@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["bun-types"]
+  },
+  "references": [
+    { "path": "packages/llm" },
+    { "path": "packages/store" },
+    { "path": "packages/audit" },
+    { "path": "packages/agent" },
+    { "path": "packages/sandbox" },
+    { "path": "packages/guardrails" },
+    { "path": "cli" }
+  ]
+}

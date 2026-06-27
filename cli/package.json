@@ -1,0 +1,14 @@
+{
+  "name": "@sm/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "llm": "src/main.ts"
+  },
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@sm/llm": "workspace:*"
+  }
+}
