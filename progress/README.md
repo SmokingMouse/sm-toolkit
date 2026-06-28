@@ -19,7 +19,7 @@
 - [x] @sm/audit：日志 + 定价 + 汇总
 - [x] @sm/sandbox：Local + Docker 后端
 - [x] @sm/guardrails：runOnce + RateLimiter + CostGate
-- [ ] SelfAgent 迁移到 @sm/agent（需实际接入验证）
+- [x] SelfAgent 迁移到 @sm/agent（已完成，通过 symlink 依赖 + endpoint 配置替换）
 - [ ] agent-gateway 统一配置源（需实际迁移）
 
 ## Session Log
@@ -54,4 +54,17 @@
   - `llm deepseek-chat -p "say hi" --json` 含 usage 的 JSON
   - `llm -p "hello"` 用 default endpoint（deepseek-chat）
   - `llm deepseek-chat -p "count 1 to 5" --stream` 流式输出
-- **Next**: 实际迁移验证——cron 脚本切换、SelfAgent 接入 @sm/agent、agent-gateway 统一配置源
+- **Next**: 实际迁移验证——cron 脚本切换、agent-gateway 统一配置源
+
+### 2026-06-28 — Git 初始化 + SelfAgent 迁移
+- **Done**:
+  - Git 初始化（.gitignore + 初始提交 ff27363）
+  - SelfAgent 替换完成：
+    - 删除 `runtime/cli-runner.ts` + `runtime/types.ts`，替换为 @sm/agent CLIRunner + CLIEvent
+    - Profile 简化：去掉 model/env 字段，改为引用 endpoints.yaml 的 endpoint 名
+    - 新增 `glm` endpoint 到 endpoints.yaml
+    - renderer/manager/bot 适配新类型
+    - 类型检查通过
+  - 依赖方式：node_modules/@sm/ → ~/sdk/packages/ symlink（bun install 后需重建）
+- **Decisions**: SelfAgent session/store.ts 保留不迁 @sm/store（ACL 表结构是 self-agent 特有的）
+- **Next**: content-studio LLM 配置统一、agent-gateway 能力迁移评估
