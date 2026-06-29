@@ -1,14 +1,47 @@
+// ── config file schema ──────────────────────────────────
+
+export interface ProviderConfig {
+  api_key_env: string
+  openai_url?: string
+  anthropic_url?: string
+  models: string[]
+}
+
+export interface ConfigFile {
+  providers: Record<string, ProviderConfig>
+  default: string
+  env_file?: string
+}
+
+// ── resolved flat config (per model, used by provider impls) ──
+
 export interface EndpointConfig {
   base_url?: string
   api_key_env: string
   model: string
+  protocol: 'openai' | 'anthropic'
 }
 
-export interface EndpointsFile {
-  endpoints: Record<string, EndpointConfig>
-  default: string
-  env_file?: string
+// ── listing types ───────────────────────────────────────
+
+export interface ProviderInfo {
+  name: string
+  openai_url?: string
+  anthropic_url?: string
+  hasKey: boolean
+  models: string[]
 }
+
+export interface EndpointInfo {
+  name: string
+  model: string
+  provider: string
+  openai_url?: string
+  anthropic_url?: string
+  hasKey: boolean
+}
+
+// ── chat types ──────────────────────────────────────────
 
 export interface Message {
   role: 'system' | 'user' | 'assistant'
@@ -32,13 +65,6 @@ export interface ChatResult {
 export type StreamChunk =
   | { type: 'text_delta'; text: string }
   | { type: 'done'; result: ChatResult }
-
-export interface EndpointInfo {
-  name: string
-  model: string
-  base_url?: string
-  hasKey: boolean
-}
 
 export interface Provider {
   chat(

@@ -1,15 +1,15 @@
-# SM-SDK Progress
+# SM-Toolkit Progress
 
 ## Current Focus
 
-全三阶段已实现。待验证：各 endpoint 实测、cron 脚本迁移、SelfAgent 接入。
+LLM 调用层统一完成。三个日常服务（content-studio / monitor-hub / news-radar）已迁移到 llm CLI → @sm/llm。
 
 ## Goals
 
 ### Short-term
 - [x] 建 monorepo 骨架（bun workspaces + tsconfig）
 - [x] @sm/llm：config 加载 + OpenAI/Anthropic provider + retry
-- [x] llm CLI：argparse + 直调 API + 交互模式（exec claude）
+- [x] llm CLI：argparse + 直调 API + 交互模式（exec claude）+ 交互式模型选择器
 - [x] endpoints.yaml 初始配置（5 endpoint）
 - [x] CLI 安装到 PATH + cron 脚本切换验证
 
@@ -20,6 +20,7 @@
 - [x] @sm/sandbox：Local + Docker 后端
 - [x] @sm/guardrails：runOnce + RateLimiter + CostGate
 - [x] SelfAgent 迁移到 @sm/agent（已完成，通过 symlink 依赖 + endpoint 配置替换）
+- [x] 日常服务 LLM 调用层统一到 llm CLI（content-studio / monitor-hub / news-radar）
 - [ ] agent-gateway 统一配置源（需实际迁移）
 
 ## Session Log
@@ -68,3 +69,22 @@
   - 依赖方式：node_modules/@sm/ → ~/sdk/packages/ symlink（bun install 后需重建）
 - **Decisions**: SelfAgent session/store.ts 保留不迁 @sm/store（ACL 表结构是 self-agent 特有的）
 - **Next**: content-studio LLM 配置统一、agent-gateway 能力迁移评估
+
+### 2026-06-28 — CLI 交互式模型选择器
+- **Done**: `llm` 无参数在 TTY 下弹出厂商分组选择器（Anthropic/DeepSeek/Google/Alibaba/Zhipu），上下键选模型，Enter 启动 Claude Code session；非 TTY 回退 help
+- **Next**: content-studio LLM 配置统一、agent-gateway 能力迁移评估
+
+### 2026-06-29 — LLM 调用层统一
+- **Done**:
+  - llm CLI 增强：`--temperature` + `--json-mode` flag，provider 名自动解析到首个模型
+  - content-studio：`llm/_client.py` 从 requests HTTP 改为 subprocess llm CLI，`_config.py` 精简为纯 TASK_ROUTING dict
+  - monitor-hub：`engine.py` judge() 外部模型分支从 ai-legion/agent-gateway 改为 llm CLI，删除 paths.py 中 ASK_PY/AI_LEGION_PY
+  - news-radar：`analyze.py` 从 endpoints.yaml 读 Claude 模型名，替代硬编码 claude-opus-4-7
+- **Verified**:
+  - `llm deepseek -p "hello" --temperature 0.3` ✓
+  - `llm deepseek -p '...' --json-mode` 返回 JSON ✓
+  - content-studio `chat()` / `chat_json()` 通过 llm CLI 正常调用 ✓
+  - monitor-hub `judge()` deepseek 后端通过 llm CLI 正常调用 ✓
+  - news-radar 从 endpoints.yaml 解析到 claude-opus-4-6 ✓
+- **Scope note**: content-studio `analyzer/vision.py`（多模态/图片）不在日常管道中，未迁移
+- **Next**: agent-gateway 能力迁移评估

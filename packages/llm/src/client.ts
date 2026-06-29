@@ -1,24 +1,30 @@
-import { loadEndpoints, resolveEndpoint, listEndpoints } from './config.js'
+import {
+  loadEndpoints,
+  resolveEndpoint,
+  listEndpoints,
+  listProviders,
+} from './config.js'
+import type { Protocol } from './config.js'
 import { openaiProvider } from './providers/openai.js'
 import { anthropicProvider } from './providers/anthropic.js'
 import type {
-  EndpointsFile,
+  ConfigFile,
   EndpointConfig,
   Message,
   ChatOptions,
   ChatResult,
   StreamChunk,
   EndpointInfo,
+  ProviderInfo,
   Provider,
 } from './types.js'
 
 function selectProvider(ep: EndpointConfig): Provider {
-  if (!ep.base_url) return anthropicProvider
-  return openaiProvider
+  return ep.protocol === 'openai' ? openaiProvider : anthropicProvider
 }
 
 export class LLMClient {
-  #config: EndpointsFile
+  #config: ConfigFile
 
   constructor(configPath?: string) {
     this.#config = loadEndpoints(configPath)
@@ -54,11 +60,18 @@ export class LLMClient {
     return listEndpoints(this.#config)
   }
 
+  listProviders(): ProviderInfo[] {
+    return listProviders(this.#config)
+  }
+
   get defaultEndpoint(): string {
     return this.#config.default
   }
 
-  getEndpointConfig(name?: string): { name: string; endpoint: EndpointConfig } {
-    return resolveEndpoint(this.#config, name)
+  getEndpointConfig(
+    name?: string,
+    protocol?: Protocol,
+  ): { name: string; endpoint: EndpointConfig } {
+    return resolveEndpoint(this.#config, name, protocol)
   }
 }

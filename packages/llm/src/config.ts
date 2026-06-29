@@ -1,17 +1,23 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { parse as parseYaml } from 'yaml'
-import type { EndpointConfig, EndpointsFile, EndpointInfo } from './types.js'
+import type {
+  ConfigFile,
+  ProviderConfig,
+  EndpointConfig,
+  EndpointInfo,
+  ProviderInfo,
+} from './types.js'
 
 const DEFAULT_CONFIG_PATH = resolve(
   process.env.HOME ?? '~',
   '.claude/global/endpoints.yaml',
 )
 
-let _cached: EndpointsFile | null = null
+let _cached: ConfigFile | null = null
 let _cachedPath: string | null = null
 
-export function loadEndpoints(path?: string): EndpointsFile {
+export function loadEndpoints(path?: string): ConfigFile {
   const p = path ?? DEFAULT_CONFIG_PATH
   if (_cached && _cachedPath === p) return _cached
 
@@ -19,9 +25,9 @@ export function loadEndpoints(path?: string): EndpointsFile {
     throw new Error(`endpoints.yaml not found: ${p}`)
   }
   const raw = readFileSync(p, 'utf-8')
-  const parsed = parseYaml(raw) as EndpointsFile
-  if (!parsed.endpoints || typeof parsed.endpoints !== 'object') {
-    throw new Error(`invalid endpoints.yaml: missing "endpoints" map`)
+  const parsed = parseYaml(raw) as ConfigFile
+  if (!parsed.providers || typeof parsed.providers !== 'object') {
+    throw new Error(`invalid endpoints.yaml: missing "providers" map`)
   }
   if (!parsed.default) {
     throw new Error(`invalid endpoints.yaml: missing "default" field`)
@@ -36,17 +42,72 @@ export function loadEndpoints(path?: string): EndpointsFile {
   return parsed
 }
 
+export type Protocol = 'openai' | 'anthropic'
+
 export function resolveEndpoint(
-  config: EndpointsFile,
+  config: ConfigFile,
   name?: string,
+  preferProtocol?: Protocol,
 ): { name: string; endpoint: EndpointConfig } {
   const n = name ?? config.default
-  const ep = config.endpoints[n]
-  if (!ep) {
-    const available = Object.keys(config.endpoints).join(', ')
-    throw new Error(`unknown endpoint "${n}". available: ${available}`)
+
+  // 1. exact model name match
+  for (const [, prov] of Object.entries(config.providers)) {
+    if (prov.models.includes(n)) {
+      return { name: n, endpoint: toEndpointConfig(prov, n, preferProtocol) }
+    }
   }
-  return { name: n, endpoint: ep }
+
+  // 2. exact provider name match → use first model
+  const provider = config.providers[n]
+  if (provider) {
+    const model = provider.models[0]!
+    return {
+      name: model,
+      endpoint: toEndpointConfig(provider, model, preferProtocol),
+    }
+  }
+
+  // 3. prefix match on model names
+  for (const [, prov] of Object.entries(config.providers)) {
+    const match = prov.models.find((m) => m.startsWith(n))
+    if (match) {
+      return {
+        name: match,
+        endpoint: toEndpointConfig(prov, match, preferProtocol),
+      }
+    }
+  }
+
+  const allModels = Object.values(config.providers).flatMap((p) => p.models)
+  throw new Error(`unknown model "${n}". available: ${allModels.join(', ')}`)
+}
+
+function toEndpointConfig(
+  prov: ProviderConfig,
+  model: string,
+  preferProtocol?: Protocol,
+): EndpointConfig {
+  let base_url: string | undefined
+  let protocol: Protocol
+
+  if (preferProtocol === 'anthropic' && prov.anthropic_url) {
+    base_url = prov.anthropic_url
+    protocol = 'anthropic'
+  } else if (preferProtocol === 'openai' && prov.openai_url) {
+    base_url = prov.openai_url
+    protocol = 'openai'
+  } else if (prov.openai_url) {
+    base_url = prov.openai_url
+    protocol = 'openai'
+  } else if (prov.anthropic_url) {
+    base_url = prov.anthropic_url
+    protocol = 'anthropic'
+  } else {
+    protocol = 'anthropic'
+  }
+
+  return { base_url, api_key_env: prov.api_key_env, model, protocol }
 }
 
 export function getApiKey(ep: EndpointConfig): string {
@@ -59,12 +120,31 @@ export function getApiKey(ep: EndpointConfig): string {
   return key
 }
 
-export function listEndpoints(config: EndpointsFile): EndpointInfo[] {
-  return Object.entries(config.endpoints).map(([name, ep]) => ({
+export function listEndpoints(config: ConfigFile): EndpointInfo[] {
+  const result: EndpointInfo[] = []
+  for (const [provName, prov] of Object.entries(config.providers)) {
+    const hasKey = !!process.env[prov.api_key_env]
+    for (const model of prov.models) {
+      result.push({
+        name: model,
+        model,
+        provider: provName,
+        openai_url: prov.openai_url,
+        anthropic_url: prov.anthropic_url,
+        hasKey,
+      })
+    }
+  }
+  return result
+}
+
+export function listProviders(config: ConfigFile): ProviderInfo[] {
+  return Object.entries(config.providers).map(([name, prov]) => ({
     name,
-    model: ep.model,
-    base_url: ep.base_url,
-    hasKey: !!process.env[ep.api_key_env],
+    openai_url: prov.openai_url,
+    anthropic_url: prov.anthropic_url,
+    hasKey: !!process.env[prov.api_key_env],
+    models: prov.models,
   }))
 }
 

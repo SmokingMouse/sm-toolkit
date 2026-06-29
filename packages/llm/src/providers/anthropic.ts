@@ -9,8 +9,13 @@ import type {
   Provider,
 } from '../types.js'
 
-const API_URL = 'https://api.anthropic.com/v1/messages'
+const DEFAULT_API_URL = 'https://api.anthropic.com/v1/messages'
 const API_VERSION = '2023-06-01'
+
+function apiUrl(ep: EndpointConfig): string {
+  if (!ep.base_url) return DEFAULT_API_URL
+  return ep.base_url.replace(/\/+$/, '') + '/v1/messages'
+}
 
 function buildPayload(
   ep: EndpointConfig,
@@ -44,7 +49,7 @@ export const anthropicProvider: Provider = {
   async chat(config, messages, opts): Promise<ChatResult> {
     return withRetry(
       async () => {
-        const resp = await fetch(API_URL, {
+        const resp = await fetch(apiUrl(config), {
           method: 'POST',
           headers: headers(config),
           body: JSON.stringify(buildPayload(config, messages, opts, false)),
@@ -75,7 +80,7 @@ export const anthropicProvider: Provider = {
   },
 
   async *stream(config, messages, opts): AsyncGenerator<StreamChunk> {
-    const resp = await fetch(API_URL, {
+    const resp = await fetch(apiUrl(config), {
       method: 'POST',
       headers: headers(config),
       body: JSON.stringify(buildPayload(config, messages, opts, true)),

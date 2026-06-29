@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import * as readline from 'node:readline'
 import { loadEndpoints, resolveEndpoint, getApiKey } from '@sm/llm'
-import type { EndpointConfig, EndpointsFile } from '@sm/llm'
+import type { EndpointConfig, ConfigFile } from '@sm/llm'
 import type { CLIEvent, Cost } from './events.js'
 
 export interface RunOptions {
@@ -52,14 +52,14 @@ function buildArgs(opts: RunOptions): string[] {
 }
 
 export class CLIRunner {
-  #config: EndpointsFile
+  #config: ConfigFile
 
   constructor(configPath?: string) {
     this.#config = loadEndpoints(configPath)
   }
 
   async *run(prompt: string, opts: RunOptions): AsyncGenerator<CLIEvent> {
-    const { endpoint: ep } = resolveEndpoint(this.#config, opts.endpoint)
+    const { endpoint: ep } = resolveEndpoint(this.#config, opts.endpoint, 'anthropic')
     const cliEnv = resolveCLIEnv(ep)
 
     const args = ['-p', prompt, '--model', ep.model, ...buildArgs(opts)]

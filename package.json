@@ -1,5 +1,5 @@
 {
-  "name": "sm-sdk",
+  "name": "sm-toolkit",
   "private": true,
   "workspaces": [
     "packages/*",
