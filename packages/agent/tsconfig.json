@@ -6,8 +6,7 @@
     "rootDir": "src"
   },
   "references": [
-    { "path": "../llm" },
-    { "path": "../store" }
+    { "path": "../llm" }
   ],
   "include": ["src"]
 }

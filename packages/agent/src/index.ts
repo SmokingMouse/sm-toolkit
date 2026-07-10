@@ -1,8 +1,12 @@
 export { CLIRunner } from './runner.js'
 export type { RunOptions } from './runner.js'
-export { createSessionStore } from './session.js'
-export type { SessionStore } from './session.js'
-export { Orchestrator } from './orchestrator.js'
-export type { OrchestratorConfig } from './orchestrator.js'
-export type { Channel, InboundTask, OutboundEvent } from './channel.js'
+export type {
+  Channel,
+  IncomingMessage,
+  IncomingAction,
+  Content,
+  ModelGroup,
+  ContentAction,
+  CommandInfo,
+} from './channel.js'
 export type { CLIEvent, Cost } from './events.js'

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import * as readline from 'node:readline'
-import { loadEndpoints, resolveEndpoint, getApiKey } from '@sm/llm'
+import { loadEndpoints, resolveEndpoint } from '@sm/llm'
 import type { EndpointConfig, ConfigFile } from '@sm/llm'
 import type { CLIEvent, Cost } from './events.js'
 
@@ -15,12 +15,18 @@ export interface RunOptions {
   configPath?: string
 }
 
+function isNativeCLI(ep: EndpointConfig): boolean {
+  return !ep.base_url
+}
+
 function resolveCLIEnv(
   ep: EndpointConfig,
 ): Record<string, string> {
+  if (isNativeCLI(ep)) return {}
   const env: Record<string, string> = {}
-  if (ep.base_url) env.ANTHROPIC_BASE_URL = ep.base_url
-  env.ANTHROPIC_API_KEY = getApiKey(ep)
+  env.ANTHROPIC_BASE_URL = ep.base_url!
+  const key = process.env[ep.api_key_env]
+  if (key) env.ANTHROPIC_API_KEY = key
   return env
 }
 
@@ -62,7 +68,9 @@ export class CLIRunner {
     const { endpoint: ep } = resolveEndpoint(this.#config, opts.endpoint, 'anthropic')
     const cliEnv = resolveCLIEnv(ep)
 
-    const args = ['-p', prompt, '--model', ep.model, ...buildArgs(opts)]
+    const args = ['-p', prompt]
+    if (!isNativeCLI(ep)) args.push('--model', ep.model)
+    args.push(...buildArgs(opts))
 
     const proc = spawn('claude', args, {
       env: { ...process.env, ...cliEnv },

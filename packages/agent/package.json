@@ -8,7 +8,6 @@
     "build": "tsc --build"
   },
   "dependencies": {
-    "@sm/llm": "workspace:*",
-    "@sm/store": "workspace:*"
+    "@sm/llm": "workspace:*"
   }
 }
