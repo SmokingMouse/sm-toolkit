@@ -1,0 +1,19 @@
+{
+  "name": "self-agent",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run src/index.ts start",
+    "setup": "bun run src/index.ts setup",
+    "dev": "bun --watch run src/index.ts start",
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@sm/agent": "workspace:*",
+    "@sm/channel-feishu": "workspace:*",
+    "@sm/llm": "workspace:*",
+    "@larksuiteoapi/node-sdk": "^1.68.0",
+    "yaml": "^2.9.0"
+  }
+}

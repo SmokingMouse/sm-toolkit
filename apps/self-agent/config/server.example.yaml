@@ -1,0 +1,8 @@
+mode: native
+port: 3800
+default_profile: default
+admin:
+  feishu_user_id: ""
+feishu:
+  app_id: ""
+  app_secret: ""
