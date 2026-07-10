@@ -3,11 +3,16 @@
   "private": true,
   "workspaces": [
     "packages/*",
-    "cli"
+    "apps/*"
   ],
   "scripts": {
+    "setup": "bun run scripts/install.ts",
     "build": "bun run --filter '*' build",
     "typecheck": "tsc --build"
+  },
+  "dependencies": {
+    "@sm/llm": "workspace:*",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "bun-types": "^1.3.14",

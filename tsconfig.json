@@ -15,6 +15,7 @@
     "rootDir": "src",
     "types": ["bun-types"]
   },
+  "files": [],
   "references": [
     { "path": "packages/llm" },
     { "path": "packages/store" },
@@ -22,6 +23,9 @@
     { "path": "packages/agent" },
     { "path": "packages/sandbox" },
     { "path": "packages/guardrails" },
-    { "path": "cli" }
+    { "path": "packages/channel-feishu" },
+    { "path": "apps/cli" },
+    { "path": "apps/self-agent" },
+    { "path": "scripts" }
   ]
 }

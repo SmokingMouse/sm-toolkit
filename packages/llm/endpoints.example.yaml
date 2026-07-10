@@ -1,0 +1,41 @@
+providers:
+  claude:
+    api_key_env: ANTHROPIC_API_KEY
+    models:
+      - claude-opus-4-6[1m]
+      - claude-opus-4-8
+
+  deepseek:
+    api_key_env: DEEPSEEK_API_KEY
+    openai_url: https://api.deepseek.com/v1
+    anthropic_url: https://api.deepseek.com/anthropic
+    models:
+      - deepseek-v4-flash
+      - deepseek-v4-pro
+
+  gemini:
+    api_key_env: GEMINI_API_KEY
+    openai_url: https://generativelanguage.googleapis.com/v1beta/openai
+    models:
+      - gemini-2.5-flash
+
+  ark-coding:
+    api_key_env: ARK_CODING_API_KEY
+    anthropic_url: https://ark.cn-beijing.volces.com/api/coding
+    openai_url: https://ark.cn-beijing.volces.com/api/coding/v3
+    models:
+      - ark-code-latest
+      - doubao-seed-2.0-code
+      - doubao-seed-2.0-pro
+      - doubao-seed-2.0-lite
+      - doubao-seed-code
+      - glm-5.2
+      - kimi-k2.7-code
+      - minimax-m3
+      - deepseek-v4-flash
+      - deepseek-v4-pro
+      - minimax-m2.7
+      - kimi-k2.6
+
+default: deepseek-v4-flash
+env_file: ~/.agent-gateway.env
