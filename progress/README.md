@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-LLM 调用层统一完成。三个日常服务（content-studio / monitor-hub / news-radar）已迁移到 llm CLI → @sm/llm。
+SDK 底座 + 应用分离完成。packages/ 放 SDK 积木，apps/ 放应用（cli + self-agent）。
 
 ## Goals
 
@@ -14,13 +14,15 @@ LLM 调用层统一完成。三个日常服务（content-studio / monitor-hub / 
 - [x] CLI 安装到 PATH + cron 脚本切换验证
 
 ### Mid-long
-- [x] @sm/agent：CLIRunner + Session + Channel + Orchestrator
+- [x] @sm/agent：CLIRunner + Channel 接口 + Orchestrator（ACL/命令/session） + OrchestratorStore
 - [x] @sm/store：SQLite / PG / Memory 三后端
 - [x] @sm/audit：日志 + 定价 + 汇总
 - [x] @sm/sandbox：Local + Docker 后端
 - [x] @sm/guardrails：runOnce + RateLimiter + CostGate
 - [x] SelfAgent 迁移到 @sm/agent（已完成，通过 symlink 依赖 + endpoint 配置替换）
 - [x] 日常服务 LLM 调用层统一到 llm CLI（content-studio / monitor-hub / news-radar）
+- [x] @sm/channel-feishu：飞书 Channel 适配（从 SelfAgent 移植，薄实现）
+- [x] 根级 `bun run setup` 引导流程（配模型 + 注册 SDK + 注册全局命令 + 按需装 app）
 - [ ] agent-gateway 统一配置源（需实际迁移）
 
 ## Session Log
@@ -88,3 +90,52 @@ LLM 调用层统一完成。三个日常服务（content-studio / monitor-hub / 
   - news-radar 从 endpoints.yaml 解析到 claude-opus-4-6 ✓
 - **Scope note**: content-studio `analyzer/vision.py`（多模态/图片）不在日常管道中，未迁移
 - **Next**: agent-gateway 能力迁移评估
+
+### 2026-06-29 — Channel + Orchestrator 重设计
+- **Done**:
+  - 重新设计 @sm/agent Channel 接口：丰富为 connect/close + onMessage/onAction + reply/update/send，支持 Content 类型联合（pending/result/error/model_selector/approval_request/help）
+  - 重写 Orchestrator：平台无关业务逻辑层（ACL 拦截+审批流、/model /help 命令路由、thread→endpoint 追踪、session 管理、CLIRunner 调度、pending→update 流程）
+  - 新建 OrchestratorStore（bun:sqlite，sessions + acl_approvals 两表）
+  - 移除 @sm/agent 对 @sm/store 的依赖（删除旧 session.ts）
+  - 新建 @sm/channel-feishu 包：FeishuChannel implements Channel（WebSocket 连接 + 消息归一化 + Content→飞书卡片渲染），从 SelfAgent 移植卡片构建逻辑
+  - bin/feishu-bot.ts 独立入口（env vars 配置）
+  - `bunx tsc --build` 全量类型检查通过
+- **Decisions**: Orchestrator 做厚 / Channel 做薄——Channel 只管平台 I/O + 卡片渲染，业务逻辑全在 Orchestrator，未来加 Slack/Discord 只需薄适配层
+- **Next**: SelfAgent 迁入 monorepo
+
+### 2026-06-29 — SDK/应用分离 + SelfAgent 迁入
+- **Done**:
+  - 目录重组：cli/ → apps/cli/，新建 apps/ 目录
+  - 根 package.json workspaces 改为 ["packages/*", "apps/*"]
+  - Orchestrator + OrchestratorStore 从 @sm/agent 移除（应用逻辑不属于 SDK）
+  - @sm/agent 精简为纯底座：CLIRunner + Channel 接口 + Content 类型 + 事件类型
+  - SelfAgent 迁入 apps/self-agent/，改用 SDK 包：
+    - FeishuChannel（@sm/channel-feishu）替代直接操作 Lark SDK
+    - Content 类型替代自建卡片 builder
+    - ACL 审批改走 Channel.send()
+    - 保留应用层逻辑（ACL/命令/session/config/setup）
+  - `bunx tsc --build` 全量类型检查通过
+- **Decisions**: SDK 是稳定地基（packages/），应用在上面盖楼（apps/），不动地基
+- **Next**: 实际部署测试 self-agent、验证飞书 bot 行为一致
+
+### 2026-06-29 — Harness 模式 + 可运行状态
+- **Done**:
+  - 实现 harness 概念：启动时锁定 endpoint + workspace（CLAUDE.md + rules + skills）
+  - 去掉 profile 系统和 /model 命令（模型是 harness 的一部分，不运行时切换）
+  - 新增 /new（重置对话）、/info（查看当前 harness）命令
+  - 创建 harnesses/assistant/ 默认 harness（harness.yaml + CLAUDE.md）
+  - 启动验证通过：setup 全绿、飞书 WebSocket 连接成功
+- **Decisions**: 一个进程 = 一个 Channel + 一个固定 harness。不同 agent 类型 = 不同启动参数（HARNESS=xxx）
+- **Next**: 飞书端到端消息测试
+
+### 2026-07-10 — 根级安装引导流程
+- **Done**:
+  - 前置修复：`apps/self-agent/config/server.yaml`（明文飞书密钥）此前未被 gitignore；新增 `server.example.yaml` 模板 + `.gitignore` 追加 `server.yaml`/`data/`；`config.ts` 的 `loadServerConfig()` 首次读取时自动从模板自举
+  - 新增 `packages/llm/endpoints.example.yaml`：模型目录模板随仓库分发（结构与当前 `~/.claude/global/endpoints.yaml` 一致，不含明文 key）
+  - 新增 `scripts/install.ts`（根 `bun run setup` 入口），六步：环境检查（claude CLI）→ `bun install` → 配置模型（endpoints.yaml 不存在则从模板创建，已存在则 union merge 补新 provider + 交互式补 key 写入 `env_file` + 选默认模型）→ `bun link` 注册所有 `packages/@sm/*` → `bun link` 注册 `apps/cli`（全局 `llm` 命令）→ 扫描 `apps/*` 里声明了 `scripts.setup` 的 app，逐个询问是否安装（约定优于配置，以后加 app 不用改这个脚本）
+  - 根 `package.json` 加 `setup` 脚本 + `@sm/llm`/`yaml` 依赖；`scripts/tsconfig.json` 接入根 `tsconfig.json` 的 project references，`scripts/install.ts` 纳入 `bun run typecheck`
+- **Verified**:
+  - `bunx tsc --build --force` 全量类型检查通过（含 scripts/）
+  - 真机跑 `bun run scripts/install.ts` 全流程走完：模型配置走了"已存在→无新增 provider→保留 key/default"的幂等分支，`server.yaml` 未被误覆盖；`bun link` 后 `~/.bun/install/global/node_modules/@sm/` 下 7 个包 + cli 全部就位，`llm` 命令仍可用；Step F 正确发现 self-agent 为唯一可安装 app 并按默认 N 跳过
+  - `/tmp` 隔离环境验证了 `server.yaml` 缺失时的自举分支（从 `server.example.yaml` 正确复制出占位符版本）
+- **Next**: 无（本轮范围内已闭环）；若未来 `apps/` 下新增 app，只需给它的 `package.json` 加 `scripts.setup` 即可被根安装器自动发现
