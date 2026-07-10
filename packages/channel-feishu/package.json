@@ -1,0 +1,14 @@
+{
+  "name": "@sm/channel-feishu",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@sm/agent": "workspace:*",
+    "@larksuiteoapi/node-sdk": "^1.68.0"
+  }
+}
