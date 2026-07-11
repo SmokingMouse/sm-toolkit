@@ -51,6 +51,27 @@ export function resolveEndpoint(
 ): { name: string; endpoint: EndpointConfig } {
   const n = name ?? config.default
 
+  // 0. provider-qualified id: "<provider>:<model>" — disambiguates model names
+  // that exist under multiple providers (e.g. deepseek-v4-flash is listed under
+  // both "deepseek" and "ark-coding"; a bare model-name search below would
+  // silently pick whichever provider iterates first). Falls through to the
+  // legacy global search when the left side isn't a real provider name, so
+  // existing bare-name/prefix callers are unaffected.
+  const colonIdx = n.indexOf(':')
+  if (colonIdx > 0) {
+    const provName = n.slice(0, colonIdx)
+    const modelName = n.slice(colonIdx + 1)
+    const prov = config.providers[provName]
+    if (prov) {
+      if (!prov.models.includes(modelName)) {
+        throw new Error(
+          `model "${modelName}" not found under provider "${provName}". available: ${prov.models.join(', ')}`,
+        )
+      }
+      return { name: n, endpoint: toEndpointConfig(prov, modelName, preferProtocol) }
+    }
+  }
+
   // 1. exact model name match
   for (const [, prov] of Object.entries(config.providers)) {
     if (prov.models.includes(n)) {
@@ -88,22 +109,45 @@ function toEndpointConfig(
   model: string,
   preferProtocol?: Protocol,
 ): EndpointConfig {
+  const hasAnthropic = !!prov.anthropic_url
+  const hasOpenai = !!prov.openai_url
+  // No URL of either kind configured (e.g. the native "claude" provider) means
+  // "ambient CLI, no override" — always allowed regardless of preferProtocol.
+  // A provider that configured ONE protocol's URL but was asked for the OTHER
+  // (e.g. gemini: openai_url only, asked for 'anthropic') is a genuine
+  // incompatibility and must throw — silently falling back used to hand callers
+  // a base_url whose wire protocol didn't match what they asked for.
+  const native = !hasAnthropic && !hasOpenai
+
+  if (preferProtocol && !native) {
+    if (preferProtocol === 'anthropic' && !hasAnthropic) {
+      throw new Error(
+        `model "${model}" has no anthropic-protocol endpoint (only openai_url configured)`,
+      )
+    }
+    if (preferProtocol === 'openai' && !hasOpenai) {
+      throw new Error(
+        `model "${model}" has no openai-protocol endpoint (only anthropic_url configured)`,
+      )
+    }
+  }
+
   let base_url: string | undefined
   let protocol: Protocol
 
-  if (preferProtocol === 'anthropic' && prov.anthropic_url) {
+  if (native) {
+    protocol = preferProtocol ?? 'anthropic'
+  } else if (preferProtocol === 'anthropic') {
     base_url = prov.anthropic_url
     protocol = 'anthropic'
-  } else if (preferProtocol === 'openai' && prov.openai_url) {
+  } else if (preferProtocol === 'openai') {
     base_url = prov.openai_url
     protocol = 'openai'
-  } else if (prov.openai_url) {
+  } else if (hasOpenai) {
     base_url = prov.openai_url
     protocol = 'openai'
-  } else if (prov.anthropic_url) {
-    base_url = prov.anthropic_url
-    protocol = 'anthropic'
   } else {
+    base_url = prov.anthropic_url
     protocol = 'anthropic'
   }
 

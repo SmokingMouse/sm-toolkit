@@ -56,6 +56,40 @@ export class LLMClient {
     } as ChatOptions & { endpointName: string })
   }
 
+  /**
+   * Try each endpoint name in `chain` in order (skipping ones with no API key
+   * configured), returning the first successful chat() result. Generalizes
+   * agent-gateway's old hardcoded TASK_ROUTING fallback chains — the chain is
+   * just a list of endpoints.yaml names the caller supplies, not a baked-in
+   * provider table, so it stays config-driven instead of code-driven.
+   */
+  async chatWithFallback(
+    chain: string[],
+    messages: Message[],
+    opts?: ChatOptions,
+  ): Promise<ChatResult> {
+    const errors: string[] = []
+    for (const endpointName of chain) {
+      let ep: EndpointConfig
+      try {
+        ep = resolveEndpoint(this.#config, endpointName).endpoint
+      } catch (e: any) {
+        errors.push(`${endpointName}: ${e?.message ?? e}`)
+        continue
+      }
+      if (!process.env[ep.api_key_env]) {
+        errors.push(`${endpointName}: no API key (${ep.api_key_env} not set)`)
+        continue
+      }
+      try {
+        return await this.chat(endpointName, messages, opts)
+      } catch (e: any) {
+        errors.push(`${endpointName}: ${e?.message ?? e}`)
+      }
+    }
+    throw new Error(`all endpoints in fallback chain failed → ${errors.join(' | ')}`)
+  }
+
   listEndpoints(): EndpointInfo[] {
     return listEndpoints(this.#config)
   }

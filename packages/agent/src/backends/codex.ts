@@ -1,0 +1,166 @@
+/**
+ * Codex CLI 后端 —— spawn `codex` + 把 jsonl 事件归一成统一 Event。
+ * 移植自 agent-gateway src/backends.ts,原样搬入(codex 的模型切换不在本次范围内,
+ * 这个后端本身也没有 endpoints.yaml 接入 —— 见 ClaudeBackend 的对比)。
+ */
+
+import { spawnSync } from "node:child_process";
+import { EventType, type AgentEvent, type Cost } from "../events.js";
+import type { Backend, RunOptions, PermissionPolicy } from "../backend.js";
+import { streamLines } from "./stream-lines.js";
+
+// 示意单价(USD / token),真实值由上游配置注入。
+const CODEX_PRICE = { input: 1.25 / 1_000_000, output: 10.0 / 1_000_000 };
+
+export class CodexBackend implements Backend {
+  readonly name = "codex";
+
+  capabilities(): Record<string, unknown> {
+    return {
+      workspace: true,
+      tools: true,
+      mcp: true,
+      sandboxModes: ["read-only", "workspace-write", "full-access"],
+      permissionPolicies: ["readonly", "auto-edit", "full"],
+      readonlyEnforcement: "os-sandbox", // OS 级只读,Bash 也无法绕过
+      dynamicPermissionCallback: false, // Phase 2:需 app-server JSON-RPC
+      vision: true, // --image FILE
+      toolAllowlist: false, // codex 无工具白名单(sandbox 决定可达)
+      streaming: "block", // codex --json 不发 per-token,agent_message 整段出
+      costInStream: false, // 只给 token,$ 需上游按单价估
+      structuredOutput: true, // --output-schema
+      reportsCapabilityAtRuntime: false, // thread.started 不含 tools/model
+      resume: true,
+    };
+  }
+
+  async *run(prompt: string, opts: RunOptions): AsyncGenerator<AgentEvent> {
+    // 登录检查(便宜 ~50ms):给清晰可操作错误,避免浪费一次必 401 的往返。
+    const login = spawnSync("codex", ["login", "status"], { encoding: "utf8", timeout: 5000 });
+    if (login.status !== 0) {
+      yield ev(this.name, EventType.Error, null, {
+        message: "codex 未登录。请先在终端运行 `codex login` 后重试。",
+      });
+      return;
+    }
+
+    // codex 无 --system-prompt,把它 inline 到 prompt 前(read-only sandbox 时主要影响风格)。
+    const finalPrompt = opts.systemPrompt ? `${opts.systemPrompt}\n\n---\n\n${prompt}` : prompt;
+    const policy: PermissionPolicy = opts.permission ?? (opts.workspace ? "auto-edit" : "readonly");
+    const args = buildCodexArgs({
+      policy,
+      ephemeral: opts.persistence === false,
+      model: opts.model,
+      resume: opts.resume ?? null,
+      imagePaths: (opts.attachments ?? []).map((a) => a.path),
+      prompt: finalPrompt,
+    });
+
+    let sid: string | null = opts.resume ?? null;
+    const finalText: string[] = [];
+    // 按 item id 记已转发长度,防 item.updated/completed 对同一条重复 emit。
+    const emittedLen = new Map<string, number>();
+
+    for await (const raw of streamLines("codex", args, {
+      cwd: opts.cwd ?? opts.workspace ?? undefined,
+      env: opts.env,
+      signal: opts.signal,
+    })) {
+      let obj: any;
+      try {
+        obj = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      const t = obj.type;
+      if (t === "thread.started") {
+        sid = obj.thread_id ?? sid;
+        yield ev(this.name, EventType.SessionStart, sid, {
+          tools: null,
+          model: null,
+          note: "capability from static declaration",
+        });
+      } else if ((t === "item.updated" || t === "item.completed") && obj.item?.type === "agent_message") {
+        // codex agent_message 整段(无 per-token);newer build 可能 item.updated 增量,按 id dedup。
+        const id = obj.item.id ?? "default";
+        const text = obj.item.text ?? "";
+        const prev = emittedLen.get(id) ?? 0;
+        if (text.length > prev) {
+          const delta = text.slice(prev);
+          finalText.push(delta);
+          yield ev(this.name, EventType.TextChunk, sid, { text: delta });
+          emittedLen.set(id, text.length);
+        }
+      } else if (t === "item.completed" && obj.item?.type === "command_execution") {
+        yield ev(this.name, EventType.ToolCall, sid, { name: "shell", input: obj.item.command });
+      } else if (t === "item.completed" && obj.item?.type === "file_change") {
+        yield ev(this.name, EventType.FileChange, sid, { changes: obj.item.changes });
+      } else if (t === "item.completed" && obj.item?.type === "mcp_tool_call") {
+        yield ev(this.name, EventType.ToolCall, sid, { name: obj.item.tool, input: obj.item.arguments });
+      } else if (t === "turn.completed") {
+        const u = obj.usage ?? {};
+        const totalIn = u.input_tokens ?? 0,
+          cached = u.cached_input_tokens ?? 0;
+        const netIn = Math.max(0, totalIn - cached); // 对齐 Anthropic 语义:input 不含 cache 命中
+        const cost: Cost = {
+          usd: Number((netIn * CODEX_PRICE.input + (u.output_tokens ?? 0) * CODEX_PRICE.output).toFixed(6)),
+          inputTokens: netIn,
+          outputTokens: u.output_tokens ?? 0,
+          cachedTokens: cached,
+          cacheCreation: 0, // codex 不报
+          estimated: true,
+          // codex 是单轮 block(无 claude 那种跨迭代累计),整轮输入即当前占用。
+          contextTokens: totalIn,
+        };
+        yield ev(this.name, EventType.Result, sid, { text: finalText.join(""), cost });
+        return;
+      } else if (t === "turn.failed") {
+        yield ev(this.name, EventType.Error, sid, { message: obj.error?.message ?? "codex turn failed" });
+        return;
+      } else if (t === "error") {
+        // "Reconnecting..." 是瞬态重连,吞掉(解决 normalizer 噪音);其余才报。
+        const msg = (obj.message as string) ?? "";
+        if (!msg.toLowerCase().startsWith("reconnecting")) {
+          yield ev(this.name, EventType.Error, sid, { message: msg || "codex error" });
+          return;
+        }
+      }
+    }
+  }
+}
+
+function buildCodexArgs(o: {
+  policy: PermissionPolicy;
+  ephemeral: boolean;
+  model?: string;
+  resume: string | null;
+  imagePaths: string[];
+  prompt: string;
+}): string[] {
+  const common = ["--json", "--skip-git-repo-check"];
+  if (o.model) common.push("-m", o.model);
+  const imageArgs = o.imagePaths.flatMap((p) => ["--image", p]);
+
+  if (o.resume) {
+    // resume 不接受 -s/--sandbox;full 时用 bypass 拿写权限,否则用 codex 默认(只读问答够用)。
+    const bypass = o.policy === "full" ? ["--dangerously-bypass-approvals-and-sandbox"] : [];
+    return ["exec", "resume", o.resume, ...common, ...bypass, ...imageArgs, o.prompt];
+  }
+  const sandbox =
+    o.policy === "readonly"
+      ? ["--sandbox", "read-only"]
+      : o.policy === "full"
+        ? ["--dangerously-bypass-approvals-and-sandbox"]
+        : ["--sandbox", "workspace-write"]; // auto-edit(以及兼容 default,codex 无独立 default 档)
+  const ephemeral = o.ephemeral ? ["--ephemeral"] : [];
+  return ["exec", ...common, ...ephemeral, ...sandbox, ...imageArgs, o.prompt];
+}
+
+function ev(
+  backend: string,
+  type: EventType,
+  sessionId: string | null,
+  data: Record<string, unknown>,
+): AgentEvent {
+  return { type, backend, sessionId, data };
+}

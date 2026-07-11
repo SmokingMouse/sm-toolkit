@@ -1,13 +1,28 @@
 {
   "name": "@sm/llm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "description": "配置驱动的 LLM 直连 API 客户端 —— 读 ~/.claude/global/endpoints.yaml，OpenAI/Anthropic 兼容 provider + retry。",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
+    "prepare": "tsc --build",
     "build": "tsc --build"
   },
   "dependencies": {
     "yaml": "^2.7.1"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "@types/node": "^25.9.2"
   }
 }
