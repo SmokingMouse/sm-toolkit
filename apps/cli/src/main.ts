@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { readFileSync } from 'node:fs'
+import { readFileSync, readSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
 import { LLMClient } from '@sm/llm'
 import type { Message } from '@sm/llm'
 
@@ -64,70 +65,65 @@ function selectFromList(
   title: string,
   items: { label: string; detail?: string; status?: string }[],
   hint: string,
-): Promise<number | null> {
-  if (items.length === 0) return Promise.resolve(null)
+): number | null {
+  if (items.length === 0) return null
 
   let cursor = 0
   const total = items.length
 
   const output = renderList(title, items, cursor, hint)
-  process.stderr.write(c.hideCursor + output)
   const lineCount = output.split('\n').length - 1
 
-  return new Promise<number | null>((resolve) => {
-    const stdin = process.stdin
-    stdin.setRawMode(true)
-    stdin.resume()
+  // 不碰 process.stdin：bun 的 stdin reader 一旦启动无法真正释放（pause 停不掉
+  // 在途 read），会和随后 spawn 的 claude 争抢 tty 字节——终端应答序列（DA/XTVERSION/
+  // 鼠标上报）被偷走 ESC 前缀后，尾巴以明文漏进 claude 输入框。
+  // 改为 stty 设终端模式 + readSync(0) 同步读，父进程全程零 stdin reader。
+  const saved = spawnSync('stty', ['-g'], {
+    stdio: ['inherit', 'pipe', 'inherit'],
+  }).stdout?.toString().trim()
+  spawnSync('stty', ['-icanon', '-echo', '-isig', 'min', '1', 'time', '0'], {
+    stdio: 'inherit',
+  })
+  process.stderr.write(c.hideCursor + output)
 
-    function redraw() {
-      process.stderr.write(c.moveUp(lineCount) + '\r')
-      process.stderr.write(renderList(title, items, cursor, hint))
-    }
-
-    function cleanup(result: number | null) {
-      stdin.setRawMode(false)
-      stdin.pause()
-      stdin.removeListener('data', onData)
-      process.stderr.write(c.moveUp(lineCount) + '\r')
-      for (let i = 0; i < lineCount + 1; i++) {
-        process.stderr.write(c.clearLine + '\n')
+  const buf = Buffer.alloc(64)
+  try {
+    while (true) {
+      let n: number
+      try {
+        n = readSync(0, buf, 0, buf.length, null)
+      } catch (e: any) {
+        if (e?.code === 'EAGAIN') continue
+        throw e
       }
-      process.stderr.write(c.moveUp(lineCount + 1) + '\r')
-      process.stderr.write(c.showCursor)
-      resolve(result)
-    }
+      if (n <= 0) return null
+      const key = buf.toString('utf8', 0, n)
 
-    function onData(data: Buffer) {
-      const key = data.toString()
-
-      if (key === '\x03' || key === 'q' || key === '\x1b') {
-        cleanup(null)
-        return
-      }
-
-      if (key === '\r' || key === '\n') {
-        cleanup(cursor)
-        return
-      }
+      if (key === '\x03' || key === '\x04' || key === 'q' || key === '\x1b') return null
+      if (key === '\r' || key === '\n') return cursor
 
       if (key === '\x1b[A' || key === 'k') {
         cursor = (cursor - 1 + total) % total
-        redraw()
-        return
-      }
-
-      if (key === '\x1b[B' || key === 'j') {
+      } else if (key === '\x1b[B' || key === 'j') {
         cursor = (cursor + 1) % total
-        redraw()
-        return
+      } else {
+        continue
       }
+      process.stderr.write(c.moveUp(lineCount) + '\r')
+      process.stderr.write(renderList(title, items, cursor, hint))
     }
-
-    stdin.on('data', onData)
-  })
+  } finally {
+    process.stderr.write(c.moveUp(lineCount) + '\r')
+    for (let i = 0; i < lineCount + 1; i++) {
+      process.stderr.write(c.clearLine + '\n')
+    }
+    process.stderr.write(c.moveUp(lineCount + 1) + '\r')
+    process.stderr.write(c.showCursor)
+    if (saved) spawnSync('stty', [saved], { stdio: 'inherit' })
+  }
 }
 
-async function pickEndpoint(): Promise<string | null> {
+function pickEndpoint(): string | null {
   const providers = client.listProviders()
   if (providers.length === 0) {
     console.error('没有可用的 provider')
@@ -140,7 +136,7 @@ async function pickEndpoint(): Promise<string | null> {
     detail: `${p.models.length} 个模型`,
     status: p.hasKey ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`,
   }))
-  const providerIdx = await selectFromList(
+  const providerIdx = selectFromList(
     '选择厂商',
     providerItems,
     '↑↓ 选择  Enter 确认  q 退出',
@@ -158,7 +154,7 @@ async function pickEndpoint(): Promise<string | null> {
   const modelItems = provider.models.map((m) => ({
     label: m,
   }))
-  const modelIdx = await selectFromList(
+  const modelIdx = selectFromList(
     `${provider.name} — 选择模型`,
     modelItems,
     '↑↓ 选择  Enter 确认  Esc 返回  q 退出',
@@ -330,7 +326,6 @@ function buildMessages(
 
 async function execClaude(endpointName?: string): Promise<void> {
   const { name, endpoint: ep } = client.getEndpointConfig(endpointName, 'anthropic')
-  const { spawn } = await import('node:child_process')
 
   const env: Record<string, string> = { ...process.env } as Record<
     string,
@@ -394,7 +389,7 @@ async function main() {
       printHelp()
       return
     }
-    const picked = await pickEndpoint()
+    const picked = pickEndpoint()
     if (!picked) return
     endpoint = picked
   }
