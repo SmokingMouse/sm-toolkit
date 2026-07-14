@@ -7,10 +7,19 @@ export interface ProviderConfig {
   models: string[]
 }
 
+/** 启动 claude CLI 交互 session 时的附加配置（llm 无 -p 路径透传） */
+export interface ClaudeSettings {
+  /** 附加环境变量（覆盖自动推导的默认值） */
+  env?: Record<string, string>
+  /** 附加命令行参数（如 --dangerously-skip-permissions） */
+  args?: string[]
+}
+
 export interface ConfigFile {
   providers: Record<string, ProviderConfig>
   default: string
   env_file?: string
+  claude?: ClaudeSettings
 }
 
 // ── resolved flat config (per model, used by provider impls) ──

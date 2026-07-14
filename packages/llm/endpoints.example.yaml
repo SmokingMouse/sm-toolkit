@@ -39,3 +39,16 @@ providers:
 
 default: deepseek-v4-flash
 env_file: ~/.agent-gateway.env
+
+# 可选：llm 启动 claude 交互 session 时的附加 env / 参数。
+# 代理 endpoint 已自动推导 ANTHROPIC_MODEL / DEFAULT_*_MODEL tier 映射、
+# API_TIMEOUT_MS、CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC，这里写的会覆盖同名项。
+# claude:
+#   env:
+#     CLAUDE_CODE_EFFORT_LEVEL: max
+#     CLAUDE_CODE_NO_FLICKER: "1"
+#     ENABLE_TOOL_SEARCH: "false"
+#   args:
+#     - --dangerously-skip-permissions
+#     - --teammate-mode
+#     - in-process

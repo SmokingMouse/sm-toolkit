@@ -12,6 +12,7 @@ export { openaiProvider } from './providers/openai.js'
 export { anthropicProvider } from './providers/anthropic.js'
 export type {
   ProviderConfig,
+  ClaudeSettings,
   ConfigFile,
   EndpointConfig,
   Message,

@@ -8,6 +8,7 @@ import type { Protocol } from './config.js'
 import { openaiProvider } from './providers/openai.js'
 import { anthropicProvider } from './providers/anthropic.js'
 import type {
+  ClaudeSettings,
   ConfigFile,
   EndpointConfig,
   Message,
@@ -100,6 +101,10 @@ export class LLMClient {
 
   get defaultEndpoint(): string {
     return this.#config.default
+  }
+
+  get claudeSettings(): ClaudeSettings {
+    return this.#config.claude ?? {}
   }
 
   getEndpointConfig(
