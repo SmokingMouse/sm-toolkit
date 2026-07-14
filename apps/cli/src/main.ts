@@ -331,10 +331,22 @@ async function execClaude(endpointName?: string): Promise<void> {
     string,
     string
   >
-  if (ep.base_url) env.ANTHROPIC_BASE_URL = ep.base_url
-
   const key = process.env[ep.api_key_env]
-  if (key) env.ANTHROPIC_API_KEY = key
+
+  if (ep.base_url) {
+    // 代理 endpoint：key 缺失时 claude 会以"无凭证"启动并要求 /login，
+    // 必须在这里拦下报错，而不是静默拉起
+    if (!key) {
+      console.error(`✗ 环境变量 ${ep.api_key_env} 未设置，endpoint [${name}] 需要 API key`)
+      console.error(`  检查 endpoints.yaml 的 env_file 是否存在且包含 ${ep.api_key_env}=...`)
+      console.error(`  运行 llm --list 查看各 provider 的 key 状态（✓/✗）`)
+      process.exit(1)
+    }
+    env.ANTHROPIC_BASE_URL = ep.base_url
+    env.ANTHROPIC_API_KEY = key
+  } else if (key) {
+    env.ANTHROPIC_API_KEY = key
+  }
 
   const args = ['--model', ep.model]
   // non-Anthropic provider: --bare forces API key auth only, skips OAuth
