@@ -367,8 +367,6 @@ async function execClaude(endpointName?: string): Promise<void> {
   }
 
   const args = ['--model', ep.model]
-  // non-Anthropic provider: --bare forces API key auth only, skips OAuth
-  if (ep.base_url) args.push('--bare')
   args.push(...(settings.args ?? []).map(String))
   console.error(`→ Claude Code [${name}] model=${ep.model}`)
 
