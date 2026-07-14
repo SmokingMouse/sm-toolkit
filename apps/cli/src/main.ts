@@ -343,6 +343,9 @@ async function execClaude(endpointName?: string): Promise<void> {
       process.exit(1)
     }
     env.ANTHROPIC_BASE_URL = ep.base_url
+    // 代理（super-relay 等）通过 ANTHROPIC_AUTH_TOKEN 认证，同时也设
+    // ANTHROPIC_API_KEY 以兼容不同版本的 claude CLI
+    env.ANTHROPIC_AUTH_TOKEN = key
     env.ANTHROPIC_API_KEY = key
   } else if (key) {
     env.ANTHROPIC_API_KEY = key

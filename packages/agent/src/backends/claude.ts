@@ -20,7 +20,7 @@ const NATIVE_TIER_ALIASES = new Set(["opus", "sonnet", "haiku"]);
  * 把 RunOptions.model 解析成 { model, env? }。三种结果:
  *   ① 裸 tier 别名(去掉可能的 "claude-" 前缀后命中)→ 原样传给 --model,无 env。
  *   ② endpoints.yaml 能解析出的名字/限定 id → 返回真实 model 名 + (若非原生
- *      claude 端点)ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY。
+ *      claude 端点)ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY。
  *   ③ 解析失败(如已废弃的 legacy id、CLI 新别名还没进 YAML)→ 原样透传给
  *      --model,让 claude CLI 自己校验 —— 不在这一层生降级用户的请求。
  */
@@ -34,9 +34,16 @@ function resolveClaudeModel(model: string | undefined): {
   try {
     const { endpoint } = resolveEndpoint(loadEndpoints(), model, "anthropic");
     if (!endpoint.base_url) return { model: endpoint.model };
+    const key = getApiKey(endpoint);
     return {
       model: endpoint.model,
-      env: { ANTHROPIC_BASE_URL: endpoint.base_url, ANTHROPIC_API_KEY: getApiKey(endpoint) },
+      // 代理（super-relay 等）通过 ANTHROPIC_AUTH_TOKEN 认证，同时也设
+      // ANTHROPIC_API_KEY 以兼容不同版本的 claude CLI
+      env: {
+        ANTHROPIC_BASE_URL: endpoint.base_url,
+        ANTHROPIC_AUTH_TOKEN: key,
+        ANTHROPIC_API_KEY: key,
+      },
     };
   } catch {
     return { model };
