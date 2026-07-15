@@ -1,6 +1,6 @@
 node_modules/
 dist/
 *.tsbuildinfo
-apps/self-agent/config/server.yaml
-apps/self-agent/config/acl.json
-apps/self-agent/data/
+archive/self-agent/config/server.yaml
+archive/self-agent/config/acl.json
+archive/self-agent/data/
