@@ -128,12 +128,20 @@ export class ClaudeBackend implements Backend {
       ];
       stdinData = JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
     } else if (interactive) {
-      // 交互模式:prompt 作为初始 stdin user 消息,streamLines 写入但不 end stdin。
+      // 交互模式:先发 initialize 握手,再送 prompt(user 消息),stdin 常开。
+      // claude 2.1.207 实测(2026-07-15):不发 initialize 则 --permission-prompt-tool stdio
+      // 被静默忽略,headless 对需授权工具直接 auto-deny,can_use_tool 永远不会下发;
+      // 握手后 claude 回 control_response(success) 并开始把权限请求路由到 stdio。
+      const initHandshake = {
+        request_id: "sm_agent_init_1",
+        type: "control_request",
+        request: { subtype: "initialize", hooks: {} },
+      };
       const interactivePrompt = {
         type: "user",
         message: { role: "user", content: [{ type: "text", text: prompt }] },
       };
-      stdinData = JSON.stringify(interactivePrompt) + "\n";
+      stdinData = JSON.stringify(initHandshake) + "\n" + JSON.stringify(interactivePrompt) + "\n";
     }
 
     let sid: string | null = opts.resume ?? null;

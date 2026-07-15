@@ -45,6 +45,19 @@ export type Content =
       originalMessage: string
       actions: ContentAction[]
     }
+  /** 工具授权审批（Harbor permission=default 链路）：pending 渲染按钮，决议后渲染状态行 */
+  | {
+      type: 'tool_approval'
+      agentName: string
+      toolName: string
+      /** 入参预览（截断后的 JSON 文本） */
+      inputPreview: string
+      status: 'pending' | 'allowed' | 'denied' | 'expired'
+      /** pending 时的按钮；决议态传 [] */
+      actions: ContentAction[]
+      /** 决议态的补充说明（谁批的/过期） */
+      note?: string
+    }
   | { type: 'help'; commands: CommandInfo[] }
 
 // ── channel interface ───────────────────────────────────

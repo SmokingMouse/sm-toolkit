@@ -101,6 +101,20 @@ export class FeishuChannel implements Channel {
     return (resp?.data as { message_id?: string })?.message_id ?? null
   }
 
+  /** 群维度发送（automation 播报等）。Channel 接口之外的飞书专有能力，调用方持有具体类型时使用 */
+  async sendToChat(chatId: string, content: Content): Promise<string | null> {
+    const card = renderContent(this.#botName, content)
+    const resp = await this.#lark.rawClient.im.message.create({
+      data: {
+        receive_id: chatId,
+        msg_type: 'interactive',
+        content: JSON.stringify(card),
+      },
+      params: { receive_id_type: 'chat_id' },
+    })
+    return (resp?.data as { message_id?: string })?.message_id ?? null
+  }
+
   // ── internal adapters ─────────────────────────────────
 
   async #onLarkMessage(msg: NormalizedMessage): Promise<void> {

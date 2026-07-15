@@ -118,6 +118,55 @@ function buildApprovalCard(
   ])
 }
 
+const TOOL_APPROVAL_STATUS: Record<string, { title: string; template: string; line: string }> = {
+  pending: { title: '工具授权请求', template: 'orange', line: '' },
+  allowed: { title: '工具授权 · 已批准', template: 'green', line: '✅ 已批准' },
+  denied: { title: '工具授权 · 已拒绝', template: 'red', line: '❌ 已拒绝' },
+  expired: { title: '工具授权 · 已过期', template: 'grey', line: '⏰ 超时未批，自动拒绝' },
+}
+
+function buildToolApprovalCard(
+  agentName: string,
+  toolName: string,
+  inputPreview: string,
+  status: 'pending' | 'allowed' | 'denied' | 'expired',
+  actions: ContentAction[],
+  note?: string,
+) {
+  const meta = TOOL_APPROVAL_STATUS[status]!
+  const elements: unknown[] = [
+    {
+      tag: 'div',
+      fields: [
+        { is_short: true, text: { tag: 'lark_md', content: `**Agent**\n${agentName}` } },
+        { is_short: true, text: { tag: 'lark_md', content: `**工具**\n${toolName}` } },
+      ],
+    },
+    {
+      tag: 'div',
+      text: { tag: 'lark_md', content: `**入参**\n\`\`\`\n${truncate(inputPreview)}\n\`\`\`` },
+    },
+  ]
+  if (status === 'pending' && actions.length > 0) {
+    elements.push({
+      tag: 'action',
+      actions: actions.map((a) => ({
+        tag: 'button' as const,
+        text: { tag: 'plain_text' as const, content: a.label },
+        type: (a.style === 'danger' ? 'danger' : a.style === 'primary' ? 'primary' : 'default') as
+          | 'primary'
+          | 'danger'
+          | 'default',
+        value: a.value,
+      })),
+    })
+  } else {
+    const line = [meta.line, note].filter(Boolean).join(' · ')
+    elements.push({ tag: 'note', elements: [{ tag: 'plain_text', content: line || meta.line }] })
+  }
+  return card(meta.title, meta.template, elements)
+}
+
 function buildHelpCard(botName: string, commands: CommandInfo[]) {
   const lines = ['**可用命令：**', '']
   for (const c of commands) {
@@ -147,6 +196,15 @@ export function renderContent(
         content.source,
         content.originalMessage,
         content.actions,
+      )
+    case 'tool_approval':
+      return buildToolApprovalCard(
+        content.agentName,
+        content.toolName,
+        content.inputPreview,
+        content.status,
+        content.actions,
+        content.note,
       )
     case 'help':
       return buildHelpCard(botName, content.commands)
