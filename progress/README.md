@@ -24,6 +24,7 @@ SDK 底座 + 应用分离完成。packages/ 放 SDK 积木，apps/ 放应用（c
 - [x] @sm/channel-feishu：飞书 Channel 适配（从 SelfAgent 移植，薄实现）
 - [x] 根级 `bun run setup` 引导流程（配模型 + 注册 SDK + 注册全局命令 + 按需装 app）
 - [x] agent-gateway 统一配置源（已迁移——见 2026-07-11 session；agent-gateway 独立仓库整体退役，能力拍平进 @sm/agent）
+- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 方案 `progress/harbor.md`，5 期路线。P1 地基已完成（2026-07-15，本机模拟双设备 e2e 全过；真双机验证待用户跨设备跑），下一步 P2 飞书/审批/worktree
 
 ## Verified Facts
 
@@ -32,11 +33,22 @@ SDK 底座 + 应用分离完成。packages/ 放 SDK 积木，apps/ 放应用（c
 
 ## Session Log
 
+### 2026-07-15 — Harbor Phase 1 落地（地基：跨设备执行闭环）
+- **Done**：`apps/harbor/` 单包三 bin 全量实现——`src/protocol.ts`（三端共享领域类型 + WS 消息 + SSE 帧）、`server/`（db user_version 迁移含 P2/P3 表、store 全 SQL 收口、statemachine 任意回退 + status_log、bus 内存扇出、scheduler=RunCoordinator 收口 run 生命周期两端、ws DeviceHub 注册/心跳 30s/90s sweep/同名踢旧连接、rest CRUD + SSE 先订阅再回放 seq 去重 + Bearer auth）、`daemon/`（capabilities 探测 CLI 版本 + endpoints 双形式清单、executor 批量 flush 200ms/20 条、main 指数退避重连 + outbox 必达补发）、`cli/`（9 个子命令 + SSE 渲染 + id 前缀匹配）。根 tsconfig/workspaces 注册，hono 依赖入 harbor 包。启动同步动作完成（`~/python/ai/Harbor` 空目录已删）。
+- **Verified**（本机 server:7788 + 双 daemon 进程模拟双设备，deepseek-v4-flash 真跑）：全量 tsc 过；P1 验收判据逐条过——issue create 派活到 dev-beta ✓ watch 流式（session/tool_call/text/cost）✓ 文件真实落盘 ✓ issue 自动 backlog→doing→review ✓ continue resume 同 session 上下文连续 + cache 复用 ✓ 中途 kill -9 daemon 重连对账 run 判 failed + issue 回 backlog + error 可操作 ✓ 崩溃后 continue 恢复上下文 ✓ model 不在能力清单被拒（报错带完整可用清单）✓ chat 第二设备路由 + 恒 open ✓ watch 已完成 run 回放 ✓ issue done 人工转换 + status_log 全轨迹（actor system/human 分明）✓。
+- **Decisions**（已回写 harbor.md）：①run failed/canceled → issue 回 backlog ②对账口径 = running ∪ outbox 待发（防断线期间完成的 run 被误判 failed）③单 shared token，token_hash 存指纹留扩展 ④isolation=worktree P1 建 agent 即拒，fail loudly 优于静默不隔离。
+- **Next**：真双机跨设备验证（Tailscale 环境，`~/.harbor.yaml` 配置已支持）；P2（飞书入口 + 审批链路 + worktree 生命周期 + self-agent 退役）。未 commit——等用户确认。
+
 ### 2026-07-15 — @sm/agent 新增 Thinking 事件（trellis CHAT 假死修复的 SDK 侧）
 - **Done**：`EventType.Thinking` + ClaudeBackend 把 stream-json 的 `content_block_delta`/`thinking_delta` 透传为 Thinking 事件（`data.text`）。此前 thinking 被静默丢弃——claude CLI 2.x 默认先出 thinking 块再出正文（实测 haiku 无 effort env 也 thinking），effort=max 时思考期达分钟级，上游 UI 全程失明像卡死。
 - **兼容**：纯增量事件类型；CLIRunner 的 toCLIEvent switch 有 default→null，self-agent 等存量消费者无感。dist 已重建。
 - **验证**：trellis 全链路实测（SSE created→thinking→delta→done + UI 面板），见 trellis progress Session 52。
 - **Next**：codex backend 的 reasoning 事件是否同样透传（有需求再做）。
+
+### 2026-07-15 — Harbor 方案定稿
+- **Done**：Mew 复刻调研（读原文档 + OSS 全渠道扫描：omnigent/vibe-kanban/claude-squad/omnara/ccr 等，结论 BUILD thin）+ 完整技术方案落 `progress/harbor.md`：领域模型（Conversation 统一 chat/issue）、SQLite schema、daemon WS 协议（外连+对账）、per-Issue worktree 隔离、飞书入口（审批卡片走 onCanUseTool 链路）、坑规避表、5 期开发计划 + 「基础体验没问题」终验清单。
+- **Decisions**：①网关用 @sm/llm env 注入不引 claude-code-router（零跳数，trace 由 @sm/audit 兜）②落 `apps/harbor/` 单包三 bin（协议类型三端共享）③self-agent P2 并入 Harbor 后退役 ④@sm/store 表结构不复用，Harbor 自建领域表。
+- **Next**：Phase 1 地基——protocol.ts → server（存储/REST/WS/队列/状态机）→ daemon（执行/对账）→ harbor CLI；验收 = 双机跨设备 issue 闭环（详见 harbor.md §9）。
 
 ### 2026-07-14 — llm 交互选择器去 process.stdin 化（终端乱码排查）
 - **触发**：bytedance 工作机（ghostty）上经 `llm` 启动 claude 后，输入框漏进终端应答序列尾巴（`22;52c` = DA1 应答、`>|ghostty` = XTVERSION 应答、`35;47;9M` = SGR 鼠标事件，ESC 前缀均被吞）。
