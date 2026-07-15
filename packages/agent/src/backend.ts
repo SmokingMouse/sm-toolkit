@@ -68,6 +68,13 @@ export interface RunOptions {
    */
   env?: Record<string, string>;
   /**
+   * 强制询问的工具名列表(claude permissions.ask 规则,经 --settings 内联注入)。
+   * ask 优先级高于用户 settings.json 的 allow 规则 —— 没有它,机器上全局 allowlist
+   * (如裸 "Bash")会让 can_use_tool 永远不触发、审批形同虚设(2026-07-15 实测)。
+   * 仅 claude 后端消费;通常与 onCanUseTool + permission:"default" 搭配。
+   */
+  askTools?: string[];
+  /**
    * 双向交互回调:claude 调用需用户输入的工具(AskUserQuestion / 工具权限 / ExitPlanMode)时,
    * 后端走 stream-json control protocol 暂停、调此回调拿决策、原地续上。
    * 传入即开启交互模式(args 加 --permission-prompt-tool stdio + prompt 走 stdin 常开)。

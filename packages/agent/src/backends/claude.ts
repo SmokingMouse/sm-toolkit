@@ -90,6 +90,12 @@ export class ClaudeBackend implements Backend {
     else args.push("-p", prompt);
     args.push("--output-format", "stream-json", "--verbose");
     if (interactive) args.push("--permission-prompt-tool", "stdio");
+    if (opts.askTools && opts.askTools.length > 0) {
+      // ask 规则 > 用户 settings 的 allow 规则(实测):强制这些工具走审批,
+      // 不然全局 allowlist(裸 "Bash" 等)会静默放行。--settings 是增量 merge,
+      // CLAUDE.md/skills 不受影响。
+      args.push("--settings", JSON.stringify({ permissions: { ask: opts.askTools } }));
+    }
     if (partial) args.push("--include-partial-messages");
     if (resolved.model) args.push("--model", resolved.model);
     if (opts.resume) args.push("--resume", opts.resume);
