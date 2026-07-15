@@ -220,48 +220,79 @@ server → daemon
 `issue continue` resume 二轮上下文连续 → 中途 kill daemon：run 判 failed，重启后 `issue continue`
 恢复上下文 → `agent create` 时 model 不在设备能力清单内被拒。
 
-### Phase 2 — 远程体验闭环（飞书入口 + 审批 + worktree）
+### Phase 2 — 远程体验闭环（飞书入口 + 审批 + worktree）✅ 2026-07-15 完成
+
+> 全量实现 + 本机 e2e 全过（飞书链路以 MockChannel 全真实组件 23 项断言验证，
+> 真飞书群验证待用户配置 `~/.harbor.yaml` feishu 块后跑一遍 /help 冒烟）。
+> 实现时拍板的决策（原方案未覆盖）：
+> - **审批双通道**：飞书卡片之外加 REST + `harbor approve/deny` CLI（watch 流里直接给命令），
+>   先到先得、decide 幂等；CLI/automation 来源的审批 DM admin，飞书来源回话题。
+> - **claude 2.1.207 行为漂移**（根因级发现，见 README Verified Facts）：can_use_tool 需要
+>   客户端先发 `initialize` control_request 握手，已修在 @sm/agent ClaudeBackend（agent-gateway
+>   移植代码在 2.1.167 时代无此要求）。设备全局 settings.json 的 allowlist 优先于审批链路
+>   （机器级信任），审批只对「未被 allowlist 且模式要求确认」的工具触发——预期行为。
+> - **同 conversation 串行闸**：enqueue 时拒绝并行 run（防两 run 拿同一 claude_session_id
+>   resume 出上下文分叉）。
+> - **cancel 级联**：issue cancel 连带 run_cancel + 作废 pending 审批；run 结束的自动流转
+>   尊重人工终态（done/canceled 不被拉回 review/backlog）。
+> - **worktree 收尾自愈**：dirty 拒删（保留目录 fail loudly）；设备离线时 cleanup 丢失 →
+>   重连对账补发；目录被手动删过 → `git worktree prune` 后重建。
+> - **ACL 简化**：admin-only（个人平台），self-agent 的陌生人审批流不迁移。
+> - 飞书话题映射：origin_ref = `chatId|anchor`（群=消息/话题 id，DM=chatId 滚动会话）；
+>   server 重启后回复锚点丢失 → 退化为 sendToChat 直发群。
 
 | # | 任务 | 要点 |
 |---|---|---|
-| 2.1 | FeishuChannel 挂载 | `@bot <agent名> <指令>` 解析 + 话题群↔Conversation 映射（origin=feishu） |
-| 2.2 | 审批链路 | onCanUseTool → approval_req → 飞书卡片 → 回批 → daemon resolve；30min 过期自动 deny；卡片重复点击幂等 |
-| 2.3 | 结果回报 | run_done → 结果摘要回群 + issue 状态标注；failed → 告警消息（error 分类） |
-| 2.4 | worktree 生命周期 | §6 全流程 + `harbor issue done` 收尾（保留分支删目录） |
-| 2.5 | send-gate 白名单 | 三场景准入（被 @ / 卡片回调 / 白名单群播报），默认空清单 |
-| 2.6 | self-agent 并入退役 | ACL/命令路由逻辑吸收进 Orchestrator，停进程归档目录 |
+| 2.1 | FeishuChannel 挂载 | `<agent名> <指令>` 解析 + 话题↔Conversation 映射 + /bind 群默认 agent + /chat /status /done /cancel /agents /help |
+| 2.2 | 审批链路 | onCanUseTool → approval_req → 飞书卡片/CLI 双通道 → daemon resolve；30min sweep 过期 deny；重复点击幂等；重连补投决议 |
+| 2.3 | 结果回报 | run_done → ack 卡原地更新为结果（cost/时长/issue 状态）；failed → 话题告警或 admin DM（无静默失败） |
+| 2.4 | worktree 生命周期 | §6 全流程 + done/cancel 收尾（保留分支删目录）+ 离线补发 + dirty 保护 |
+| 2.5 | send-gate 白名单 | 三场景准入落地（被 @ 且 admin / 卡片回调 / 白名单群播报），默认空清单 |
+| 2.6 | self-agent 并入退役 | 已归档 `archive/self-agent/`（RETIRED.md 含凭证迁移步骤），workspaces/tsconfig 摘除 |
 
-✅ 验收：飞书话题群派 issue → 高危工具卡片批准 → 完成通知回群；permission=default 的 agent
-端到端可用；同 repo 两个 issue 并行 worktree 不互踩；非白名单群 bot 全程静默。
+✅ 验收（e2e 实测 2026-07-15）：审批 allow/deny/expire/cancel 四路径全过（watch 流内提示 +
+CLI 批准 + claude 原地续跑 + 文件落盘核实）；同 repo 两 issue 并行 worktree 互不可见、
+分支独立、done 后目录删分支留；permission=default agent 端到端可用；飞书 23 项 mock 断言全过
+（含非 admin 拒绝、白名单拦截、DM 滚动会话）。
 
-### Phase 3 — 无人值守闭环（automation + 用量 + skill 入口）
+### Phase 3 — 无人值守闭环（automation + 用量 + skill 入口）✅ 2026-07-15 完成
 
-| # | 任务 | 要点 |
-|---|---|---|
-| 3.1 | croner 调度 | automation CRUD（CLI 管理）；server 停机期间错过的触发**跳过不补跑**，记 missed 日志 |
-| 3.2 | 用量报表 | `harbor usage`：按 agent×model×日聚合；逐 run cost 可下钻 |
-| 3.3 | run_events prune | 7 天滚动清理，result/cost 永久留 runs 表 |
-| 3.4 | harbor skill | 薄 skill 包住 harbor CLI，让日常 Claude Code session 可直接派活/查状态（vibe-kanban MCP 入口的低成本等价物） |
-
-✅ 验收：迁移 1 个现有 cron 类任务进 automation 连跑 3 天留档正确；usage 报表与逐 run
-cost 抽查 3 笔一致；在日常 CC session 里通过 skill 建一个 issue 并收到飞书完成通知。
-
-### Phase 4 — Web 看板（只读起步）
+> 坑：croner 的模式回溯 `previousRuns(1)` 是 **v10 才有的 API**（v9 的 previousRun()
+> 是实例运行历史、新实例恒 null，missed 检测形同虚设）——已升 croner@^10 并实测。
+> automation 播报走 `--notify-chat` + server 白名单双闸。
 
 | # | 任务 | 要点 |
 |---|---|---|
-| 4.1 | Next.js 看板 | Issue kanban（状态列拖拽后置）+ run 详情（事件流回放）+ 用量图 |
-| 4.2 | 只读边界 | 第一版纯只读，管理操作仍走 CLI/飞书；写操作按 dogfood 体感再加，不预做 |
+| 3.1 | croner 调度 | CRUD + enable/disable + fired/missed 双日志（`automation_log` 表）；停机错过跳过不补跑 ✅ 实测（每分钟 cron 连续 6 发 + 停机 missed 留档） |
+| 3.2 | 用量报表 | `harbor usage [--days][--agent][--runs]`：聚合与 DB 原始 sum 全额对账一致（15 runs / $0.8641） |
+| 3.3 | run_events prune | boot + 每小时；老化 8 天事件实测被清且日志留痕 |
+| 3.4 | harbor skill | `~/.claude/skills/harbor/SKILL.md` 已建（bin 已 `bun link` 全局：harbor / harbord / harbor-server） |
 
-✅ 验收：手机浏览器（Tailscale 内网）打开看板，完整查看一个 issue 的状态、run 流水与用量。
+✅ 验收：连跑 3 天留档 + 飞书完成通知两项与真实环境绑定，机制已全部实测
+（missed/fired/对账/skill 命令面）；剩余为用户环境时间性验证。
 
-### Phase 5 — Dogfood 加固（「基础体验没问题」的兑现期）
+### Phase 4 — Web 看板（只读起步）✅ 2026-07-15 完成
+
+> **决策变更：不引 Next.js**（原方案标签），harbor-server `GET /` 直出自包含单文件看板
+> （vanilla JS，零新进程零构建）。理由：P4 明确只读、写操作「按 dogfood 体感再加」——
+> 单文件已覆盖全部验收判据；Web 真长成管理入口时再立 Next.js（迁移面 = 一个文件）。
+> 与 §3 架构图「Web(P3, Next.js)」的出入以本条为准。
 
 | # | 任务 | 要点 |
 |---|---|---|
-| 5.1 | 真实负载迁移 | ≥2 条 automation + 日常派活跑满一周 |
-| 5.2 | 边缘 case 清零 | 长输出（>1MB 事件流）截断策略；设备睡眠唤醒；server 重启恢复；飞书卡片过期态；时区 |
-| 5.3 | 错误信息走查 | 每类失败原因（模型不可用/设备离线/权限拒绝/超时）人为触发一遍，确认 error 提示可操作 |
+| 4.1 | 看板 | 5 列 issue kanban + 设备/agent 概览条 + issue 抽屉（status_log 时间线 + run 流水）+ run 事件回放（SSE 流式，支持进行中直播）+ 用量柱图/明细表 |
+| 4.2 | 只读边界 | 纯只读；token 存 localStorage，数据面全走既有 /api/*（Bearer） |
+
+✅ 验收（agent-browser 实测截图）：看板 5 列渲染/issue 抽屉/事件回放（thinking/tool/正文
+分层）/用量图表全部正常；手机浏览器 = 同一页面（响应式 CSS），Tailscale 场景待真机。
+
+### Phase 5 — Dogfood 加固（「基础体验没问题」的兑现期）◐ 机制层完成，时间性验证待真实负载
+
+| # | 任务 | 要点 |
+|---|---|---|
+| 5.1 | 真实负载迁移 | ≥2 条 automation + 日常派活跑满一周 —— **待用户真实环境** |
+| 5.2 | 边缘 case 清零 | ✅ 长输出截断（单事件 8KB 上限带标记，108KB Bash 输出实测）；✅ server 重启恢复（重启后 SSE 重连/排队恢复/missed 留档实测）；✅ 飞书卡片过期态（sweep 改卡）；时区=server 本机（croner 默认，已文档化）；设备睡眠唤醒=断线重连机制已验（真实睡眠待 dogfood） |
+| 5.3 | 错误信息走查 | ✅ 已走查：模型不在能力清单（带可用清单）/设备离线（排队提示）/权限拒绝（deny 后模型可感知）/审批过期（自动拒+卡片标注）/worktree 非 git repo（git 原文直达）/dirty 拒删（提示人工处理）/同会话并行（串行闸提示）——全部可操作 |
 
 ✅ **终验清单（全部达成才算「做完」）**：
 1. 可靠派活：连续 20 个真实任务（chat/issue/automation 三来源混合）零次需要登 server 机器查日志排障

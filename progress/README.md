@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-SDK 底座 + 应用分离完成。packages/ 放 SDK 积木，apps/ 放应用（cli + self-agent）。
+Harbor P1–P4 落地完毕（跨设备执行 + 飞书/审批/worktree + automation/用量 + Web 看板），self-agent 已退役。当前等待用户环境的时间性验证（真双机 / 真飞书 / dogfood 一周）。
 
 ## Goals
 
@@ -24,14 +24,28 @@ SDK 底座 + 应用分离完成。packages/ 放 SDK 积木，apps/ 放应用（c
 - [x] @sm/channel-feishu：飞书 Channel 适配（从 SelfAgent 移植，薄实现）
 - [x] 根级 `bun run setup` 引导流程（配模型 + 注册 SDK + 注册全局命令 + 按需装 app）
 - [x] agent-gateway 统一配置源（已迁移——见 2026-07-11 session；agent-gateway 独立仓库整体退役，能力拍平进 @sm/agent）
-- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 方案 `progress/harbor.md`，5 期路线。P1 地基已完成（2026-07-15，本机模拟双设备 e2e 全过；真双机验证待用户跨设备跑），下一步 P2 飞书/审批/worktree
+- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 方案 `progress/harbor.md`。P1–P4 全部完成（2026-07-15，本机 e2e 全过：审批四路径/worktree 并行与自愈/automation fired+missed/usage 对账/看板浏览器实测/飞书 mock 23 项），self-agent 退役归档。剩 P5 时间性验证——真双机 Tailscale、真飞书群冒烟、automation 连跑 7 天、真实负载一周，全部依赖用户环境
 
 ## Verified Facts
 
 - **claude CLI 的路由优先级**：env 注入的 `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` 优先于本机 OAuth 登录态——本地假服务器实测（2026-07-14），所有 `/v1/messages` 请求均打到 env 指定的 base_url 且带 `Bearer <token>`，零请求流向官方；`--bare` 有无不影响路由归属。因此"指定三方 endpoint 却悄悄用官方模型"在 env 齐全时不存在。
 - **super-relay 等字节内部代理认 `ANTHROPIC_AUTH_TOKEN`（Bearer），不认 `ANTHROPIC_API_KEY`**；两个都设可兼容不同版本 claude CLI。
+- **claude 2.1.207 的 can_use_tool 双向审批需要 initialize 握手**（2026-07-15 实测）：spawn 后客户端必须先向 stdin 发 `{"request_id":...,"type":"control_request","request":{"subtype":"initialize","hooks":{}}}`，claude 回 success 后才把权限请求以 `control_request(can_use_tool)` 下发 stdout；不握手则 `--permission-prompt-tool stdio` 被静默忽略、headless 对需授权工具直接 auto-deny（agent-gateway 时代 2.1.167 无此要求，属行为漂移）。该 flag 已从 `--help` 隐藏；`--permission-mode` 选项改为 acceptEdits/auto/bypassPermissions/manual/dontAsk/plan，旧值 `default` 仍兼容（=manual）。修复落在 `@sm/agent` ClaudeBackend。
+- **设备全局 `~/.claude/settings.json` 的 permissions.allow 优先于审批链路**：allowlist 的工具（本机 Bash/Read/Edit/Write/WebFetch 全在）永不触发 can_use_tool——审批只覆盖「未 allowlist 且当前模式要求确认」的工具，是机器级信任的预期行为。e2e 测审批必须隔离 `CLAUDE_CONFIG_DIR`。
+- **croner 的模式回溯 `previousRuns(n)` 是 v10 才有的 API**；v9 的 `previousRun()` 返回实例自身运行历史（新实例恒 null），拿它做停机 missed 检测形同虚设。另：bun 对 workspace 外的脚本会回退解析全局缓存里的别版本包——调试依赖行为先 `require.resolve` 确认实际加载路径。
 
 ## Session Log
+
+### 2026-07-15 — Harbor P2+P3+P4 一次落地 + self-agent 退役（方案收尾）
+- **Done**：
+  - **P2**：审批链路全闭环（daemon onCanUseTool → approval_req → 落库 → 飞书卡片/CLI 双通道决议 → approval_res resolve → claude 原地续跑；30min sweep 过期 deny、重复点击幂等、重连补投、run 终态作废 pending）；worktree 生命周期（per-issue 建/复用/回填路径、done/cancel 收尾保留分支删目录、dirty 拒删、设备离线重连补发、prune 自愈）；FeishuEntry（`<agent> <指令>` 话题映射、/bind /chat /status /done /cancel /agents /help、ack 卡原地更新为结果、failed 无静默告警、send-gate 三场景 + admin-only ACL）；@sm/agent Content 加 `tool_approval` + channel-feishu 卡片渲染 + `sendToChat`。
+  - **P3**：croner v10 调度（fired/missed 双日志、停机跳过不补跑）、`harbor usage` 聚合+下钻、run_events 7 天 prune、`~/.claude/skills/harbor` skill、三 bin `bun link` 全局。
+  - **P4**：决策变更——不引 Next.js，server `GET /` 直出单文件看板（kanban/issue 抽屉含 status_log 时间线/run 事件回放含直播/用量图表；token localStorage）。
+  - **修复上游**：@sm/agent ClaudeBackend 交互模式补 **initialize 握手**（claude 2.1.207 行为漂移，细节见 Verified Facts）；P1 遗留 bug 两枚——run 结束的自动流转会覆盖人工 done/canceled（加终态尊重 guard）、同 conversation 可并行 run 导致 resume 分叉（加串行闸）；issue cancel 现在级联 run_cancel。
+  - **self-agent 退役**：`apps/self-agent` → `archive/self-agent/`（RETIRED.md 含能力去向表 + 凭证迁移步骤），workspaces/tsconfig/.gitignore 同步。
+- **Verified**（本机 e2e，deepseek-v4-flash 真跑 + 隔离 CLAUDE_CONFIG_DIR）：v1→v2 迁移无损；审批 allow（watch 提示→CLI 批→续跑→文件落盘）/deny（文件未删）/expire（老化 31min→sweep 自动拒）/cancel 级联四路径；同 repo 双 issue 并行 worktree 互不可见+分支独立+主仓库干净；dirty 拒删→commit 后重连补发删除成功；非 git workdir 报错带 git 原文；automation 每分钟连发 6 次+停机 missed 留档+enable/disable；usage 与 DB 原始 sum 全额一致（15 runs/$0.8641）；串行闸拒绝并行；resume 上下文连续（模型答出上一轮文件路径）；108KB 工具输出截到 8KB 带标记；prune 清 24 行老化事件；离线派活排队提示+上线自动跑；看板 agent-browser 实测（5 列/抽屉/回放/用量图截图确认）；飞书 mock e2e 23 项断言全过。
+- **Decisions**（已回写 harbor.md 各期）：P4 单文件看板取代 Next.js（只读期零进程零构建，真要写操作再立）；审批双通道先到先得；ACL 简化 admin-only；飞书话题锚 `chatId|anchor`。
+- **Next**：用户侧时间性验证——①真双机（Tailscale + `~/.harbor.yaml`）②飞书凭证迁 `~/.harbor.yaml` 后真群冒烟（步骤见 `archive/self-agent/RETIRED.md`，注意先停旧 self-agent 进程防双响应）③automation 连跑 7 天 ④dogfood 一周（P5 终验清单）。
 
 ### 2026-07-15 — claude 后端 --setting-sources 改等号形式（工作机 0 输出修复上游化）
 - **触发**：工作机 pull trellis a29f9b5 后 chat 仍 0 输出，排查是 `("--setting-sources", "")` 的独立空字符串 argv 在该机 runtime 下被丢弃 → `--strict-mcp-config` 被当成 setting-sources 的值 → CLI 报错退出。本机 bun 1.3.14 实测**不**吞空 argv（不复现），但等号形式把值焊死在同一 argv 里对 runtime 差异免疫，语义不变（仍是"不加载任何 settings source"，不是工作机临时用的 `=local`——那会让真实 cwd 的 caller 突然加载 .claude/settings.local.json，通用 SDK 不做该语义漂移）。
