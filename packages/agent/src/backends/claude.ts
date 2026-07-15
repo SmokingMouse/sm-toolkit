@@ -98,7 +98,10 @@ export class ClaudeBackend implements Backend {
     if (opts.systemPrompt) args.push("--system-prompt", opts.systemPrompt);
     if (opts.settingSources === false) {
       // 砍全局 CLAUDE.md + 默认 MCP 省 context。实测一句 OK $0.28→$0.0015(↓184x)。
-      args.push("--setting-sources", "", "--strict-mcp-config");
+      // 等号形式而非 ("--setting-sources", ""):独立的空字符串 argv 在部分 runtime
+      // (工作机 bun 实测)会被丢弃,导致后面的 --strict-mcp-config 被当成值吞掉、
+      // CLI 报错 0 输出;等号把空值焊死在同一个 argv 里,两种写法 CLI 均实测接受。
+      args.push("--setting-sources=", "--strict-mcp-config");
     }
     if (opts.tools && opts.tools !== "all") {
       args.push("--tools", opts.tools.join(",")); // [] → "" 即无工具

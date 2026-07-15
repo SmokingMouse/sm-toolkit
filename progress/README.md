@@ -33,6 +33,11 @@ SDK 底座 + 应用分离完成。packages/ 放 SDK 积木，apps/ 放应用（c
 
 ## Session Log
 
+### 2026-07-15 — claude 后端 --setting-sources 改等号形式（工作机 0 输出修复上游化）
+- **触发**：工作机 pull trellis a29f9b5 后 chat 仍 0 输出，排查是 `("--setting-sources", "")` 的独立空字符串 argv 在该机 runtime 下被丢弃 → `--strict-mcp-config` 被当成 setting-sources 的值 → CLI 报错退出。本机 bun 1.3.14 实测**不**吞空 argv（不复现），但等号形式把值焊死在同一 argv 里对 runtime 差异免疫，语义不变（仍是"不加载任何 settings source"，不是工作机临时用的 `=local`——那会让真实 cwd 的 caller 突然加载 .claude/settings.local.json，通用 SDK 不做该语义漂移）。
+- **验证**：`--setting-sources=` 与 `=local` 裸 CLI 均实测接受；trellis 隔离实例真 spawn 纯 chat 回答正常。
+- **Next**：工作机收敛——`git checkout -- packages/agent/src && git pull && bun run build`（其手工 Thinking 补丁与上游 a3ce7b2 等价，等号修复本条已含）。
+
 ### 2026-07-15 — Harbor Phase 1 落地（地基：跨设备执行闭环）
 - **Done**：`apps/harbor/` 单包三 bin 全量实现——`src/protocol.ts`（三端共享领域类型 + WS 消息 + SSE 帧）、`server/`（db user_version 迁移含 P2/P3 表、store 全 SQL 收口、statemachine 任意回退 + status_log、bus 内存扇出、scheduler=RunCoordinator 收口 run 生命周期两端、ws DeviceHub 注册/心跳 30s/90s sweep/同名踢旧连接、rest CRUD + SSE 先订阅再回放 seq 去重 + Bearer auth）、`daemon/`（capabilities 探测 CLI 版本 + endpoints 双形式清单、executor 批量 flush 200ms/20 条、main 指数退避重连 + outbox 必达补发）、`cli/`（9 个子命令 + SSE 渲染 + id 前缀匹配）。根 tsconfig/workspaces 注册，hono 依赖入 harbor 包。启动同步动作完成（`~/python/ai/Harbor` 空目录已删）。
 - **Verified**（本机 server:7788 + 双 daemon 进程模拟双设备，deepseek-v4-flash 真跑）：全量 tsc 过；P1 验收判据逐条过——issue create 派活到 dev-beta ✓ watch 流式（session/tool_call/text/cost）✓ 文件真实落盘 ✓ issue 自动 backlog→doing→review ✓ continue resume 同 session 上下文连续 + cache 复用 ✓ 中途 kill -9 daemon 重连对账 run 判 failed + issue 回 backlog + error 可操作 ✓ 崩溃后 continue 恢复上下文 ✓ model 不在能力清单被拒（报错带完整可用清单）✓ chat 第二设备路由 + 恒 open ✓ watch 已完成 run 回放 ✓ issue done 人工转换 + status_log 全轨迹（actor system/human 分明）✓。
