@@ -12,6 +12,7 @@ import type { DaemonMsg, DeviceCapabilities, ServerMsg } from "../protocol.js";
 import { OFFLINE_AFTER_MS } from "../protocol.js";
 import type { HarborStore } from "./store.js";
 import type { DeviceTransport, RunCoordinator } from "./scheduler.js";
+import type { ApprovalService } from "./approvals.js";
 
 export interface WsData {
   deviceId: string | null;
@@ -23,6 +24,7 @@ export class DeviceHub implements DeviceTransport {
   private conns = new Map<string, ServerWebSocket<WsData>>(); // deviceId → ws
   /** hello 后由 main 注入（hub 先于 coordinator 构造，二者互相引用） */
   coordinator!: RunCoordinator;
+  approvals!: ApprovalService;
   private sweeper: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -89,8 +91,13 @@ export class DeviceHub implements DeviceTransport {
         this.coordinator.onRunDone(msg);
         break;
       case "approval_req":
-        // P2 审批链路才接；P1 不会出现（server 不给 daemon 挂 onCanUseTool 的机会）
-        console.warn(`[hub] approval_req 到达但审批链路未实现（P2）：run=${msg.runId} tool=${msg.toolName}`);
+        this.approvals.onApprovalReq(msg);
+        break;
+      case "worktree_ready":
+        this.coordinator.onWorktreeReady(msg.conversationId, msg.path);
+        break;
+      case "worktree_cleanup_result":
+        this.coordinator.onWorktreeCleanupResult(msg.conversationId, msg.ok, msg.message);
         break;
     }
   }
@@ -133,8 +140,9 @@ export class DeviceHub implements DeviceTransport {
       `[hub] device 上线：${device.name}（${device.id}）clis=${JSON.stringify(capabilities.clis)} endpoints=${capabilities.endpoints.length} 个，对账 running=${runningRunIds.length}`,
     );
 
-    // 对账（清孤儿）+ 补位调度
+    // 对账（清孤儿 + worktree 收尾补发）+ 决议补投 + 补位调度
     this.coordinator.reconcileDevice(device.id, runningRunIds);
+    this.approvals.redeliverForDevice(device.id);
   }
 
   private sweep(): void {

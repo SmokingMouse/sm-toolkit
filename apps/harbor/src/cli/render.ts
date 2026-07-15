@@ -61,6 +61,23 @@ export class RunRenderer {
       }
       return run;
     }
+    if (f.kind === "approval") {
+      this.breakText();
+      const input = JSON.stringify(f.approval.input ?? {});
+      process.stdout.write(
+        `${c.yellow}⏸ 等待工具授权 ${c.bold}${f.approval.id}${c.reset}${c.yellow}：${f.approval.toolName} ${
+          input.length > 120 ? input.slice(0, 120) + "…" : input
+        }${c.reset}\n${c.dim}  批：harbor approve ${f.approval.id}   拒：harbor deny ${f.approval.id}（飞书卡片同步可批，30min 超时自动拒）${c.reset}\n`,
+      );
+      return null;
+    }
+    if (f.kind === "approval_decided") {
+      this.breakText();
+      const label =
+        f.status === "allowed" ? `${c.green}▶ 已批准` : f.status === "denied" ? `${c.red}▶ 已拒绝` : `${c.yellow}▶ 已过期（自动拒绝）`;
+      process.stdout.write(`${label}${c.reset}${c.dim} ${f.approvalId}${f.decidedBy ? ` by ${f.decidedBy}` : ""}${c.reset}\n`);
+      return null;
+    }
 
     const ev = f.event;
     switch (ev.type) {

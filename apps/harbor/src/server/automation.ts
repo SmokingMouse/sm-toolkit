@@ -1,0 +1,118 @@
+/**
+ * AutomationService —— cron 定时派活（P3，croner）。
+ * 语义：server 停机期间错过的触发跳过不补跑，boot 时对比 previousRun 与 last_fired_at
+ * 记 missed 日志；触发时按 mode 开新 issue（origin=automation）或追加到固定 conversation。
+ * 时区：跟 server 本机时区（croner 默认）。
+ */
+
+import { Cron } from "croner";
+import type { Automation, Conversation } from "../protocol.js";
+import type { HarborStore } from "./store.js";
+import type { RunCoordinator } from "./scheduler.js";
+
+export class AutomationService {
+  private jobs = new Map<string, Cron>();
+
+  constructor(
+    private store: HarborStore,
+    private coordinator: RunCoordinator,
+  ) {}
+
+  /** boot：missed 检查 + 全部 enabled 排班 */
+  start(): void {
+    const now = Date.now();
+    for (const auto of this.store.listAutomations()) {
+      if (!auto.enabled) continue;
+      // missed 检查：上一个应触发时刻晚于 last_fired_at → server 停机漏掉了。
+      // 注意 croner 的 previousRun() 是「本实例的运行历史」（新实例恒 null），
+      // 模式回溯要用 previousRuns(1)，且它是 croner v10 才有的 API——2026-07-15 实测踩过。
+      if (auto.lastFiredAt) {
+        try {
+          const probe = new Cron(auto.cron);
+          const prev = probe.previousRuns(1)[0];
+          probe.stop();
+          if (prev && prev.getTime() > auto.lastFiredAt) {
+            this.store.appendAutomationLog(
+              { automationId: auto.id, kind: "missed", note: `server 停机错过 ${prev.toISOString()}（跳过不补跑）` },
+              now,
+            );
+            console.log(`[automation] missed：${auto.name} @ ${prev.toISOString()}`);
+          }
+        } catch (e) {
+          // cron 表达式坏了会在 schedule 时报；这里只可能是 previousRuns 探测本身出错
+          console.warn(`[automation] missed 探测失败（${auto.name}）：`, e instanceof Error ? e.message : e);
+        }
+      }
+      this.schedule(auto);
+    }
+    console.log(`[automation] 已排班 ${this.jobs.size} 条`);
+  }
+
+  stop(): void {
+    for (const job of this.jobs.values()) job.stop();
+    this.jobs.clear();
+  }
+
+  /** cron 表达式校验（REST create 前置闸）——非法直接 throw */
+  static validateCron(expr: string): void {
+    const probe = new Cron(expr);
+    probe.stop();
+  }
+
+  schedule(auto: Automation): void {
+    this.unschedule(auto.id);
+    const job = new Cron(auto.cron, { name: auto.id }, () => this.fire(auto.id));
+    this.jobs.set(auto.id, job);
+  }
+
+  unschedule(id: string): void {
+    this.jobs.get(id)?.stop();
+    this.jobs.delete(id);
+  }
+
+  private fire(id: string): void {
+    const now = Date.now();
+    const auto = this.store.getAutomation(id);
+    if (!auto || !auto.enabled) return; // 已删/已停用（stop 竞态兜底）
+
+    const agent = this.store.getAgent(auto.agentId);
+    if (!agent || agent.archivedAt) {
+      this.store.appendAutomationLog(
+        { automationId: id, kind: "missed", note: "agent 不存在或已归档，未触发" },
+        now,
+      );
+      console.warn(`[automation] ${auto.name} 触发失败：agent 不可用`);
+      return;
+    }
+
+    let conv: Conversation;
+    if (auto.mode === "append") {
+      const target = auto.targetConversationId ? this.store.getConversation(auto.targetConversationId) : null;
+      if (!target) {
+        this.store.appendAutomationLog(
+          { automationId: id, kind: "missed", note: `target conversation ${auto.targetConversationId} 不存在，未触发` },
+          now,
+        );
+        console.warn(`[automation] ${auto.name} 触发失败：target conversation 不存在`);
+        return;
+      }
+      conv = target;
+    } else {
+      conv = this.store.createConversation(
+        {
+          kind: "issue",
+          title: `[auto] ${auto.name} ${new Date(now).toLocaleString("sv-SE")}`,
+          agentId: agent.id,
+          origin: "automation",
+          originRef: auto.id,
+        },
+        now,
+      );
+    }
+
+    const run = this.coordinator.enqueueRun(conv, agent, auto.prompt);
+    this.store.markAutomationFired(id, now);
+    this.store.appendAutomationLog({ automationId: id, kind: "fired", runId: run.id }, now);
+    console.log(`[automation] fired：${auto.name} → run ${run.id}（conv ${conv.id}）`);
+  }
+}

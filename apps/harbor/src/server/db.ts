@@ -70,6 +70,25 @@ const MIGRATIONS: string[] = [
     actor TEXT NOT NULL, ts INTEGER NOT NULL
   );
   `,
+  // v2 —— P2/P3 增量：审批路由/飞书绑定/automation 日志/查询索引
+  `
+  ALTER TABLE approvals ADD COLUMN decided_by TEXT;             -- cli|feishu|sweep|system
+  ALTER TABLE approvals ADD COLUMN feishu_message_id TEXT;      -- 审批卡片 id（过期/决议后改卡）
+  ALTER TABLE automations ADD COLUMN notify_chat_id TEXT;       -- 完成播报群（白名单闸在 server 配置）
+  CREATE TABLE chat_bindings (                                  -- 飞书群 → 默认 agent
+    chat_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agents(id),
+    created_at INTEGER NOT NULL
+  );
+  CREATE TABLE automation_log (                                 -- fired/missed 留档（跳过不补跑）
+    automation_id TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('fired','missed')),
+    ts INTEGER NOT NULL, run_id TEXT, note TEXT
+  );
+  CREATE INDEX idx_conversations_origin ON conversations(origin, origin_ref);
+  CREATE INDEX idx_approvals_status ON approvals(status);
+  CREATE INDEX idx_approvals_run ON approvals(run_id);
+  CREATE INDEX idx_run_events_ts ON run_events(ts);
+  CREATE INDEX idx_automation_log ON automation_log(automation_id, ts);
+  `,
 ];
 
 export function openDb(path: string): Database {

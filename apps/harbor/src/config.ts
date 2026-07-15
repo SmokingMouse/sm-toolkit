@@ -6,6 +6,12 @@
  *   server_url: http://100.x.x.x:7777   # CLI/daemon 指向 server（Tailscale 内网）
  *   token: <shared secret>
  *   device_name: mac-studio             # daemon 用，缺省 hostname
+ *   feishu:                             # server 用（P2 飞书入口）；缺省 = 入口关闭
+ *     app_id: cli_xxx
+ *     app_secret: xxx
+ *     admin_user_id: ou_xxx             # 唯一有权指挥 bot 的人（send-gate ACL）
+ *     bot_name: Harbor
+ *     allowed_chats: []                 # automation 播报白名单群，默认空 = 不播报
  */
 
 import { readFileSync, existsSync } from "node:fs";
@@ -18,6 +24,13 @@ interface HarborFileConfig {
   server_url?: string;
   token?: string;
   device_name?: string;
+  feishu?: {
+    app_id?: string;
+    app_secret?: string;
+    admin_user_id?: string;
+    bot_name?: string;
+    allowed_chats?: string[];
+  };
 }
 
 let _file: HarborFileConfig | null = null;
@@ -55,4 +68,29 @@ export function token(): string {
 
 export function deviceName(): string {
   return process.env.HARBOR_DEVICE_NAME ?? fileConfig().device_name ?? hostname();
+}
+
+export interface FeishuConfig {
+  appId: string;
+  appSecret: string;
+  /** 唯一有权指挥 bot 的飞书 user id；空 = 开放（不建议） */
+  adminUserId: string;
+  botName: string;
+  /** automation 播报白名单群（send-gate 场景③）；默认空 = 不播报 */
+  allowedChats: string[];
+}
+
+/** 飞书入口配置；app_id/app_secret 不全 → null（入口关闭，server 只跑 CLI/REST 面） */
+export function feishuConfig(): FeishuConfig | null {
+  const f = fileConfig().feishu ?? {};
+  const appId = process.env.HARBOR_FEISHU_APP_ID ?? f.app_id;
+  const appSecret = process.env.HARBOR_FEISHU_APP_SECRET ?? f.app_secret;
+  if (!appId || !appSecret) return null;
+  return {
+    appId,
+    appSecret,
+    adminUserId: process.env.HARBOR_FEISHU_ADMIN ?? f.admin_user_id ?? "",
+    botName: f.bot_name ?? "Harbor",
+    allowedChats: f.allowed_chats ?? [],
+  };
 }

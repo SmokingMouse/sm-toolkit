@@ -3,12 +3,17 @@
  */
 
 import type {
+  Approval,
+  ApprovalStatus,
+  Automation,
+  AutomationLogRow,
   Conversation,
   ConversationStatus,
   Device,
   HarborAgent,
   Run,
   RunStreamFrame,
+  UsageRow,
 } from "../protocol.js";
 
 export class HarborClient {
@@ -79,6 +84,45 @@ export class HarborClient {
 
   getRun(id: string): Promise<Run> {
     return this.req("GET", `/api/runs/${encodeURIComponent(id)}`);
+  }
+
+  approvals(status?: ApprovalStatus): Promise<Approval[]> {
+    return this.req("GET", `/api/approvals${status ? `?status=${status}` : ""}`);
+  }
+
+  decideApproval(id: string, behavior: "allow" | "deny"): Promise<Approval> {
+    return this.req("POST", `/api/approvals/${encodeURIComponent(id)}`, { behavior });
+  }
+
+  automations(): Promise<(Automation & { agentName: string })[]> {
+    return this.req("GET", "/api/automations");
+  }
+
+  createAutomation(body: Record<string, unknown>): Promise<Automation> {
+    return this.req("POST", "/api/automations", body);
+  }
+
+  setAutomationEnabled(id: string, enabled: boolean): Promise<Automation> {
+    return this.req("PATCH", `/api/automations/${encodeURIComponent(id)}`, { enabled });
+  }
+
+  deleteAutomation(id: string): Promise<{ ok: boolean }> {
+    return this.req("DELETE", `/api/automations/${encodeURIComponent(id)}`);
+  }
+
+  automationLog(id: string): Promise<AutomationLogRow[]> {
+    return this.req("GET", `/api/automations/${encodeURIComponent(id)}/log`);
+  }
+
+  usage(days: number): Promise<UsageRow[]> {
+    return this.req("GET", `/api/usage?days=${days}`);
+  }
+
+  usageRuns(q: { days: number; agent?: string; day?: string }): Promise<Run[]> {
+    const params = new URLSearchParams({ days: String(q.days) });
+    if (q.agent) params.set("agent", q.agent);
+    if (q.day) params.set("day", q.day);
+    return this.req("GET", `/api/usage/runs?${params.toString()}`);
   }
 
   /** SSE：手写解析（data: 行 + \n\n 分帧），done 帧后 server 关流、生成器自然结束 */

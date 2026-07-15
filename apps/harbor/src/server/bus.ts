@@ -3,7 +3,7 @@
  * 持久化在 store（run_events），bus 只做「已入库事件的实时扇出」，无回放职责。
  */
 
-import type { Run, RunStreamFrame } from "../protocol.js";
+import type { Approval, ApprovalStatus, Run, RunStreamFrame } from "../protocol.js";
 import type { AgentEvent } from "@sm/agent";
 
 type Subscriber = (frame: RunStreamFrame) => void;
@@ -24,15 +24,25 @@ export class RunBus {
     };
   }
 
-  emitEvent(runId: string, seq: number, event: AgentEvent): void {
+  private emit(runId: string, frame: RunStreamFrame): void {
     const set = this.subs.get(runId);
     if (!set) return;
-    for (const fn of set) fn({ kind: "event", seq, event });
+    for (const fn of set) fn(frame);
+  }
+
+  emitEvent(runId: string, seq: number, event: AgentEvent): void {
+    this.emit(runId, { kind: "event", seq, event });
+  }
+
+  emitApproval(approval: Approval): void {
+    this.emit(approval.runId, { kind: "approval", approval });
+  }
+
+  emitApprovalDecided(runId: string, approvalId: string, status: ApprovalStatus, decidedBy: string | null): void {
+    this.emit(runId, { kind: "approval_decided", approvalId, status, decidedBy });
   }
 
   emitDone(run: Run): void {
-    const set = this.subs.get(run.id);
-    if (!set) return;
-    for (const fn of set) fn({ kind: "done", run });
+    this.emit(run.id, { kind: "done", run });
   }
 }

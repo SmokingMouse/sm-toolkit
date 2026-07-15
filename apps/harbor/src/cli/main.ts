@@ -12,10 +12,11 @@ import type { ConversationStatus } from "../protocol.js";
 
 const USAGE = `${c.bold}harbor${c.reset} — 个人多设备 agent 调度
 
-${c.bold}用法${c.reset}
+${c.bold}派活${c.reset}
   harbor device ls                                        已注册设备（在线状态/能力）
   harbor agent create --name <n> --device <d> --workdir <路径>
-                      [--model <m>] [--permission <p>] [--backend claude|codex]
+                      [--model <m>] [--permission readonly|auto-edit|full|default]
+                      [--backend claude|codex] [--isolation none|worktree]
                       [--instruction <系统提示>] [--description <说明>]
   harbor agent ls
   harbor chat <agent> "<prompt>"        [--detach]        临时对话（不留 issue）
@@ -23,14 +24,26 @@ ${c.bold}用法${c.reset}
   harbor issue continue <id> "<prompt>"  [--detach]        续多轮（resume 上下文）
   harbor issue ls [--status backlog|doing|review|done|canceled]
   harbor issue show <id>                                   详情 + run 流水
-  harbor issue done <id> · harbor issue cancel <id>        人工验收/取消
+  harbor issue done <id> · harbor issue cancel <id>        人工验收/取消（收尾 worktree）
   harbor watch <run-id>                                    (重)连一个 run 的实时输出
+
+${c.bold}审批${c.reset}（permission=default 的 agent 用工具时上抛）
+  harbor approvals [--status pending]                      审批列表
+  harbor approve <id> · harbor deny <id>                   批/拒（飞书卡片同步可批）
+
+${c.bold}定时${c.reset}
+  harbor auto create --name <n> --agent <a> --cron "<表达式>" --prompt "<p>"
+                     [--mode new_issue|append --target <conv-id>] [--notify-chat <oc_xx>]
+  harbor auto ls · auto log <id> · auto enable|disable|rm <id>
+
+${c.bold}用量${c.reset}
+  harbor usage [--days 7] [--agent <a>] [--runs]           agent×model×日聚合 / 逐 run 下钻
 
 ${c.dim}id 支持前缀匹配；--detach 派活后不等输出。server 地址/token 走 env 或 ~/.harbor.yaml${c.reset}`;
 
 // ── 极简 argparse：--flag value / --flag（bool 白名单）+ 位置参数 ──
 
-const BOOL_FLAGS = new Set(["detach", "help"]);
+const BOOL_FLAGS = new Set(["detach", "help", "runs"]);
 
 function parseArgs(argv: string[]): { pos: string[]; flags: Record<string, string | true> } {
   const pos: string[] = [];
@@ -129,11 +142,14 @@ async function main(): Promise<number> {
       model: flags.model,
       permission: flags.permission,
       backend: flags.backend,
+      isolation: flags.isolation,
       instruction: flags.instruction,
       description: flags.description,
     });
     console.log(`${c.green}✓${c.reset} agent ${c.bold}${agent.name}${c.reset}（${agent.id}）已创建`);
-    console.log(`${c.dim}  device=${agent.deviceId} model=${agent.model ?? "CLI 默认"} permission=${agent.permission} workdir=${agent.workdir}${c.reset}`);
+    console.log(
+      `${c.dim}  device=${agent.deviceId} model=${agent.model ?? "CLI 默认"} permission=${agent.permission} isolation=${agent.isolation} workdir=${agent.workdir}${c.reset}`,
+    );
     return 0;
   }
 
@@ -147,9 +163,10 @@ async function main(): Promise<number> {
         a.backend,
         a.model ?? "(默认)",
         a.permission,
+        a.isolation === "worktree" ? "worktree" : "-",
         a.workdir,
       ]),
-      ["NAME", "DEVICE", "BACKEND", "MODEL", "PERM", "WORKDIR"],
+      ["NAME", "DEVICE", "BACKEND", "MODEL", "PERM", "ISO", "WORKDIR"],
     );
     return 0;
   }
@@ -234,6 +251,137 @@ async function main(): Promise<number> {
     if (!id) throw new Error("用法：harbor watch <run-id>");
     const run = await client.getRun(id);
     return watchRun(client, run.id);
+  }
+
+  // ── 审批 ──
+  if (domain === "approvals") {
+    const status = typeof flags.status === "string" ? (flags.status as import("../protocol.js").ApprovalStatus) : undefined;
+    const rows = await client.approvals(status);
+    table(
+      rows.map((a) => [
+        a.id,
+        a.status + (a.decidedBy ? `(${a.decidedBy})` : ""),
+        a.toolName,
+        JSON.stringify(a.input ?? {}).slice(0, 50),
+        a.runId,
+        fmtAgo(a.createdAt),
+      ]),
+      ["ID", "STATUS", "TOOL", "INPUT", "RUN", "CREATED"],
+    );
+    return 0;
+  }
+
+  if (domain === "approve" || domain === "deny") {
+    const id = pos[1];
+    if (!id) throw new Error(`用法：harbor ${domain} <approval-id>`);
+    const expected = domain === "approve" ? "allowed" : "denied";
+    const a = await client.decideApproval(id, domain === "approve" ? "allow" : "deny");
+    if (a.status === expected) {
+      console.log(`${c.green}✓${c.reset} approval ${a.id} → ${a.status}`);
+    } else {
+      console.log(`${c.yellow}⚠ approval ${a.id} 已是 ${a.status}（by ${a.decidedBy ?? "?"}），本次操作未生效${c.reset}`);
+    }
+    return 0;
+  }
+
+  // ── automation ──
+  if (domain === "auto") {
+    if (verb === "create") {
+      const auto = await client.createAutomation({
+        name: req(flags, "name"),
+        agent: req(flags, "agent"),
+        cron: req(flags, "cron"),
+        prompt: req(flags, "prompt"),
+        mode: flags.mode,
+        target: flags.target,
+        notifyChat: flags["notify-chat"],
+      });
+      console.log(`${c.green}✓${c.reset} automation ${c.bold}${auto.name}${c.reset}（${auto.id}）已创建并排班`);
+      console.log(`${c.dim}  cron="${auto.cron}"（server 本机时区）mode=${auto.mode}${auto.notifyChatId ? ` notify=${auto.notifyChatId}` : ""}${c.reset}`);
+      return 0;
+    }
+    if (verb === "ls") {
+      const autos = await client.automations();
+      table(
+        autos.map((a) => [
+          a.id,
+          a.enabled ? `${c.green}on${c.reset}` : `${c.dim}off${c.reset}`,
+          a.name,
+          a.agentName,
+          a.cron,
+          a.mode,
+          fmtAgo(a.lastFiredAt),
+        ]),
+        ["ID", "STATE", "NAME", "AGENT", "CRON", "MODE", "LAST FIRED"],
+      );
+      return 0;
+    }
+    if (verb === "log") {
+      const id = pos[2];
+      if (!id) throw new Error("用法：harbor auto log <id>");
+      const rows = await client.automationLog(id);
+      table(
+        rows.map((l) => [
+          new Date(l.ts).toLocaleString("sv-SE"),
+          l.kind === "fired" ? `${c.green}fired${c.reset}` : `${c.yellow}missed${c.reset}`,
+          l.runId ?? "-",
+          l.note ?? "",
+        ]),
+        ["TS", "KIND", "RUN", "NOTE"],
+      );
+      return 0;
+    }
+    if (verb === "enable" || verb === "disable") {
+      const id = pos[2];
+      if (!id) throw new Error(`用法：harbor auto ${verb} <id>`);
+      const auto = await client.setAutomationEnabled(id, verb === "enable");
+      console.log(`${c.green}✓${c.reset} automation ${auto.name} → ${auto.enabled ? "enabled" : "disabled"}`);
+      return 0;
+    }
+    if (verb === "rm") {
+      const id = pos[2];
+      if (!id) throw new Error("用法：harbor auto rm <id>");
+      await client.deleteAutomation(id);
+      console.log(`${c.green}✓${c.reset} automation 已删除`);
+      return 0;
+    }
+  }
+
+  // ── usage ──
+  if (domain === "usage") {
+    const days = typeof flags.days === "string" ? Math.max(1, Number(flags.days)) : 7;
+    if (flags.runs) {
+      const runs = await client.usageRuns({ days, agent: typeof flags.agent === "string" ? flags.agent : undefined });
+      table(
+        runs.map((r) => [
+          r.id,
+          r.status,
+          new Date(r.queuedAt).toLocaleString("sv-SE"),
+          fmtRunCost(r) || "-",
+          (r.error ?? r.prompt).slice(0, 40),
+        ]),
+        ["RUN", "STATUS", "QUEUED", "COST", "ERROR/PROMPT"],
+      );
+      return 0;
+    }
+    const rows = await client.usage(days);
+    const filtered = typeof flags.agent === "string" ? rows.filter((r) => r.agentName === flags.agent) : rows;
+    table(
+      filtered.map((r) => [
+        r.day,
+        r.agentName,
+        r.model,
+        String(r.runs),
+        `$${r.usd.toFixed(4)}`,
+        String(r.inputTokens),
+        String(r.outputTokens),
+        String(r.cachedTokens),
+      ]),
+      ["DAY", "AGENT", "MODEL", "RUNS", "USD", "IN", "OUT", "CACHED"],
+    );
+    const total = filtered.reduce((s, r) => s + r.usd, 0);
+    console.log(`${c.dim}—— 近 ${days} 天合计 $${total.toFixed(4)}（${filtered.reduce((s, r) => s + r.runs, 0)} runs）${c.reset}`);
+    return 0;
   }
 
   console.log(USAGE);

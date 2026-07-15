@@ -2,7 +2,7 @@
 /**
  * harbor-server 入口 —— Bun.serve 单端口双面：/ws 升级给 DeviceHub，其余走 Hono REST。
  * 配置（env）：HARBOR_TOKEN（必须）、HARBOR_PORT=7777、HARBOR_DB=~/.harbor/harbor.db、
- * HARBOR_CONCURRENCY=2（per-device 并发闸）。
+ * HARBOR_CONCURRENCY=2（per-device 并发闸）；飞书入口走 ~/.harbor.yaml feishu 块（可缺省）。
  */
 
 import { resolve } from "node:path";
@@ -11,9 +11,12 @@ import { HarborStore } from "./store.js";
 import { RunBus } from "./bus.js";
 import { DeviceHub, type WsData } from "./ws.js";
 import { RunCoordinator } from "./scheduler.js";
+import { ApprovalService } from "./approvals.js";
+import { AutomationService } from "./automation.js";
+import { FeishuEntry } from "./feishu.js";
 import { buildRest } from "./rest.js";
-import { token } from "../config.js";
-import { DEFAULT_DEVICE_CONCURRENCY, DEFAULT_PORT } from "../protocol.js";
+import { feishuConfig, token } from "../config.js";
+import { DEFAULT_DEVICE_CONCURRENCY, DEFAULT_PORT, RUN_EVENTS_RETENTION_MS } from "../protocol.js";
 
 const authToken = token();
 const port = Number(process.env.HARBOR_PORT ?? DEFAULT_PORT);
@@ -25,8 +28,40 @@ const store = new HarborStore(db);
 const bus = new RunBus();
 const hub = new DeviceHub(store, authToken);
 const coordinator = new RunCoordinator(store, bus, hub, concurrency);
+const approvals = new ApprovalService(store, bus, hub);
+const automations = new AutomationService(store, coordinator);
 hub.coordinator = coordinator;
-const app = buildRest(store, bus, hub, coordinator, authToken);
+hub.approvals = approvals;
+
+// 飞书入口（可选）：配置齐才挂；审批卡片/结果回报都走它
+let feishu: FeishuEntry | null = null;
+const fc = feishuConfig();
+if (fc) {
+  const { FeishuChannel } = await import("@sm/channel-feishu");
+  const channel = new FeishuChannel({
+    appId: fc.appId,
+    appSecret: fc.appSecret,
+    botName: fc.botName,
+    requireMention: true,
+  });
+  feishu = new FeishuEntry(store, coordinator, approvals, fc, channel);
+  approvals.sink = feishu;
+  feishu.start().catch((e) => {
+    console.error("[harbor-server] 飞书入口启动失败（server 继续跑，仅 CLI/REST 面可用）：", e);
+    feishu = null;
+    approvals.sink = null;
+  });
+} else {
+  console.log("[harbor-server] 飞书未配置（~/.harbor.yaml feishu 块），入口关闭");
+}
+
+// run 终态 hook：审批作废 + 飞书回报
+coordinator.onRunFinished = (run, conv) => {
+  approvals.expireForRun(run.id);
+  feishu?.notifyRunDone(run, conv);
+};
+
+const app = buildRest(store, bus, hub, coordinator, approvals, automations, authToken);
 
 Bun.serve<WsData>({
   port,
@@ -49,5 +84,15 @@ Bun.serve<WsData>({
   },
 });
 hub.startSweeper();
+approvals.startSweeper();
+automations.start();
+
+// run_events 7 天滚动 prune（boot 一次 + 每小时）
+const prune = () => {
+  const n = store.pruneRunEvents(Date.now() - RUN_EVENTS_RETENTION_MS);
+  if (n > 0) console.log(`[harbor-server] run_events prune：清理 ${n} 行（>7 天）`);
+};
+prune();
+setInterval(prune, 3600_000);
 
 console.log(`[harbor-server] listening on :${port}  db=${dbPath}  concurrency/device=${concurrency}`);

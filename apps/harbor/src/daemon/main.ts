@@ -16,6 +16,7 @@ import { HEARTBEAT_INTERVAL_MS } from "../protocol.js";
 import { deviceName, serverWsUrl, token } from "../config.js";
 import { detectCapabilities } from "./capabilities.js";
 import { Executor } from "./executor.js";
+import { removeWorktree } from "./worktree.js";
 
 const authToken = token(); // 缺失时这里就抛，fail loudly
 const name = deviceName();
@@ -31,6 +32,15 @@ let attempt = 0;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 const outbox: DaemonMsg[] = [];
 
+/** 必达消息类型（断线入 outbox 重连补发）；heartbeat 可丢 */
+const MUST_DELIVER = new Set<DaemonMsg["type"]>([
+  "run_event",
+  "run_done",
+  "approval_req",
+  "worktree_ready",
+  "worktree_cleanup_result",
+]);
+
 function sendOrQueue(msg: DaemonMsg): void {
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
@@ -40,7 +50,7 @@ function sendOrQueue(msg: DaemonMsg): void {
       // fallthrough → 入队
     }
   }
-  if (msg.type === "run_event" || msg.type === "run_done") outbox.push(msg);
+  if (MUST_DELIVER.has(msg.type)) outbox.push(msg);
 }
 
 const executor = new Executor(sendOrQueue);
@@ -49,7 +59,7 @@ const executor = new Executor(sendOrQueue);
 function ownedRunIds(): string[] {
   const ids = new Set(executor.runningIds());
   for (const m of outbox) {
-    if (m.type === "run_done") ids.add(m.runId);
+    if (m.type === "run_done" || m.type === "approval_req" || m.type === "worktree_ready") ids.add(m.runId);
     else if (m.type === "run_event") for (const e of m.events) ids.add(e.runId);
   }
   return [...ids];
@@ -105,8 +115,15 @@ function connect(): void {
         executor.cancel(msg.runId);
         break;
       case "approval_res":
-        // P2 审批链路才接
+        console.log(`[harbord] approval_res ${msg.behavior}（run=${msg.runId} req=${msg.requestId}）`);
+        executor.resolveApproval(msg.runId, msg.requestId, msg.behavior, msg.updatedInput, msg.message);
         break;
+      case "worktree_cleanup": {
+        const r = removeWorktree(msg.workdir, msg.worktreePath);
+        console.log(`[harbord] worktree_cleanup ${msg.conversationId}：${r.ok ? "✓" : "✗"} ${r.message}`);
+        sendOrQueue({ type: "worktree_cleanup_result", conversationId: msg.conversationId, ok: r.ok, message: r.message });
+        break;
+      }
     }
   };
 

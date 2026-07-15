@@ -7,6 +7,7 @@
   },
   "references": [
     { "path": "../../packages/agent" },
+    { "path": "../../packages/channel-feishu" },
     { "path": "../../packages/llm" }
   ],
   "include": ["src"]
