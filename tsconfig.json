@@ -25,6 +25,7 @@
     { "path": "packages/guardrails" },
     { "path": "packages/channel-feishu" },
     { "path": "apps/cli" },
+    { "path": "apps/harbor" },
     { "path": "apps/self-agent" },
     { "path": "scripts" }
   ]

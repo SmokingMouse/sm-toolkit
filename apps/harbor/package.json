@@ -1,0 +1,22 @@
+{
+  "name": "harbor",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "harbor-server": "src/server/main.ts",
+    "harbord": "src/daemon/main.ts",
+    "harbor": "src/cli/main.ts"
+  },
+  "scripts": {
+    "server": "bun run src/server/main.ts",
+    "daemon": "bun run src/daemon/main.ts",
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@sm/agent": "workspace:*",
+    "@sm/llm": "workspace:*",
+    "hono": "^4.7.0",
+    "yaml": "^2.9.0"
+  }
+}
