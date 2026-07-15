@@ -317,6 +317,11 @@ export class HarborStore {
     return r ? toAgent(r) : null;
   }
 
+  /** 归档 = 软删除（不出现在派活下拉，历史 run/conversation 引用不悬空）；archived=false 可恢复 */
+  setAgentArchived(id: string, archived: boolean, now: number): void {
+    this.db.run("UPDATE agents SET archived_at = ? WHERE id = ?", [archived ? now : null, id]);
+  }
+
   listAgents(includeArchived = false): HarborAgent[] {
     const sql = includeArchived
       ? "SELECT * FROM agents ORDER BY created_at"

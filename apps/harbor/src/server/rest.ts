@@ -6,6 +6,8 @@
  *   - automation create 校验 cron 表达式 / agent 存在 / append 模式 target 存在
  */
 
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type {
@@ -25,9 +27,11 @@ import type { RunCoordinator } from "./scheduler.js";
 import type { ApprovalService } from "./approvals.js";
 import { AutomationService } from "./automation.js";
 import { transitionConversation } from "./statemachine.js";
-import { DASHBOARD_HTML } from "./dashboard.js";
 
 const PERMISSIONS = ["readonly", "auto-edit", "full", "default"];
+
+/** Web 产物目录（Next.js 静态导出）。相对本源码定位仓库内路径，不依赖 cwd。 */
+const WEB_OUT = resolve(import.meta.dir, "../../../harbor-web/out");
 
 function bad(message: string): never {
   throw new HTTPException(400, { message });
@@ -59,9 +63,6 @@ export function buildRest(
   });
 
   app.get("/api/health", (c) => c.json({ ok: true }));
-
-  // 只读看板（P4）：静态壳不带数据，数据面 fetch /api/*（token 在浏览器本地输入）
-  app.get("/", (c) => c.html(DASHBOARD_HTML));
 
   // ---- devices ----
 
@@ -133,6 +134,16 @@ export function buildRest(
     return c.json(agent, 201);
   });
 
+  app.patch("/api/agents/:id", async (c) => {
+    const key = c.req.param("id");
+    const agent = store.getAgentByName(key) ?? store.getAgent(key);
+    if (!agent) throw new HTTPException(404, { message: `agent "${key}" 不存在` });
+    const b = (await c.req.json()) as { archived?: boolean };
+    if (typeof b.archived !== "boolean") bad("需要 archived: true/false");
+    store.setAgentArchived(agent.id, b.archived, Date.now());
+    return c.json(store.getAgent(agent.id));
+  });
+
   // ---- conversations ----
 
   app.get("/api/conversations", (c) => {
@@ -170,7 +181,8 @@ export function buildRest(
     return c.json({
       conversation: conv,
       agent,
-      runs: store.listRunsByConversation(conv.id),
+      // resultText：Chat/Issue 历史渲染用；run_events 7 天 prune 后为 null（UI 显示「记录已过期」）
+      runs: store.listRunsByConversation(conv.id).map((r) => ({ ...r, resultText: store.getRunResultText(r.id) })),
       statusLog: store.listStatusLog(conv.id),
     });
   });
@@ -436,6 +448,32 @@ export function buildRest(
         Connection: "keep-alive",
       },
     });
+  });
+
+  // ---- Web 静态产物（P4.5）：非 /api|/ws 路径全部映射到 apps/harbor-web/out/ ----
+  // 页面壳不鉴权（API 全鉴权），miss fallback index.html（客户端路由用 query param，理论不触发）。
+  app.get("*", async (c) => {
+    const pathname = decodeURIComponent(new URL(c.req.url).pathname);
+    if (pathname.startsWith("/api/") || pathname === "/ws") {
+      throw new HTTPException(404, { message: "not found" });
+    }
+    if (!existsSync(WEB_OUT)) {
+      return c.text("harbor-web 未构建：bun run --filter harbor-web build（产物 apps/harbor-web/out/）", 503);
+    }
+    const target = resolve(WEB_OUT, "." + pathname);
+    if (target !== WEB_OUT && !target.startsWith(WEB_OUT + "/")) {
+      throw new HTTPException(403, { message: "forbidden" });
+    }
+    // 精确文件（/_next/... 静态资源）→ .html 补全（/chats → chats.html）→ 目录 index.html（/）
+    for (const p of [target, `${target}.html`, join(target, "index.html")]) {
+      const f = Bun.file(p);
+      if (await f.exists()) {
+        // 带 hash 的产物永久缓存；html 每次校验（部署新版立即生效）
+        const cache = pathname.startsWith("/_next/") ? "public, max-age=31536000, immutable" : "no-cache";
+        return new Response(f, { headers: { "Cache-Control": cache } });
+      }
+    }
+    return new Response(Bun.file(join(WEB_OUT, "index.html")), { headers: { "Cache-Control": "no-cache" } });
   });
 
   return app;
