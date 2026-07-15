@@ -24,7 +24,7 @@ Harbor P1–P4 落地完毕（跨设备执行 + 飞书/审批/worktree + automat
 - [x] @sm/channel-feishu：飞书 Channel 适配（从 SelfAgent 移植，薄实现）
 - [x] 根级 `bun run setup` 引导流程（配模型 + 注册 SDK + 注册全局命令 + 按需装 app）
 - [x] agent-gateway 统一配置源（已迁移——见 2026-07-11 session；agent-gateway 独立仓库整体退役，能力拍平进 @sm/agent）
-- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 方案 `progress/harbor.md`。P1–P4 全部完成（2026-07-15，本机 e2e 全过：审批四路径/worktree 并行与自愈/automation fired+missed/usage 对账/看板浏览器实测/飞书 mock 23 项），self-agent 退役归档。剩 P5 时间性验证——真双机 Tailscale、真飞书群冒烟、automation 连跑 7 天、真实负载一周，全部依赖用户环境
+- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 方案 `progress/harbor.md`。P1–P4 全部完成（2026-07-15，本机 e2e 全过：审批四路径/worktree 并行与自愈/automation fired+missed/usage 对账/看板浏览器实测/飞书 mock 23 项），self-agent 退役归档。**P4.5 可操作 Web 平台方案已定稿 `progress/harbor-web.md`（2026-07-16，待另 session 实施）**。剩 P5 时间性验证——真双机 Tailscale、真飞书群冒烟、automation 连跑 7 天、真实负载一周，全部依赖用户环境
 
 ## Verified Facts
 
@@ -35,6 +35,10 @@ Harbor P1–P4 落地完毕（跨设备执行 + 飞书/审批/worktree + automat
 - **croner 的模式回溯 `previousRuns(n)` 是 v10 才有的 API**；v9 的 `previousRun()` 返回实例自身运行历史（新实例恒 null），拿它做停机 missed 检测形同虚设。另：bun 对 workspace 外的脚本会回退解析全局缓存里的别版本包——调试依赖行为先 `require.resolve` 确认实际加载路径。
 
 ## Session Log
+
+### 2026-07-16 — Harbor 服务拉起 + P4.5 可操作 Web 平台方案
+- **Done**：正式环境首次拉起（`~/.harbor.yaml` 生成、`harbor-server`/`harbord` nohup 后台、db 落 `~/.harbor/harbor.db`、设备 SmokingMousedeMac-mini.local 注册、看板可访问）；用户 dogfood 第一反馈「要能直接在平台上操作」（Mew 截图对标）→ P4「写操作按体感再加」判断点兑现，定稿 `progress/harbor-web.md`（Next.js 静态导出 + server 单进程 serve + 删单文件版；含后端三项小补丁清单 / 七页信息架构 / 验收判据 / pitfalls，自包含可另 session 直接执行）。
+- **Next**：另 session 按 harbor-web.md 实施；本机进程目前 nohup 挂载，体验稳定后配 launchd 常驻。
 
 ### 2026-07-15 — Harbor P2+P3+P4 一次落地 + self-agent 退役（方案收尾）
 - **Done**：
