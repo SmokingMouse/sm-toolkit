@@ -211,6 +211,17 @@ export class ClaudeBackend implements Backend {
         if (typeof d === "string" && d.length > 0) {
           yield ev(this.name, EventType.TextChunk, sid, { text: d });
         }
+      } else if (
+        t === "stream_event" &&
+        obj.event?.type === "content_block_delta" &&
+        obj.event?.delta?.type === "thinking_delta"
+      ) {
+        // extended thinking 逐 token(delta.thinking 携文本)。正文前必有 thinking
+        // 块(claude 2.x 默认),不发事件上游会把思考期当"卡死"。
+        const d = obj.event.delta.thinking;
+        if (typeof d === "string" && d.length > 0) {
+          yield ev(this.name, EventType.Thinking, sid, { text: d });
+        }
       } else if (t === "assistant") {
         // 覆盖式记录本条 assistant 的 context 占用(input+cache_read+cache_creation);
         // 末条即主 agent 当前窗口实际占用,供 result 直报给上游算占用%。

@@ -12,6 +12,9 @@
 export const EventType = {
   SessionStart: "session_start",
   TextChunk: "text_chunk",
+  /** extended thinking 流式片段(data.text)。claude 2.x 默认先出 thinking 块再出
+   * 正文,不透传的话上游在思考期(effort 高时可达分钟级)对进程活动完全失明。 */
+  Thinking: "thinking",
   ToolCall: "tool_call",
   ToolCallDone: "tool_call_done",
   FileChange: "file_change",

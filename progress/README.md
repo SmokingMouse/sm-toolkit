@@ -32,6 +32,12 @@ SDK 底座 + 应用分离完成。packages/ 放 SDK 积木，apps/ 放应用（c
 
 ## Session Log
 
+### 2026-07-15 — @sm/agent 新增 Thinking 事件（trellis CHAT 假死修复的 SDK 侧）
+- **Done**：`EventType.Thinking` + ClaudeBackend 把 stream-json 的 `content_block_delta`/`thinking_delta` 透传为 Thinking 事件（`data.text`）。此前 thinking 被静默丢弃——claude CLI 2.x 默认先出 thinking 块再出正文（实测 haiku 无 effort env 也 thinking），effort=max 时思考期达分钟级，上游 UI 全程失明像卡死。
+- **兼容**：纯增量事件类型；CLIRunner 的 toCLIEvent switch 有 default→null，self-agent 等存量消费者无感。dist 已重建。
+- **验证**：trellis 全链路实测（SSE created→thinking→delta→done + UI 面板），见 trellis progress Session 52。
+- **Next**：codex backend 的 reasoning 事件是否同样透传（有需求再做）。
+
 ### 2026-07-14 — llm 交互选择器去 process.stdin 化（终端乱码排查）
 - **触发**：bytedance 工作机（ghostty）上经 `llm` 启动 claude 后，输入框漏进终端应答序列尾巴（`22;52c` = DA1 应答、`>|ghostty` = XTVERSION 应答、`35;47;9M` = SGR 鼠标事件，ESC 前缀均被吞）。
 - **Done**：`apps/cli/src/main.ts` 选择器重写——不再碰 `process.stdin`（原实现 `setRawMode+resume` 会启动 bun 内部 stdin reader），改为 `stty -icanon -echo -isig` 设终端模式 + `readSync(0)` 同步读按键，父进程全程零 stdin reader；`pickEndpoint` 转同步；补 `\x04`(EOF) 退出分支。
