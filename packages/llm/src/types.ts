@@ -5,6 +5,8 @@ export interface ProviderConfig {
   openai_url?: string
   anthropic_url?: string
   models: string[]
+  /** provider 级 claude session 配置，env 覆盖顶层 claude: 同名项，args 追加其后 */
+  claude?: ClaudeSettings
 }
 
 /** 启动 claude CLI 交互 session 时的附加配置（llm 无 -p 路径透传） */
@@ -29,6 +31,8 @@ export interface EndpointConfig {
   api_key_env: string
   model: string
   protocol: 'openai' | 'anthropic'
+  /** 所属 provider 的 claude 块（若有），供启动 claude session 的调用方合并 */
+  claude?: ClaudeSettings
 }
 
 // ── listing types ───────────────────────────────────────

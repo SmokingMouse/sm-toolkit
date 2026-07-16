@@ -35,16 +35,21 @@ function resolveClaudeModel(model: string | undefined): {
     const { endpoint } = resolveEndpoint(loadEndpoints(), model, "anthropic");
     if (!endpoint.base_url) return { model: endpoint.model };
     const key = getApiKey(endpoint);
-    return {
-      model: endpoint.model,
-      // 代理（super-relay 等）通过 ANTHROPIC_AUTH_TOKEN 认证，同时也设
-      // ANTHROPIC_API_KEY 以兼容不同版本的 claude CLI
-      env: {
-        ANTHROPIC_BASE_URL: endpoint.base_url,
-        ANTHROPIC_AUTH_TOKEN: key,
-        ANTHROPIC_API_KEY: key,
-      },
+    // 代理（super-relay 等）通过 ANTHROPIC_AUTH_TOKEN 认证，同时也设
+    // ANTHROPIC_API_KEY 以兼容不同版本的 claude CLI
+    const env: Record<string, string> = {
+      ANTHROPIC_BASE_URL: endpoint.base_url,
+      ANTHROPIC_AUTH_TOKEN: key,
+      ANTHROPIC_API_KEY: key,
     };
+    // provider 级 claude.env 是端点正确性配置（tier 映射/上下文窗口/认证头
+    // 差异），跟 endpoint 走，headless 同样生效。endpoints.yaml 顶层全局
+    // claude: 块与 args 不进这里——那是交互 launch 偏好（EFFORT_LEVEL、
+    // --dangerously-skip-permissions 等），后者会绕过审批链路。
+    for (const [k, v] of Object.entries(endpoint.claude?.env ?? {})) {
+      env[k] = String(v);
+    }
+    return { model: endpoint.model, env };
   } catch {
     return { model };
   }

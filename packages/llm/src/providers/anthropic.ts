@@ -38,11 +38,16 @@ function buildPayload(
 }
 
 function headers(ep: EndpointConfig): Record<string, string> {
-  return {
-    'x-api-key': getApiKey(ep),
+  const key = getApiKey(ep)
+  const h: Record<string, string> = {
+    'x-api-key': key,
     'anthropic-version': API_VERSION,
     'Content-Type': 'application/json',
   }
+  // 代理端点（super-relay/kimi 等）多数只认 Bearer 不认 x-api-key，两个都带；
+  // 官方 API 不加 Authorization——避免 key 被当 OAuth token 校验
+  if (ep.base_url) h.Authorization = `Bearer ${key}`
+  return h
 }
 
 export const anthropicProvider: Provider = {

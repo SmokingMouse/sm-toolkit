@@ -19,6 +19,29 @@ providers:
     models:
       - gemini-2.5-flash
 
+  # provider 级 claude: 块示例——env 覆盖顶层 claude: 的同名项（优先级：
+  # 自动推导 < 全局 < provider），args 追加其后。provider 级 env 跟 endpoint
+  # 走：llm 交互 launch 和 @sm/agent ClaudeBackend（headless）都注入
+  kimi:
+    api_key_env: KIMI_API_KEY
+    anthropic_url: https://api.kimi.com/coding
+    models:
+      - k3
+      - kimi-for-coding-highspeed
+      - kimi-for-coding
+    claude:
+      env:
+        ANTHROPIC_DEFAULT_FABLE_MODEL: k3
+        ANTHROPIC_DEFAULT_OPUS_MODEL: kimi-for-coding-highspeed
+        ANTHROPIC_DEFAULT_SONNET_MODEL: kimi-for-coding-highspeed
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: kimi-for-coding
+        ANTHROPIC_SMALL_FAST_MODEL: kimi-for-coding-highspeed
+        CLAUDE_CODE_SUBAGENT_MODEL: k3
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS: "1048576"
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1048576"
+        # kimi 只认 Bearer（AUTH_TOKEN），清掉推导出的 API_KEY 防 x-api-key 冲突
+        ANTHROPIC_API_KEY: ""
+
   ark-coding:
     api_key_env: ARK_CODING_API_KEY
     anthropic_url: https://ark.cn-beijing.volces.com/api/coding
@@ -40,9 +63,10 @@ providers:
 default: deepseek-v4-flash
 env_file: ~/.agent-gateway.env
 
-# 可选：llm 启动 claude 交互 session 时的附加 env / 参数。
-# 代理 endpoint 已自动推导 ANTHROPIC_MODEL / DEFAULT_*_MODEL tier 映射、
-# API_TIMEOUT_MS、CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC，这里写的会覆盖同名项。
+# 可选：llm 启动 claude 交互 session 时的附加 env / 参数（全局层）。
+# 代理 endpoint 已自动推导 ANTHROPIC_MODEL / DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL /
+# SMALL_FAST tier 映射、API_TIMEOUT_MS、CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC。
+# 优先级：自动推导 < 这里的全局 env < provider 级 claude.env（见上方 kimi 示例）。
 # claude:
 #   env:
 #     CLAUDE_CODE_EFFORT_LEVEL: max

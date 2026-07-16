@@ -151,7 +151,7 @@ function toEndpointConfig(
     protocol = 'anthropic'
   }
 
-  return { base_url, api_key_env: prov.api_key_env, model, protocol }
+  return { base_url, api_key_env: prov.api_key_env, model, protocol, claude: prov.claude }
 }
 
 export function getApiKey(ep: EndpointConfig): string {

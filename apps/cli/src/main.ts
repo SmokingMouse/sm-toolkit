@@ -367,20 +367,27 @@ async function execClaude(endpointName?: string): Promise<void> {
     env.ANTHROPIC_DEFAULT_OPUS_MODEL = ep.model
     env.ANTHROPIC_DEFAULT_SONNET_MODEL = ep.model
     env.ANTHROPIC_DEFAULT_HAIKU_MODEL = ep.model
+    env.ANTHROPIC_DEFAULT_FABLE_MODEL = ep.model
+    env.ANTHROPIC_SMALL_FAST_MODEL = ep.model
     env.API_TIMEOUT_MS ??= '3000000'
     env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ??= '1'
   } else if (key) {
     env.ANTHROPIC_API_KEY = key
   }
 
-  // endpoints.yaml 顶层 claude: 块——个人偏好类 env/args 透传
+  // endpoints.yaml 的 claude: 块——顶层为全局，provider 级覆盖同名 env、args 追加。
+  // 优先级：自动推导 < 全局 claude.env < provider claude.env
   const settings = client.claudeSettings
-  for (const [k, v] of Object.entries(settings.env ?? {})) {
+  for (const [k, v] of Object.entries({
+    ...settings.env,
+    ...ep.claude?.env,
+  })) {
     env[k] = String(v)
   }
 
   const args = ['--model', ep.model]
   args.push(...(settings.args ?? []).map(String))
+  args.push(...(ep.claude?.args ?? []).map(String))
   console.error(`→ Claude Code [${name}] model=${ep.model}`)
 
   const child = spawn('claude', args, {
