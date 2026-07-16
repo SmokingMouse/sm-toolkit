@@ -212,9 +212,19 @@ function printHelp() {
   --temperature   温度（0.0-2.0）
   --json-mode     要求模型返回 JSON（response_format: json_object）
   --stream        流式输出
-  --json          JSON 格式输出（含 usage）
+  --json          JSON 格式输出（含 usage；配 --list 输出 provider 状态 JSON）
+  --fallback      逗号分隔的 endpoint 链，依次尝试直到成功（配 -p 使用）
   --list          列出所有 providers
   -h, --help      帮助
+
+子命令:
+  llm vision -f <file> -p <prompt> [-m model]
+      图片/视频/音频理解。图片走 openai-compat（默认 Gemini），
+      视频/音频走 Gemini Files API（上传+轮询，进度打 stderr）
+  llm image -p <prompt> [--backend imagen|codex] [--aspect 16:9] [--count N]
+            [--negative "..."] [--ref FILE] [--target-size N] [--output DIR]
+      生图。imagen 默认（快/可控），codex = GPT-Image-1 via codex exec
+      （支持 --ref 参考图）。stdout 每行一个图片绝对路径
 
 Providers:`)
   for (const p of providers) {
@@ -241,6 +251,7 @@ interface Args {
   system?: string
   file?: string
   temperature?: number
+  fallback?: string
   json: boolean
   jsonMode: boolean
   stream: boolean
@@ -268,6 +279,8 @@ function parseArgs(argv: string[]): Args {
       args.file = argv[++i]
     } else if (a === '--temperature') {
       args.temperature = parseFloat(argv[++i]!)
+    } else if (a === '--fallback') {
+      args.fallback = argv[++i]
     } else if (a === '--json') {
       args.json = true
     } else if (a === '--json-mode') {
@@ -381,10 +394,81 @@ async function execClaude(endpointName?: string): Promise<void> {
   process.exit(code)
 }
 
+// ── subcommands: vision / image ─────────────────────────
+
+async function cmdVision(argv: string[]): Promise<void> {
+  let file: string | undefined
+  let prompt: string | undefined
+  let model: string | undefined
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === '-f' || a === '--file') file = argv[++i]
+    else if (a === '-p' || a === '--prompt') prompt = argv[++i]
+    else if (a === '-m' || a === '--model') model = argv[++i]
+  }
+  if (!file || !prompt) {
+    console.error('用法: llm vision -f <file> -p <prompt> [-m model]')
+    process.exit(1)
+  }
+  const text = await client.vision(file, prompt, {
+    endpoint: model,
+    onProgress: (m) => console.error(`… ${m}`),
+  })
+  console.log(text)
+}
+
+async function cmdImage(argv: string[]): Promise<void> {
+  let prompt: string | undefined
+  let backend: 'imagen' | 'codex' | undefined
+  let aspect: string | undefined
+  let count: number | undefined
+  let negative: string | undefined
+  let ref: string | undefined
+  let targetSize: number | undefined
+  let output: string | undefined
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === '-p' || a === '--prompt') prompt = argv[++i]
+    else if (a === '--backend') backend = argv[++i] as 'imagen' | 'codex'
+    else if (a === '-a' || a === '--aspect') aspect = argv[++i]
+    else if (a === '-n' || a === '--count') count = parseInt(argv[++i]!, 10)
+    else if (a === '--negative') negative = argv[++i]
+    else if (a === '--ref') ref = argv[++i]
+    else if (a === '--target-size') targetSize = parseInt(argv[++i]!, 10)
+    else if (a === '-o' || a === '--output') output = argv[++i]
+  }
+  if (!prompt) {
+    console.error(
+      '用法: llm image -p <prompt> [--backend imagen|codex] [--aspect R] [--count N] [--negative S] [--ref FILE] [--target-size N] [--output DIR]',
+    )
+    process.exit(1)
+  }
+  if (backend && backend !== 'imagen' && backend !== 'codex') {
+    console.error(`未知 backend: "${backend}"（可选 imagen / codex）`)
+    process.exit(1)
+  }
+  const paths = await client.image({
+    prompt,
+    backend,
+    aspect,
+    count,
+    negative,
+    ref,
+    targetSize,
+    output,
+    onProgress: (m) => console.error(`… ${m}`),
+  })
+  for (const p of paths) console.log(p)
+}
+
 // ── main ────────────────────────────────────────────────
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2))
+  const rawArgv = process.argv.slice(2)
+  if (rawArgv[0] === 'vision') return cmdVision(rawArgv.slice(1))
+  if (rawArgv[0] === 'image') return cmdImage(rawArgv.slice(1))
+
+  const args = parseArgs(rawArgv)
 
   if (args.help) {
     printHelp()
@@ -392,7 +476,11 @@ async function main() {
   }
 
   if (args.list) {
-    printHelp()
+    if (args.json) {
+      console.log(JSON.stringify(client.listProviders(), null, 2))
+    } else {
+      printHelp()
+    }
     return
   }
 
@@ -442,6 +530,13 @@ async function main() {
   const chatOpts = {
     temperature: args.temperature,
     json_mode: args.jsonMode || undefined,
+  }
+
+  if (args.fallback) {
+    const chain = args.fallback.split(',').map((s) => s.trim()).filter(Boolean)
+    const result = await client.chatWithFallback(chain, messages, chatOpts)
+    console.log(args.json ? JSON.stringify(result, null, 2) : result.text)
+    return
   }
 
   if (args.stream) {

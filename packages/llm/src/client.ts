@@ -7,6 +7,11 @@ import {
 import type { Protocol } from './config.js'
 import { openaiProvider } from './providers/openai.js'
 import { anthropicProvider } from './providers/anthropic.js'
+import { mediaKind, analyzeImage, analyzeMedia } from './vision.js'
+import type { VisionProgress } from './vision.js'
+import { generateImage } from './image.js'
+import type { ImageOptions } from './image.js'
+import { geminiNative } from './gemini.js'
 import type {
   ClaudeSettings,
   ConfigFile,
@@ -89,6 +94,32 @@ export class LLMClient {
       }
     }
     throw new Error(`all endpoints in fallback chain failed → ${errors.join(' | ')}`)
+  }
+
+  /**
+   * 图片/视频/音频理解。图片走 openai-compat inline base64（默认 Gemini
+   * provider 首模型），视频/音频走 Gemini 原生 Files API，按扩展名分发。
+   * 返回分析文本。
+   */
+  async vision(
+    file: string,
+    prompt: string,
+    opts?: { endpoint?: string; onProgress?: VisionProgress },
+  ): Promise<string> {
+    if (mediaKind(file) === 'image') {
+      const name = opts?.endpoint ?? geminiNative(this.#config).models[0]!
+      const { endpoint: ep } = resolveEndpoint(this.#config, name, 'openai')
+      return analyzeImage(ep, file, prompt)
+    }
+    const model = opts?.endpoint
+      ? resolveEndpoint(this.#config, opts.endpoint).endpoint.model
+      : undefined
+    return analyzeMedia(this.#config, file, prompt, model, opts?.onProgress)
+  }
+
+  /** 生图（imagen / codex）。返回图片绝对路径列表。 */
+  async image(opts: ImageOptions): Promise<string[]> {
+    return generateImage(this.#config, opts)
   }
 
   listEndpoints(): EndpointInfo[] {
