@@ -1,22 +1,109 @@
 @import "tailwindcss";
 
-/* 浅色 Linear 风：信息密度优先，状态色与旧看板同源（换浅底适配） */
 @theme {
-  --color-bg: #fafafa;
-  --color-panel: #ffffff;
-  --color-line: #e4e4e7;
-  --color-ink: #18181b;
-  --color-dim: #71717a;
-  --color-accent: #4f46e5;
-  --color-backlog: #71717a;
-  --color-doing: #2563eb;
-  --color-review: #d97706;
-  --color-done: #16a34a;
-  --color-canceled: #dc2626;
+  --color-bg: #f3f5f2;
+  --color-panel: #fffefa;
+  --color-line: #dbe2dd;
+  --color-ink: #17231f;
+  --color-dim: #6d7973;
+  --color-accent: #087f6f;
+  --color-accent-strong: #056457;
+  --color-accent-soft: #dcefe9;
+  --color-harbor: #13231f;
+  --color-backlog: #75817b;
+  --color-doing: #2474a6;
+  --color-review: #c27822;
+  --color-done: #16856f;
+  --color-canceled: #c44b46;
+  --font-sans: "Avenir Next", Avenir, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+:root {
+  color-scheme: light;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
 }
 
 body {
+  margin: 0;
   background: var(--color-bg);
   color: var(--color-ink);
-  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease, box-shadow 150ms ease, opacity 150ms ease, transform 150ms ease;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-accent) 58%, white);
+  outline-offset: 2px;
+}
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+::selection {
+  background: var(--color-accent-soft);
+  color: var(--color-ink);
+}
+
+.harbor-grid {
+  background-color: var(--color-bg);
+  background-image: radial-gradient(circle at 1px 1px, rgb(23 35 31 / 5.5%) 1px, transparent 0);
+  background-size: 22px 22px;
+}
+
+.page-enter {
+  animation: page-enter 260ms cubic-bezier(.2, .8, .2, 1) both;
+}
+
+.surface-shadow {
+  box-shadow: 0 1px 1px rgb(20 35 30 / 3%), 0 8px 24px rgb(20 35 30 / 4%);
+}
+
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

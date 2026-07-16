@@ -16,7 +16,7 @@ import {
 } from "../../lib/api";
 import { ago, usePoll } from "../../lib/hooks";
 import { useToast } from "../../components/toast";
-import { btnGhost, btnPrimary, Empty, Field, inputCls, Modal, ModalFooter } from "../../components/ui";
+import { btnGhost, btnPrimary, Empty, Field, inputCls, Modal, ModalFooter, PageHeader } from "../../components/ui";
 
 export default function AutomationsPage() {
   const autos = usePoll(listAutomations, 10_000);
@@ -25,25 +25,25 @@ export default function AutomationsPage() {
   const [expanded, setExpanded] = useState<string | null>(null);
 
   return (
-    <div className="p-6">
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Automations</h1>
-        <button className={btnPrimary} onClick={() => setCreating(true)}>
-          + New
-        </button>
-      </div>
+    <div className="page-enter mx-auto max-w-[1440px] p-7 max-sm:p-4">
+      <PageHeader
+        eyebrow="Scheduled work"
+        title="Automations"
+        description={`${(autos.data ?? []).filter((a) => a.enabled).length} 条规则正在按 Server 本机时区运行；停机期间只记录 missed，不追补执行。`}
+        actions={<button className={btnPrimary} onClick={() => setCreating(true)}><span className="mr-1.5 text-base leading-none">＋</span> New Automation</button>}
+      />
       {autos.error && <div className="mb-3 text-sm text-canceled">{autos.error}</div>}
-      <div className="overflow-x-auto rounded-xl border border-line bg-panel">
+      <div className="surface-shadow overflow-x-auto rounded-2xl border border-line bg-panel">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-line text-left text-xs text-dim">
-              <th className="px-3 py-2 font-medium">name</th>
-              <th className="px-3 py-2 font-medium">agent</th>
-              <th className="px-3 py-2 font-medium">cron</th>
-              <th className="px-3 py-2 font-medium">mode</th>
-              <th className="px-3 py-2 font-medium">enabled</th>
-              <th className="px-3 py-2 font-medium">lastFired</th>
-              <th className="px-3 py-2 font-medium">操作</th>
+              <th className="px-4 py-3 font-semibold uppercase tracking-[0.08em]">name</th>
+              <th className="px-4 py-3 font-semibold uppercase tracking-[0.08em]">agent</th>
+              <th className="px-4 py-3 font-semibold uppercase tracking-[0.08em]">cron</th>
+              <th className="px-4 py-3 font-semibold uppercase tracking-[0.08em]">mode</th>
+              <th className="px-4 py-3 font-semibold uppercase tracking-[0.08em]">enabled</th>
+              <th className="px-4 py-3 font-semibold uppercase tracking-[0.08em]">last fired</th>
+              <th className="px-4 py-3 font-semibold uppercase tracking-[0.08em]">actions</th>
             </tr>
           </thead>
           <tbody>
@@ -119,18 +119,18 @@ function AutomationRow({
 
   return (
     <>
-      <tr className="border-b border-line last:border-0">
-        <td className="px-3 py-2">{auto.name}</td>
-        <td className="px-3 py-2">{auto.agentName}</td>
-        <td className="px-3 py-2 font-mono text-xs">{auto.cron}</td>
-        <td className="px-3 py-2 text-xs">{auto.mode}</td>
-        <td className="px-3 py-2">
+      <tr className="border-b border-line hover:bg-bg/55 last:border-0">
+        <td className="px-4 py-3 font-medium">{auto.name}</td>
+        <td className="px-4 py-3">{auto.agentName}</td>
+        <td className="px-4 py-3 font-mono text-xs">{auto.cron}</td>
+        <td className="px-4 py-3 text-xs">{auto.mode}</td>
+        <td className="px-4 py-3">
           <span className={`text-xs font-medium ${auto.enabled ? "text-done" : "text-dim"}`}>
             {auto.enabled ? "on" : "off"}
           </span>
         </td>
-        <td className="px-3 py-2 text-xs text-dim">{ago(auto.lastFiredAt)}</td>
-        <td className="px-3 py-2">
+        <td className="px-4 py-3 text-xs text-dim">{ago(auto.lastFiredAt)}</td>
+        <td className="px-4 py-3">
           <div className="flex gap-2 text-xs">
             <button className="text-accent hover:underline" onClick={toggleEnabled}>
               {auto.enabled ? "disable" : "enable"}

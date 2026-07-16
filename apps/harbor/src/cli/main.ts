@@ -5,10 +5,16 @@
  * 连接配置：HARBOR_SERVER_URL / HARBOR_TOKEN（或 ~/.harbor.yaml）。
  */
 
-import { serverUrl, token } from "../config.js";
+import { serverUrl, token as harborToken } from "../config.js";
 import { HarborClient } from "./client.js";
 import { RunRenderer, c, fmtAgo, fmtRunCost } from "./render.js";
 import type { ConversationStatus } from "../protocol.js";
+import {
+  daemonServiceStatus,
+  setupDaemonService,
+  showDaemonLogs,
+  uninstallDaemonService,
+} from "../daemon/service.js";
 
 const USAGE = `${c.bold}harbor${c.reset} — 个人多设备 agent 调度
 
@@ -27,6 +33,12 @@ ${c.bold}派活${c.reset}
   harbor issue done <id> · harbor issue cancel <id>        人工验收/取消（收尾 worktree）
   harbor watch <run-id>                                    (重)连一个 run 的实时输出
 
+${c.bold}设备 daemon${c.reset}
+  harbor daemon setup [--server-url <url>] [--token <secret>] [--device-name <name>]
+  harbor daemon status
+  harbor daemon logs [--lines 100] [--follow]
+  harbor daemon uninstall                                  卸服务，保留配置与日志
+
 ${c.bold}审批${c.reset}（permission=default 的 agent 用工具时上抛）
   harbor approvals [--status pending]                      审批列表
   harbor approve <id> · harbor deny <id>                   批/拒（飞书卡片同步可批）
@@ -43,7 +55,7 @@ ${c.dim}id 支持前缀匹配；--detach 派活后不等输出。server 地址/t
 
 // ── 极简 argparse：--flag value / --flag（bool 白名单）+ 位置参数 ──
 
-const BOOL_FLAGS = new Set(["detach", "help", "runs"]);
+const BOOL_FLAGS = new Set(["detach", "follow", "help", "runs"]);
 
 function parseArgs(argv: string[]): { pos: string[]; flags: Record<string, string | true> } {
   const pos: string[] = [];
@@ -115,8 +127,44 @@ async function main(): Promise<number> {
     console.log(USAGE);
     return 0;
   }
-  const client = new HarborClient(serverUrl(), token());
   const [domain, verb] = [pos[0]!, pos[1]];
+
+  // 本机服务管理不依赖 server/token，必须在 HarborClient 初始化前处理。
+  if (domain === "daemon") {
+    if (verb === "setup") {
+      const status = await setupDaemonService({
+        serverUrl: typeof flags["server-url"] === "string" ? flags["server-url"] : undefined,
+        token: typeof flags.token === "string" ? flags.token : undefined,
+        deviceName: typeof flags["device-name"] === "string" ? flags["device-name"] : undefined,
+      });
+      console.log(`${c.green}✓${c.reset} harbord service 已安装并启动（${status.platform}）`);
+      console.log(`${c.dim}  state=${status.state} pid=${status.pid ?? "-"} definition=${status.definitionPath}${c.reset}`);
+      return status.running ? 0 : 1;
+    }
+    if (verb === "status") {
+      const status = daemonServiceStatus();
+      const color = status.running ? c.green : status.loaded ? c.yellow : c.red;
+      console.log(`${color}${status.running ? "● running" : status.loaded ? "● loaded" : "○ stopped"}${c.reset}`);
+      console.log(`${c.dim}  platform=${status.platform} state=${status.state} pid=${status.pid ?? "-"}${c.reset}`);
+      console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
+      if (status.stdoutPath) console.log(`${c.dim}  logs=${status.stdoutPath}, ${status.stderrPath}${c.reset}`);
+      return status.running ? 0 : 1;
+    }
+    if (verb === "logs") {
+      const lines = typeof flags.lines === "string" ? Number(flags.lines) : 100;
+      if (!Number.isFinite(lines) || lines <= 0) throw new Error("--lines 必须是正整数");
+      return showDaemonLogs(lines, flags.follow === true);
+    }
+    if (verb === "uninstall") {
+      const status = uninstallDaemonService();
+      console.log(`${c.green}✓${c.reset} harbord service 已卸载（配置与日志保留）`);
+      console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
+      return 0;
+    }
+    throw new Error("用法：harbor daemon setup|status|logs|uninstall");
+  }
+
+  const client = new HarborClient(serverUrl(), harborToken());
 
   if (domain === "device" && verb === "ls") {
     const devices = await client.devices();

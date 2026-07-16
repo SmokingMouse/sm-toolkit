@@ -23,19 +23,22 @@ export default function ChatsPage() {
   const [newChatOpen, setNewChatOpen] = useState(false);
 
   return (
-    <div className="flex h-full">
-      <aside className="flex w-64 shrink-0 flex-col border-r border-line bg-panel">
-        <div className="flex items-center justify-between px-3 py-3">
-          <span className="text-sm font-semibold">Chats</span>
+    <div className="page-enter flex h-full">
+      <aside className="flex w-[292px] shrink-0 flex-col border-r border-line bg-panel/80 max-lg:w-[250px] max-sm:w-[210px]">
+        <div className="flex items-end justify-between border-b border-line px-4 py-4">
+          <div>
+            <div className="text-[9px] font-bold uppercase tracking-[0.17em] text-accent">Conversations</div>
+            <span className="mt-1 block text-lg font-semibold tracking-tight">Chats</span>
+          </div>
           <button className={btnGhost} onClick={() => setNewChatOpen(true)}>
-            + New
+            ＋ New
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto px-2 pb-2">
+        <div className="flex-1 overflow-y-auto px-2.5 py-3">
           {draftAgent && (
             <button
-              className={`mb-1 w-full rounded-md border px-2.5 py-2 text-left text-sm ${
-                selected === null ? "border-accent bg-bg" : "border-line"
+              className={`mb-1.5 w-full rounded-xl border px-3 py-2.5 text-left text-sm ${
+                selected === null ? "border-accent/30 bg-accent-soft/55" : "border-line bg-white/55"
               }`}
               onClick={() => setSelected(null)}
             >
@@ -46,15 +49,15 @@ export default function ChatsPage() {
           {(convs.data ?? []).map((c) => (
             <button
               key={c.id}
-              className={`mb-1 w-full rounded-md border px-2.5 py-2 text-left ${
-                selected === c.id ? "border-accent bg-bg" : "border-transparent hover:border-line"
+              className={`mb-1.5 w-full rounded-xl border px-3 py-2.5 text-left ${
+                selected === c.id ? "border-accent/30 bg-accent-soft/55 shadow-[inset_3px_0_0_var(--color-accent)]" : "border-transparent hover:border-line hover:bg-white/70"
               }`}
               onClick={() => {
                 setSelected(c.id);
               }}
             >
-              <div className="truncate text-[13px]">{c.title || "(无标题)"}</div>
-              <div className="flex gap-2 text-[11px] text-dim">
+              <div className="truncate text-[13px] font-medium">{c.title || "(无标题)"}</div>
+              <div className="mt-1 flex gap-2 text-[10px] text-dim">
                 <span>{c.agentName}</span>
                 <span>{ago(c.updatedAt)}</span>
               </div>
@@ -79,7 +82,7 @@ export default function ChatsPage() {
             }}
           />
         ) : (
-          <Empty text="选择左侧会话，或 + New 开新聊天" />
+          <div className="p-7"><Empty text="选择左侧会话，或创建一段新对话" /></div>
         )}
       </div>
 
@@ -168,6 +171,8 @@ function ChatView({
 
   const sending = busy || (liveRunId !== null && doneRun === null && streaming);
   const livePrompt = runs.find((r) => r.id === liveRunId)?.prompt ?? pendingPrompt;
+  const agentName = detail.data?.agent?.name ?? draftAgent ?? "Agent";
+  const chatTitle = detail.data?.conversation.title || (conversationId ? "Untitled chat" : "New conversation");
 
   const send = async () => {
     const prompt = input.trim();
@@ -201,28 +206,32 @@ function ChatView({
 
   return (
     <div className="flex h-full flex-col">
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-5">
-        {runs
-          .filter((r) => r.id !== liveRunId)
-          .map((r) => (
-            <HistoryBubbles key={r.id} run={r} />
-          ))}
-        {liveRunId && (
-          <>
-            {livePrompt && <UserBubble text={livePrompt} />}
-            <LiveAssistantBubble frames={frames} streaming={streaming} />
-          </>
-        )}
-        {runs.length === 0 && !liveRunId && (
-          <div className="py-10 text-center text-sm text-dim">
-            {conversationId ? "无消息" : `向 ${draftAgent} 发送第一条消息开始聊天`}
-          </div>
-        )}
+      <div className="flex h-[72px] shrink-0 items-center justify-between border-b border-line bg-panel/70 px-5 backdrop-blur">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold">{chatTitle}</div>
+          <div className="mt-1 flex items-center gap-1.5 text-[10px] text-dim"><span className="h-1.5 w-1.5 rounded-full bg-done" /> Agent · {agentName}</div>
+        </div>
+        <div className="rounded-full border border-line bg-white/60 px-2.5 py-1 font-mono text-[10px] text-dim">{runs.length} runs</div>
       </div>
-      <div className="border-t border-line bg-panel p-3">
-        <div className="flex gap-2">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-6">
+        <div className="mx-auto max-w-3xl">
+          {runs.filter((r) => r.id !== liveRunId).map((r) => <HistoryBubbles key={r.id} run={r} />)}
+          {liveRunId && <>{livePrompt && <UserBubble text={livePrompt} />}<LiveAssistantBubble frames={frames} streaming={streaming} /></>}
+          {runs.length === 0 && !liveRunId && (
+            <div className="grid min-h-56 place-items-center text-center">
+              <div>
+                <div className="mx-auto mb-3 grid h-10 w-10 place-items-center rounded-xl border border-line bg-panel font-semibold text-accent">H</div>
+                <div className="text-sm font-medium">Start with {agentName}</div>
+                <div className="mt-1 text-xs text-dim">输入第一条消息，Harbor 会创建并保存这段会话。</div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="border-t border-line bg-panel/90 p-4 backdrop-blur">
+        <div className="mx-auto flex max-w-3xl gap-2">
           <textarea
-            className={`${inputCls} h-14 resize-none`}
+            className={`${inputCls} h-[58px] resize-none bg-white`}
             placeholder={sending ? "上一轮还在跑…（串行闸）" : "输入消息，⌘/Ctrl+Enter 发送"}
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -243,7 +252,7 @@ function ChatView({
 function UserBubble({ text }: { text: string }) {
   return (
     <div className="mb-3 flex justify-end">
-      <div className="max-w-[80%] whitespace-pre-wrap break-words rounded-2xl rounded-br-sm bg-accent px-3.5 py-2 text-sm text-white">
+      <div className="max-w-[80%] whitespace-pre-wrap break-words rounded-2xl rounded-br-sm bg-accent-strong px-4 py-2.5 text-sm leading-6 text-white shadow-[0_5px_16px_rgba(5,100,87,.12)]">
         {text}
       </div>
     </div>
@@ -253,7 +262,7 @@ function UserBubble({ text }: { text: string }) {
 function AssistantShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="mb-3 flex justify-start">
-      <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-bl-sm border border-line bg-panel px-3.5 py-2 text-sm">
+      <div className="surface-shadow max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-bl-sm border border-line bg-panel px-4 py-2.5 text-sm leading-6">
         {children}
       </div>
     </div>

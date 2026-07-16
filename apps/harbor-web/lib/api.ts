@@ -9,10 +9,13 @@ import type {
   ApprovalStatus,
   Automation,
   AutomationLogRow,
+  BackendKind,
   Conversation,
   ConversationStatus,
   Device,
   HarborAgent,
+  PromptSource,
+  PromptWrapperConfig,
   Run,
   RunStreamFrame,
   UsageRow,
@@ -23,10 +26,13 @@ export type {
   ApprovalStatus,
   Automation,
   AutomationLogRow,
+  BackendKind,
   Conversation,
   ConversationStatus,
   Device,
   HarborAgent,
+  PromptSource,
+  PromptWrapperConfig,
   Run,
   RunStreamFrame,
   UsageRow,
@@ -152,6 +158,18 @@ export const automationLog = (id: string) =>
 export const usage = (days: number) => req<UsageRow[]>("GET", `/api/usage?days=${days}`);
 
 export const health = () => req<{ ok: boolean }>("GET", "/api/health");
+
+export interface PromptWrapperSettings {
+  wrappers: PromptWrapperConfig[];
+  variables: string[];
+}
+
+export const promptWrapperSettings = () =>
+  req<PromptWrapperSettings>("GET", "/api/settings/prompt-wrappers");
+export const savePromptWrapper = (body: { source: PromptSource; enabled: boolean; template: string }) =>
+  req<PromptWrapperConfig>("PATCH", "/api/settings/prompt-wrappers", body);
+export const resetPromptWrapper = (source: PromptSource) =>
+  req<PromptWrapperConfig>("DELETE", `/api/settings/prompt-wrappers/${encodeURIComponent(source)}`);
 
 // ── SSE：run 事件流（EventSource 带不了 Authorization header → fetch 手解） ──
 

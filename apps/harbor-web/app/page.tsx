@@ -15,7 +15,7 @@ import {
 } from "../lib/api";
 import { ago, fmtUsd, usePoll } from "../lib/hooks";
 import { useToast } from "../components/toast";
-import { btnDanger, btnGhost, btnPrimary, Empty, Field, inputCls, Modal, ModalFooter, StatusBadge } from "../components/ui";
+import { btnDanger, btnGhost, btnPrimary, Empty, Field, inputCls, Modal, ModalFooter, PageHeader, StatusBadge } from "../components/ui";
 import { EventLog } from "../components/run-stream";
 
 const COL_BAR: Record<string, string> = {
@@ -36,41 +36,41 @@ export default function IssuesPage() {
   for (const c of convs.data ?? []) byStatus.get(c.status)?.push(c);
 
   return (
-    <div className="flex h-full flex-col p-6">
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Issues</h1>
-        <button className={btnPrimary} onClick={() => setCreating(true)}>
-          + New
-        </button>
-      </div>
+    <div className="page-enter flex h-full flex-col p-7 max-sm:p-4">
+      <PageHeader
+        eyebrow="Active work"
+        title="Issues"
+        description={`${(convs.data ?? []).length} 个任务横跨 ${ISSUE_STATUSES.length} 个执行阶段；状态由 Harbor 和你共同推进。`}
+        actions={<button className={btnPrimary} onClick={() => setCreating(true)}><span className="mr-1.5 text-base leading-none">＋</span> New Issue</button>}
+      />
       {convs.error && <div className="mb-3 text-sm text-canceled">{convs.error}</div>}
-      <div className="grid min-h-0 flex-1 auto-cols-[minmax(230px,1fr)] grid-flow-col gap-3 overflow-x-auto">
+      <div className="grid min-h-0 flex-1 auto-cols-[minmax(185px,1fr)] grid-flow-col gap-3 overflow-x-auto pb-1">
         {ISSUE_STATUSES.map((s) => {
           const cards = byStatus.get(s) ?? [];
           return (
-            <div key={s} className="flex min-h-[120px] flex-col rounded-xl border border-line bg-panel">
-              <div className="flex items-center justify-between border-b border-line px-3 py-2">
-                <span className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide">
+            <div key={s} className="surface-shadow flex min-h-[120px] flex-col overflow-hidden rounded-2xl border border-line bg-panel/78">
+              <div className="flex items-center justify-between border-b border-line bg-white/55 px-3.5 py-3">
+                <span className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.14em]">
                   <span className={`inline-block h-2 w-2 rounded-full ${COL_BAR[s]}`} />
                   {s}
                 </span>
-                <span className="text-xs text-dim">{cards.length}</span>
+                <span className="grid h-5 min-w-5 place-items-center rounded-full bg-bg px-1.5 font-mono text-[10px] text-dim">{cards.length}</span>
               </div>
-              <div className="flex flex-col gap-2 overflow-y-auto p-2">
+              <div className="flex flex-col gap-2.5 overflow-y-auto p-2.5">
                 {cards.map((c) => (
                   <button
                     key={c.id}
-                    className="rounded-lg border border-line bg-bg p-2.5 text-left hover:border-accent"
+                    className="group rounded-xl border border-line bg-panel p-3 text-left shadow-[0_1px_1px_rgba(20,35,30,.03)] hover:-translate-y-0.5 hover:border-accent/50 hover:shadow-[0_7px_18px_rgba(20,35,30,.07)]"
                     onClick={() => setOpenId(c.id)}
                   >
-                    <div className="mb-1 break-all text-[13px]">{c.title || "(无标题)"}</div>
-                    <div className="flex flex-wrap gap-x-2 text-[11px] text-dim">
-                      <span>{c.agentName}</span>
+                    <div className="mb-2 break-all text-[13px] font-medium leading-5">{c.title || "(无标题)"}</div>
+                    <div className="flex flex-wrap items-center gap-x-2 text-[10px] text-dim">
+                      <span className="rounded bg-bg px-1.5 py-0.5 font-medium text-ink/70">{c.agentName}</span>
                       <span>{ago(c.updatedAt)}</span>
                     </div>
                   </button>
                 ))}
-                {cards.length === 0 && <div className="px-1 py-2 text-xs text-dim">—</div>}
+                {cards.length === 0 && <div className="grid min-h-20 place-items-center rounded-xl border border-dashed border-line/80 text-[10px] uppercase tracking-[0.12em] text-dim/60">Clear</div>}
               </div>
             </div>
           );
@@ -212,12 +212,12 @@ function IssueDrawer({ id, onClose }: { id: string; onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-30 bg-black/30"
+      className="fixed inset-0 z-30 bg-harbor/55 backdrop-blur-[2px]"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="absolute bottom-0 right-0 top-0 flex w-[720px] max-w-full flex-col overflow-y-auto border-l border-line bg-bg p-5">
+      <div className="surface-shadow absolute bottom-0 right-0 top-0 flex w-[720px] max-w-full flex-col overflow-y-auto border-l border-line bg-panel p-6">
         {!conv ? (
           <div className="text-sm text-dim">{detail.error ?? "加载中…"}</div>
         ) : (

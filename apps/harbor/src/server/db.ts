@@ -89,6 +89,15 @@ const MIGRATIONS: string[] = [
   CREATE INDEX idx_run_events_ts ON run_events(ts);
   CREATE INDEX idx_automation_log ON automation_log(automation_id, ts);
   `,
+  // v3 —— P4.6：按来源可配置的 server 级 Prompt wrapper
+  `
+  CREATE TABLE prompt_templates (
+    source TEXT PRIMARY KEY CHECK (source IN ('issue','chat','automation')),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    template TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  `,
 ];
 
 export function openDb(path: string): Database {

@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-Harbor P1–P4 落地完毕（跨设备执行 + 飞书/审批/worktree + automation/用量 + Web 看板），self-agent 已退役。当前等待用户环境的时间性验证（真双机 / 真飞书 / dogfood 一周）。
+Harbor P4.7「控制台 UI 重塑」已完成：八页统一为“港口调度台”视觉语言，桌面与窄屏真实浏览器验收通过；当前回到 P5 时间性验证，等待真双机 / 真飞书 / automation 7 天 / dogfood 一周。
 
 ## Goals
 
@@ -24,7 +24,7 @@ Harbor P1–P4 落地完毕（跨设备执行 + 飞书/审批/worktree + automat
 - [x] @sm/channel-feishu：飞书 Channel 适配（从 SelfAgent 移植，薄实现）
 - [x] 根级 `bun run setup` 引导流程（配模型 + 注册 SDK + 注册全局命令 + 按需装 app）
 - [x] agent-gateway 统一配置源（已迁移——见 2026-07-11 session；agent-gateway 独立仓库整体退役，能力拍平进 @sm/agent）
-- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 方案 `progress/harbor.md`。P1–P4 全部完成（2026-07-15，本机 e2e 全过：审批四路径/worktree 并行与自愈/automation fired+missed/usage 对账/看板浏览器实测/飞书 mock 23 项），self-agent 退役归档。**P4.5 可操作 Web 平台已实施完成（2026-07-16，方案 `progress/harbor-web.md`，e2e 判据 1-8 全过）**。剩 P5 时间性验证——真双机 Tailscale、真飞书群冒烟、automation 连跑 7 天、真实负载一周，全部依赖用户环境
+- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 主方案 `progress/harbor.md`。P1–P4.7 已完成（P4.7 控制台 UI 重塑见 `progress/harbor-ui.md`）。仅剩 P5 时间性验证——真双机 Tailscale、真飞书群冒烟、automation 连跑 7 天、真实负载一周，全部依赖用户环境
 
 ## Verified Facts
 
@@ -54,6 +54,23 @@ Harbor P1–P4 落地完毕（跨设备执行 + 飞书/审批/worktree + automat
   - 下游解耦 content-studio venv：svg-diagram review.py / xianyu gen_image.py+check_image.py / x-api x_api.py 的解释器改 `/usr/bin/python3`（ai-legion 纯 stdlib，3.9 实测可跑）。
 - **Verified**（全部实测）：`llm --list --json` ✓ `--fallback` chat ✓ vision 图片（比特币图正确描述）✓ vision 音频（say 生成 m4a → Files API 上传轮询转写）✓ imagen 生图（1024×1024 PNG 落盘；首跑遇瞬时 API 错误，已补 withRetry）✓ ai-legion status/ask/ask--json/vision/image 五路 ✓ 系统 python3.9 跑 vision.py ✓；codex 生图路径已发起（~2min 异步确认）。
 - **Next**：codex 并发生图（多进程 mkdtemp）真实场景观察；content-studio 已无 skill 层依赖，可择机退役。
+
+### 2026-07-16 — P4.7 控制台 UI 重塑完成
+- **Decision**：采用“个人港口调度台”而非通用 SaaS 白卡片：暖灰画布、深海墨色侧栏、航标绿主色，运行状态和设备事实优先；不改变信息架构与业务行为。仓库无 Story checkpoint，方向由现有源码、`progress/` 与实际页面截图推导。
+- **Done**：重做全局 token、字体、focus、动效、Modal / Toast / button / field / status badge；侧栏加入分组图标导航、连接态与窄屏图标轨；Devices 增加 fleet metrics、接入终端、provider / agent / endpoint 事实卡；Agents 增加 ready metrics、执行配置卡与两列分组创建表单；Settings 改为连接卡 + Prompt pipeline 工作台；Issues 五列、Chats 双栏、Automations / Approvals / Usage 表格与标题体系同步收口。
+- **Verified**：harbor-web `tsc --noEmit`、Next static build 全过；agent-browser 1280×720 实测八页，Issues 五列全显、New Agent footer 可达、各页 `scrollWidth === innerWidth`；760×720 Devices 实测侧栏折叠且无页面横溢。最终截图见 Codex visualizations 目录，预览 server:17777 health 正常。
+- **Next**：P5 时间性验证不变——真双机、真飞书、automation 连跑 7 天、真实负载一周。
+
+### 2026-07-16 — P4.6 个人控制面产品化完成
+- **Decision**：范围固定为 daemon lifecycle、Devices、Provider capability validation、Prompt wrapper；不扩到团队权限、Skills/Integrations 或 server service。领域边界、持久化选择与验收见 `progress/harbor-control-plane.md`，共用术语见 `progress/glossary.md`。仓库无 Story checkpoint，本期意图以 git、`progress/` 与源码为证据。
+- **Done**：
+  - **Daemon lifecycle**：`harbor daemon setup|status|logs|uninstall`，覆盖 macOS launchd / Linux systemd user service；setup 幂等、保留式写 `~/.harbor.yaml`（0600），definition 只含 bun/入口/HOME/PATH、不含 token；status/logs/uninstall 无 token 也可用。
+  - **Provider capability**：Agent 创建强制 backend ∈ 设备实报 CLI；未指定时优先 Claude、否则唯一可用 provider；Claude 模型按 native tier/endpoints 校验，Codex model 交 CLI；Codex 禁止伪装成 `default` 动态审批。Web 表单 device→provider→model 联动，现存 Agent provider 丢失会告警。
+  - **Prompt wrapper**：SQLite v3 `prompt_templates`；issue/chat/automation 三套默认模板、白名单变量、`{{prompt}}` 强制保底；scheduler 只在 dispatch 时渲染，raw `runs.prompt` 不变。REST + Settings 支持编辑、禁用、恢复默认。
+  - **Devices**：新增第八个 Web 导航页，展示在线/last seen、CLI 版本、Claude endpoints、关联 Agents 与可复制 daemon setup 命令。
+- **Verified**：11 个 Bun 定向测试 / 37 assertions 全过；Harbor `tsc --build`、harbor-web `tsc --noEmit` + Next static build 全过；SQLite 实迁 v3。isolated launchd 真机重复 setup、logs、无 token status、kill 后 KeepAlive（PID 75360→75529）、uninstall 全过。REST 实测默认/非法/保存/恢复模板与 Agent 创建；agent-browser 实测 Settings、Devices 实机双 provider、Agents 联动、模板保存回读，截图人工检查无布局问题。
+- **Environment boundary**：当前 7777 由 VS Code NodeService 转发 Harbor API，本地无对应 `~/.harbor.yaml`，未擅自接管；测试用 17777 + 临时 HOME，service/server/browser/临时文件均已清理。
+- **Next**：P5 时间性验证不变——真双机、真飞书、automation 连跑 7 天、真实负载一周。
 
 ### 2026-07-16 — P4.5 harbor-web 实施完成（七页操作台上线，单文件看板退役）
 - **Done**：

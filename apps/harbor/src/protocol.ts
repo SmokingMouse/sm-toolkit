@@ -19,6 +19,7 @@ export type ConversationStatus = "open" | "backlog" | "doing" | "review" | "done
 export const ISSUE_STATUSES: ConversationStatus[] = ["backlog", "doing", "review", "done", "canceled"];
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 export type Origin = "cli" | "feishu" | "web" | "automation";
+export type PromptSource = "issue" | "chat" | "automation";
 
 export interface DeviceCapabilities {
   /** 已装 CLI 及版本，如 {claude: "2.1.207"} */
@@ -160,6 +161,15 @@ export interface UsageRow {
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
+}
+
+/** server 级 Prompt wrapper 配置；isDefault=true 表示尚未写 DB，使用代码内默认值。 */
+export interface PromptWrapperConfig {
+  source: PromptSource;
+  enabled: boolean;
+  template: string;
+  isDefault: boolean;
+  updatedAt: number | null;
 }
 
 // ── Run 下发规格（server → daemon） ─────────────────────

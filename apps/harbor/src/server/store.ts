@@ -20,6 +20,7 @@ import type {
   HarborAgent,
   IsolationKind,
   Origin,
+  PromptSource,
   Run,
   RunEventRow,
   RunStatus,
@@ -118,6 +119,20 @@ interface AutomationRow {
   notify_chat_id: string | null;
   enabled: number;
   last_fired_at: number | null;
+}
+
+interface PromptTemplateRow {
+  source: string;
+  enabled: number;
+  template: string;
+  updated_at: number;
+}
+
+export interface PromptTemplateOverride {
+  source: PromptSource;
+  enabled: boolean;
+  template: string;
+  updatedAt: number;
 }
 
 // ── 映射 ────────────────────────────────────────────────
@@ -766,6 +781,34 @@ export class HarborStore {
       .query<{ agent_id: string }, [string]>("SELECT agent_id FROM chat_bindings WHERE chat_id = ?")
       .get(chatId);
     return r?.agent_id ?? null;
+  }
+
+  // ---- prompt_templates（P4.6 server 级 Prompt wrapper） ----
+
+  getPromptTemplate(source: PromptSource): PromptTemplateOverride | null {
+    const r = this.db
+      .query<PromptTemplateRow, [string]>("SELECT * FROM prompt_templates WHERE source = ?")
+      .get(source);
+    return r
+      ? {
+          source: r.source as PromptSource,
+          enabled: r.enabled === 1,
+          template: r.template,
+          updatedAt: r.updated_at,
+        }
+      : null;
+  }
+
+  setPromptTemplate(source: PromptSource, enabled: boolean, template: string, now: number): void {
+    this.db.run(
+      `INSERT INTO prompt_templates (source, enabled, template, updated_at) VALUES (?,?,?,?)
+       ON CONFLICT(source) DO UPDATE SET enabled = excluded.enabled, template = excluded.template, updated_at = excluded.updated_at`,
+      [source, enabled ? 1 : 0, template, now],
+    );
+  }
+
+  resetPromptTemplate(source: PromptSource): void {
+    this.db.run("DELETE FROM prompt_templates WHERE source = ?", [source]);
   }
 
   // ---- usage（P3 报表） ----

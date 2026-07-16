@@ -9,11 +9,12 @@ import {
   PERMISSIONS,
   setAgentArchived,
   type Device,
+  type BackendKind,
   type HarborAgent,
 } from "../../lib/api";
 import { usePoll } from "../../lib/hooks";
 import { useToast } from "../../components/toast";
-import { btnGhost, btnPrimary, Empty, Field, inputCls, Modal, ModalFooter } from "../../components/ui";
+import { btnGhost, btnPrimary, Empty, Field, inputCls, Metric, Modal, ModalFooter, PageHeader } from "../../components/ui";
 
 export default function AgentsPage() {
   const agents = usePoll(listAgents, 10_000);
@@ -24,21 +25,41 @@ export default function AgentsPage() {
     [devices.data],
   );
 
+  const allAgents = agents.data ?? [];
+  const onlineAgents = allAgents.filter((agent) => deviceById.get(agent.deviceId)?.online).length;
+  const providers = new Set(allAgents.map((agent) => agent.backend)).size;
+
   return (
-    <div className="p-6">
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Agents</h1>
-        <button className={btnPrimary} onClick={() => setCreating(true)}>
-          + New
-        </button>
-      </div>
+    <div className="page-enter mx-auto max-w-[1440px] p-7 max-sm:p-4">
+      <PageHeader
+        eyebrow="Execution roster"
+        title="Agents"
+        description="Agent 是 provider、模型、权限和工作目录的可派活组合；设备状态决定它此刻能否接单。"
+        actions={
+          <>
+            <div className="mr-2 flex gap-5 rounded-xl border border-line bg-panel/75 px-4 py-2.5 surface-shadow max-lg:hidden">
+              <Metric label="Agents" value={allAgents.length} />
+              <Metric label="Ready" value={onlineAgents} tone="good" />
+              <Metric label="Providers" value={providers} />
+            </div>
+            <button
+              className={btnPrimary}
+              disabled={!devices.data?.length}
+              title={!devices.data?.length ? "需要先注册至少一台设备" : undefined}
+              onClick={() => setCreating(true)}
+            >
+              <span className="mr-1.5 text-base leading-none">＋</span> New Agent
+            </button>
+          </>
+        }
+      />
       {agents.error && <div className="mb-3 text-sm text-canceled">{agents.error}</div>}
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
-        {(agents.data ?? []).map((a) => (
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+        {allAgents.map((a) => (
           <AgentCard key={a.id} agent={a} device={deviceById.get(a.deviceId)} onChanged={agents.reload} />
         ))}
       </div>
-      {agents.data?.length === 0 && <Empty text="还没有 agent —— 点 + New 创建（需要该设备 harbord 在线注册过）" />}
+      {allAgents.length === 0 && <Empty text="还没有 Agent——创建前需要至少一台已注册设备" />}
       {creating && (
         <NewAgentModal
           devices={devices.data ?? []}
@@ -74,35 +95,49 @@ function AgentCard({
     }
   };
 
+  const providerMissing = !!device && !device.capabilities.clis?.[agent.backend];
   return (
-    <div className="rounded-xl border border-line bg-panel p-4">
-      <div className="mb-2 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="font-medium">{agent.name}</span>
-          <span
-            className={`inline-block h-2 w-2 rounded-full ${device?.online ? "bg-done" : "bg-zinc-300"}`}
-            title={device?.online ? "设备在线" : "设备离线"}
-          />
+    <article className="surface-shadow group overflow-hidden rounded-2xl border border-line bg-panel">
+      <div className={`h-1 ${agent.backend === "claude" ? "bg-[#c98b4b]" : "bg-accent"}`} />
+      <div className="p-5">
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl text-sm font-bold uppercase ${agent.backend === "claude" ? "bg-[#f2e7d7] text-[#9b5f25]" : "bg-accent-soft text-accent-strong"}`}>{agent.backend[0]}</div>
+            <div className="min-w-0">
+              <h2 className="truncate text-[15px] font-semibold tracking-tight">{agent.name}</h2>
+              <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-dim">
+                <span className={`h-1.5 w-1.5 rounded-full ${device?.online ? "bg-done" : "bg-zinc-400"}`} />
+                {device?.online ? "ready" : "device offline"} · {agent.backend}
+              </div>
+            </div>
+          </div>
+          <button className="rounded-md px-2 py-1 text-[11px] text-dim opacity-60 hover:bg-red-50 hover:text-canceled group-hover:opacity-100" onClick={archive}>归档</button>
         </div>
-        <button className="text-xs text-dim hover:text-canceled" onClick={archive}>
-          归档
-        </button>
+
+        {agent.description && <p className="mb-4 text-xs leading-5 text-dim">{agent.description}</p>}
+        {providerMissing && <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-2.5 py-2 text-xs text-canceled">设备当前缺少 {agent.backend} provider</div>}
+
+        <div className="grid grid-cols-2 gap-x-4 gap-y-4 border-y border-line py-4 text-xs">
+          <AgentFact label="Device" value={device?.name ?? agent.deviceId} />
+          <AgentFact label="Model" value={agent.model ?? "CLI default"} mono />
+          <AgentFact label="Permission" value={agent.permission} />
+          <AgentFact label="Isolation" value={agent.isolation} />
+        </div>
+
+        <div className="mt-4">
+          <div className="mb-1 text-[9px] font-bold uppercase tracking-[0.14em] text-dim">Working directory</div>
+          <div className="truncate font-mono text-[10px] text-ink/70" title={agent.workdir}>{agent.workdir}</div>
+        </div>
       </div>
-      {agent.description && <div className="mb-2 text-xs text-dim">{agent.description}</div>}
-      <dl className="grid grid-cols-[72px_1fr] gap-y-1 text-xs">
-        <dt className="text-dim">device</dt>
-        <dd>{device?.name ?? agent.deviceId}</dd>
-        <dt className="text-dim">backend</dt>
-        <dd>{agent.backend}</dd>
-        <dt className="text-dim">model</dt>
-        <dd className="font-mono">{agent.model ?? "（CLI 默认）"}</dd>
-        <dt className="text-dim">permission</dt>
-        <dd>{agent.permission}</dd>
-        <dt className="text-dim">isolation</dt>
-        <dd>{agent.isolation}</dd>
-        <dt className="text-dim">workdir</dt>
-        <dd className="break-all font-mono">{agent.workdir}</dd>
-      </dl>
+    </article>
+  );
+}
+
+function AgentFact({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <div className="mb-1 text-[9px] font-bold uppercase tracking-[0.12em] text-dim">{label}</div>
+      <div className={`truncate font-medium ${mono ? "font-mono text-[11px]" : ""}`} title={value}>{value}</div>
     </div>
   );
 }
@@ -119,6 +154,12 @@ function NewAgentModal({
   const toast = useToast();
   const [name, setName] = useState("");
   const [device, setDevice] = useState(devices[0]?.name ?? "");
+  const firstProviders = (["claude", "codex"] as BackendKind[]).filter(
+    (provider) => !!devices[0]?.capabilities.clis?.[provider],
+  );
+  const [backend, setBackend] = useState<BackendKind | "">(
+    firstProviders.includes("claude") ? "claude" : (firstProviders[0] ?? ""),
+  );
   const [model, setModel] = useState("");
   const [workdir, setWorkdir] = useState("");
   const [permission, setPermission] = useState<string>("auto-edit");
@@ -127,10 +168,29 @@ function NewAgentModal({
   const [busy, setBusy] = useState(false);
 
   const selectedDevice = devices.find((d) => d.name === device);
-  const modelOptions = [
-    ...NATIVE_TIER_ALIASES,
-    ...(selectedDevice?.capabilities.endpoints ?? []),
-  ];
+  const providers = (["claude", "codex"] as BackendKind[]).filter(
+    (provider) => !!selectedDevice?.capabilities.clis?.[provider],
+  );
+  const modelOptions = backend === "claude"
+    ? [...NATIVE_TIER_ALIASES, ...(selectedDevice?.capabilities.endpoints ?? [])]
+    : [];
+
+  const selectDevice = (name: string) => {
+    setDevice(name);
+    setModel("");
+    const next = devices.find((d) => d.name === name);
+    const available = (["claude", "codex"] as BackendKind[]).filter(
+      (provider) => !!next?.capabilities.clis?.[provider],
+    );
+    setBackend(available.includes("claude") ? "claude" : (available[0] ?? ""));
+    if (!available.includes("claude") && permission === "default") setPermission("auto-edit");
+  };
+
+  const selectBackend = (value: BackendKind) => {
+    setBackend(value);
+    setModel("");
+    if (value === "codex" && permission === "default") setPermission("auto-edit");
+  };
 
   const submit = async () => {
     setBusy(true);
@@ -138,6 +198,7 @@ function NewAgentModal({
       await createAgent({
         name: name.trim(),
         device,
+        backend,
         model: model.trim() || undefined,
         workdir: workdir.trim(),
         permission,
@@ -155,64 +216,56 @@ function NewAgentModal({
   };
 
   return (
-    <Modal title="New Agent" onClose={onClose}>
-      <Field label="name">
-        <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="如 mac-mini-dev" />
-      </Field>
-      <Field label="device">
-        <select className={inputCls} value={device} onChange={(e) => setDevice(e.target.value)}>
-          {devices.map((d) => (
-            <option key={d.id} value={d.name}>
-              {d.name} {d.online ? "（在线）" : "（离线）"}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <Field label="model（留空 = CLI 默认；可手输，服务端校验能力清单）">
-        <input
-          className={inputCls}
-          list="model-options"
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          placeholder="（CLI 默认）"
-        />
-        <datalist id="model-options">
-          {modelOptions.map((m) => (
-            <option key={m} value={m} />
-          ))}
-        </datalist>
-      </Field>
-      <Field label="workdir（该设备上的绝对路径）">
-        <input className={inputCls} value={workdir} onChange={(e) => setWorkdir(e.target.value)} placeholder="/Users/xxx/repo" />
-      </Field>
-      <Field label="permission">
-        <select className={inputCls} value={permission} onChange={(e) => setPermission(e.target.value)}>
-          {PERMISSIONS.map((p) => (
-            <option key={p} value={p}>
-              {p}
-              {p === "default" ? "（需授权工具走审批）" : ""}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <Field label="isolation">
-        <select className={inputCls} value={isolation} onChange={(e) => setIsolation(e.target.value)}>
-          <option value="none">none</option>
-          <option value="worktree">worktree（per-issue git worktree）</option>
-        </select>
-      </Field>
-      <Field label="instruction（systemPrompt 注入，可空）">
-        <textarea
-          className={`${inputCls} h-20 resize-y`}
-          value={instruction}
-          onChange={(e) => setInstruction(e.target.value)}
-        />
-      </Field>
+    <Modal title="New Agent" onClose={onClose} wide>
+      <div className="mb-4 rounded-xl border border-line bg-accent-soft/45 px-3.5 py-3 text-xs leading-5 text-dim">
+        先选择运行设备，再从设备实报能力中选择 provider 与模型；Harbor 不会假定本机存在某个 CLI。
+      </div>
+      <div className="grid gap-x-4 md:grid-cols-2">
+        <Field label="Agent name">
+          <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="mac-mini-dev" />
+        </Field>
+        <Field label="Runtime device">
+          <select className={inputCls} value={device} onChange={(e) => selectDevice(e.target.value)}>
+            {devices.map((d) => <option key={d.id} value={d.name}>{d.name} · {d.online ? "online" : "offline"}</option>)}
+          </select>
+        </Field>
+        <Field label="Provider · device reported">
+          <select className={inputCls} value={backend} onChange={(e) => selectBackend(e.target.value as BackendKind)}>
+            {providers.map((provider) => <option key={provider} value={provider}>{provider} · {selectedDevice?.capabilities.clis?.[provider]}</option>)}
+            {providers.length === 0 && <option value="">无可用 provider</option>}
+          </select>
+        </Field>
+        <Field label={backend === "claude" ? "Model · endpoint validated" : "Model · optional override"}>
+          <input className={inputCls} list={backend === "claude" ? "model-options" : undefined} value={model} onChange={(e) => setModel(e.target.value)} placeholder="CLI default" />
+          <datalist id="model-options">{modelOptions.map((m) => <option key={m} value={m} />)}</datalist>
+        </Field>
+        <div className="md:col-span-2">
+          <Field label="Working directory · absolute path on device">
+            <input className={`${inputCls} font-mono text-xs`} value={workdir} onChange={(e) => setWorkdir(e.target.value)} placeholder="/Users/xxx/repo" />
+          </Field>
+        </div>
+        <Field label="Permission mode">
+          <select className={inputCls} value={permission} onChange={(e) => setPermission(e.target.value)}>
+            {PERMISSIONS.filter((p) => backend !== "codex" || p !== "default").map((p) => <option key={p} value={p}>{p}{p === "default" ? " · tools require approval" : ""}</option>)}
+          </select>
+        </Field>
+        <Field label="Workspace isolation">
+          <select className={inputCls} value={isolation} onChange={(e) => setIsolation(e.target.value)}>
+            <option value="none">none</option>
+            <option value="worktree">worktree · per-issue git worktree</option>
+          </select>
+        </Field>
+        <div className="md:col-span-2">
+          <Field label="Instruction · optional system prompt">
+            <textarea className={`${inputCls} h-20 resize-y`} value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="给这个 Agent 一条长期有效的工作约束…" />
+          </Field>
+        </div>
+      </div>
       <ModalFooter>
         <button className={btnGhost} onClick={onClose}>
           取消
         </button>
-        <button className={btnPrimary} disabled={busy || !name.trim() || !device || !workdir.trim()} onClick={submit}>
+        <button className={btnPrimary} disabled={busy || !name.trim() || !device || !backend || !workdir.trim()} onClick={submit}>
           {busy ? "创建中…" : "创建"}
         </button>
       </ModalFooter>

@@ -12,6 +12,7 @@ import type { Conversation, HarborAgent, Run, RunSpec, ServerMsg } from "../prot
 import type { HarborStore } from "./store.js";
 import type { RunBus } from "./bus.js";
 import { transitionConversation } from "./statemachine.js";
+import { renderRunPrompt } from "./prompt-wrapper.js";
 
 /** 传输面（由 ws DeviceHub 实现）——注入接口避免 scheduler ↔ ws 循环依赖 */
 export interface DeviceTransport {
@@ -88,7 +89,8 @@ export class RunCoordinator {
       const spec: RunSpec = {
         backend: agent.backend,
         model: agent.model,
-        prompt: run.prompt,
+        // runs.prompt 保留原文；只在 dispatch 瞬间按来源包裹结构化上下文。
+        prompt: renderRunPrompt(this.store, { run, conversation: conv, agent }),
         workdir: agent.workdir,
         permission: agent.permission,
         systemPrompt: agent.instruction,

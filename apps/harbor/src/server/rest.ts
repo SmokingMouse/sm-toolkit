@@ -16,6 +16,7 @@ import type {
   ConversationStatus,
   IsolationKind,
   Origin,
+  PromptSource,
   Run,
   RunStreamFrame,
 } from "../protocol.js";
@@ -27,6 +28,13 @@ import type { RunCoordinator } from "./scheduler.js";
 import type { ApprovalService } from "./approvals.js";
 import { AutomationService } from "./automation.js";
 import { transitionConversation } from "./statemachine.js";
+import {
+  getPromptWrapperConfig,
+  listPromptWrapperConfigs,
+  PROMPT_SOURCES,
+  PROMPT_WRAPPER_VARIABLES,
+  validatePromptTemplate,
+} from "./prompt-wrapper.js";
 
 const PERMISSIONS = ["readonly", "auto-edit", "full", "default"];
 
@@ -64,6 +72,32 @@ export function buildRest(
 
   app.get("/api/health", (c) => c.json({ ok: true }));
 
+  // ---- settings / prompt wrappers ----
+
+  app.get("/api/settings/prompt-wrappers", (c) =>
+    c.json({ wrappers: listPromptWrapperConfigs(store), variables: PROMPT_WRAPPER_VARIABLES }),
+  );
+
+  app.patch("/api/settings/prompt-wrappers", async (c) => {
+    const b = (await c.req.json()) as { source?: string; enabled?: boolean; template?: string };
+    if (!PROMPT_SOURCES.includes(b.source as PromptSource)) {
+      bad(`source 可选 ${PROMPT_SOURCES.join("/")}（收到 "${b.source}"）`);
+    }
+    if (typeof b.enabled !== "boolean") bad("需要 enabled: true/false");
+    if (typeof b.template !== "string") bad("需要 template: string");
+    const invalid = validatePromptTemplate(b.template);
+    if (invalid) bad(invalid);
+    store.setPromptTemplate(b.source as PromptSource, b.enabled, b.template, Date.now());
+    return c.json(getPromptWrapperConfig(store, b.source as PromptSource));
+  });
+
+  app.delete("/api/settings/prompt-wrappers/:source", (c) => {
+    const source = c.req.param("source") as PromptSource;
+    if (!PROMPT_SOURCES.includes(source)) bad(`source 可选 ${PROMPT_SOURCES.join("/")}`);
+    store.resetPromptTemplate(source);
+    return c.json(getPromptWrapperConfig(store, source));
+  });
+
   // ---- devices ----
 
   app.get("/api/devices", (c) => c.json(store.listDevices(hub.onlineIds())));
@@ -90,8 +124,9 @@ export function buildRest(
     if (!b.workdir.startsWith("/") && !b.workdir.startsWith("~")) {
       bad(`workdir 必须是绝对路径（收到 "${b.workdir}"）`);
     }
-    const backend = (b.backend ?? "claude") as BackendKind;
-    if (backend !== "claude" && backend !== "codex") bad(`backend 只支持 claude/codex（收到 "${b.backend}"）`);
+    if (b.backend !== undefined && b.backend !== "claude" && b.backend !== "codex") {
+      bad(`backend 只支持 claude/codex（收到 "${b.backend}"）`);
+    }
     const permission = b.permission ?? "auto-edit";
     if (!PERMISSIONS.includes(permission)) bad(`permission 可选 ${PERMISSIONS.join("/")}（收到 "${b.permission}"）`);
     const isolation = (b.isolation ?? "none") as IsolationKind;
@@ -103,11 +138,24 @@ export function buildRest(
     if (!device) bad(`device "${b.device}" 未注册（先在该设备上启动 harbord）`);
     if (store.getAgentByName(b.name)) bad(`agent 名 "${b.name}" 已存在`);
 
-    // model 校验：空 = CLI 默认模型放行；裸 tier 别名放行（claude CLI 原生认，不进 endpoints.yaml）；
-    // 其余必须在该设备能力上报的 endpoints 清单内。
-    if (b.model) {
+    const installed = (["claude", "codex"] as BackendKind[]).filter(
+      (provider) => !!device.capabilities.clis?.[provider],
+    );
+    const backend = (b.backend ?? (installed.includes("claude") ? "claude" : installed[0])) as BackendKind | undefined;
+    if (!backend || !installed.includes(backend)) {
+      bad(
+        `provider "${b.backend ?? backend ?? "(默认)"}" 在设备 "${device.name}" 上不可用。` +
+          `可用 provider：${installed.length ? installed.join(", ") : "无（请先安装 claude 或 codex CLI 并重启 harbord）"}`,
+      );
+    }
+    if (backend === "codex" && permission === "default") {
+      bad('codex CLI 不支持 Harbor 动态审批；permission 请选 readonly/auto-edit/full（"default" 仅 Claude 可用）');
+    }
+
+    // Claude 接入 endpoints.yaml，需前置校验；CodexBackend 不接 endpoints，model 由 codex CLI 校验。
+    if (b.model && backend === "claude") {
       const bare = b.model.startsWith("claude-") ? b.model.slice("claude-".length) : b.model;
-      const isNativeTier = backend === "claude" && NATIVE_TIER_ALIASES.includes(bare);
+      const isNativeTier = NATIVE_TIER_ALIASES.includes(bare);
       const eps = device.capabilities.endpoints ?? [];
       if (!isNativeTier && !eps.includes(b.model)) {
         bad(
