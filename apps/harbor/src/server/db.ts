@@ -489,6 +489,73 @@ const MIGRATIONS: string[] = [
     WHERE repository_id IS NULL;
   DROP TABLE agent_repository_backfill_v10;
   `,
+  // v11 —— Workspace 级 Mew Prompt pipeline：session context + event trigger
+  `
+  ALTER TABLE runs ADD COLUMN prompt_event TEXT NOT NULL DEFAULT 'event.issue.message_created'
+    CHECK (prompt_event IN (
+      'event.issue.assigned','event.issue.mentioned','event.issue.message_created',
+      'event.chat.message_created','event.automation.schedule','event.automation.manual'
+    ));
+  ALTER TABLE runs ADD COLUMN trigger_ref TEXT;
+  UPDATE runs
+    SET prompt_event = CASE
+      WHEN EXISTS (
+        SELECT 1 FROM conversations c
+        WHERE c.id = runs.conversation_id AND c.origin = 'automation'
+      ) THEN 'event.automation.schedule'
+      WHEN EXISTS (
+        SELECT 1 FROM conversations c
+        WHERE c.id = runs.conversation_id AND c.kind = 'chat'
+      ) THEN 'event.chat.message_created'
+      ELSE 'event.issue.message_created'
+    END;
+  UPDATE runs
+    SET trigger_ref = (
+      SELECT c.origin_ref FROM conversations c WHERE c.id = runs.conversation_id
+    )
+    WHERE prompt_event IN ('event.automation.schedule','event.automation.manual','event.issue.mentioned');
+
+  CREATE TABLE workspace_prompt_blocks (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    block_key TEXT NOT NULL CHECK (block_key IN (
+      'session.issue.context','event.issue.assigned','event.issue.mentioned','event.issue.message_created',
+      'session.chat.context','event.chat.message_created',
+      'event.automation.schedule','event.automation.manual'
+    )),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    template TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, block_key)
+  );
+
+  -- 旧 issue/chat wrapper 是 context + request 的合并模板。迁到 context 后，renderer
+  -- 识别其中的 request 变量并继续单独渲染，重置该 block 后才切到两段式 pipeline。
+  INSERT INTO workspace_prompt_blocks (workspace_id, block_key, enabled, template, updated_at)
+    SELECT workspace_id, CASE source
+      WHEN 'issue' THEN 'session.issue.context'
+      WHEN 'chat' THEN 'session.chat.context'
+      ELSE 'event.automation.schedule'
+    END, enabled, template, updated_at
+    FROM workspace_prompt_templates;
+  INSERT INTO workspace_prompt_blocks (workspace_id, block_key, enabled, template, updated_at)
+    SELECT workspace_id, 'event.automation.manual', enabled, template, updated_at
+    FROM workspace_prompt_templates WHERE source = 'automation';
+
+  -- 旧 source 被整体禁用时，event 也要透传原始请求，避免迁移后重新启用包装。
+  INSERT INTO workspace_prompt_blocks (workspace_id, block_key, enabled, template, updated_at)
+    SELECT workspace_id, event_key, 0, '', updated_at
+    FROM workspace_prompt_templates
+    JOIN (
+      SELECT 'issue' AS source_key, 'event.issue.assigned' AS event_key
+      UNION ALL SELECT 'issue', 'event.issue.mentioned'
+      UNION ALL SELECT 'issue', 'event.issue.message_created'
+      UNION ALL SELECT 'chat', 'event.chat.message_created'
+    ) legacy_events ON legacy_events.source_key = workspace_prompt_templates.source
+    WHERE workspace_prompt_templates.enabled = 0;
+
+  DROP TABLE workspace_prompt_templates;
+  DROP TABLE prompt_templates;
+  `,
 ];
 
 function normalizeLegacyRepositoryNames(db: Database): void {

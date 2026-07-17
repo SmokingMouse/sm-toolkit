@@ -8,6 +8,7 @@ import {
   listAgents,
   listAutomations,
   listConversations,
+  runAutomation,
   setAutomationEnabled,
   type AutomationLogRow,
   type AutomationWithAgent,
@@ -87,6 +88,7 @@ function AutomationRow({
 }) {
   const toast = useToast();
   const [log, setLog] = useState<AutomationLogRow[] | null>(null);
+  const [running, setRunning] = useState(false);
 
   useEffect(() => {
     if (expanded) {
@@ -117,6 +119,20 @@ function AutomationRow({
     }
   };
 
+  const runNow = async () => {
+    setRunning(true);
+    try {
+      const run = await runAutomation(auto.id);
+      toast(`${auto.name} 已手动触发（${run.id.slice(0, 12)}）`, "success");
+      onChanged();
+      if (expanded) automationLog(auto.id).then(setLog, () => {});
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setRunning(false);
+    }
+  };
+
   return (
     <>
       <tr className="border-b border-line hover:bg-bg/55 last:border-0">
@@ -132,6 +148,9 @@ function AutomationRow({
         <td className="px-4 py-3 text-xs text-dim">{ago(auto.lastFiredAt)}</td>
         <td className="px-4 py-3">
           <div className="flex gap-2 text-xs">
+            <button className="text-accent hover:underline disabled:opacity-50" onClick={runNow} disabled={running}>
+              {running ? "running…" : "run now"}
+            </button>
             <button className="text-accent hover:underline" onClick={toggleEnabled}>
               {auto.enabled ? "disable" : "enable"}
             </button>

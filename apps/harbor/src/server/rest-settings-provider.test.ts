@@ -100,28 +100,28 @@ describe("provider capability validation", () => {
   });
 });
 
-describe("prompt wrapper settings API", () => {
+describe("prompt block settings API", () => {
   test("reads defaults, validates updates, and resets", async () => {
     const { request } = harness();
-    const initial = await request("/api/settings/prompt-wrappers");
-    const initialBody = (await initial.json()) as { wrappers: { source: string; isDefault: boolean }[] };
-    expect(initialBody.wrappers).toHaveLength(3);
-    expect(initialBody.wrappers.every((w) => w.isDefault)).toBe(true);
+    const initial = await request("/api/settings/prompt-blocks");
+    const initialBody = (await initial.json()) as { blocks: { key: string; isDefault: boolean }[] };
+    expect(initialBody.blocks).toHaveLength(8);
+    expect(initialBody.blocks.every((block) => block.isDefault)).toBe(true);
 
-    const invalid = await request("/api/settings/prompt-wrappers", {
+    const invalid = await request("/api/settings/prompt-blocks", {
       method: "PATCH",
-      body: JSON.stringify({ source: "chat", enabled: true, template: "{{unknown}} {{prompt}}" }),
+      body: JSON.stringify({ key: "event.chat.message_created", enabled: true, template: "{{unknown}} {{prompt}}" }),
     });
     expect(invalid.status).toBe(400);
 
-    const saved = await request("/api/settings/prompt-wrappers", {
+    const saved = await request("/api/settings/prompt-blocks", {
       method: "PATCH",
-      body: JSON.stringify({ source: "chat", enabled: false, template: "Request: {{prompt}}" }),
+      body: JSON.stringify({ key: "event.chat.message_created", enabled: false, template: "Request: {{prompt}}" }),
     });
     const savedBody = (await saved.json()) as { enabled: boolean; isDefault: boolean };
     expect(savedBody).toEqual(expect.objectContaining({ enabled: false, isDefault: false }));
 
-    const reset = await request("/api/settings/prompt-wrappers/chat", { method: "DELETE" });
+    const reset = await request("/api/settings/prompt-blocks/event.chat.message_created", { method: "DELETE" });
     expect(((await reset.json()) as { isDefault: boolean }).isDefault).toBe(true);
   });
 });

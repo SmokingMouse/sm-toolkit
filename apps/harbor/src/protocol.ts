@@ -26,6 +26,16 @@ export type RunPurpose = "implementation" | "triage" | "review" | "verification"
 export const RUN_PURPOSES: RunPurpose[] = ["implementation", "triage", "review", "verification"];
 export type Origin = "cli" | "feishu" | "web" | "automation";
 export type PromptSource = "issue" | "chat" | "automation";
+export type PromptBlockPhase = "context" | "event";
+export type PromptContextBlockKey = "session.issue.context" | "session.chat.context";
+export type PromptEventBlockKey =
+  | "event.issue.assigned"
+  | "event.issue.mentioned"
+  | "event.issue.message_created"
+  | "event.chat.message_created"
+  | "event.automation.schedule"
+  | "event.automation.manual";
+export type PromptBlockKey = PromptContextBlockKey | PromptEventBlockKey;
 
 /** daemon 从本机 Runtime 配置目录发现、可同步进 Workspace 的 Skill。 */
 export interface InstalledSkillCapability {
@@ -235,6 +245,10 @@ export interface Run {
   executionRoot: string | null;
   prompt: string;
   purpose: RunPurpose;
+  /** 本次 Run 的触发原因；与 purpose（执行意图）正交，用于选择 event Prompt block。 */
+  promptEvent: PromptEventBlockKey;
+  /** 触发对象引用（如 Automation ID）；append 到既有会话时不能从 Conversation 反推。 */
+  triggerRef: string | null;
   status: RunStatus;
   claudeSessionId: string | null;
   error: string | null;
@@ -317,13 +331,23 @@ export interface UsageRow {
   cachedTokens: number;
 }
 
-/** server 级 Prompt wrapper 配置；isDefault=true 表示尚未写 DB，使用代码内默认值。 */
-export interface PromptWrapperConfig {
+export interface PromptVariableDefinition {
+  name: string;
+  description: string;
+}
+
+/** server 级 Prompt block 配置；context 与 event 在 dispatch 时按 Run 组合。 */
+export interface PromptBlockConfig {
+  key: PromptBlockKey;
   source: PromptSource;
+  phase: PromptBlockPhase;
+  label: string;
+  description: string;
   enabled: boolean;
   template: string;
   isDefault: boolean;
   updatedAt: number | null;
+  variables: PromptVariableDefinition[];
 }
 
 // ── Run 下发规格（server → daemon） ─────────────────────

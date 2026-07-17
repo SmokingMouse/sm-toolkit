@@ -33,7 +33,8 @@ import type {
   IsolationKind,
   IssuePriority,
   Origin,
-  PromptSource,
+  PromptBlockKey,
+  PromptEventBlockKey,
   Run,
   RunEventRow,
   RunPurpose,
@@ -145,6 +146,8 @@ interface RunRow {
   execution_root: string | null;
   prompt: string;
   purpose: string;
+  prompt_event: string;
+  trigger_ref: string | null;
   status: string;
   claude_session_id: string | null;
   error: string | null;
@@ -193,9 +196,9 @@ interface AutomationRow {
   last_fired_at: number | null;
 }
 
-interface PromptTemplateRow {
+interface PromptBlockRow {
   workspace_id: string;
-  source: string;
+  block_key: string;
   enabled: number;
   template: string;
   updated_at: number;
@@ -228,8 +231,8 @@ interface RepositoryMountRow {
   created_at: number;
 }
 
-export interface PromptTemplateOverride {
-  source: PromptSource;
+export interface PromptBlockOverride {
+  key: PromptBlockKey;
   enabled: boolean;
   template: string;
   updatedAt: number;
@@ -404,6 +407,8 @@ function toRun(r: RunRow): Run {
     executionRoot: r.execution_root,
     prompt: r.prompt,
     purpose: r.purpose as RunPurpose,
+    promptEvent: r.prompt_event as PromptEventBlockKey,
+    triggerRef: r.trigger_ref,
     status: r.status as RunStatus,
     claudeSessionId: r.claude_session_id,
     error: r.error,
@@ -1309,6 +1314,8 @@ export class HarborStore {
       executionRoot?: string | null;
       prompt: string;
       purpose?: RunPurpose;
+      promptEvent: PromptEventBlockKey;
+      triggerRef?: string | null;
     },
     now: number,
   ): Run {
@@ -1318,8 +1325,8 @@ export class HarborStore {
     this.db.run(
       `INSERT INTO runs
        (id, workspace_id, conversation_id, agent_id, device_id, repository_id, repository_mount_id, execution_root,
-        prompt, purpose, status, queued_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,'queued',?)`,
+        prompt, purpose, prompt_event, trigger_ref, status, queued_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'queued',?)`,
       [
         id,
         workspaceId,
@@ -1331,6 +1338,8 @@ export class HarborStore {
         r.executionRoot ?? null,
         r.prompt,
         r.purpose ?? "implementation",
+        r.promptEvent,
+        r.triggerRef ?? null,
         now,
       ],
     );
@@ -1685,17 +1694,17 @@ export class HarborStore {
     return r?.agent_id ?? null;
   }
 
-  // ---- prompt_templates（P4.6 server 级 Prompt wrapper） ----
+  // ---- prompt_blocks（session context + event trigger） ----
 
-  getPromptTemplate(workspaceId: string, source: PromptSource): PromptTemplateOverride | null {
+  getPromptBlock(workspaceId: string, key: PromptBlockKey): PromptBlockOverride | null {
     const r = this.db
-      .query<PromptTemplateRow, [string, string]>(
-        "SELECT * FROM workspace_prompt_templates WHERE workspace_id = ? AND source = ?",
+      .query<PromptBlockRow, [string, string]>(
+        "SELECT * FROM workspace_prompt_blocks WHERE workspace_id = ? AND block_key = ?",
       )
-      .get(workspaceId, source);
+      .get(workspaceId, key);
     return r
       ? {
-          source: r.source as PromptSource,
+          key: r.block_key as PromptBlockKey,
           enabled: r.enabled === 1,
           template: r.template,
           updatedAt: r.updated_at,
@@ -1703,16 +1712,16 @@ export class HarborStore {
       : null;
   }
 
-  setPromptTemplate(workspaceId: string, source: PromptSource, enabled: boolean, template: string, now: number): void {
+  setPromptBlock(workspaceId: string, key: PromptBlockKey, enabled: boolean, template: string, now: number): void {
     this.db.run(
-      `INSERT INTO workspace_prompt_templates (workspace_id, source, enabled, template, updated_at) VALUES (?,?,?,?,?)
-       ON CONFLICT(workspace_id, source) DO UPDATE SET enabled = excluded.enabled, template = excluded.template, updated_at = excluded.updated_at`,
-      [workspaceId, source, enabled ? 1 : 0, template, now],
+      `INSERT INTO workspace_prompt_blocks (workspace_id, block_key, enabled, template, updated_at) VALUES (?,?,?,?,?)
+       ON CONFLICT(workspace_id, block_key) DO UPDATE SET enabled = excluded.enabled, template = excluded.template, updated_at = excluded.updated_at`,
+      [workspaceId, key, enabled ? 1 : 0, template, now],
     );
   }
 
-  resetPromptTemplate(workspaceId: string, source: PromptSource): void {
-    this.db.run("DELETE FROM workspace_prompt_templates WHERE workspace_id = ? AND source = ?", [workspaceId, source]);
+  resetPromptBlock(workspaceId: string, key: PromptBlockKey): void {
+    this.db.run("DELETE FROM workspace_prompt_blocks WHERE workspace_id = ? AND block_key = ?", [workspaceId, key]);
   }
 
   // ---- usage（P3 报表） ----

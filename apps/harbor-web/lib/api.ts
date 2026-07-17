@@ -23,8 +23,9 @@ import type {
   HarborWorkspace,
   IssuePriority,
   ModelRouteCapability,
+  PromptBlockConfig,
+  PromptBlockKey,
   PromptSource,
-  PromptWrapperConfig,
   Run,
   RunStreamFrame,
   RepositoryMount,
@@ -50,8 +51,9 @@ export type {
   HarborWorkspace,
   IssuePriority,
   ModelRouteCapability,
+  PromptBlockConfig,
+  PromptBlockKey,
   PromptSource,
-  PromptWrapperConfig,
   Run,
   RunStreamFrame,
   RepositoryMount,
@@ -258,6 +260,8 @@ export const createAutomation = (body: Record<string, unknown>) =>
   req<Automation>("POST", "/api/automations", body);
 export const setAutomationEnabled = (id: string, enabled: boolean) =>
   req<Automation>("PATCH", `/api/automations/${encodeURIComponent(id)}`, { enabled });
+export const runAutomation = (id: string) =>
+  req<Run>("POST", `/api/automations/${encodeURIComponent(id)}/run`);
 export const deleteAutomation = (id: string) =>
   req<{ ok: boolean }>("DELETE", `/api/automations/${encodeURIComponent(id)}`);
 export const automationLog = (id: string) =>
@@ -267,17 +271,16 @@ export const usage = (days: number) => req<UsageRow[]>("GET", `/api/usage?days=$
 
 export const health = () => req<{ ok: boolean }>("GET", "/api/health");
 
-export interface PromptWrapperSettings {
-  wrappers: PromptWrapperConfig[];
-  variables: string[];
+export interface PromptBlockSettings {
+  blocks: PromptBlockConfig[];
 }
 
-export const promptWrapperSettings = () =>
-  req<PromptWrapperSettings>("GET", "/api/settings/prompt-wrappers");
-export const savePromptWrapper = (body: { source: PromptSource; enabled: boolean; template: string }) =>
-  req<PromptWrapperConfig>("PATCH", "/api/settings/prompt-wrappers", body);
-export const resetPromptWrapper = (source: PromptSource) =>
-  req<PromptWrapperConfig>("DELETE", `/api/settings/prompt-wrappers/${encodeURIComponent(source)}`);
+export const promptBlockSettings = () =>
+  req<PromptBlockSettings>("GET", "/api/settings/prompt-blocks");
+export const savePromptBlock = (body: { key: PromptBlockKey; enabled: boolean; template: string }) =>
+  req<PromptBlockConfig>("PATCH", "/api/settings/prompt-blocks", body);
+export const resetPromptBlock = (key: PromptBlockKey) =>
+  req<PromptBlockConfig>("DELETE", `/api/settings/prompt-blocks/${encodeURIComponent(key)}`);
 
 // ── SSE：run 事件流（EventSource 带不了 Authorization header → fetch 手解） ──
 

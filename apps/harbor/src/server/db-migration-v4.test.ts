@@ -4,8 +4,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "./db.js";
+import { renderRunPrompt } from "./prompt-wrapper.js";
+import { HarborStore } from "./store.js";
 
-test("legacy database migrates through v10 without losing conversations or runs", () => {
+test("legacy database migrates through v11 without losing conversations, runs, or prompts", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v4-"));
   const path = join(dir, "legacy.db");
   try {
@@ -49,29 +51,37 @@ test("legacy database migrates through v10 without losing conversations or runs"
         last_fired_at INTEGER
       );
       CREATE TABLE prompt_templates (
-        source TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1,
-        template TEXT NOT NULL, updated_at INTEGER NOT NULL
+        source TEXT PRIMARY KEY CHECK (source IN ('issue','chat','automation')),
+        enabled INTEGER NOT NULL DEFAULT 1,
+        template TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
       );
       INSERT INTO devices VALUES ('device_1', 'worker', 'hash', '{}', NULL, 1);
       INSERT INTO agents VALUES ('agent_1', 'builder', NULL, 'device_1', 'claude', NULL, 'auto-edit', '/repo', 'none', NULL, 2, NULL);
       INSERT INTO conversations VALUES ('conversation_1', 'issue', 'Legacy issue', 'agent_1', 'doing', '/repo/wt', 'session_1', 'cli', NULL, 3, 4);
       INSERT INTO runs VALUES ('run_1', 'conversation_1', 'agent_1', 'device_1', 'legacy prompt', 'succeeded', 'session_1', NULL, 0.1, 10, 20, 5, 5, 6, 7);
+      INSERT INTO prompt_templates VALUES ('issue', 1, 'Legacy={{conversation.id}} Request={{prompt}}', 8);
       PRAGMA user_version = 3;
     `);
     legacy.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(10);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(11);
     expect(
       migrated.query<{ agent_id: string | null; description: string | null; priority: string; status: string }, []>(
         "SELECT agent_id, description, priority, status FROM conversations WHERE id = 'conversation_1'",
       ).get(),
     ).toEqual({ agent_id: "agent_1", description: null, priority: "medium", status: "review" });
     expect(
-      migrated.query<{ purpose: string; prompt: string }, []>(
-        "SELECT purpose, prompt FROM runs WHERE id = 'run_1'",
+      migrated.query<{ purpose: string; prompt: string; prompt_event: string; trigger_ref: string | null }, []>(
+        "SELECT purpose, prompt, prompt_event, trigger_ref FROM runs WHERE id = 'run_1'",
       ).get(),
-    ).toEqual({ purpose: "implementation", prompt: "legacy prompt" });
+    ).toEqual({
+      purpose: "implementation",
+      prompt: "legacy prompt",
+      prompt_event: "event.issue.message_created",
+      trigger_ref: null,
+    });
     expect(
       migrated.query<{ workspace_id: string; repository_name: string; path: string }, []>(
         `SELECT a.workspace_id, r.name AS repository_name, m.path
@@ -91,6 +101,19 @@ test("legacy database migrates through v10 without losing conversations or runs"
         "SELECT workspace_id, execution_root FROM runs WHERE id = 'run_1'",
       ).get(),
     ).toEqual({ workspace_id: "ws_personal", execution_root: "/repo/wt" });
+    expect(
+      migrated.query<{ enabled: number; template: string }, []>(
+        "SELECT enabled, template FROM workspace_prompt_blocks WHERE workspace_id = 'ws_personal' AND block_key = 'session.issue.context'",
+      ).get(),
+    ).toEqual({ enabled: 1, template: "Legacy={{conversation.id}} Request={{prompt}}" });
+    const migratedStore = new HarborStore(migrated);
+    expect(
+      renderRunPrompt(migratedStore, {
+        run: migratedStore.getRun("run_1")!,
+        conversation: migratedStore.getConversation("conversation_1")!,
+        agent: migratedStore.getAgent("agent_1")!,
+      }),
+    ).toBe("Legacy=conversation_1 Request=legacy prompt");
     expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
 
     migrated.run(
@@ -120,7 +143,7 @@ test("legacy database migrates through v10 without losing conversations or runs"
   }
 });
 
-test("v10 upgrades an already-running v9 database and preserves unbound Agents", () => {
+test("v11 upgrades an already-running v9 database and preserves unbound Agents", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v9-"));
   const path = join(dir, "v9.db");
   try {
@@ -161,17 +184,36 @@ test("v10 upgrades an already-running v9 database and preserves unbound Agents",
         target_conversation_id TEXT, notify_chat_id TEXT, enabled INTEGER NOT NULL DEFAULT 1,
         last_fired_at INTEGER
       );
+      CREATE TABLE runs (
+        id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id), conversation_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL, device_id TEXT NOT NULL, repository_id TEXT REFERENCES repositories(id),
+        repository_mount_id TEXT, execution_root TEXT, prompt TEXT NOT NULL,
+        purpose TEXT NOT NULL DEFAULT 'implementation', status TEXT NOT NULL DEFAULT 'queued',
+        claude_session_id TEXT, error TEXT, cost_usd REAL, input_tokens INTEGER, output_tokens INTEGER,
+        cached_tokens INTEGER, queued_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER
+      );
+      CREATE TABLE prompt_templates (
+        source TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1,
+        template TEXT NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE workspace_prompt_templates (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        source TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+        template TEXT NOT NULL, updated_at INTEGER NOT NULL,
+        PRIMARY KEY (workspace_id, source)
+      );
       INSERT INTO workspaces VALUES ('ws_personal', 'Personal', 'personal', NULL, 1, NULL);
       INSERT INTO devices VALUES ('device_1', 'worker', 'hash', '{}', NULL, 1);
       INSERT INTO agents VALUES ('agent_1', 'ws_personal', 'unbound', NULL, 'device_1', 'claude', NULL, 'auto-edit', NULL, 'none', NULL, 2, NULL);
       INSERT INTO conversations VALUES ('conversation_1', 'ws_personal', 'issue', 'Keep me', 'agent_1', NULL, 'medium', 'backlog', NULL, NULL, NULL, NULL, 'web', NULL, 3, 3);
       INSERT INTO automations VALUES ('automation_1', 'ws_personal', 'nightly', 'agent_1', NULL, '0 0 * * *', 'Run', 'new_issue', NULL, NULL, 1, NULL);
+      INSERT INTO workspace_prompt_templates VALUES ('ws_personal', 'issue', 1, 'Legacy={{prompt}}', 4);
       PRAGMA user_version = 9;
     `);
     v9.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(10);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(11);
     const agent = migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM agents WHERE id = 'agent_1'").get();
     expect(agent?.repository_id).toStartWith("repo_unconfigured_");
     expect(migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM conversations WHERE id = 'conversation_1'").get()).toEqual(agent);
@@ -179,6 +221,11 @@ test("v10 upgrades an already-running v9 database and preserves unbound Agents",
     expect(
       migrated.query<{ name: string }, []>("PRAGMA table_info(agents)").all().map((column) => column.name),
     ).toContain("repository_id");
+    expect(
+      migrated.query<{ template: string }, []>(
+        "SELECT template FROM workspace_prompt_blocks WHERE workspace_id = 'ws_personal' AND block_key = 'session.issue.context'",
+      ).get(),
+    ).toEqual({ template: "Legacy={{prompt}}" });
     expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
     migrated.close();
   } finally {

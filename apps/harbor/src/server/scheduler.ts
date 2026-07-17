@@ -8,11 +8,20 @@
  */
 
 import type { Cost } from "@sm/agent";
-import type { Conversation, HarborAgent, HarborSkill, Run, RunPurpose, RunSpec, ServerMsg } from "../protocol.js";
+import type {
+  Conversation,
+  HarborAgent,
+  HarborSkill,
+  PromptEventBlockKey,
+  Run,
+  RunPurpose,
+  RunSpec,
+  ServerMsg,
+} from "../protocol.js";
 import type { HarborStore } from "./store.js";
 import type { RunBus } from "./bus.js";
 import { transitionConversation } from "./statemachine.js";
-import { renderRunPrompt } from "./prompt-wrapper.js";
+import { inferPromptEvent, renderRunPrompt } from "./prompt-wrapper.js";
 import { DeliveryService } from "./delivery.js";
 
 /** 传输面（由 ws DeviceHub 实现）——注入接口避免 scheduler ↔ ws 循环依赖 */
@@ -38,7 +47,14 @@ export class RunCoordinator {
   }
 
   /** 入队并尝试即时下发（REST/飞书/automation 共用）。同 conversation 串行——防 resume 分叉 */
-  enqueueRun(conv: Conversation, agent: HarborAgent, prompt: string, purpose: RunPurpose = "implementation"): Run {
+  enqueueRun(
+    conv: Conversation,
+    agent: HarborAgent,
+    prompt: string,
+    purpose: RunPurpose = "implementation",
+    promptEvent?: PromptEventBlockKey,
+    triggerRef?: string | null,
+  ): Run {
     if (conv.workspaceId !== agent.workspaceId) {
       throw new Error(`Agent "${agent.name}" 不属于当前 Workspace，不能跨作用域执行`);
     }
@@ -100,6 +116,7 @@ export class RunCoordinator {
         }
       }
     }
+    const event = promptEvent ?? inferPromptEvent(conv, this.store.listRunsByConversation(conv.id).length > 0);
     const run = this.store.createRun(
       {
         workspaceId: conv.workspaceId,
@@ -111,6 +128,8 @@ export class RunCoordinator {
         executionRoot: conv.worktreePath ?? mount.path,
         prompt,
         purpose,
+        promptEvent: event,
+        triggerRef: triggerRef ?? conv.originRef,
       },
       Date.now(),
     );

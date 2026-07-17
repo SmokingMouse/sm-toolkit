@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-Harbor P4.14「Workspace / Repository scope」已按 Mew 心智模型收口：Workspace 只组织工作视图、不配置统一仓库；每个 Agent 必绑 Repository + Device checkout，Issue / Chat / AI draft / Automation 只选 Agent 并继承代码上下文；Run 仍坚持单仓库执行。下一步用真实双机 checkout 验证跨 Device mount，并接真实 Codebase/GitHub Provider；P5 时间性验证仍等待真飞书 / automation 7 天 / dogfood 一周。
+Harbor P4.15「Mew Prompt workflows」已完成：Workspace 级 Prompt 配置从三类整块 wrapper 拆成 `session context + event trigger` 两段式 pipeline，Run 持久化 Assigned / Mentioned / New message / Schedule / Manual 触发原因；Workspace / Repository scope 与单仓库执行约束保持不变。下一步用真实双机 checkout 验证跨 Device mount，并接真实 Codebase/GitHub Provider；P5 时间性验证仍等待真飞书 / automation 7 天 / dogfood 一周。
 
 ## Goals
 
@@ -24,10 +24,11 @@ Harbor P4.14「Workspace / Repository scope」已按 Mew 心智模型收口：Wo
 - [x] @sm/channel-feishu：飞书 Channel 适配（从 SelfAgent 移植，薄实现）
 - [x] 根级 `bun run setup` 引导流程（配模型 + 注册 SDK + 注册全局命令 + 按需装 app）
 - [x] agent-gateway 统一配置源（已迁移——见 2026-07-11 session；agent-gateway 独立仓库整体退役，能力拍平进 @sm/agent）
-- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 主方案 `progress/harbor.md`。P1–P4.14 已完成（Mew 对标、模型路由、敏捷闭环、AI draft、Skill、Delivery control plane 与 Workspace/Repository scope）。产品机制层只剩真实 SCM/CD Provider；P5 时间性验证仍需真双机 Tailscale、真飞书群、automation 7 天与真实负载一周
+- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 主方案 `progress/harbor.md`。P1–P4.15 已完成（Mew 对标、模型路由、敏捷闭环、AI draft、Skill、Delivery control plane、Workspace/Repository scope 与 event-aware Prompt pipeline）。产品机制层只剩真实 SCM/CD Provider；P5 时间性验证仍需真双机 Tailscale、真飞书群、automation 7 天与真实负载一周
 
 ## Verified Facts
 
+- **Harbor Prompt 配置是 Workspace 级两段式 pipeline**（2026-07-17 实测）：Issue / Chat 在 dispatch 时组合稳定 `session context` 与本次 `event trigger`；Automation 只选 schedule/manual event。Run 持久化 `promptEvent` 与 `triggerRef`，不从可变 Conversation 事后猜触发来源；event block 停用时透传原始请求，旧 wrapper 无损迁移且不会重复拼接。
 - **Repository 的唯一产品配置源是 Agent**（2026-07-17 实测）：Workspace 只隔离 Agents / Skills / Conversations / Automations / prompt settings / Usage，不配置仓库地址；每个 Agent 必须绑定一个 Repository，且该 Repository 在 Agent Device 上必须有 checkout mount。Issue / Chat / AI draft / Automation 拒绝任务级 override，指派时继承 Agent Repository；Run 冻结 repository / mount / execution root，Review Agent 必须绑定实现仓库。
 - **Issue Done 与 Agent 自报完成解耦**（2026-07-17 实测）：代码 Issue 建立 Delivery 后，人工验收只更新 `review_status`，不会直接 Done；只有 CI passed + merged，且无需部署或 deployment succeeded，control plane 才以 system actor 推进 Done 并清理 worktree。新 implementation 或 MR/branch 引用变化都会使未合并 Delivery 的人工验收和 CI 证据失效；merged 后在原 Issue 返工会被调度层拒绝。
 - **Harbor Skill 绑定不是 UI 标签**（2026-07-17 实测）：daemon 只从显式 Runtime Skill 目录探测 `SKILL.md`；同步后 Harbor 保存 Workspace 快照，runtime 来源限制在同 Device/兼容 Runtime；scheduler dispatch 时把 Agent instruction + 当前 Skill 绑定合成 system prompt，Claude 走 `--system-prompt`、Codex 由 Backend inline。Skill 归档会立即解除绑定。
@@ -45,6 +46,13 @@ Harbor P4.14「Workspace / Repository scope」已按 Mew 心智模型收口：Wo
 - **Next**：Issue 交人工验收；lockfile 双轨问题待决策。
 
 ## Session Log
+
+### 2026-07-17 — P4.15 Mew Prompt workflows
+- **Evidence**：只读实测 Mew Prompts 页面与线上 bundle，确认 8 个可见 block：Issue context/assigned/mentioned/message、Chat context/message、Automation schedule/manual；另有当前 Harbor 尚无入口的隐藏 webhook block。
+- **Decision**：`Run purpose` 表示执行意图，`promptEvent` 表示触发原因，两者正交并持久化。Prompt override 继续按 Workspace 隔离；旧 issue/chat wrapper 若含 request 变量则保持旧合并语义，reset 后自然切到两段式 pipeline。
+- **Done**：SQLite v11 `workspace_prompt_blocks` + Run trigger fields；dispatch renderer 组合 context/event；Settings 8-block 编辑器与变量说明；Automation `run now`，manual/schedule 使用不同边界；与 P4.14 Workspace/Repository 分支完成语义合并。
+- **Verified**：Harbor server 24 tests / 169 assertions ✓；根 TypeScript build、Harbor build、harbor-web typecheck、Next production build（12 static pages）✓；独立 worktree 阶段完成桌面与 390px Settings 浏览器验收。
+- **Next**：隐藏 webhook trigger 等 Harbor 真有对应入口后再加，不先画空能力；P5 与真实 SCM/CD Provider 计划不变。
 
 ### 2026-07-17 — P4.14 Workspace / Repository scope
 - **Decision**：Workspace 是面向用户的逻辑 scope，不配置 Repository 地址；Agent 必须绑定 Repository + Device checkout，Conversation 不独立选择仓库，Run 只保存派生快照。新 ADR `progress/decisions/2026-07-17-harbor-agent-repository-binding.md` 取代上一版“Agent 可选默认仓库”的关系。
