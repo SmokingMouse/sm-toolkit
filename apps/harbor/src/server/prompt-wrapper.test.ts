@@ -19,7 +19,7 @@ function fixtures(origin: Conversation["origin"] = "web", kind: Conversation["ki
     description: "Implement the control plane",
     priority: "medium",
     status: kind === "issue" ? "backlog" : "open",
-    repositoryId: null,
+    repositoryId: "repository_1",
     worktreePath: null,
     worktreeMountId: null,
     claudeSessionId: null,
@@ -37,7 +37,7 @@ function fixtures(origin: Conversation["origin"] = "web", kind: Conversation["ki
     backend: "claude",
     model: "sonnet",
     permission: "auto-edit",
-    defaultRepositoryId: null,
+    repositoryId: "repository_1",
     isolation: "none",
     instruction: null,
     skillIds: [],
@@ -50,8 +50,8 @@ function fixtures(origin: Conversation["origin"] = "web", kind: Conversation["ki
     conversationId: conversation.id,
     agentId: agent.id,
     deviceId: agent.deviceId,
-    repositoryId: null,
-    repositoryMountId: null,
+    repositoryId: "repository_1",
+    repositoryMountId: "mount_1",
     executionRoot: "/repo",
     prompt: "Implement the missing page",
     purpose: "implementation",
@@ -70,7 +70,7 @@ describe("prompt wrapper", () => {
   test("latest migration and defaults render without mutating raw prompt", () => {
     const db = openDb(":memory:");
     const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version;
-    expect(version).toBe(9);
+    expect(version).toBe(10);
     const store = new HarborStore(db);
     const input = fixtures();
     const rendered = renderRunPrompt(store, input);

@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-Harbor P4.14「Workspace / Repository scope」已完成：Workspace 成为 Agents、Skills、Issues、Chats、Automations 与 Usage 的逻辑作用域，Repository 作为可在多 Device 挂载的执行资源独立建模；Run 仍坚持单仓库执行。下一步用真实双机 checkout 验证跨 Device mount，并接真实 Codebase/GitHub Provider；P5 时间性验证仍等待真飞书 / automation 7 天 / dogfood 一周。
+Harbor P4.14「Workspace / Repository scope」已按 Mew 心智模型收口：Workspace 只组织工作视图、不配置统一仓库；每个 Agent 必绑 Repository + Device checkout，Issue / Chat / AI draft / Automation 只选 Agent 并继承代码上下文；Run 仍坚持单仓库执行。下一步用真实双机 checkout 验证跨 Device mount，并接真实 Codebase/GitHub Provider；P5 时间性验证仍等待真飞书 / automation 7 天 / dogfood 一周。
 
 ## Goals
 
@@ -28,7 +28,7 @@ Harbor P4.14「Workspace / Repository scope」已完成：Workspace 成为 Agent
 
 ## Verified Facts
 
-- **Workspace 是逻辑作用域，不是仓库别名**（2026-07-17 实测）：Workspace 隔离 Agents / Skills / Conversations / Automations / prompt settings / Usage；Repository 是 Workspace 内的逻辑代码资源，通过 RepositoryMount 映射到各 Device 的绝对路径。Agent 只保存可选默认 Repository，Conversation 选择本次任务仓库，Run 冻结 repository / mount / execution root；跨仓库工作拆成多个 Run，不让单 Run 获得多个写根。
+- **Repository 的唯一产品配置源是 Agent**（2026-07-17 实测）：Workspace 只隔离 Agents / Skills / Conversations / Automations / prompt settings / Usage，不配置仓库地址；每个 Agent 必须绑定一个 Repository，且该 Repository 在 Agent Device 上必须有 checkout mount。Issue / Chat / AI draft / Automation 拒绝任务级 override，指派时继承 Agent Repository；Run 冻结 repository / mount / execution root，Review Agent 必须绑定实现仓库。
 - **Issue Done 与 Agent 自报完成解耦**（2026-07-17 实测）：代码 Issue 建立 Delivery 后，人工验收只更新 `review_status`，不会直接 Done；只有 CI passed + merged，且无需部署或 deployment succeeded，control plane 才以 system actor 推进 Done 并清理 worktree。新 implementation 或 MR/branch 引用变化都会使未合并 Delivery 的人工验收和 CI 证据失效；merged 后在原 Issue 返工会被调度层拒绝。
 - **Harbor Skill 绑定不是 UI 标签**（2026-07-17 实测）：daemon 只从显式 Runtime Skill 目录探测 `SKILL.md`；同步后 Harbor 保存 Workspace 快照，runtime 来源限制在同 Device/兼容 Runtime；scheduler dispatch 时把 Agent instruction + 当前 Skill 绑定合成 system prompt，Claude 走 `--system-prompt`、Codex 由 Backend inline。Skill 归档会立即解除绑定。
 - **Harbor 的 Model route 是设备级能力，不是 server 全局清单**（2026-07-17 实测）：daemon 从该设备的 sm-toolkit `endpoints.yaml` 上报结构化 `provider:model`；Claude Runtime 只接 native / Anthropic-compatible route，缺 key 的 route 保留为不可选状态，openai-only route 不上报。Codex Runtime 尚不消费 sm-toolkit route，只透传本地 Codex model override。
@@ -47,9 +47,9 @@ Harbor P4.14「Workspace / Repository scope」已完成：Workspace 成为 Agent
 ## Session Log
 
 ### 2026-07-17 — P4.14 Workspace / Repository scope
-- **Decision**：Workspace 是面向用户的逻辑 scope，不与 Repository、目录、Device 或租户等同；Repository 是可跨 Device 配置 mount 的执行资源。Agent 永久归属一个 Workspace 与 Device，但只保存可选默认 Repository；Conversation 选择任务仓库，Run 冻结实际 mount 与 execution root。完整 ADR：`progress/decisions/2026-07-17-harbor-workspace-repository-scope.md`。
-- **Done**：SQLite v9 无损迁移既有数据到 `ws_personal`，并把旧 Agent `workdir` 转为 Repository + Device mount；REST / CLI / Web 全面传递 Workspace scope；新增 Workspace switcher、Repositories 主从页与 Agent / Issue / Chat / Automation 仓库选择；Scheduler、worktree、Reviewer 可见性与 mount 删除保护统一按 repository mount 判定；飞书 Agent 引用支持 `workspace/agent`，旧 CLI `--workdir` 保持兼容。
-- **Verified**：根 TypeScript build ✓；Harbor 27 tests / 159 assertions ✓；Next production build（13 static pages）✓；旧 v4 数据迁移至 v9 且 `foreign_key_check` 为空；真实浏览器完成 Workspace 创建/切换、Repository mount、Agent 默认 Repository、Issue 自动选仓库与 Run mount 快照验收。
+- **Decision**：Workspace 是面向用户的逻辑 scope，不配置 Repository 地址；Agent 必须绑定 Repository + Device checkout，Conversation 不独立选择仓库，Run 只保存派生快照。新 ADR `progress/decisions/2026-07-17-harbor-agent-repository-binding.md` 取代上一版“Agent 可选默认仓库”的关系。
+- **Done**：SQLite v9 无损迁移既有数据到 `ws_personal` 并把旧 Agent `workdir` 转为 Repository + Device mount；追加 v10 将已落地的 `default_repository_id` 迁为必选 `repository_id`，未绑定 Agent 保留为无 mount 的待配置占位，避免改写旧迁移导致已启动用户升级失败。Agent schema/REST 强制 Repository，Agent 创建和详情内联创建、编辑、切换 Repository checkout；删除独立 Repositories 页面与 Issue / Chat / Automation 仓库下拉；REST/CLI 拒绝任务级 override；Scheduler、worktree、Reviewer 可见性与 mount 删除保护统一按 repository mount 判定；飞书 Agent 引用支持 `workspace/agent`，旧 Agent CLI `--workdir` 保持兼容。
+- **Verified**：根 TypeScript build ✓；Harbor 30 tests / 177 assertions ✓，覆盖 Agent 必绑仓库、任务继承、任务级 override 拒绝、Automation 跟随 Agent 当前仓库、Run/mount 快照、Review 同仓校验，以及 v3 / 已落地 v9 两条真实升级路径的 `foreign_key_check`；harbor-web typecheck + Next production build（12 static pages）✓；真实浏览器在 1440×900 / 390×844 完成 Agent 新建与仓库内联配置、Issue Unassigned → 指派后仓库派生、Chat / Automation 单 Agent 入口验收，并修复 Unassigned 被初始化 effect 抢回首个 Agent 的交互 bug。
 - **Next**：在真实双机上为同一 Repository 配置两个 mount，完成跨 Device dogfood；继续实现真实 Codebase/GitHub Delivery Provider。
 
 ### 2026-07-17 — P4.13 Delivery control plane

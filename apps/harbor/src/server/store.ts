@@ -66,7 +66,7 @@ interface AgentRow {
   backend: string;
   model: string | null;
   permission: string;
-  default_repository_id: string | null;
+  repository_id: string;
   isolation: string;
   instruction: string | null;
   created_at: number;
@@ -291,7 +291,7 @@ function toAgent(r: AgentRow): HarborAgent {
     backend: r.backend as BackendKind,
     model: r.model,
     permission: r.permission as PermissionPolicy,
-    defaultRepositoryId: r.default_repository_id,
+    repositoryId: r.repository_id,
     isolation: r.isolation as IsolationKind,
     instruction: r.instruction,
     skillIds: [],
@@ -623,7 +623,7 @@ export class HarborStore {
     const activeRuns = this.db.query<{ count: number }, [string]>("SELECT COUNT(*) AS count FROM runs WHERE repository_mount_id = ? AND status IN ('queued','running')").get(id)?.count ?? 0;
     const worktrees = this.db.query<{ count: number }, [string]>("SELECT COUNT(*) AS count FROM conversations WHERE worktree_mount_id = ?").get(id)?.count ?? 0;
     const agents = this.db.query<{ count: number }, [string, string]>(
-      "SELECT COUNT(*) AS count FROM agents WHERE default_repository_id = ? AND device_id = ? AND archived_at IS NULL",
+      "SELECT COUNT(*) AS count FROM agents WHERE repository_id = ? AND device_id = ? AND archived_at IS NULL",
     ).get(mount.repositoryId, mount.deviceId)?.count ?? 0;
     const conversations = this.db.query<{ count: number }, [string, string]>(
       `SELECT COUNT(*) AS count FROM conversations c JOIN agents a ON a.id = c.agent_id
@@ -703,7 +703,7 @@ export class HarborStore {
     backend: BackendKind;
     model?: string | null;
     permission?: PermissionPolicy;
-    defaultRepositoryId?: string | null;
+    repositoryId?: string;
     /** @deprecated REST/CLI compatibility; converted to Repository + mount immediately. */
     workdir?: string;
     isolation?: IsolationKind;
@@ -711,13 +711,14 @@ export class HarborStore {
   }, now: number): HarborAgent {
     const id = newId("agent");
     const workspaceId = a.workspaceId ?? DEFAULT_WORKSPACE_ID;
-    const defaultRepositoryId =
-      a.defaultRepositoryId === undefined && a.workdir
+    const repositoryId =
+      a.repositoryId === undefined && a.workdir
         ? this.ensureRepositoryForPath(workspaceId, a.deviceId, a.workdir, now).id
-        : (a.defaultRepositoryId ?? null);
+        : a.repositoryId;
+    if (!repositoryId) throw new Error(`Agent "${a.name}" 必须绑定 Repository`);
     this.db.run(
       `INSERT INTO agents
-       (id, workspace_id, name, description, device_id, backend, model, permission, default_repository_id, isolation, instruction, created_at)
+       (id, workspace_id, name, description, device_id, backend, model, permission, repository_id, isolation, instruction, created_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         id,
@@ -728,7 +729,7 @@ export class HarborStore {
         a.backend,
         a.model ?? null,
         a.permission ?? "auto-edit",
-        defaultRepositoryId,
+        repositoryId,
         a.isolation ?? "none",
         a.instruction ?? null,
         now,
@@ -758,6 +759,26 @@ export class HarborStore {
   /** 归档 = 软删除（不出现在派活下拉，历史 run/conversation 引用不悬空）；archived=false 可恢复 */
   setAgentArchived(id: string, archived: boolean, now: number): void {
     this.db.run("UPDATE agents SET archived_at = ? WHERE id = ?", [archived ? now : null, id]);
+  }
+
+  setAgentRepository(id: string, repositoryId: string): void {
+    this.db.run("UPDATE agents SET repository_id = ? WHERE id = ?", [repositoryId, id]);
+  }
+
+  agentRepositoryChangeBlocker(agentId: string): string | null {
+    const run = this.db
+      .query<{ id: string }, [string]>(
+        "SELECT id FROM runs WHERE agent_id = ? AND status IN ('queued','running') LIMIT 1",
+      )
+      .get(agentId);
+    if (run) return `Agent 仍有 active Run（${run.id}）`;
+    const conversation = this.db
+      .query<{ id: string }, [string]>(
+        `SELECT id FROM conversations
+         WHERE agent_id = ? AND worktree_path IS NOT NULL AND status NOT IN ('done','canceled') LIMIT 1`,
+      )
+      .get(agentId);
+    return conversation ? `Issue ${conversation.id} 仍持有 worktree` : null;
   }
 
   listAgents(includeArchived = false, workspaceId?: string): HarborAgent[] {
@@ -945,7 +966,7 @@ export class HarborStore {
     const status: ConversationStatus = c.kind === "issue" ? "backlog" : "open";
     const agent = c.agentId ? this.getAgent(c.agentId) : null;
     const workspaceId = c.workspaceId ?? agent?.workspaceId ?? DEFAULT_WORKSPACE_ID;
-    const repositoryId = c.repositoryId === undefined ? (agent?.defaultRepositoryId ?? null) : c.repositoryId;
+    const repositoryId = c.repositoryId === undefined ? (agent?.repositoryId ?? null) : c.repositoryId;
     this.db.run(
       `INSERT INTO conversations
        (id, workspace_id, kind, title, agent_id, description, priority, status, repository_id, origin, origin_ref, created_at, updated_at)
@@ -1054,13 +1075,14 @@ export class HarborStore {
     return this.getConversation(id)!;
   }
 
-  /** Assignee 变化时清空旧 Agent 的 resume session；Review Agent 不走这里。 */
+  /** Assignee 变化时同步继承 Agent Repository，并清空旧 session；Review Agent 不走这里。 */
   setConversationAssignee(id: string, agentId: string | null, now: number): void {
     const current = this.getConversation(id);
     if (!current || current.agentId === agentId) return;
+    const repositoryId = agentId ? this.getAgent(agentId)?.repositoryId ?? null : null;
     this.db.run(
-      "UPDATE conversations SET agent_id = ?, claude_session_id = NULL, updated_at = ? WHERE id = ?",
-      [agentId, now, id],
+      "UPDATE conversations SET agent_id = ?, repository_id = ?, claude_session_id = NULL, updated_at = ? WHERE id = ?",
+      [agentId, repositoryId, now, id],
     );
   }
 

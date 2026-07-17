@@ -1,5 +1,7 @@
 # Harbor Workspace / Repository Scope
 
+> Status: Superseded by `2026-07-17-harbor-agent-repository-binding.md`. 本文保留当时决策，后续实现以新 ADR 为准。
+
 ## Context
 
 Harbor 需要同时开发多个代码仓库，也需要把不同工作上下文下的 Agents、Skills、Issues 与 Automations 分开。若把 Workspace 直接等同于仓库，跨仓库项目会被拆散；若继续把 Agent 永久绑定 `workdir`，同一个 Agent 配置也无法自然服务多个仓库或多台设备上的不同 checkout。

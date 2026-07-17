@@ -108,7 +108,7 @@ describe("Mew-style Issue workflow", () => {
     const h = workflowHarness();
     const otherDevice = h.store.upsertDevice("other", "hash-2", { clis: { claude: "2.1" }, endpoints: [] }, 5);
     const remoteReviewer = h.store.createAgent(
-      { name: "remote-reviewer", deviceId: otherDevice.id, backend: "claude", workdir: "/other-repo" },
+      { name: "remote-reviewer", deviceId: otherDevice.id, backend: "claude", repositoryId: h.builder.repositoryId },
       6,
     );
     const issue = h.store.createConversation(

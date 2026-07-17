@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "./db.js";
 
-test("v4 migration preserves legacy conversations and runs while adding workflow fields", () => {
+test("legacy database migrates through v10 without losing conversations or runs", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v4-"));
   const path = join(dir, "legacy.db");
   try {
@@ -61,7 +61,7 @@ test("v4 migration preserves legacy conversations and runs while adding workflow
     legacy.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(9);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(10);
     expect(
       migrated.query<{ agent_id: string | null; description: string | null; priority: string; status: string }, []>(
         "SELECT agent_id, description, priority, status FROM conversations WHERE id = 'conversation_1'",
@@ -76,7 +76,7 @@ test("v4 migration preserves legacy conversations and runs while adding workflow
       migrated.query<{ workspace_id: string; repository_name: string; path: string }, []>(
         `SELECT a.workspace_id, r.name AS repository_name, m.path
          FROM agents a
-         JOIN repositories r ON r.id = a.default_repository_id
+         JOIN repositories r ON r.id = a.repository_id
          JOIN repository_mounts m ON m.repository_id = r.id AND m.device_id = a.device_id
          WHERE a.id = 'agent_1'`,
       ).get(),
@@ -114,6 +114,72 @@ test("v4 migration preserves legacy conversations and runs while adding workflow
     expect(
       migrated.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'deliveries'").get(),
     ).toEqual({ name: "deliveries" });
+    migrated.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("v10 upgrades an already-running v9 database and preserves unbound Agents", () => {
+  const dir = mkdtempSync(join(tmpdir(), "harbor-v9-"));
+  const path = join(dir, "v9.db");
+  try {
+    const v9 = new Database(path, { create: true });
+    v9.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, slug TEXT UNIQUE NOT NULL,
+        description TEXT, created_at INTEGER NOT NULL, archived_at INTEGER
+      );
+      CREATE TABLE devices (
+        id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, token_hash TEXT NOT NULL,
+        capabilities TEXT NOT NULL DEFAULT '{}', last_seen_at INTEGER, created_at INTEGER NOT NULL
+      );
+      CREATE TABLE repositories (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), name TEXT NOT NULL,
+        remote_url TEXT, default_branch TEXT NOT NULL DEFAULT 'main', created_at INTEGER NOT NULL,
+        archived_at INTEGER, UNIQUE (workspace_id, name)
+      );
+      CREATE TABLE agents (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), name TEXT NOT NULL,
+        description TEXT, device_id TEXT NOT NULL REFERENCES devices(id), backend TEXT NOT NULL,
+        model TEXT, permission TEXT NOT NULL DEFAULT 'auto-edit',
+        default_repository_id TEXT REFERENCES repositories(id), isolation TEXT NOT NULL DEFAULT 'none',
+        instruction TEXT, created_at INTEGER NOT NULL, archived_at INTEGER, UNIQUE (workspace_id, name)
+      );
+      CREATE TABLE conversations (
+        id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id), kind TEXT NOT NULL, title TEXT,
+        agent_id TEXT REFERENCES agents(id), description TEXT, priority TEXT NOT NULL DEFAULT 'medium',
+        status TEXT NOT NULL DEFAULT 'backlog', repository_id TEXT REFERENCES repositories(id),
+        worktree_path TEXT, worktree_mount_id TEXT, claude_session_id TEXT, origin TEXT NOT NULL DEFAULT 'web',
+        origin_ref TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE automations (
+        id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id), name TEXT NOT NULL,
+        agent_id TEXT NOT NULL REFERENCES agents(id), repository_id TEXT REFERENCES repositories(id),
+        cron TEXT NOT NULL, prompt TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'new_issue',
+        target_conversation_id TEXT, notify_chat_id TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+        last_fired_at INTEGER
+      );
+      INSERT INTO workspaces VALUES ('ws_personal', 'Personal', 'personal', NULL, 1, NULL);
+      INSERT INTO devices VALUES ('device_1', 'worker', 'hash', '{}', NULL, 1);
+      INSERT INTO agents VALUES ('agent_1', 'ws_personal', 'unbound', NULL, 'device_1', 'claude', NULL, 'auto-edit', NULL, 'none', NULL, 2, NULL);
+      INSERT INTO conversations VALUES ('conversation_1', 'ws_personal', 'issue', 'Keep me', 'agent_1', NULL, 'medium', 'backlog', NULL, NULL, NULL, NULL, 'web', NULL, 3, 3);
+      INSERT INTO automations VALUES ('automation_1', 'ws_personal', 'nightly', 'agent_1', NULL, '0 0 * * *', 'Run', 'new_issue', NULL, NULL, 1, NULL);
+      PRAGMA user_version = 9;
+    `);
+    v9.close();
+
+    const migrated = openDb(path);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(10);
+    const agent = migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM agents WHERE id = 'agent_1'").get();
+    expect(agent?.repository_id).toStartWith("repo_unconfigured_");
+    expect(migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM conversations WHERE id = 'conversation_1'").get()).toEqual(agent);
+    expect(migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM automations WHERE id = 'automation_1'").get()).toEqual(agent);
+    expect(
+      migrated.query<{ name: string }, []>("PRAGMA table_info(agents)").all().map((column) => column.name),
+    ).toContain("repository_id");
+    expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
     migrated.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

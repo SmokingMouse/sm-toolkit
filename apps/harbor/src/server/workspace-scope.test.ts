@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ServerMsg } from "../protocol.js";
 import type { ApprovalService } from "./approvals.js";
-import type { AutomationService } from "./automation.js";
+import { AutomationService } from "./automation.js";
 import { RunBus } from "./bus.js";
 import { openDb } from "./db.js";
 import { buildRest } from "./rest.js";
@@ -71,10 +71,12 @@ describe("Workspace REST scope", () => {
 
       const conversationResponse = await request("/api/conversations", {
         method: "POST",
-        body: JSON.stringify({ kind: "issue", agent: agent.id, repository: repository.id, title: "Scoped issue" }),
+        body: JSON.stringify({ kind: "issue", agent: agent.id, title: "Scoped issue" }),
       }, workspace);
       expect(conversationResponse.status).toBe(201);
-      return { agent, conversation: (await conversationResponse.json()) as { id: string } };
+      const conversation = (await conversationResponse.json()) as { id: string; repositoryId: string };
+      expect(conversation.repositoryId).toBe(repository.id);
+      return { agent, conversation };
     };
 
     const personal = await setup(undefined, "/personal/app");
@@ -93,6 +95,54 @@ describe("Workspace REST scope", () => {
     const hidden = await request(`/api/conversations/${personal.conversation.id}`, undefined, product.id);
     expect(hidden.status).toBe(404);
   });
+
+  test("uses Agent as the only Repository configuration source", async () => {
+    const { store, request } = restHarness();
+    const device = store.upsertDevice("worker", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
+
+    const missingRepository = await request("/api/agents", {
+      method: "POST",
+      body: JSON.stringify({ name: "unbound", device: device.id, backend: "claude" }),
+    });
+    expect(missingRepository.status).toBe(400);
+
+    const createRepository = async (name: string, path: string) => {
+      const response = await request("/api/repositories", {
+        method: "POST",
+        body: JSON.stringify({ name, device: device.id, path }),
+      });
+      expect(response.status).toBe(201);
+      return (await response.json()) as { id: string };
+    };
+    const primary = await createRepository("primary", "/code/primary");
+    const unrelated = await createRepository("unrelated", "/code/unrelated");
+    const agentResponse = await request("/api/agents", {
+      method: "POST",
+      body: JSON.stringify({ name: "builder", device: device.id, backend: "claude", repository: primary.id }),
+    });
+    expect(agentResponse.status).toBe(201);
+    const agent = (await agentResponse.json()) as { id: string };
+
+    const override = await request("/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ kind: "issue", agent: agent.id, repository: unrelated.id, title: "Wrong target" }),
+    });
+    expect(override.status).toBe(400);
+
+    const conversationResponse = await request("/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ kind: "issue", agent: agent.id, title: "Inherited target" }),
+    });
+    expect(conversationResponse.status).toBe(201);
+    const conversation = (await conversationResponse.json()) as { id: string; repositoryId: string };
+    expect(conversation.repositoryId).toBe(primary.id);
+
+    const patchOverride = await request(`/api/conversations/${conversation.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ repository: unrelated.id }),
+    });
+    expect(patchOverride.status).toBe(400);
+  });
 });
 
 describe("Repository mount execution snapshots", () => {
@@ -108,7 +158,7 @@ describe("Repository mount execution snapshots", () => {
       name: "builder",
       deviceId: deviceA.id,
       backend: "claude",
-      defaultRepositoryId: repository.id,
+      repositoryId: repository.id,
       isolation: "worktree",
     }, 5);
     const conversation = store.createConversation({
@@ -150,7 +200,7 @@ describe("Repository mount execution snapshots", () => {
       name: "remote-builder",
       deviceId: deviceB.id,
       backend: "claude",
-      defaultRepositoryId: repository.id,
+      repositoryId: repository.id,
     }, 7);
     const remoteConversation = store.createConversation({
       workspaceId: workspace.id,
@@ -160,8 +210,45 @@ describe("Repository mount execution snapshots", () => {
     }, 8);
     expect(() => coordinator.enqueueRun(remoteConversation, agentWithoutMount, "inspect")).toThrow("没有挂载到 Agent 设备");
 
-    const personalAgent = store.createAgent({ name: "personal", deviceId: deviceA.id, backend: "claude" }, 9);
+    const personalRepository = store.createRepository({ workspaceId: "ws_personal", name: "personal-app" }, 9);
+    store.setRepositoryMount(personalRepository.id, deviceA.id, "/personal/app", 9);
+    const personalAgent = store.createAgent({ name: "personal", deviceId: deviceA.id, backend: "claude", repositoryId: personalRepository.id }, 9);
     expect(() => coordinator.enqueueRun(remoteConversation, personalAgent, "cross scope")).toThrow("不属于当前 Workspace");
     expect(sent).toHaveLength(0);
+  });
+
+  test("new-issue Automation follows the Agent current Repository", () => {
+    const store = new HarborStore(openDb(":memory:"));
+    const device = store.upsertDevice("worker", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
+    const firstRepository = store.createRepository({ workspaceId: "ws_personal", name: "first" }, 2);
+    store.setRepositoryMount(firstRepository.id, device.id, "/code/first", 2);
+    const nextRepository = store.createRepository({ workspaceId: "ws_personal", name: "next" }, 3);
+    store.setRepositoryMount(nextRepository.id, device.id, "/code/next", 3);
+    const agent = store.createAgent({
+      name: "builder",
+      deviceId: device.id,
+      backend: "claude",
+      repositoryId: firstRepository.id,
+    }, 4);
+    const automation = store.createAutomation({
+      name: "nightly",
+      agentId: agent.id,
+      repositoryId: firstRepository.id,
+      cron: "0 0 * * *",
+      prompt: "Run checks",
+      mode: "new_issue",
+    }, 5);
+    store.setAgentRepository(agent.id, nextRepository.id);
+    const coordinator = new RunCoordinator(store, new RunBus(), { isOnline: () => false, send: () => true }, 1);
+    const service = new AutomationService(store, coordinator);
+
+    (service as unknown as { fire: (id: string) => void }).fire(automation.id);
+
+    const conversation = store.listConversations({ workspaceId: "ws_personal" }).find((item) => item.originRef === automation.id);
+    expect(conversation?.repositoryId).toBe(nextRepository.id);
+    expect(conversation && store.latestRunForConversation(conversation.id)).toEqual(expect.objectContaining({
+      repositoryId: nextRepository.id,
+      executionRoot: "/code/next",
+    }));
   });
 });

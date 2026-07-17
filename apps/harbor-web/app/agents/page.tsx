@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   createAgent,
+  createRepository,
   listAgents,
   listDevices,
   listRepositories,
@@ -10,7 +11,10 @@ import {
   NATIVE_TIER_ALIASES,
   PERMISSIONS,
   setAgentArchived,
+  setAgentRepository,
   setAgentSkills,
+  setRepositoryMount,
+  updateRepository,
   type Device,
   type BackendKind,
   type HarborAgent,
@@ -53,7 +57,7 @@ export default function AgentsPage() {
       <PageHeader
         eyebrow="Execution roster"
         title="Agents"
-        description="Workspace 内的执行角色；代码目录由每次任务选择的 Repository mount 决定。"
+        description="每个 Agent 固定绑定一个 Repository 与当前 Device 的本地 checkout。"
         actions={
           <button
             className={btnPrimary}
@@ -100,15 +104,17 @@ export default function AgentsPage() {
                 setCreating(false);
                 agents.reload();
                 skills.reload();
+                repositories.reload();
               }}
             />
           ) : selectedAgent ? (
             <AgentDetail
               agent={selectedAgent}
               device={deviceById.get(selectedAgent.deviceId)}
-              repository={selectedAgent.defaultRepositoryId ? repositoryById.get(selectedAgent.defaultRepositoryId) : undefined}
+              repository={selectedAgent.repositoryId ? repositoryById.get(selectedAgent.repositoryId) : undefined}
+              repositories={repositories.data ?? []}
               skills={skills.data ?? []}
-              onChanged={() => { agents.reload(); skills.reload(); }}
+              onChanged={() => { agents.reload(); skills.reload(); repositories.reload(); }}
             />
           ) : (
             <div className="p-6"><Empty text="选择一个 Agent，或创建新的执行配置" /></div>
@@ -155,18 +161,21 @@ function AgentDetail({
   agent,
   device,
   repository,
+  repositories,
   skills,
   onChanged,
 }: {
   agent: HarborAgent;
   device: Device | undefined;
   repository: RepositoryWithMounts | undefined;
+  repositories: RepositoryWithMounts[];
   skills: SkillWithAgents[];
   onChanged: () => void;
 }) {
   const toast = useToast();
   const [skillIds, setSkillIds] = useState(agent.skillIds);
   const [savingSkills, setSavingSkills] = useState(false);
+  const [editingRepository, setEditingRepository] = useState(false);
   useEffect(() => setSkillIds(agent.skillIds), [agent.id, agent.skillIds]);
   const compatibleSkills = skills.filter((skill) =>
     skill.runtimes.includes(agent.backend) && (skill.source === "manual" || skill.deviceId === agent.deviceId),
@@ -228,15 +237,25 @@ function AgentDetail({
 
         <div className="grid gap-5 lg:grid-cols-2">
           <div className="rounded-xl border border-line bg-white/55 p-4">
-            <div className="mb-3 text-xs font-medium text-dim">Default repository</div>
-            <div className="text-sm font-semibold leading-6 text-ink/80">{repository?.name ?? "No repository"}</div>
-            <div className="mt-1 break-all font-mono text-[11px] leading-5 text-dim">{repository?.mounts.find((mount) => mount.deviceId === agent.deviceId)?.path ?? "Select per Issue / Chat"}</div>
+            <div className="mb-3 flex items-center justify-between gap-3"><div className="text-xs font-medium text-dim">Repository</div><button className="text-[11px] font-semibold text-accent hover:text-accent-strong" onClick={() => setEditingRepository((value) => !value)}>{editingRepository ? "收起" : "Configure"}</button></div>
+            <div className="text-sm font-semibold leading-6 text-ink/80">{repository?.name ?? "Repository unavailable"}</div>
+            {repository?.remoteUrl && <div className="mt-0.5 truncate text-[11px] text-dim" title={repository.remoteUrl}>{repository.remoteUrl}</div>}
+            <div className="mt-2 break-all rounded-lg bg-bg px-2.5 py-2 font-mono text-[11px] leading-5 text-dim">{repository?.mounts.find((mount) => mount.deviceId === agent.deviceId)?.path ?? "Checkout missing"}</div>
           </div>
           <div className="rounded-xl border border-line bg-white/55 p-4">
             <div className="mb-3 text-xs font-medium text-dim">Instruction</div>
             <div className="whitespace-pre-wrap text-sm leading-6 text-ink/80">{agent.instruction || "No additional instruction."}</div>
           </div>
         </div>
+        {editingRepository && device && (
+          <RepositoryEditor
+            agent={agent}
+            device={device}
+            current={repository}
+            repositories={repositories}
+            onSaved={() => { setEditingRepository(false); onChanged(); }}
+          />
+        )}
         <div className="mt-5 rounded-xl border border-line bg-white/55 p-4">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
             <div><div className="text-xs font-medium text-dim">Skills</div><div className="mt-1 text-[11px] text-dim">按 Mew 的少而精原则，建议只选 2–3 个。</div></div>
@@ -255,6 +274,94 @@ function AgentFact({ label, value, mono }: { label: string; value: string; mono?
       <div className="mb-1.5 text-[10px] font-medium text-dim">{label}</div>
       <div className={`truncate text-sm font-medium ${mono ? "font-mono text-xs" : ""}`} title={value}>{value}</div>
     </div>
+  );
+}
+
+function RepositoryEditor({
+  agent,
+  device,
+  current,
+  repositories,
+  onSaved,
+}: {
+  agent: HarborAgent;
+  device: Device;
+  current: RepositoryWithMounts | undefined;
+  repositories: RepositoryWithMounts[];
+  onSaved: () => void;
+}) {
+  const toast = useToast();
+  const mounted = repositories.filter((item) => item.mounts.some((mount) => mount.deviceId === device.id));
+  const [choice, setChoice] = useState(current?.id ?? "__new__");
+  const selected = repositories.find((item) => item.id === choice);
+  const [name, setName] = useState(current?.name ?? "");
+  const [remoteUrl, setRemoteUrl] = useState(current?.remoteUrl ?? "");
+  const [branch, setBranch] = useState(current?.defaultBranch ?? "main");
+  const [path, setPath] = useState(current?.mounts.find((mount) => mount.deviceId === device.id)?.path ?? "");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const repository = choice === "__new__" ? undefined : repositories.find((item) => item.id === choice);
+    setName(repository?.name ?? "");
+    setRemoteUrl(repository?.remoteUrl ?? "");
+    setBranch(repository?.defaultBranch ?? "main");
+    setPath(repository?.mounts.find((mount) => mount.deviceId === device.id)?.path ?? "");
+  }, [choice, device.id]);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      let repositoryId = choice;
+      if (choice === "__new__") {
+        const created = await createRepository({
+          name: name.trim(),
+          remoteUrl: remoteUrl.trim() || undefined,
+          defaultBranch: branch.trim() || "main",
+          device: device.name,
+          path: path.trim(),
+        });
+        repositoryId = created.id;
+      } else if (selected) {
+        await updateRepository(selected.id, {
+          name: name.trim(),
+          remoteUrl: remoteUrl.trim() || null,
+          defaultBranch: branch.trim() || "main",
+        });
+        const mount = selected.mounts.find((item) => item.deviceId === device.id);
+        if (!mount || mount.path !== path.trim()) {
+          await setRepositoryMount(selected.id, { device: device.name, path: path.trim() });
+        }
+      }
+      await setAgentRepository(agent.id, repositoryId);
+      toast(`已更新 ${agent.name} 的 Repository`, "success");
+      onSaved();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="mt-5 overflow-hidden rounded-2xl border border-accent/20 bg-accent-soft/25">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-accent/15 px-5 py-4">
+        <div><div className="text-[10px] font-bold uppercase tracking-[0.16em] text-accent">Execution repository</div><div className="mt-1 text-sm font-semibold">仓库与本机 checkout 都配置在 Agent 上</div></div>
+        <div className="rounded-full bg-white/70 px-3 py-1 text-[10px] text-dim">{device.name}</div>
+      </div>
+      <div className="grid gap-x-5 p-5 md:grid-cols-2">
+        <Field label="Repository">
+          <select className={inputCls} value={choice} onChange={(event) => setChoice(event.target.value)}>
+            {mounted.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+            <option value="__new__">＋ New repository</option>
+          </select>
+        </Field>
+        <Field label="Repository name"><input className={inputCls} value={name} onChange={(event) => setName(event.target.value)} placeholder="sm-toolkit" /></Field>
+        <Field label="Remote URL（optional）"><input className={inputCls} value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} placeholder="git@github.com:org/repo.git" /></Field>
+        <Field label="Base branch"><input className={inputCls} value={branch} onChange={(event) => setBranch(event.target.value)} placeholder="main" /></Field>
+        <div className="md:col-span-2"><Field label="Local checkout path"><input className={`${inputCls} font-mono text-xs`} value={path} onChange={(event) => setPath(event.target.value)} placeholder="/absolute/path/to/repository" /></Field></div>
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-accent/15 bg-white/35 px-5 py-3.5"><p className="text-[11px] leading-5 text-dim">同一 Repository 在同一 Device 上共用 checkout；修改路径会影响绑定它的其他 Agent。</p><button className={btnPrimary} disabled={busy || !name.trim() || !branch.trim() || !path.trim()} onClick={save}>{busy ? "保存中…" : "Save repository"}</button></div>
+    </section>
   );
 }
 
@@ -282,7 +389,11 @@ function NewAgentPanel({
     initialRuntimes.includes("claude") ? "claude" : (initialRuntimes[0] ?? ""),
   );
   const [model, setModel] = useState("");
-  const [repository, setRepository] = useState("");
+  const [repository, setRepository] = useState("__new__");
+  const [repositoryName, setRepositoryName] = useState("");
+  const [remoteUrl, setRemoteUrl] = useState("");
+  const [defaultBranch, setDefaultBranch] = useState("main");
+  const [checkoutPath, setCheckoutPath] = useState("");
   const [permission, setPermission] = useState<string>("auto-edit");
   const [isolation, setIsolation] = useState("none");
   const [instruction, setInstruction] = useState("");
@@ -326,9 +437,8 @@ function NewAgentPanel({
       return !!skill && !!nextBackend && skill.runtimes.includes(nextBackend) && (skill.source === "manual" || skill.deviceId === next?.id);
     }));
     if (!available.includes("claude") && permission === "default") setPermission("auto-edit");
-    if (repository && !repositories.find((item) => item.id === repository)?.mounts.some((mount) => mount.deviceId === next?.id)) {
-      setRepository("");
-      if (isolation === "worktree") setIsolation("none");
+    if (repository !== "__new__" && !repositories.find((item) => item.id === repository)?.mounts.some((mount) => mount.deviceId === next?.id)) {
+      setRepository("__new__");
     }
   };
 
@@ -346,12 +456,23 @@ function NewAgentPanel({
     event?.preventDefault();
     setBusy(true);
     try {
+      let repositoryId = repository;
+      if (repository === "__new__") {
+        const created = await createRepository({
+          name: repositoryName.trim(),
+          remoteUrl: remoteUrl.trim() || undefined,
+          defaultBranch: defaultBranch.trim() || "main",
+          device,
+          path: checkoutPath.trim(),
+        });
+        repositoryId = created.id;
+      }
       await createAgent({
         name: name.trim(),
         device,
         backend,
         model: model.trim() || undefined,
-        repository: repository || undefined,
+        repository: repositoryId,
         permission,
         isolation,
         instruction: instruction.trim() || undefined,
@@ -455,14 +576,22 @@ function NewAgentPanel({
         </AgentFormSection>
 
         <AgentFormSection title="Execution target">
-          <Field label="Default repository">
-            <select className={inputCls} value={repository} onChange={(e) => { setRepository(e.target.value); if (!e.target.value && isolation === "worktree") setIsolation("none"); }}>
-              <option value="">No default repository</option>
+          <Field label="Repository">
+            <select className={inputCls} value={repository} onChange={(e) => setRepository(e.target.value)}>
               {availableRepositories.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              <option value="__new__">＋ New repository</option>
             </select>
-            <p className="mt-2 text-xs leading-5 text-dim">只显示已挂载到当前 Device 的 Repository；Issue / Chat 仍可覆盖这个默认值。</p>
+            <p className="mt-2 text-xs leading-5 text-dim">这是 Agent 的固定代码上下文；Issue 与 Chat 指派后自动继承。</p>
             {selectedRepository && <div className="mt-2 rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[10px] text-dim">{selectedRepository.mounts.find((mount) => mount.deviceId === selectedDevice?.id)?.path}</div>}
           </Field>
+          {repository === "__new__" && (
+            <div className="mb-5 grid gap-x-5 rounded-2xl border border-accent/20 bg-accent-soft/25 p-4 md:grid-cols-2">
+              <Field label="Repository name"><input className={inputCls} value={repositoryName} onChange={(event) => setRepositoryName(event.target.value)} placeholder="sm-toolkit" /></Field>
+              <Field label="Base branch"><input className={inputCls} value={defaultBranch} onChange={(event) => setDefaultBranch(event.target.value)} placeholder="main" /></Field>
+              <div className="md:col-span-2"><Field label="Remote URL（optional）"><input className={inputCls} value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} placeholder="git@github.com:org/repo.git" /></Field></div>
+              <div className="md:col-span-2"><Field label="Local checkout path"><input className={`${inputCls} font-mono text-xs`} value={checkoutPath} onChange={(event) => setCheckoutPath(event.target.value)} placeholder="/absolute/path/to/repository" /></Field></div>
+            </div>
+          )}
           <Field label="Permission">
             <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
               {PERMISSIONS.filter((value) => backend !== "codex" || value !== "default").map((value) => (
@@ -473,7 +602,7 @@ function NewAgentPanel({
           <Field label="Isolation">
             <div className="grid grid-cols-2 gap-2">
               <ChoiceButton selected={isolation === "none"} onClick={() => setIsolation("none")}>Direct checkout</ChoiceButton>
-              <ChoiceButton selected={isolation === "worktree"} onClick={() => repository && setIsolation("worktree")}>Git worktree</ChoiceButton>
+              <ChoiceButton selected={isolation === "worktree"} onClick={() => setIsolation("worktree")}>Git worktree</ChoiceButton>
             </div>
           </Field>
         </AgentFormSection>
@@ -489,7 +618,7 @@ function NewAgentPanel({
       </div>
       <div className="sticky bottom-0 flex items-center justify-between gap-4 border-t border-line bg-panel/95 px-7 py-4 backdrop-blur max-sm:px-4">
         <span className="text-xs text-dim">Agent 配置会作为新的执行快照保存</span>
-        <button type="submit" className={btnPrimary} disabled={busy || !name.trim() || !device || !backend || (isolation === "worktree" && !repository)}>
+        <button type="submit" className={btnPrimary} disabled={busy || !name.trim() || !device || !backend || !repository || (repository === "__new__" && (!repositoryName.trim() || !defaultBranch.trim() || !checkoutPath.trim()))}>
           {busy ? "创建中…" : "创建"}
         </button>
       </div>

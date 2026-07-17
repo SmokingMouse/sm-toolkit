@@ -180,6 +180,8 @@ export const setAgentArchived = (id: string, archived: boolean) =>
   req<HarborAgent>("PATCH", `/api/agents/${encodeURIComponent(id)}`, { archived });
 export const setAgentSkills = (id: string, skills: string[]) =>
   req<HarborAgent>("PATCH", `/api/agents/${encodeURIComponent(id)}`, { skills });
+export const setAgentRepository = (id: string, repository: string) =>
+  req<HarborAgent>("PATCH", `/api/agents/${encodeURIComponent(id)}`, { repository });
 
 export const listSkills = () => req<SkillWithAgents[]>("GET", "/api/skills");
 export const createSkill = (body: { name: string; description?: string; instruction: string }) =>
@@ -202,11 +204,10 @@ export const createConversation = (body: {
   title?: string;
   description?: string;
   priority?: IssuePriority;
-  repository?: string;
   origin?: string;
   originRef?: string;
 }) => req<Conversation>("POST", "/api/conversations", body);
-export const createIssueDraft = (body: { request: string; agent: string; priority: IssuePriority; repository?: string }) =>
+export const createIssueDraft = (body: { request: string; agent: string; priority: IssuePriority }) =>
   req<{ conversation: Conversation; run: Run }>("POST", "/api/issue-drafts", body);
 export const publishIssueDraft = (
   id: string,

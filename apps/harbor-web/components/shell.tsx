@@ -15,7 +15,7 @@ import {
 import { usePoll } from "../lib/hooks";
 import { ToastProvider } from "./toast";
 
-type IconName = "search" | "issues" | "chats" | "skills" | "agents" | "repositories" | "devices" | "automations" | "approvals" | "usage" | "settings";
+type IconName = "search" | "issues" | "chats" | "skills" | "agents" | "devices" | "automations" | "approvals" | "usage" | "settings";
 type NavItem = { href: string; label: string; icon: IconName };
 
 const NAV: { section: string; items: NavItem[] }[] = [
@@ -26,7 +26,6 @@ const NAV: { section: string; items: NavItem[] }[] = [
       { href: "/chats", label: "Chats", icon: "chats" },
       { href: "/skills", label: "Skills", icon: "skills" },
       { href: "/agents", label: "Agents", icon: "agents" },
-      { href: "/repositories", label: "Repositories", icon: "repositories" },
     ],
   },
   {
@@ -48,7 +47,6 @@ function NavIcon({ name }: { name: IconName }) {
     case "chats": return <svg {...common}><path d="M5 18.5 3.5 21l.7-4A8 8 0 1 1 7 19.5"/><path d="M8 10h8M8 14h5"/></svg>;
     case "skills": return <svg {...common}><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11a3 3 0 0 1 3 3v15a3 3 0 0 0-3-3H6.5A2.5 2.5 0 0 0 4 20.5z"/><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H14v18a3 3 0 0 1 3-3h.5a2.5 2.5 0 0 1 2.5 2.5z"/></svg>;
     case "agents": return <svg {...common}><circle cx="12" cy="8" r="3"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0M4 8h2M18 8h2"/></svg>;
-    case "repositories": return <svg {...common}><path d="M5 5.5A2.5 2.5 0 0 1 7.5 3h9A2.5 2.5 0 0 1 19 5.5v13a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 5 18.5z"/><path d="M8.5 7h7M8.5 11h7M8.5 15H13"/></svg>;
     case "devices": return <svg {...common}><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/></svg>;
     case "automations": return <svg {...common}><path d="M20 12a8 8 0 1 1-2.35-5.65L20 8.7"/><path d="M20 4v4.7h-4.7M12 8v4l2.5 1.5"/></svg>;
     case "approvals": return <svg {...common}><path d="M12 3 5 6v5c0 4.6 2.8 8 7 10 4.2-2 7-5.4 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg>;
@@ -218,7 +216,7 @@ export function Shell({ children }: { children: ReactNode }) {
               <div className="border-b border-line px-5 py-4">
                 <div className="text-[10px] font-bold uppercase tracking-[0.17em] text-accent">Harbor scope</div>
                 <div className="mt-1 text-lg font-semibold text-ink">Choose a workspace</div>
-                <p className="mt-1 text-xs leading-5 text-dim">Agents, Skills, Issues and Repositories stay inside the selected scope.</p>
+                <p className="mt-1 text-xs leading-5 text-dim">Agents, Skills, Issues and workflows stay inside the selected scope.</p>
               </div>
               <div className="max-h-[340px] space-y-1 overflow-y-auto p-2">
                 {(workspaces.data ?? []).map((workspace) => (

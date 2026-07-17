@@ -17,7 +17,6 @@ import {
   listAgents,
   listConversations,
   listDevices,
-  listRepositories,
   publishIssueDraft,
   requestIssueChanges,
   reviewIssue,
@@ -32,7 +31,6 @@ import {
   type DeliveryEvent,
   type HarborAgent,
   type IssuePriority,
-  type RepositoryWithMounts,
   type Run,
   type RunWithResult,
 } from "../lib/api";
@@ -89,7 +87,6 @@ export default function IssuesPage() {
   const convs = usePoll(() => listConversations({ kind: "issue" }), 8_000);
   const agents = usePoll(listAgents, 30_000);
   const devices = usePoll(listDevices, 10_000);
-  const repositories = usePoll(listRepositories, 30_000);
   const [creating, setCreating] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [initialAction, setInitialAction] = useState<IssueAction | null>(null);
@@ -180,7 +177,6 @@ export default function IssuesPage() {
       <IssueDrawer
         id={openId}
         agents={agents.data ?? []}
-        repositories={repositories.data ?? []}
         onlineDeviceIds={onlineDeviceIds}
         initialAction={initialAction}
         onInitialActionConsumed={() => setInitialAction(null)}
@@ -255,7 +251,7 @@ export default function IssuesPage() {
         <IssueList issues={visible} onOpen={setOpenId} />
       )}
 
-      {creating && <NewIssueModal agents={agents.data ?? []} repositories={repositories.data ?? []} onlineDeviceIds={onlineDeviceIds} onClose={() => setCreating(false)} onCreated={(id) => { setCreating(false); convs.reload(); setOpenId(id); }} />}
+      {creating && <NewIssueModal agents={agents.data ?? []} onlineDeviceIds={onlineDeviceIds} onClose={() => setCreating(false)} onCreated={(id) => { setCreating(false); convs.reload(); setOpenId(id); }} />}
     </div>
   );
 }
@@ -308,11 +304,10 @@ function IssueList({ issues, onOpen }: { issues: ConversationWithAgent[]; onOpen
   );
 }
 
-function NewIssueModal({ agents, repositories, onlineDeviceIds, onClose, onCreated }: { agents: HarborAgent[]; repositories: RepositoryWithMounts[]; onlineDeviceIds: Set<string>; onClose: () => void; onCreated: (id: string) => void }) {
+function NewIssueModal({ agents, onlineDeviceIds, onClose, onCreated }: { agents: HarborAgent[]; onlineDeviceIds: Set<string>; onClose: () => void; onCreated: (id: string) => void }) {
   const toast = useToast();
   const sortedAgents = useMemo(() => sortAgentsByAvailability(agents, onlineDeviceIds), [agents, onlineDeviceIds]);
-  const [agent, setAgent] = useState("");
-  const [repository, setRepository] = useState("");
+  const [agent, setAgent] = useState(() => sortedAgents[0]?.id ?? "");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState<IssuePriority>("medium");
@@ -327,24 +322,6 @@ function NewIssueModal({ agents, repositories, onlineDeviceIds, onClose, onCreat
     draftId ? 1_500 : 60_000,
   );
   const draftRun = draftDetail.data?.runs.at(-1);
-  const selectedAgent = agents.find((candidate) => candidate.id === agent);
-  const availableRepositories = selectedAgent
-    ? repositories.filter((candidate) => candidate.mounts.some((mount) => mount.deviceId === selectedAgent.deviceId))
-    : repositories;
-
-  useEffect(() => {
-    if (!agent && sortedAgents[0]) setAgent(sortedAgents[0].id);
-  }, [agent, sortedAgents]);
-
-  useEffect(() => {
-    if (!selectedAgent) return;
-    setRepository((current) => {
-      if (current && availableRepositories.some((candidate) => candidate.id === current)) return current;
-      return selectedAgent.defaultRepositoryId && availableRepositories.some((candidate) => candidate.id === selectedAgent.defaultRepositoryId)
-        ? selectedAgent.defaultRepositoryId
-        : "";
-    });
-  }, [selectedAgent?.id, selectedAgent?.defaultRepositoryId, repositories]);
 
   useEffect(() => {
     if (draftHydrated || !draftRun?.resultText || draftRun.status !== "succeeded") return;
@@ -357,7 +334,7 @@ function NewIssueModal({ agents, repositories, onlineDeviceIds, onClose, onCreat
   const submitRegular = async () => {
     setBusy(true);
     try {
-      const conv = await createConversation({ kind: "issue", ...(agent ? { agent } : {}), ...(repository ? { repository } : {}), title: title.trim() || description.trim().slice(0, 60), description: description.trim(), priority, origin: "web" });
+      const conv = await createConversation({ kind: "issue", ...(agent ? { agent } : {}), title: title.trim() || description.trim().slice(0, 60), description: description.trim(), priority, origin: "web" });
       if (agent) {
         try {
           await dispatchIssue(conv.id, { agent, prompt: description.trim() });
@@ -383,7 +360,7 @@ function NewIssueModal({ agents, repositories, onlineDeviceIds, onClose, onCreat
     if (!agent || !description.trim()) return;
     setBusy(true);
     try {
-      const created = await createIssueDraft({ request: description.trim(), agent, priority, ...(repository ? { repository } : {}) });
+      const created = await createIssueDraft({ request: description.trim(), agent, priority });
       setDraftId(created.conversation.id);
       setDraftRunId(created.run.id);
       toast("Agent 已开始只读分诊", "success");
@@ -456,11 +433,7 @@ function NewIssueModal({ agents, repositories, onlineDeviceIds, onClose, onCreat
         <div className="flex flex-wrap items-center gap-2 border-t border-line bg-bg/35 px-4 py-3">
           <select className="h-9 rounded-lg border border-line bg-white pl-3 text-xs font-medium" value={stage} onChange={(event) => setStage(event.target.value as "backlog" | "todo")} aria-label="Initial stage"><option value="todo">Ready</option><option value="backlog">Inbox</option></select>
           <select className="h-9 rounded-lg border border-line bg-white pl-3 text-xs font-medium" value={priority} onChange={(event) => setPriority(event.target.value as IssuePriority)} aria-label="Priority">{ISSUE_PRIORITIES.map((item) => <option key={item} value={item}>{PRIORITY[item].label}</option>)}</select>
-          <select className="h-9 max-w-[210px] rounded-lg border border-line bg-white pl-3 text-xs font-medium" value={agent} onChange={(event) => setAgent(event.target.value)} aria-label="Agent" disabled={!!draftId}><option value="">Unassigned</option>{sortedAgents.map((item) => <option key={item.id} value={item.id}>{agentOptionLabel(item, onlineDeviceIds)}</option>)}</select>
-          <select className="h-9 max-w-[210px] rounded-lg border border-line bg-white pl-3 text-xs font-medium" value={repository} onChange={(event) => setRepository(event.target.value)} aria-label="Repository" disabled={!!draftId}>
-            <option value="">No repository</option>
-            {availableRepositories.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-          </select>
+          <select className="h-9 max-w-[250px] rounded-lg border border-line bg-white pl-3 text-xs font-medium" value={agent} onChange={(event) => setAgent(event.target.value)} aria-label="Agent" disabled={!!draftId}><option value="">Unassigned</option>{sortedAgents.map((item) => <option key={item.id} value={item.id}>{agentOptionLabel(item, onlineDeviceIds)}</option>)}</select>
           <label className="ml-auto inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg px-2 text-xs font-medium text-dim hover:bg-white hover:text-ink">
             <span className={`relative h-5 w-9 rounded-full transition ${aiDraft ? "bg-accent" : "bg-zinc-300"}`}><input className="sr-only" type="checkbox" checked={aiDraft} disabled={!!draftId} onChange={(event) => setAiDraft(event.target.checked)} /><span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition ${aiDraft ? "left-[18px]" : "left-0.5"}`} /></span>
             AI draft
@@ -488,7 +461,7 @@ function parseIssueDraft(text: string, fallback: string): { title: string; descr
   return { title: title || fallback.trim().slice(0, 72), description: description || normalized };
 }
 
-function IssueDrawer({ id, agents, repositories, onlineDeviceIds, initialAction, onInitialActionConsumed, onChanged, onClose }: { id: string; agents: HarborAgent[]; repositories: RepositoryWithMounts[]; onlineDeviceIds: Set<string>; initialAction: IssueAction | null; onInitialActionConsumed: () => void; onChanged: () => void; onClose: () => void }) {
+function IssueDrawer({ id, agents, onlineDeviceIds, initialAction, onInitialActionConsumed, onChanged, onClose }: { id: string; agents: HarborAgent[]; onlineDeviceIds: Set<string>; initialAction: IssueAction | null; onInitialActionConsumed: () => void; onChanged: () => void; onClose: () => void }) {
   const toast = useToast();
   const detail = usePoll(() => getConversation(id), 4_000);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -509,15 +482,12 @@ function IssueDrawer({ id, agents, repositories, onlineDeviceIds, initialAction,
   const deliveryEvents = detail.data?.deliveryEvents ?? [];
   const activeRun = [...runs].reverse().find((r) => r.status === "queued" || r.status === "running");
   const threadRuns = runs.filter((run) => run.purpose !== "triage");
-  const repositoryForConversation = repositories.find((repository) => repository.id === conv?.repositoryId);
-  const agentsForConversation = repositoryForConversation
-    ? agents.filter((agent) => repositoryForConversation.mounts.some((mount) => mount.deviceId === agent.deviceId))
+  const repositoryLocked = !!conv?.worktreePath || conv?.status === "review";
+  const agentsForConversation = repositoryLocked && conv?.repositoryId
+    ? agents.filter((agent) => agent.repositoryId === conv.repositoryId)
     : agents;
   const agentScopeKey = agentsForConversation.map((agent) => agent.id).join("|");
   const selectedComposerAgent = agentsForConversation.find((agent) => agent.id === composerAgent);
-  const repositoryOptions = conv?.agentId
-    ? repositories.filter((candidate) => candidate.mounts.some((mount) => mount.deviceId === agents.find((agent) => agent.id === conv.agentId)?.deviceId))
-    : repositories;
   const dirty = !!conv && (title !== (conv.title ?? "") || description !== (conv.description ?? "") || priority !== conv.priority);
 
   useEffect(() => {
@@ -758,7 +728,7 @@ function IssueDrawer({ id, agents, repositories, onlineDeviceIds, initialAction,
             <div className="mx-auto max-w-[720px] rounded-2xl border border-line bg-white p-3 shadow-[0_8px_28px_rgba(20,35,30,.08)] focus-within:border-zinc-300 focus-within:ring-3 focus-within:ring-accent/8">
               <textarea ref={composerRef} className="min-h-14 w-full resize-none border-0 bg-transparent px-1 py-1 text-sm leading-6 outline-none placeholder:text-dim/55" value={composerText} disabled={composerDisabled} onChange={(event) => setComposerText(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void sendMessage(); } }} placeholder={composerPlaceholder} />
               <div className="mt-2 flex flex-wrap items-center gap-2">
-                <select className="h-8 max-w-[210px] rounded-lg border border-transparent bg-bg px-2 text-[11px] font-medium hover:border-line" value={composerAgent} disabled={composerDisabled} onChange={(event) => setComposerAgent(event.target.value)} aria-label="Message Agent"><option value="">Select Agent…</option>{sortAgentsByAvailability(agentsForConversation, onlineDeviceIds).map((agent) => <option key={agent.id} value={agent.id}>{agentOptionLabel(agent, onlineDeviceIds)}</option>)}</select>
+                <select className="h-8 max-w-[250px] rounded-lg border border-transparent bg-bg px-2 text-[11px] font-medium hover:border-line" value={composerAgent} disabled={composerDisabled} onChange={(event) => setComposerAgent(event.target.value)} aria-label="Message Agent"><option value="">Select Agent…</option>{sortAgentsByAvailability(agentsForConversation, onlineDeviceIds).map((agent) => <option key={agent.id} value={agent.id}>{agentOptionLabel(agent, onlineDeviceIds)}</option>)}</select>
                 {selectedComposerAgent && <span className="text-[10px] text-dim">{selectedComposerAgent.permission} · {selectedComposerAgent.model ?? "CLI default"}</span>}
                 <span className="ml-auto text-[9px] text-dim/70 max-sm:hidden">⌘↵ send</span>
                 <button className="grid h-9 w-9 place-items-center rounded-full bg-ink text-base text-white hover:bg-accent disabled:cursor-not-allowed disabled:opacity-35" disabled={composerDisabled || !composerAgent || (conv.status === "review" && !composerText.trim())} onClick={sendMessage} aria-label={conv.status === "review" ? "Send changes" : "Start implementation"}>↑</button>
@@ -772,7 +742,7 @@ function IssueDrawer({ id, agents, repositories, onlineDeviceIds, initialAction,
             <PropertyRow label="Status"><StatusBadge status={conv.status} /></PropertyRow>
             <PropertyRow label="Priority"><select className="h-8 max-w-[130px] rounded-lg border border-transparent bg-transparent pl-2 text-xs font-medium hover:border-line hover:bg-bg" value={priority} onChange={async (event) => { const next = event.target.value as IssuePriority; setPriority(next); try { await updateConversation(id, { priority: next }); refresh(); } catch (error) { toast(error instanceof Error ? error.message : String(error), "error"); } }}>{ISSUE_PRIORITIES.map((item) => <option key={item} value={item}>{PRIORITY[item].label}</option>)}</select></PropertyRow>
             <PropertyRow label="Assignee"><select className="h-8 max-w-[142px] rounded-lg border border-transparent bg-transparent pl-2 text-xs font-medium hover:border-line hover:bg-bg" value={conv.agentId ?? ""} disabled={!!activeRun || conv.status === "done" || conv.status === "canceled"} onChange={async (event) => { try { await updateConversation(id, { agent: event.target.value || null }); setComposerAgent(event.target.value); refresh(); } catch (error) { toast(error instanceof Error ? error.message : String(error), "error"); } }}><option value="">Unassigned</option>{sortAgentsByAvailability(agentsForConversation, onlineDeviceIds).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></PropertyRow>
-            <PropertyRow label="Repository"><select className="h-8 max-w-[142px] rounded-lg border border-transparent bg-transparent pl-2 text-xs font-medium hover:border-line hover:bg-bg" value={conv.repositoryId ?? ""} disabled={!!activeRun || !!conv.worktreePath || conv.status === "done" || conv.status === "canceled"} onChange={async (event) => { try { await updateConversation(id, { repository: event.target.value || null }); refresh(); } catch (error) { toast(error instanceof Error ? error.message : String(error), "error"); } }}><option value="">No repository</option>{repositoryOptions.map((repository) => <option key={repository.id} value={repository.id}>{repository.name}</option>)}</select></PropertyRow>
+            <PropertyRow label="Repository"><span className="max-w-[142px] truncate text-xs font-medium text-ink/75" title={detail.data?.repository?.name ?? "Unassigned"}>{detail.data?.repository?.name ?? "Unassigned"}</span></PropertyRow>
             <PropertyRow label="Source"><span className="text-xs font-medium text-ink/75">{conv.origin}</span></PropertyRow>
             <PropertyRow label="Updated"><span className="text-xs text-dim">{ago(conv.updatedAt)}</span></PropertyRow>
             <PropertyRow label="Created"><span className="text-xs text-dim">{ago(conv.createdAt)}</span></PropertyRow>

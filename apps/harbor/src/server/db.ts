@@ -434,6 +434,61 @@ const MIGRATIONS: string[] = [
     SELECT 'ws_personal', source, enabled, replace(template, '{{agent.workdir}}', '{{repository.root}}'), updated_at
     FROM prompt_templates;
   `,
+  // v10 —— Repository 配置收敛到 Agent；兼容已运行过 v9 的数据库
+  `
+  -- v9 允许无默认 Repository。保留这些 Agent，并给每个 Workspace 建一个显式待配置占位；
+  -- 占位没有 mount，因此在用户从 Agent 详情补完 checkout 前不会误执行。
+  CREATE TABLE agent_repository_backfill_v10 (
+    workspace_id TEXT PRIMARY KEY,
+    repository_id TEXT UNIQUE NOT NULL
+  );
+  INSERT INTO agent_repository_backfill_v10 (workspace_id, repository_id)
+    SELECT workspace_id, 'repo_unconfigured_' || lower(substr(hex(randomblob(8)), 1, 12))
+    FROM agents WHERE default_repository_id IS NULL GROUP BY workspace_id;
+  INSERT INTO repositories (id, workspace_id, name, default_branch, created_at)
+    SELECT repository_id, workspace_id, 'Unconfigured (' || substr(repository_id, -8) || ')', 'main',
+           CAST(strftime('%s','now') AS INTEGER) * 1000
+    FROM agent_repository_backfill_v10;
+  UPDATE agents
+    SET default_repository_id = (
+      SELECT repository_id FROM agent_repository_backfill_v10 b WHERE b.workspace_id = agents.workspace_id
+    )
+    WHERE default_repository_id IS NULL;
+
+  CREATE TABLE agents_v10 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    name TEXT NOT NULL,
+    description TEXT,
+    device_id TEXT NOT NULL REFERENCES devices(id),
+    backend TEXT NOT NULL CHECK (backend IN ('claude','codex')),
+    model TEXT,
+    permission TEXT NOT NULL DEFAULT 'auto-edit',
+    repository_id TEXT NOT NULL REFERENCES repositories(id),
+    isolation TEXT NOT NULL DEFAULT 'none' CHECK (isolation IN ('none','worktree')),
+    instruction TEXT,
+    created_at INTEGER NOT NULL,
+    archived_at INTEGER,
+    UNIQUE (workspace_id, name)
+  );
+  INSERT INTO agents_v10
+    (id, workspace_id, name, description, device_id, backend, model, permission, repository_id,
+     isolation, instruction, created_at, archived_at)
+    SELECT id, workspace_id, name, description, device_id, backend, model, permission, default_repository_id,
+           isolation, instruction, created_at, archived_at
+    FROM agents;
+  DROP TABLE agents;
+  ALTER TABLE agents_v10 RENAME TO agents;
+  CREATE INDEX idx_agents_workspace ON agents(workspace_id, archived_at, created_at);
+
+  UPDATE conversations
+    SET repository_id = (SELECT a.repository_id FROM agents a WHERE a.id = conversations.agent_id)
+    WHERE agent_id IS NOT NULL AND repository_id IS NULL;
+  UPDATE automations
+    SET repository_id = (SELECT a.repository_id FROM agents a WHERE a.id = automations.agent_id)
+    WHERE repository_id IS NULL;
+  DROP TABLE agent_repository_backfill_v10;
+  `,
 ];
 
 function normalizeLegacyRepositoryNames(db: Database): void {
@@ -469,7 +524,7 @@ export function openDb(path: string): Database {
   let version = row?.user_version ?? 0;
   while (version < MIGRATIONS.length) {
     const sql = MIGRATIONS[version]!;
-    const rebuildsReferencedTables = version === 8;
+    const rebuildsReferencedTables = version === 8 || version === 9;
     if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = OFF;");
     try {
       db.transaction(() => {

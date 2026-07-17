@@ -29,10 +29,10 @@ ${c.bold}派活${c.reset}
                       [--backend claude|codex] [--isolation none|worktree]
                       [--instruction <系统提示>] [--description <说明>]
   harbor agent ls
-  harbor chat <agent> "<prompt>"        [--repository <repo>] [--detach]
-  harbor issue draft "<描述>" [--title <t>] [--priority <p>] [--agent <a>] [--repository <repo>]
+  harbor chat <agent> "<prompt>"        [--detach]
+  harbor issue draft "<描述>" [--title <t>] [--priority <p>] [--agent <a>]
                                                                保存到 Inbox，不启动 Run
-  harbor issue create <agent> "<prompt>" [--title <t>] [--repository <repo>] [--detach]
+  harbor issue create <agent> "<prompt>" [--title <t>] [--detach]
   harbor issue assign <id> <agent> ["<prompt>"] [--detach]  指派并执行
   harbor issue continue <id> "<prompt>"  [--detach]        续多轮（resume 上下文）
   harbor issue changes <id> "<反馈>" [--agent <a>] [--detach]
@@ -54,7 +54,7 @@ ${c.bold}审批${c.reset}（permission=default 的 agent 用工具时上抛）
 
 ${c.bold}定时${c.reset}
   harbor auto create --name <n> --agent <a> --cron "<表达式>" --prompt "<p>"
-                     [--repository <repo>] [--mode new_issue|append --target <conv-id>]
+                     [--mode new_issue|append --target <conv-id>]
                      [--notify-chat <oc_xx>]
   harbor auto ls · auto log <id> · auto enable|disable|rm <id>
 
@@ -258,7 +258,7 @@ async function main(): Promise<number> {
     });
     console.log(`${c.green}✓${c.reset} agent ${c.bold}${agent.name}${c.reset}（${agent.id}）已创建`);
     console.log(
-      `${c.dim}  device=${agent.deviceId} model=${agent.model ?? "CLI 默认"} permission=${agent.permission} isolation=${agent.isolation} repository=${agent.defaultRepositoryId ?? "none"}${c.reset}`,
+      `${c.dim}  device=${agent.deviceId} model=${agent.model ?? "CLI 默认"} permission=${agent.permission} isolation=${agent.isolation} repository=${agent.repositoryId ?? "none"}${c.reset}`,
     );
     return 0;
   }
@@ -274,9 +274,9 @@ async function main(): Promise<number> {
         a.model ?? "(默认)",
         a.permission,
         a.isolation === "worktree" ? "worktree" : "-",
-        a.defaultRepositoryId ?? "-",
+        a.repositoryId ?? "-",
       ]),
-      ["NAME", "DEVICE", "BACKEND", "MODEL", "PERM", "ISO", "DEFAULT REPO"],
+      ["NAME", "DEVICE", "BACKEND", "MODEL", "PERM", "ISO", "REPOSITORY"],
     );
     return 0;
   }
@@ -285,7 +285,7 @@ async function main(): Promise<number> {
     const agent = pos[1];
     const prompt = pos.slice(2).join(" ");
     if (!agent || !prompt) throw new Error(`用法：harbor chat <agent> "<prompt>"`);
-    const conv = await client.createConversation({ kind: "chat", agent, repository: flags.repository });
+    const conv = await client.createConversation({ kind: "chat", agent });
     const run = await client.createRun(conv.id, prompt);
     console.log(`${c.dim}chat ${conv.id} · run ${run.id}${c.reset}`);
     return flags.detach ? 0 : watchRun(client, run.id);
@@ -301,7 +301,6 @@ async function main(): Promise<number> {
         title: typeof flags.title === "string" ? flags.title : description.slice(0, 60),
         description,
         priority: flags.priority,
-        repository: flags.repository,
       });
       console.log(`${c.green}✓${c.reset} issue ${c.bold}${conv.id}${c.reset} 已保存到 Inbox${conv.agentId ? "（已指派，未执行）" : ""}`);
       return 0;
@@ -317,7 +316,6 @@ async function main(): Promise<number> {
         title: typeof flags.title === "string" ? flags.title : prompt.slice(0, 60),
         description: prompt,
         priority: flags.priority,
-        repository: flags.repository,
       });
       const run = await client.dispatchIssue(conv.id, agent, prompt);
       console.log(`${c.green}✓${c.reset} issue ${c.bold}${conv.id}${c.reset} · run ${run.id}`);
@@ -450,7 +448,6 @@ async function main(): Promise<number> {
         prompt: req(flags, "prompt"),
         mode: flags.mode,
         target: flags.target,
-        repository: flags.repository,
         notifyChat: flags["notify-chat"],
       });
       console.log(`${c.green}✓${c.reset} automation ${c.bold}${auto.name}${c.reset}（${auto.id}）已创建并排班`);

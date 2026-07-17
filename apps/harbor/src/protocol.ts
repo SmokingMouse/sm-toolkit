@@ -82,7 +82,7 @@ export interface HarborWorkspace {
   archivedAt: number | null;
 }
 
-/** Workspace 可使用的逻辑代码仓库；物理路径由 RepositoryMount 表达。 */
+/** 可复用的逻辑代码仓库；workspaceId 只做可见性作用域，不代表 Workspace 默认仓库。 */
 export interface HarborRepository {
   id: string;
   workspaceId: string;
@@ -112,8 +112,8 @@ export interface HarborAgent {
   /** endpoints.yaml 名 / 裸 tier / 透传；null = 该 CLI 自己的默认模型 */
   model: string | null;
   permission: PermissionPolicy;
-  /** 可为空；Run/Conversation 也可显式选择其他 Repository。 */
-  defaultRepositoryId: string | null;
+  /** 必选主 Repository；Issue / Chat 指派给 Agent 后继承它，不单独选择。 */
+  repositoryId: string;
   isolation: IsolationKind;
   /** systemPrompt 注入 */
   instruction: string | null;
@@ -153,7 +153,7 @@ export interface Conversation {
   description: string | null;
   priority: IssuePriority;
   status: ConversationStatus;
-  /** 当前会话唯一的代码执行目标；非代码会话可为空。 */
+  /** 当前执行仓库快照；未指派的 Inbox Issue 可为空，指派后由 Agent 派生。 */
   repositoryId: string | null;
   worktreePath: string | null;
   /** worktree 属于哪个物理 mount，防止跨设备/仓库误复用。 */
@@ -284,7 +284,7 @@ export interface Automation {
   workspaceId: string;
   name: string;
   agentId: string;
-  /** new_issue 的默认执行仓库；append 模式继承目标 Conversation。 */
+  /** 兼容/审计快照；不是配置项，触发时以 Agent 当前 Repository 为准。 */
   repositoryId: string | null;
   cron: string;
   prompt: string;

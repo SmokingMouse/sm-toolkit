@@ -573,11 +573,9 @@ export function buildRest(
     if (!repository && b.workdir) {
       repository = store.ensureRepositoryForPath(workspace.id, device.id, b.workdir, Date.now());
     }
-    if (repository && !store.getRepositoryMountForDevice(repository.id, device.id)) {
+    if (!repository) bad("Agent 必须绑定 Repository；请在 Agent 表单选择已有仓库或创建新仓库");
+    if (!store.getRepositoryMountForDevice(repository.id, device.id)) {
       bad(`Repository "${repository.name}" 尚未挂载到设备 "${device.name}"`);
-    }
-    if (isolation === "worktree" && !repository) {
-      bad("Git worktree isolation 需要选择默认 Repository（非代码 Agent 请使用 Shared workspace）");
     }
 
     const skills = resolveAgentSkills(b.skills, workspace.id, device.id, backend);
@@ -590,7 +588,7 @@ export function buildRest(
         backend,
         model: b.model ?? null,
         permission: permission as import("@sm/agent").PermissionPolicy,
-        defaultRepositoryId: repository?.id ?? null,
+        repositoryId: repository.id,
         isolation,
         instruction: b.instruction ?? null,
       },
@@ -605,14 +603,26 @@ export function buildRest(
     const key = c.req.param("id");
     const agent = scopedAgent(workspace.id, key);
     if (!agent) throw new HTTPException(404, { message: `agent "${key}" 不存在` });
-    const b = (await c.req.json()) as { archived?: boolean; skills?: unknown };
-    if (b.archived === undefined && b.skills === undefined) bad("需要 archived 或 skills");
+    const b = (await c.req.json()) as { archived?: boolean; skills?: unknown; repository?: string };
+    if (b.archived === undefined && b.skills === undefined && b.repository === undefined) bad("需要 archived、skills 或 repository");
     const skills = b.skills !== undefined ? resolveAgentSkills(b.skills, workspace.id, agent.deviceId, agent.backend) : null;
     if (b.archived !== undefined) {
       if (typeof b.archived !== "boolean") bad("archived 需要 true/false");
       store.setAgentArchived(agent.id, b.archived, Date.now());
     }
     if (skills) store.setAgentSkills(agent.id, skills.map((skill) => skill.id), Date.now());
+    if (b.repository !== undefined) {
+      const repository = scopedRepository(workspace.id, b.repository);
+      if (!repository) bad("Agent 必须绑定 Repository");
+      if (!store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
+        bad(`Repository "${repository.name}" 尚未挂载到 Agent 设备`);
+      }
+      if (repository.id !== agent.repositoryId) {
+        const blocker = store.agentRepositoryChangeBlocker(agent.id);
+        if (blocker) bad(`${blocker}，暂不能更换 Repository`);
+        store.setAgentRepository(agent.id, repository.id);
+      }
+    }
     return c.json(store.getAgent(agent.id));
   });
 
@@ -642,10 +652,11 @@ export function buildRest(
       title?: string;
       description?: string;
       priority?: string;
-      repository?: string;
       origin?: Origin;
       originRef?: string;
+      repository?: unknown;
     };
+    if (b.repository !== undefined) bad("Conversation 的 Repository 由 Agent 决定，请修改 Agent 配置");
     if (b.kind !== "chat" && b.kind !== "issue") bad(`kind 只支持 chat/issue（收到 "${b.kind}"）`);
     if (b.kind === "chat" && !b.agent) bad("chat 缺少 agent（agent 名或 id）");
     if (b.priority !== undefined && !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)) {
@@ -654,11 +665,7 @@ export function buildRest(
     const agent = scopedAgent(workspace.id, b.agent);
     if (b.agent && !agent) bad(`agent "${b.agent}" 不存在（harbor agent ls 查看）`);
     if (agent?.archivedAt) bad(`agent "${agent.name}" 已归档`);
-    const repository = scopedRepository(workspace.id, b.repository) ??
-      (agent?.defaultRepositoryId ? store.getRepository(agent.defaultRepositoryId) : null);
-    if (repository && agent && !store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
-      bad(`Repository "${repository.name}" 尚未挂载到 Agent "${agent.name}" 的设备`);
-    }
+    const repository = agent ? store.getRepository(agent.repositoryId) : null;
     const conv = store.createConversation(
       {
         workspaceId: workspace.id,
@@ -679,7 +686,8 @@ export function buildRest(
   /** Mew AI draft：先用只读 Agent 分诊，人工确认标题/正文后才发布到 Issue 看板。 */
   app.post("/api/issue-drafts", async (c) => {
     const workspace = currentWorkspace(c);
-    const b = (await c.req.json()) as { request?: string; agent?: string; priority?: string; repository?: string };
+    const b = (await c.req.json()) as { request?: string; agent?: string; priority?: string; repository?: unknown };
+    if (b.repository !== undefined) bad("Issue draft 的 Repository 由 Agent 决定，请修改 Agent 配置");
     if (!b.request?.trim()) bad("请描述要 Agent 分诊的请求");
     if (!b.agent) bad("请选择负责分诊的 Agent");
     if (b.priority !== undefined && !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)) {
@@ -688,11 +696,7 @@ export function buildRest(
     const agent = scopedAgent(workspace.id, b.agent);
     if (!agent) bad(`agent "${b.agent}" 不存在`);
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
-    const repository = scopedRepository(workspace.id, b.repository) ??
-      (agent.defaultRepositoryId ? store.getRepository(agent.defaultRepositoryId) : null);
-    if (repository && !store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
-      bad(`Repository "${repository.name}" 尚未挂载到 Agent "${agent.name}" 的设备`);
-    }
+    const repository = store.getRepository(agent.repositoryId);
     const conv = store.createConversation(
       {
         workspaceId: workspace.id,
@@ -776,8 +780,9 @@ export function buildRest(
       description?: string | null;
       priority?: string;
       agent?: string | null;
-      repository?: string | null;
+      repository?: unknown;
     };
+    if (b.repository !== undefined) bad("Conversation 的 Repository 由 Assignee 决定，请修改 Agent 配置");
     if (b.priority !== undefined && !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)) {
       bad(`priority 可选 ${ISSUE_PRIORITIES.join("/")}（收到 "${b.priority}"）`);
     }
@@ -795,22 +800,10 @@ export function buildRest(
       if (b.agent && !agent) bad(`agent "${b.agent}" 不存在`);
       if (agent?.archivedAt) bad(`agent "${agent.name}" 已归档`);
       if (store.activeRunForConversation(conv.id)) bad("Run 进行中，不能更换 Assignee；请先停止 Run");
-      if (agent && conv.repositoryId && !store.getRepositoryMountForDevice(conv.repositoryId, agent.deviceId)) {
-        const repository = store.getRepository(conv.repositoryId);
-        bad(`Repository "${repository?.name ?? conv.repositoryId}" 尚未挂载到 Agent "${agent.name}" 的设备`);
+      if (conv.worktreePath && agent?.repositoryId !== conv.repositoryId) {
+        bad("Issue 已有 worktree，不能换到绑定其他 Repository 的 Agent");
       }
       store.setConversationAssignee(conv.id, agent?.id ?? null, Date.now());
-    }
-    if (b.repository !== undefined) {
-      if (store.activeRunForConversation(conv.id)) bad("Run 进行中，不能更换 Repository；请先停止 Run");
-      if (conv.worktreePath) bad("Issue 已有 worktree，不能更换 Repository；请结束当前 Issue 后新建任务");
-      const repository = scopedRepository(workspace.id, b.repository);
-      const current = store.getConversation(conv.id)!;
-      const agent = current.agentId ? store.getAgent(current.agentId) : null;
-      if (repository && agent && !store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
-        bad(`Repository "${repository.name}" 尚未挂载到 Agent "${agent.name}" 的设备`);
-      }
-      store.setConversationRepository(conv.id, repository?.id ?? null, Date.now());
     }
     if (b.status !== undefined) {
       if (!ISSUE_STATUSES.includes(b.status as ConversationStatus)) {
@@ -1023,9 +1016,10 @@ export function buildRest(
       prompt?: string;
       mode?: string;
       target?: string;
-      repository?: string;
       notifyChat?: string;
+      repository?: unknown;
     };
+    if (b.repository !== undefined) bad("Automation 的 Repository 由 Agent 决定，请修改 Agent 配置");
     if (!b.name) bad("缺少 name");
     if (store.listAutomations(workspace.id).some((automation) => automation.name === b.name)) {
       bad(`automation 名 "${b.name}" 已存在于当前 Workspace`);
@@ -1047,12 +1041,14 @@ export function buildRest(
       if (!b.target) bad("mode=append 需要 --target <conversation-id>");
       const target = store.resolveConversationPrefix(b.target);
       if (!target || target.workspaceId !== workspace.id) bad(`target conversation "${b.target}" 不存在于当前 Workspace`);
+      if (target.repositoryId && target.repositoryId !== agent.repositoryId) {
+        bad("append target 与 Agent 绑定的 Repository 不一致");
+      }
       targetId = target.id;
     }
     const repository = mode === "append"
       ? null
-      : (scopedRepository(workspace.id, b.repository) ??
-        (agent.defaultRepositoryId ? store.getRepository(agent.defaultRepositoryId) : null));
+      : store.getRepository(agent.repositoryId);
     if (repository && !store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
       bad(`Repository "${repository.name}" 尚未挂载到 Agent "${agent.name}" 的设备`);
     }

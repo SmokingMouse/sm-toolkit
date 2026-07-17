@@ -7,10 +7,8 @@ import {
   getConversation,
   listAgents,
   listConversations,
-  listRepositories,
   type ConversationWithAgent,
   type HarborAgent,
-  type RepositoryWithMounts,
   type RunWithResult,
 } from "../../lib/api";
 import { ago, usePoll } from "../../lib/hooks";
@@ -22,9 +20,8 @@ import { Markdown } from "../../components/markdown";
 export default function ChatsPage() {
   const convs = usePoll(() => listConversations({ kind: "chat" }), 10_000);
   const agents = usePoll(listAgents, 30_000);
-  const repositories = usePoll(listRepositories, 30_000);
   const [selected, setSelected] = useState<string | null>(null);
-  const [draft, setDraft] = useState<{ agent: string; repository: string } | null>(null);
+  const [draft, setDraft] = useState<{ agent: string } | null>(null);
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [groupByAgent, setGroupByAgent] = useState(false);
   const grouped = useMemo(() => {
@@ -97,11 +94,9 @@ export default function ChatsPage() {
       <div className="min-w-0 flex-1">
         {selected || draft ? (
           <ChatView
-            key={selected ?? `draft:${draft?.agent}:${draft?.repository}`}
+            key={selected ?? `draft:${draft?.agent}`}
             conversationId={selected}
             draftAgent={draft?.agent ?? null}
-            draftRepository={draft?.repository ?? ""}
-            repositories={repositories.data ?? []}
             onConversationCreated={(id) => {
               setDraft(null);
               setSelected(id);
@@ -116,11 +111,10 @@ export default function ChatsPage() {
       {newChatOpen && (
         <NewChatModal
           agents={agents.data ?? []}
-          repositories={repositories.data ?? []}
           onClose={() => setNewChatOpen(false)}
-          onPick={(agent, repository) => {
+          onPick={(agent) => {
             setNewChatOpen(false);
-            setDraft({ agent, repository });
+            setDraft({ agent });
             setSelected(null);
           }}
         />
@@ -131,30 +125,15 @@ export default function ChatsPage() {
 
 function NewChatModal({
   agents,
-  repositories,
   onClose,
   onPick,
 }: {
   agents: HarborAgent[];
-  repositories: RepositoryWithMounts[];
   onClose: () => void;
-  onPick: (agent: string, repository: string) => void;
+  onPick: (agent: string) => void;
 }) {
   const [agent, setAgent] = useState(agents[0]?.name ?? "");
   const selectedAgent = agents.find((candidate) => candidate.name === agent);
-  const availableRepositories = selectedAgent
-    ? repositories.filter((candidate) => candidate.mounts.some((mount) => mount.deviceId === selectedAgent.deviceId))
-    : repositories;
-  const [repository, setRepository] = useState(selectedAgent?.defaultRepositoryId ?? "");
-
-  useEffect(() => {
-    setRepository((current) => {
-      if (current && availableRepositories.some((candidate) => candidate.id === current)) return current;
-      return selectedAgent?.defaultRepositoryId && availableRepositories.some((candidate) => candidate.id === selectedAgent.defaultRepositoryId)
-        ? selectedAgent.defaultRepositoryId
-        : "";
-    });
-  }, [selectedAgent?.id, selectedAgent?.defaultRepositoryId, repositories]);
   return (
     <Modal title="New Chat" onClose={onClose}>
       <Field label="agent">
@@ -166,17 +145,16 @@ function NewChatModal({
           ))}
         </select>
       </Field>
-      <Field label="repository">
-        <select className={inputCls} value={repository} onChange={(e) => setRepository(e.target.value)}>
-          <option value="">No repository</option>
-          {availableRepositories.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-        </select>
-      </Field>
+      {selectedAgent && (
+        <div className="rounded-xl border border-line bg-bg px-3 py-2.5 text-xs text-dim">
+          Repository follows <span className="font-semibold text-ink">{selectedAgent.name}</span>. Change it from the Agent detail page.
+        </div>
+      )}
       <ModalFooter>
         <button className={btnGhost} onClick={onClose}>
           取消
         </button>
-        <button className={btnPrimary} disabled={!agent} onClick={() => onPick(agent, repository)}>
+        <button className={btnPrimary} disabled={!agent} onClick={() => onPick(agent)}>
           开始
         </button>
       </ModalFooter>
@@ -187,14 +165,10 @@ function NewChatModal({
 function ChatView({
   conversationId,
   draftAgent,
-  draftRepository,
-  repositories,
   onConversationCreated,
 }: {
   conversationId: string | null;
   draftAgent: string | null;
-  draftRepository: string;
-  repositories: RepositoryWithMounts[];
   onConversationCreated: (id: string) => void;
 }) {
   const toast = useToast();
@@ -227,7 +201,7 @@ function ChatView({
   const livePrompt = runs.find((r) => r.id === liveRunId)?.prompt ?? pendingPrompt;
   const agentName = detail.data?.agent?.name ?? draftAgent ?? "Agent";
   const chatTitle = detail.data?.conversation.title || (conversationId ? "Untitled chat" : "New conversation");
-  const repositoryName = detail.data?.repository?.name ?? repositories.find((candidate) => candidate.id === draftRepository)?.name ?? null;
+  const repositoryName = detail.data?.repository?.name ?? null;
 
   const send = async () => {
     const prompt = input.trim();
@@ -240,7 +214,6 @@ function ChatView({
         const conv = await createConversation({
           kind: "chat",
           agent: draftAgent!,
-          ...(draftRepository ? { repository: draftRepository } : {}),
           title: prompt.slice(0, 60),
           origin: "web",
         });

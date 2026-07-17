@@ -54,15 +54,20 @@ export class RunCoordinator {
     if (conv.kind === "issue_draft" && purpose !== "triage") {
       throw new Error("AI Issue 草稿只允许 triage run");
     }
-    const repositoryId = conv.repositoryId ?? agent.defaultRepositoryId;
-    const repository = repositoryId ? this.store.getRepository(repositoryId) : null;
+    const reviewing = purpose === "review" || purpose === "verification";
+    const repositoryId = reviewing ? conv.repositoryId : agent.repositoryId;
+    if (!repositoryId) throw new Error("当前任务尚未确定 Repository");
+    if (reviewing && agent.repositoryId !== repositoryId) {
+      throw new Error(`Reviewer Agent 必须绑定实现仓库；当前 Agent 绑定的是其他 Repository`);
+    }
+    const repository = this.store.getRepository(repositoryId);
     if (repository?.archivedAt) {
       throw new Error(`Repository "${repository.name}" 已归档，不能启动新的 Run`);
     }
-    const mount = repositoryId ? this.store.getRepositoryMountForDevice(repositoryId, agent.deviceId) : null;
-    if (repositoryId && !mount) {
+    const mount = this.store.getRepositoryMountForDevice(repositoryId, agent.deviceId);
+    if (!mount) {
       throw new Error(
-        `Repository "${repository?.name ?? repositoryId}" 没有挂载到 Agent 设备；请先在 Repositories 配置该 Device 的本地路径`,
+        `Repository "${repository?.name ?? repositoryId}" 没有挂载到 Agent 设备；请在 Agent 配置中补全该 Device 的本地路径`,
       );
     }
     const effectiveIsolation = purpose === "triage" ? "none" : agent.isolation;
@@ -72,7 +77,8 @@ export class RunCoordinator {
     if (conv.worktreePath && conv.worktreeMountId !== mount?.id) {
       throw new Error("当前 Issue 已有 worktree，只能继续使用创建该 worktree 的 Repository mount");
     }
-    if (!conv.repositoryId && repositoryId) {
+    if (conv.repositoryId !== repositoryId) {
+      if (conv.worktreePath) throw new Error("当前 Issue 已有 worktree，不能切换 Repository");
       this.store.setConversationRepository(conv.id, repositoryId, Date.now());
       conv = this.store.getConversation(conv.id)!;
     }
@@ -100,9 +106,9 @@ export class RunCoordinator {
         conversationId: conv.id,
         agentId: agent.id,
         deviceId: agent.deviceId,
-        repositoryId: repositoryId ?? null,
-        repositoryMountId: mount?.id ?? null,
-        executionRoot: conv.worktreePath ?? mount?.path ?? null,
+        repositoryId,
+        repositoryMountId: mount.id,
+        executionRoot: conv.worktreePath ?? mount.path,
         prompt,
         purpose,
       },

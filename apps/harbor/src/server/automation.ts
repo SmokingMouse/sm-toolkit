@@ -103,6 +103,13 @@ export class AutomationService {
         console.warn(`[automation] ${auto.name} 触发失败：target conversation 不存在`);
         return;
       }
+      if (target.repositoryId && target.repositoryId !== agent.repositoryId) {
+        this.store.appendAutomationLog(
+          { automationId: id, kind: "missed", note: "target conversation 与 Agent 绑定的 Repository 不一致，未触发" },
+          now,
+        );
+        return;
+      }
       conv = target;
     } else {
       conv = this.store.createConversation(
@@ -112,7 +119,7 @@ export class AutomationService {
           title: `[auto] ${auto.name} ${new Date(now).toLocaleString("sv-SE")}`,
           description: auto.prompt,
           agentId: agent.id,
-          repositoryId: auto.repositoryId,
+          repositoryId: agent.repositoryId,
           origin: "automation",
           originRef: auto.id,
         },
