@@ -20,6 +20,7 @@ export const PROMPT_WRAPPER_VARIABLES = [
   "conversation.kind",
   "conversation.title",
   "conversation.status",
+  "conversation.priority",
   "conversation.origin",
   "conversation.originRef",
   "agent.name",
@@ -27,6 +28,7 @@ export const PROMPT_WRAPPER_VARIABLES = [
   "agent.model",
   "agent.workdir",
   "run.id",
+  "run.purpose",
 ] as const;
 
 const DEFAULT_TEMPLATES: Record<PromptSource, string> = {
@@ -34,9 +36,11 @@ const DEFAULT_TEMPLATES: Record<PromptSource, string> = {
 - Issue: {{conversation.id}}
 - Title: {{conversation.title}}
 - Status: {{conversation.status}}
+- Priority: {{conversation.priority}}
 - Agent: {{agent.name}} ({{agent.backend}} / {{agent.model}})
 - Workspace: {{agent.workdir}}
 - Run: {{run.id}}
+- Run purpose: {{run.purpose}}
 
 Use earlier session context as background. The current request below has highest priority.
 
@@ -47,6 +51,7 @@ Use earlier session context as background. The current request below has highest
 - Agent: {{agent.name}} ({{agent.backend}} / {{agent.model}})
 - Workspace: {{agent.workdir}}
 - Run: {{run.id}}
+- Run purpose: {{run.purpose}}
 
 Answer the current request below. Treat earlier session context as background when present.
 
@@ -59,6 +64,7 @@ Answer the current request below. Treat earlier session context as background wh
 - Agent: {{agent.name}} ({{agent.backend}} / {{agent.model}})
 - Workspace: {{agent.workdir}}
 - Run: {{run.id}}
+- Run purpose: {{run.purpose}}
 
 This run was scheduled and may be unattended. Complete the current request below and make blockers explicit in the final result.
 
@@ -118,6 +124,7 @@ export function renderRunPrompt(
     "conversation.kind": input.conversation.kind,
     "conversation.title": input.conversation.title ?? "(untitled)",
     "conversation.status": input.conversation.status,
+    "conversation.priority": input.conversation.priority,
     "conversation.origin": input.conversation.origin,
     "conversation.originRef": input.conversation.originRef ?? "-",
     "agent.name": input.agent.name,
@@ -125,6 +132,7 @@ export function renderRunPrompt(
     "agent.model": input.agent.model ?? "CLI default",
     "agent.workdir": input.agent.workdir,
     "run.id": input.run.id,
+    "run.purpose": input.run.purpose,
   };
   return config.template.replace(VARIABLE_PATTERN, (_match, name: string) => values[name as keyof typeof values]);
 }

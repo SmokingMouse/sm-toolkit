@@ -14,13 +14,24 @@ import type {
   BackendKind,
   ConversationKind,
   ConversationStatus,
+  Delivery,
+  DeliveryCheckStatus,
+  DeliveryProviderKind,
+  IssuePriority,
   IsolationKind,
   Origin,
   PromptSource,
   Run,
+  RunPurpose,
   RunStreamFrame,
 } from "../protocol.js";
-import { ISSUE_STATUSES, NATIVE_TIER_ALIASES } from "../protocol.js";
+import {
+  DELIVERY_CHECK_STATUSES,
+  ISSUE_PRIORITIES,
+  ISSUE_STATUSES,
+  NATIVE_TIER_ALIASES,
+  RUN_PURPOSES,
+} from "../protocol.js";
 import type { HarborStore } from "./store.js";
 import type { RunBus } from "./bus.js";
 import type { DeviceHub } from "./ws.js";
@@ -28,6 +39,7 @@ import type { RunCoordinator } from "./scheduler.js";
 import type { ApprovalService } from "./approvals.js";
 import { AutomationService } from "./automation.js";
 import { transitionConversation } from "./statemachine.js";
+import { DeliveryService } from "./delivery.js";
 import {
   getPromptWrapperConfig,
   listPromptWrapperConfigs,
@@ -37,12 +49,44 @@ import {
 } from "./prompt-wrapper.js";
 
 const PERMISSIONS = ["readonly", "auto-edit", "full", "default"];
+const MAX_SKILL_INSTRUCTION = 128 * 1024;
+const ISSUE_TRIAGE_PROMPT = `You are triaging a request before an Issue is created.
+Read the repository only as needed to replace ambiguity with concrete evidence. Do not edit files, create branches, commit, push, or implement the request.
+
+Return one proposed Issue in Markdown using this exact shape:
+# <concise outcome-oriented title>
+
+## Context
+<what is happening and why it matters>
+
+## Scope
+<specific implementation scope, relevant files or modules when known>
+
+## Acceptance criteria
+- <observable criterion>
+
+## Risks / open questions
+- <only real uncertainty; write "None" if there is none>
+
+User request:
+`;
 
 /** Web 产物目录（Next.js 静态导出）。相对本源码定位仓库内路径，不依赖 cwd。 */
 const WEB_OUT = resolve(import.meta.dir, "../../../harbor-web/out");
 
 function bad(message: string): never {
   throw new HTTPException(400, { message });
+}
+
+function validateDeliveryUrl(value: string | null | undefined): void {
+  if (!value?.trim()) return;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") bad("MR/PR URL 只支持 http/https");
+  } catch (error) {
+    if (error instanceof HTTPException) throw error;
+    bad("MR/PR URL 格式不正确");
+  }
 }
 
 export function buildRest(
@@ -53,8 +97,35 @@ export function buildRest(
   approvals: ApprovalService,
   automations: AutomationService,
   expectedToken: string,
+  deliveries = new DeliveryService(store),
 ): Hono {
   const app = new Hono();
+
+  // 调度冲突（已有 active Run、阶段不符、Reviewer 看不到 worktree）是可修正的请求错误，
+  // 不应泄漏成 500。统一收口，保证 Web / CLI 都拿到可读的 400 提示。
+  const enqueue = (...args: Parameters<RunCoordinator["enqueueRun"]>): Run => {
+    try {
+      return coordinator.enqueueRun(...args);
+    } catch (error) {
+      bad(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const deliveryAction = async <T>(action: () => T | Promise<T>): Promise<T> => {
+    try {
+      return await action();
+    } catch (error) {
+      bad(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const finalizeDelivery = (delivery: Delivery): void => {
+    if (!deliveries.isComplete(delivery)) return;
+    const conv = store.getConversation(delivery.conversationId);
+    if (!conv || conv.kind !== "issue" || conv.status === "done" || conv.status === "canceled") return;
+    transitionConversation(store, conv, "done", "system", Date.now());
+    coordinator.requestWorktreeCleanup(store.getConversation(conv.id)!);
+  };
 
   app.onError((err, c) => {
     if (err instanceof HTTPException) return c.json({ error: err.message }, err.status);
@@ -71,6 +142,25 @@ export function buildRest(
   });
 
   app.get("/api/health", (c) => c.json({ ok: true }));
+
+  const resolveAgentSkills = (value: unknown, deviceId: string, backend: BackendKind) => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || value.some((id) => typeof id !== "string")) {
+      bad("skills 需要是 Skill id 数组");
+    }
+    const ids = [...new Set(value as string[])];
+    return ids.map((id) => {
+      const skill = store.getSkill(id);
+      if (!skill || skill.archivedAt) bad(`skill "${id}" 不存在或已归档`);
+      if (skill.source === "runtime" && skill.deviceId !== deviceId) {
+        bad(`runtime skill "${skill.name}" 只能绑定来源设备上的 Agent`);
+      }
+      if (!skill.runtimes.includes(backend)) {
+        bad(`skill "${skill.name}" 不支持 ${backend} Runtime（可用：${skill.runtimes.join(", ")}）`);
+      }
+      return skill;
+    });
+  };
 
   // ---- settings / prompt wrappers ----
 
@@ -100,7 +190,133 @@ export function buildRest(
 
   // ---- devices ----
 
-  app.get("/api/devices", (c) => c.json(store.listDevices(hub.onlineIds())));
+  app.get("/api/devices", (c) =>
+    c.json(
+      store.listDevices(hub.onlineIds()).map((device) => ({
+        ...device,
+        capabilities: {
+          ...device.capabilities,
+          installedSkills: device.capabilities.installedSkills?.map(({ instruction: _instruction, ...skill }) => skill),
+        },
+      })),
+    ),
+  );
+
+  // ---- skills ----
+
+  const skillView = (id: string) => {
+    const skill = store.getSkill(id);
+    if (!skill) return null;
+    return {
+      ...skill,
+      agents: store.listAgentsForSkill(id).map((agent) => ({ id: agent.id, name: agent.name })),
+    };
+  };
+
+  app.get("/api/skills", (c) => c.json(store.listSkills().map((skill) => skillView(skill.id))));
+
+  app.post("/api/skills", async (c) => {
+    const b = (await c.req.json()) as { name?: string; description?: string; instruction?: string };
+    const name = b.name?.trim() ?? "";
+    const instruction = b.instruction?.trim() ?? "";
+    if (!name) bad("缺少 Skill name");
+    if (name.length > 80) bad("Skill name 最多 80 字符");
+    if (!instruction) bad("缺少 Skill instruction（SKILL.md 正文）");
+    if (instruction.length > MAX_SKILL_INSTRUCTION) bad("Skill instruction 不能超过 128KB");
+    if (store.getSkillByName(name)) bad(`skill 名 "${name}" 已存在`);
+    const skill = store.createSkill(
+      {
+        name,
+        description: b.description?.trim() ?? "",
+        source: "manual",
+        instruction,
+        runtimes: ["claude", "codex"],
+      },
+      Date.now(),
+    );
+    return c.json(skillView(skill.id), 201);
+  });
+
+  /** Mew 式 local runtime sync：只接受 daemon hello 中真实探测到的 path，不信任客户端自报正文。 */
+  app.post("/api/skills/import", async (c) => {
+    const b = (await c.req.json()) as { device?: string; paths?: string[] };
+    if (!b.device) bad("缺少 device");
+    if (!Array.isArray(b.paths) || b.paths.length === 0 || b.paths.some((path) => typeof path !== "string")) {
+      bad("paths 需要是非空的本地 Skill 路径数组");
+    }
+    const device =
+      store.getDeviceByName(b.device, hub.isOnline(b.device)) ??
+      store.getDevice(b.device, hub.isOnline(b.device));
+    if (!device) bad(`device "${b.device}" 不存在`);
+    const installed = device.capabilities.installedSkills ?? [];
+    const imported = [];
+    for (const path of [...new Set(b.paths)]) {
+      const local = installed.find((skill) => skill.path === path);
+      if (!local?.instruction) bad(`device "${device.name}" 未上报可导入的 Skill：${path}（重启 harbord 后重试）`);
+      const existing = store.getRuntimeSkill(device.id, path);
+      const owner = store.getSkillByName(local.name);
+      if (owner && owner.id !== existing?.id) {
+        bad(`skill 名 "${local.name}" 已被占用；请先重命名现有 Skill 或本地 SKILL.md`);
+      }
+      if (existing) {
+        store.updateSkill(existing.id, {
+          name: local.name,
+          description: local.description,
+          instruction: local.instruction,
+          runtimes: local.runtimes,
+        }, Date.now());
+        store.setSkillArchived(existing.id, false, Date.now());
+        imported.push(skillView(existing.id));
+      } else {
+        const skill = store.createSkill({
+          name: local.name,
+          description: local.description,
+          source: "runtime",
+          instruction: local.instruction,
+          deviceId: device.id,
+          sourcePath: local.path,
+          runtimes: local.runtimes,
+        }, Date.now());
+        imported.push(skillView(skill.id));
+      }
+    }
+    return c.json({ imported });
+  });
+
+  app.patch("/api/skills/:id", async (c) => {
+    const id = c.req.param("id");
+    const skill = store.getSkill(id);
+    if (!skill) throw new HTTPException(404, { message: `skill "${id}" 不存在` });
+    const b = (await c.req.json()) as {
+      name?: string;
+      description?: string;
+      instruction?: string;
+      archived?: boolean;
+    };
+    const patch: { name?: string; description?: string; instruction?: string } = {};
+    if (b.name !== undefined) {
+      const name = b.name.trim();
+      if (!name || name.length > 80) bad("Skill name 需要 1–80 字符");
+      const owner = store.getSkillByName(name);
+      if (owner && owner.id !== skill.id) bad(`skill 名 "${name}" 已存在`);
+      patch.name = name;
+    }
+    if (b.description !== undefined) patch.description = b.description.trim();
+    if (b.instruction !== undefined) {
+      if (skill.source === "runtime") bad("runtime Skill 的正文由本机同步管理；请使用 Sync local skills 刷新");
+      const instruction = b.instruction.trim();
+      if (!instruction) bad("Skill instruction 不能为空");
+      if (instruction.length > MAX_SKILL_INSTRUCTION) bad("Skill instruction 不能超过 128KB");
+      patch.instruction = instruction;
+    }
+    if (Object.keys(patch).length > 0) store.updateSkill(id, patch, Date.now());
+    if (b.archived !== undefined) {
+      if (typeof b.archived !== "boolean") bad("archived 需要 true/false");
+      store.setSkillArchived(id, b.archived, Date.now());
+    }
+    if (Object.keys(patch).length === 0 && b.archived === undefined) bad("没有可更新的字段");
+    return c.json(skillView(id));
+  });
 
   // ---- agents ----
 
@@ -117,6 +333,7 @@ export function buildRest(
       workdir?: string;
       isolation?: string;
       instruction?: string;
+      skills?: unknown;
     };
     if (!b.name) bad("缺少 name");
     if (!b.device) bad("缺少 device（设备名或 id）");
@@ -157,14 +374,21 @@ export function buildRest(
       const bare = b.model.startsWith("claude-") ? b.model.slice("claude-".length) : b.model;
       const isNativeTier = NATIVE_TIER_ALIASES.includes(bare);
       const eps = device.capabilities.endpoints ?? [];
-      if (!isNativeTier && !eps.includes(b.model)) {
+      // 只认 claude routes：codex 清单同存于 modelRoutes，不能为 claude 校验放行/报错
+      const routes = (device.capabilities.modelRoutes ?? []).filter((candidate) => candidate.runtime === "claude");
+      const route = routes.find((candidate) => candidate.id === b.model || candidate.model === b.model);
+      const invalidStructuredRoute = routes.length > 0 && (!route || !route.ready);
+      const invalidLegacyRoute = routes.length === 0 && !eps.includes(b.model);
+      if (!isNativeTier && (invalidStructuredRoute || invalidLegacyRoute)) {
+        const readyRoutes = routes.filter((candidate) => candidate.ready).map((candidate) => candidate.id);
         bad(
           `model "${b.model}" 不在设备 "${device.name}" 的能力清单内。` +
-            `可用：${NATIVE_TIER_ALIASES.join("/")}（claude 原生）${eps.length ? "，" + eps.join(", ") : "（该设备未上报 endpoints，检查其 endpoints.yaml）"}`,
+            `可用：${NATIVE_TIER_ALIASES.join("/")}（Claude 原生）${readyRoutes.length ? "，sm-toolkit routes：" + readyRoutes.join(", ") : eps.length ? "，" + eps.join(", ") : "（该设备未上报 sm-toolkit routes，检查 endpoints.yaml 后重启 harbord）"}`,
         );
       }
     }
 
+    const skills = resolveAgentSkills(b.skills, device.id, backend);
     const agent = store.createAgent(
       {
         name: b.name,
@@ -179,16 +403,22 @@ export function buildRest(
       },
       Date.now(),
     );
-    return c.json(agent, 201);
+    if (skills.length > 0) store.setAgentSkills(agent.id, skills.map((skill) => skill.id), Date.now());
+    return c.json(store.getAgent(agent.id), 201);
   });
 
   app.patch("/api/agents/:id", async (c) => {
     const key = c.req.param("id");
     const agent = store.getAgentByName(key) ?? store.getAgent(key);
     if (!agent) throw new HTTPException(404, { message: `agent "${key}" 不存在` });
-    const b = (await c.req.json()) as { archived?: boolean };
-    if (typeof b.archived !== "boolean") bad("需要 archived: true/false");
-    store.setAgentArchived(agent.id, b.archived, Date.now());
+    const b = (await c.req.json()) as { archived?: boolean; skills?: unknown };
+    if (b.archived === undefined && b.skills === undefined) bad("需要 archived 或 skills");
+    const skills = b.skills !== undefined ? resolveAgentSkills(b.skills, agent.deviceId, agent.backend) : null;
+    if (b.archived !== undefined) {
+      if (typeof b.archived !== "boolean") bad("archived 需要 true/false");
+      store.setAgentArchived(agent.id, b.archived, Date.now());
+    }
+    if (skills) store.setAgentSkills(agent.id, skills.map((skill) => skill.id), Date.now());
     return c.json(store.getAgent(agent.id));
   });
 
@@ -197,9 +427,16 @@ export function buildRest(
   app.get("/api/conversations", (c) => {
     const kind = c.req.query("kind") as ConversationKind | undefined;
     const status = c.req.query("status") as ConversationStatus | undefined;
-    const convs = store.listConversations({ kind, status });
+    // AI draft 是创建器内部态；正式发布前不进入 Chats / Issues / Automation target 列表。
+    const convs = store.listConversations({ kind, status }).filter((conversation) => conversation.kind !== "issue_draft");
     const agentNames = new Map(store.listAgents(true).map((a) => [a.id, a.name]));
-    return c.json(convs.map((cv) => ({ ...cv, agentName: agentNames.get(cv.agentId) ?? cv.agentId })));
+    return c.json(
+      convs.map((cv) => ({
+        ...cv,
+        agentName: cv.agentId ? (agentNames.get(cv.agentId) ?? cv.agentId) : null,
+        latestRun: store.latestRunForConversation(cv.id),
+      })),
+    );
   });
 
   app.post("/api/conversations", async (c) => {
@@ -207,63 +444,314 @@ export function buildRest(
       kind?: string;
       agent?: string;
       title?: string;
+      description?: string;
+      priority?: string;
       origin?: Origin;
       originRef?: string;
     };
     if (b.kind !== "chat" && b.kind !== "issue") bad(`kind 只支持 chat/issue（收到 "${b.kind}"）`);
-    if (!b.agent) bad("缺少 agent（agent 名或 id）");
-    const agent = store.getAgentByName(b.agent) ?? store.getAgent(b.agent);
-    if (!agent) bad(`agent "${b.agent}" 不存在（harbor agent ls 查看）`);
-    if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
+    if (b.kind === "chat" && !b.agent) bad("chat 缺少 agent（agent 名或 id）");
+    if (b.priority !== undefined && !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)) {
+      bad(`priority 可选 ${ISSUE_PRIORITIES.join("/")}（收到 "${b.priority}"）`);
+    }
+    const agent = b.agent ? (store.getAgentByName(b.agent) ?? store.getAgent(b.agent)) : null;
+    if (b.agent && !agent) bad(`agent "${b.agent}" 不存在（harbor agent ls 查看）`);
+    if (agent?.archivedAt) bad(`agent "${agent.name}" 已归档`);
     const conv = store.createConversation(
-      { kind: b.kind, title: b.title ?? null, agentId: agent.id, origin: b.origin ?? "cli", originRef: b.originRef ?? null },
+      {
+        kind: b.kind,
+        title: b.title ?? null,
+        description: b.description ?? null,
+        priority: (b.priority as IssuePriority | undefined) ?? "medium",
+        agentId: agent?.id ?? null,
+        origin: b.origin ?? "cli",
+        originRef: b.originRef ?? null,
+      },
       Date.now(),
     );
     return c.json(conv, 201);
   });
 
+  /** Mew AI draft：先用只读 Agent 分诊，人工确认标题/正文后才发布到 Issue 看板。 */
+  app.post("/api/issue-drafts", async (c) => {
+    const b = (await c.req.json()) as { request?: string; agent?: string; priority?: string };
+    if (!b.request?.trim()) bad("请描述要 Agent 分诊的请求");
+    if (!b.agent) bad("请选择负责分诊的 Agent");
+    if (b.priority !== undefined && !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)) {
+      bad(`priority 可选 ${ISSUE_PRIORITIES.join("/")}（收到 "${b.priority}"）`);
+    }
+    const agent = store.getAgentByName(b.agent) ?? store.getAgent(b.agent);
+    if (!agent) bad(`agent "${b.agent}" 不存在`);
+    if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
+    const conv = store.createConversation(
+      {
+        kind: "issue_draft",
+        agentId: agent.id,
+        description: b.request.trim(),
+        priority: (b.priority as IssuePriority | undefined) ?? "medium",
+        origin: "web",
+        originRef: "ai-draft",
+      },
+      Date.now(),
+    );
+    const run = enqueue(conv, agent, `${ISSUE_TRIAGE_PROMPT}${b.request.trim()}`, "triage");
+    return c.json({ conversation: conv, run }, 201);
+  });
+
+  app.post("/api/issue-drafts/:id/publish", async (c) => {
+    const conv = store.resolveConversationPrefix(c.req.param("id"));
+    if (!conv || conv.kind !== "issue_draft") {
+      throw new HTTPException(404, { message: `issue draft "${c.req.param("id")}" 不存在` });
+    }
+    if (store.activeRunForConversation(conv.id)) bad("Agent 仍在分诊，请等待完成后再创建 Issue");
+    const latest = store.latestRunForConversation(conv.id);
+    if (!latest || latest.purpose !== "triage" || latest.status !== "succeeded") {
+      bad("AI 分诊尚未成功完成；可关闭草稿后改用普通模式创建 Issue");
+    }
+    const b = (await c.req.json()) as {
+      title?: string;
+      description?: string;
+      priority?: string;
+      status?: string;
+    };
+    if (!b.title?.trim()) bad("Issue 标题不能为空");
+    if (!b.description?.trim()) bad("Issue 描述不能为空");
+    if (!ISSUE_PRIORITIES.includes(b.priority as IssuePriority)) {
+      bad(`priority 可选 ${ISSUE_PRIORITIES.join("/")}`);
+    }
+    if (b.status !== "backlog" && b.status !== "todo") bad("初始阶段只支持 backlog/todo");
+    return c.json(
+      store.publishIssueDraft(
+        conv.id,
+        {
+          title: b.title.trim(),
+          description: b.description.trim(),
+          priority: b.priority as IssuePriority,
+          status: b.status,
+        },
+        Date.now(),
+      ),
+    );
+  });
+
   app.get("/api/conversations/:id", (c) => {
     const conv = store.resolveConversationPrefix(c.req.param("id"));
     if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
-    const agent = store.getAgent(conv.agentId);
+    const agent = conv.agentId ? store.getAgent(conv.agentId) : null;
     return c.json({
       conversation: conv,
       agent,
       // resultText：Chat/Issue 历史渲染用；run_events 7 天 prune 后为 null（UI 显示「记录已过期」）
       runs: store.listRunsByConversation(conv.id).map((r) => ({ ...r, resultText: store.getRunResultText(r.id) })),
       statusLog: store.listStatusLog(conv.id),
+      delivery: store.getDeliveryForConversation(conv.id),
+      deliveryEvents: (() => {
+        const delivery = store.getDeliveryForConversation(conv.id);
+        return delivery ? store.listDeliveryEvents(delivery.id) : [];
+      })(),
     });
   });
 
   app.patch("/api/conversations/:id", async (c) => {
     const conv = store.resolveConversationPrefix(c.req.param("id"));
     if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
-    const b = (await c.req.json()) as { status?: string };
-    if (!b.status || !ISSUE_STATUSES.includes(b.status as ConversationStatus)) {
-      bad(`status 可选 ${ISSUE_STATUSES.join("/")}（收到 "${b.status}"）`);
+    const b = (await c.req.json()) as {
+      status?: string;
+      title?: string | null;
+      description?: string | null;
+      priority?: string;
+      agent?: string | null;
+    };
+    if (b.priority !== undefined && !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)) {
+      bad(`priority 可选 ${ISSUE_PRIORITIES.join("/")}（收到 "${b.priority}"）`);
     }
-    const to = b.status as ConversationStatus;
-    // 取消 issue 时连带取消进行中的 run（不然 run 跑完又把状态拉走/白烧钱）
-    if (to === "canceled") {
-      const active = store.activeRunForConversation(conv.id);
-      if (active) coordinator.cancelRun(active.id);
+    store.updateConversation(
+      conv.id,
+      {
+        ...(b.title !== undefined ? { title: b.title } : {}),
+        ...(b.description !== undefined ? { description: b.description } : {}),
+        ...(b.priority !== undefined ? { priority: b.priority as IssuePriority } : {}),
+      },
+      Date.now(),
+    );
+    if (b.agent !== undefined) {
+      const agent = b.agent ? (store.getAgentByName(b.agent) ?? store.getAgent(b.agent)) : null;
+      if (b.agent && !agent) bad(`agent "${b.agent}" 不存在`);
+      if (agent?.archivedAt) bad(`agent "${agent.name}" 已归档`);
+      if (store.activeRunForConversation(conv.id)) bad("Run 进行中，不能更换 Assignee；请先停止 Run");
+      store.setConversationAssignee(conv.id, agent?.id ?? null, Date.now());
     }
-    transitionConversation(store, conv, to, "human", Date.now());
-    const fresh = store.getConversation(conv.id)!;
-    // issue 终结 → worktree 收尾（保留分支删目录）；设备离线由重连对账补发
-    if (to === "done" || to === "canceled") coordinator.requestWorktreeCleanup(fresh);
-    return c.json(fresh);
+    if (b.status !== undefined) {
+      if (!ISSUE_STATUSES.includes(b.status as ConversationStatus)) {
+        bad(`status 可选 ${ISSUE_STATUSES.join("/")}（收到 "${b.status}"）`);
+      }
+      if (conv.kind !== "issue") bad("chat 状态恒为 open");
+      if (store.activeRunForConversation(conv.id)) bad("Run 进行中，不能手动调整阶段；请先停止 Run");
+      const current = store.getConversation(conv.id)!;
+      const to = b.status as ConversationStatus;
+      if (to === "doing" || to === "review") bad(`${to} 由 Run 生命周期自动推进，不能手动设置`);
+      if (to === "done" && current.status !== "review") bad("只有 Review 中的 Issue 才能验收完成");
+      if (to === "done" && store.getDeliveryForConversation(current.id)) {
+        bad("当前 Issue 已建立 Delivery，请完成合并/部署流程，不能绕过交付策略直接 Done");
+      }
+      if (to === "backlog" || to === "todo") {
+        if (current.status === "done" || current.status === "canceled") bad(`${current.status} 是终态，不能直接重新打开`);
+      }
+      transitionConversation(store, current, to, "human", Date.now());
+      const fresh = store.getConversation(conv.id)!;
+      if (to === "done" || to === "canceled") coordinator.requestWorktreeCleanup(fresh);
+    }
+    return c.json(store.getConversation(conv.id));
   });
 
   app.post("/api/conversations/:id/runs", async (c) => {
     const conv = store.resolveConversationPrefix(c.req.param("id"));
     if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
-    const b = (await c.req.json()) as { prompt?: string };
+    const b = (await c.req.json()) as { prompt?: string; agent?: string; purpose?: string };
     if (!b.prompt?.trim()) bad("缺少 prompt");
-    const agent = store.getAgent(conv.agentId);
-    if (!agent) bad(`conversation 绑定的 agent 已不存在`);
-    const run = coordinator.enqueueRun(conv, agent, b.prompt);
+    const purpose = (b.purpose ?? "implementation") as RunPurpose;
+    if (!RUN_PURPOSES.includes(purpose)) bad(`purpose 可选 ${RUN_PURPOSES.join("/")}`);
+    const agentKey = b.agent ?? conv.agentId;
+    const agent = agentKey ? (store.getAgentByName(agentKey) ?? store.getAgent(agentKey)) : null;
+    if (!agent) bad("Issue 尚未指派 Agent，请先选择 Assignee");
+    if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
+    const run = enqueue(conv, agent, b.prompt.trim(), purpose);
     return c.json(run, 201);
+  });
+
+  /** Mew 式一步派活：选择 Agent 即更新 Assignee + 创建 implementation Run。 */
+  app.post("/api/conversations/:id/dispatch", async (c) => {
+    const conv = store.resolveConversationPrefix(c.req.param("id"));
+    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    if (conv.kind !== "issue") bad("dispatch 只适用于 Issue");
+    const b = (await c.req.json()) as { agent?: string; prompt?: string };
+    const agentKey = b.agent ?? conv.agentId;
+    const agent = agentKey ? (store.getAgentByName(agentKey) ?? store.getAgent(agentKey)) : null;
+    if (!agent) bad("请选择要执行的 Agent");
+    if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
+    const prompt = b.prompt?.trim() || conv.description?.trim();
+    if (!prompt) bad("Issue 缺少任务描述，无法派发");
+    return c.json(enqueue(conv, agent, prompt, "implementation"), 201);
+  });
+
+  app.post("/api/conversations/:id/request-changes", async (c) => {
+    const conv = store.resolveConversationPrefix(c.req.param("id"));
+    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    if (conv.kind !== "issue" || conv.status !== "review") bad("只有 Review 中的 Issue 可以要求修改");
+    const b = (await c.req.json()) as { feedback?: string; agent?: string };
+    if (!b.feedback?.trim()) bad("请填写修改意见");
+    const agentKey = b.agent ?? conv.agentId;
+    const agent = agentKey ? (store.getAgentByName(agentKey) ?? store.getAgent(agentKey)) : null;
+    if (!agent) bad("请选择返工 Agent");
+    if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
+    return c.json(enqueue(conv, agent, b.feedback.trim(), "implementation"), 201);
+  });
+
+  app.post("/api/conversations/:id/review", async (c) => {
+    const conv = store.resolveConversationPrefix(c.req.param("id"));
+    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    if (conv.kind !== "issue" || conv.status !== "review") bad("AI Review 只能在 Review 阶段启动");
+    const b = (await c.req.json()) as { agent?: string; prompt?: string };
+    const agent = b.agent ? (store.getAgentByName(b.agent) ?? store.getAgent(b.agent)) : null;
+    if (!agent) bad("请选择 Reviewer Agent");
+    if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
+    const prompt = b.prompt?.trim() || "请独立审查本 Issue 的实现结果、代码改动和测试证据，指出阻塞问题与改进建议；不要直接宣告 Issue 完成。";
+    return c.json(enqueue(conv, agent, prompt, "review"), 201);
+  });
+
+  app.post("/api/conversations/:id/delivery", async (c) => {
+    const conv = store.resolveConversationPrefix(c.req.param("id"));
+    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    const b = (await c.req.json()) as {
+      provider?: DeliveryProviderKind;
+      changeUrl?: string;
+      externalId?: string;
+      headBranch?: string;
+      baseBranch?: string;
+      deploymentRequired?: boolean;
+    };
+    validateDeliveryUrl(b.changeUrl);
+    const delivery = await deliveryAction(() => deliveries.create(conv, b));
+    return c.json(delivery, 201);
+  });
+
+  app.patch("/api/deliveries/:id", async (c) => {
+    const delivery = store.getDelivery(c.req.param("id"));
+    if (!delivery) throw new HTTPException(404, { message: `delivery "${c.req.param("id")}" 不存在` });
+    const b = (await c.req.json()) as {
+      changeUrl?: string | null;
+      externalId?: string | null;
+      headBranch?: string | null;
+      baseBranch?: string | null;
+      checkStatus?: DeliveryCheckStatus;
+    };
+    if (b.checkStatus !== undefined && !DELIVERY_CHECK_STATUSES.includes(b.checkStatus)) {
+      bad(`checkStatus 可选 ${DELIVERY_CHECK_STATUSES.join("/")}`);
+    }
+    if (b.changeUrl !== undefined && b.changeUrl !== null) validateDeliveryUrl(b.changeUrl);
+    return c.json(await deliveryAction(() => deliveries.update(delivery, b)));
+  });
+
+  app.post("/api/deliveries/:id/merge", async (c) => {
+    const delivery = store.getDelivery(c.req.param("id"));
+    if (!delivery) throw new HTTPException(404, { message: `delivery "${c.req.param("id")}" 不存在` });
+    const conv = store.getConversation(delivery.conversationId);
+    if (!conv) throw new HTTPException(404, { message: "Delivery 所属 Issue 不存在" });
+    const b = (await c.req.json()) as { confirmed?: boolean };
+    const fresh = await deliveryAction(() => deliveries.merge(delivery, conv, b));
+    finalizeDelivery(fresh);
+    return c.json(store.getDelivery(fresh.id));
+  });
+
+  app.post("/api/deliveries/:id/deploy", async (c) => {
+    const delivery = store.getDelivery(c.req.param("id"));
+    if (!delivery) throw new HTTPException(404, { message: `delivery "${c.req.param("id")}" 不存在` });
+    const conv = store.getConversation(delivery.conversationId);
+    if (!conv) throw new HTTPException(404, { message: "Delivery 所属 Issue 不存在" });
+    const b = (await c.req.json()) as { confirmed?: boolean };
+    return c.json(await deliveryAction(() => deliveries.startDeployment(delivery, conv, b)));
+  });
+
+  app.post("/api/deliveries/:id/deployment-result", async (c) => {
+    const delivery = store.getDelivery(c.req.param("id"));
+    if (!delivery) throw new HTTPException(404, { message: `delivery "${c.req.param("id")}" 不存在` });
+    const b = (await c.req.json()) as { status?: "succeeded" | "failed" };
+    if (b.status !== "succeeded" && b.status !== "failed") bad("status 可选 succeeded/failed");
+    const fresh = await deliveryAction(() => deliveries.finishDeployment(delivery, b.status!));
+    finalizeDelivery(fresh);
+    return c.json(store.getDelivery(fresh.id));
+  });
+
+  app.post("/api/conversations/:id/approve", (c) => {
+    const conv = store.resolveConversationPrefix(c.req.param("id"));
+    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    if (conv.kind !== "issue" || conv.status !== "review") bad("只有 Review 中的 Issue 可以验收完成");
+    if (store.activeRunForConversation(conv.id)) bad("仍有 Run 进行中，不能完成验收");
+    const delivery = store.getDeliveryForConversation(conv.id);
+    if (delivery) {
+      try {
+        deliveries.approve(delivery, conv);
+      } catch (error) {
+        bad(error instanceof Error ? error.message : String(error));
+      }
+      return c.json(store.getConversation(conv.id));
+    }
+    transitionConversation(store, conv, "done", "human", Date.now());
+    const fresh = store.getConversation(conv.id)!;
+    coordinator.requestWorktreeCleanup(fresh);
+    return c.json(fresh);
+  });
+
+  app.post("/api/conversations/:id/cancel", (c) => {
+    const conv = store.resolveConversationPrefix(c.req.param("id"));
+    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    if (conv.kind !== "issue") bad("chat 不能取消为 Issue 终态");
+    const active = store.activeRunForConversation(conv.id);
+    if (active) coordinator.cancelRun(active.id);
+    transitionConversation(store, store.getConversation(conv.id)!, "canceled", "human", Date.now());
+    const fresh = store.getConversation(conv.id)!;
+    coordinator.requestWorktreeCleanup(fresh);
+    return c.json(fresh);
   });
 
   // ---- runs ----

@@ -15,15 +15,27 @@ import type {
   Conversation,
   ConversationKind,
   ConversationStatus,
+  Delivery,
+  DeliveryCheckStatus,
+  DeliveryDeploymentStatus,
+  DeliveryEvent,
+  DeliveryMergeStatus,
+  DeliveryProviderKind,
+  DeliveryReviewStatus,
+  DeliveryStatus,
   Device,
   DeviceCapabilities,
   HarborAgent,
+  HarborSkill,
   IsolationKind,
+  IssuePriority,
   Origin,
   PromptSource,
   Run,
   RunEventRow,
+  RunPurpose,
   RunStatus,
+  SkillSource,
   UsageRow,
 } from "../protocol.js";
 import type { PermissionPolicy } from "@sm/agent";
@@ -55,11 +67,27 @@ interface AgentRow {
   archived_at: number | null;
 }
 
+interface SkillRow {
+  id: string;
+  name: string;
+  description: string;
+  source: string;
+  instruction: string;
+  device_id: string | null;
+  source_path: string | null;
+  runtimes: string;
+  created_at: number;
+  updated_at: number;
+  archived_at: number | null;
+}
+
 interface ConversationRow {
   id: string;
   kind: string;
   title: string | null;
-  agent_id: string;
+  agent_id: string | null;
+  description: string | null;
+  priority: string;
   status: string;
   worktree_path: string | null;
   claude_session_id: string | null;
@@ -69,12 +97,40 @@ interface ConversationRow {
   updated_at: number;
 }
 
+interface DeliveryRow {
+  id: string;
+  conversation_id: string;
+  provider: string;
+  change_url: string | null;
+  external_id: string | null;
+  head_branch: string | null;
+  base_branch: string | null;
+  review_status: string;
+  check_status: string;
+  merge_status: string;
+  deployment_status: string;
+  review_approved_at: number | null;
+  merged_at: number | null;
+  deployed_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface DeliveryEventRow {
+  delivery_id: string;
+  kind: string;
+  data: string;
+  actor: string;
+  ts: number;
+}
+
 interface RunRow {
   id: string;
   conversation_id: string;
   agent_id: string;
   device_id: string;
   prompt: string;
+  purpose: string;
   status: string;
   claude_session_id: string | null;
   error: string | null;
@@ -160,7 +216,24 @@ function toAgent(r: AgentRow): HarborAgent {
     workdir: r.workdir,
     isolation: r.isolation as IsolationKind,
     instruction: r.instruction,
+    skillIds: [],
     createdAt: r.created_at,
+    archivedAt: r.archived_at,
+  };
+}
+
+function toSkill(r: SkillRow): HarborSkill {
+  return {
+    id: r.id,
+    name: r.name,
+    description: r.description,
+    source: r.source as SkillSource,
+    instruction: r.instruction,
+    deviceId: r.device_id,
+    sourcePath: r.source_path,
+    runtimes: JSON.parse(r.runtimes) as BackendKind[],
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
     archivedAt: r.archived_at,
   };
 }
@@ -171,6 +244,8 @@ function toConversation(r: ConversationRow): Conversation {
     kind: r.kind as ConversationKind,
     title: r.title,
     agentId: r.agent_id,
+    description: r.description,
+    priority: r.priority as IssuePriority,
     status: r.status as ConversationStatus,
     worktreePath: r.worktree_path,
     claudeSessionId: r.claude_session_id,
@@ -178,6 +253,58 @@ function toConversation(r: ConversationRow): Conversation {
     originRef: r.origin_ref,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+  };
+}
+
+function deliveryStatus(r: DeliveryRow): DeliveryStatus {
+  if (r.merge_status === "merged") {
+    if (r.deployment_status === "failed") return "failed";
+    if (r.deployment_status === "running") return "deploying";
+    if (r.deployment_status === "pending") return "merged";
+    return "succeeded";
+  }
+  if (!r.change_url) return "awaiting_change";
+  if (r.check_status === "failed") return "blocked";
+  if (r.review_status !== "approved") return "review_pending";
+  if (r.check_status !== "passed") return "checks_pending";
+  return "merge_ready";
+}
+
+function toDelivery(r: DeliveryRow): Delivery {
+  return {
+    id: r.id,
+    conversationId: r.conversation_id,
+    provider: r.provider as DeliveryProviderKind,
+    changeUrl: r.change_url,
+    externalId: r.external_id,
+    headBranch: r.head_branch,
+    baseBranch: r.base_branch,
+    reviewStatus: r.review_status as DeliveryReviewStatus,
+    checkStatus: r.check_status as DeliveryCheckStatus,
+    mergeStatus: r.merge_status as DeliveryMergeStatus,
+    deploymentStatus: r.deployment_status as DeliveryDeploymentStatus,
+    status: deliveryStatus(r),
+    reviewApprovedAt: r.review_approved_at,
+    mergedAt: r.merged_at,
+    deployedAt: r.deployed_at,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+function toDeliveryEvent(r: DeliveryEventRow): DeliveryEvent {
+  let data: unknown = {};
+  try {
+    data = JSON.parse(r.data);
+  } catch {
+    data = { raw: r.data };
+  }
+  return {
+    deliveryId: r.delivery_id,
+    kind: r.kind,
+    data,
+    actor: r.actor as DeliveryEvent["actor"],
+    ts: r.ts,
   };
 }
 
@@ -190,6 +317,7 @@ function toRun(r: RunRow): Run {
     agentId: r.agent_id,
     deviceId: r.device_id,
     prompt: r.prompt,
+    purpose: r.purpose as RunPurpose,
     status: r.status as RunStatus,
     claudeSessionId: r.claude_session_id,
     error: r.error,
@@ -324,12 +452,12 @@ export class HarborStore {
 
   getAgent(id: string): HarborAgent | null {
     const r = this.db.query<AgentRow, [string]>("SELECT * FROM agents WHERE id = ?").get(id);
-    return r ? toAgent(r) : null;
+    return r ? this.withAgentSkills(toAgent(r)) : null;
   }
 
   getAgentByName(name: string): HarborAgent | null {
     const r = this.db.query<AgentRow, [string]>("SELECT * FROM agents WHERE name = ?").get(name);
-    return r ? toAgent(r) : null;
+    return r ? this.withAgentSkills(toAgent(r)) : null;
   }
 
   /** 归档 = 软删除（不出现在派活下拉，历史 run/conversation 引用不悬空）；archived=false 可恢复 */
@@ -341,7 +469,154 @@ export class HarborStore {
     const sql = includeArchived
       ? "SELECT * FROM agents ORDER BY created_at"
       : "SELECT * FROM agents WHERE archived_at IS NULL ORDER BY created_at";
-    return this.db.query<AgentRow, []>(sql).all().map(toAgent);
+    return this.db.query<AgentRow, []>(sql).all().map((row) => this.withAgentSkills(toAgent(row)));
+  }
+
+  private withAgentSkills(agent: HarborAgent): HarborAgent {
+    agent.skillIds = this.db
+      .query<{ skill_id: string }, [string]>(
+        "SELECT skill_id FROM agent_skills WHERE agent_id = ? ORDER BY position, created_at",
+      )
+      .all(agent.id)
+      .map((row) => row.skill_id);
+    return agent;
+  }
+
+  /** 绑定是 Agent 当前配置，不写进历史 Run；dispatch 时 scheduler 解析最新值。 */
+  setAgentSkills(agentId: string, skillIds: string[], now: number): void {
+    this.db.transaction(() => {
+      this.db.run("DELETE FROM agent_skills WHERE agent_id = ?", [agentId]);
+      const insert = this.db.prepare(
+        "INSERT INTO agent_skills (agent_id, skill_id, position, created_at) VALUES (?,?,?,?)",
+      );
+      skillIds.forEach((skillId, position) => insert.run(agentId, skillId, position, now));
+    })();
+  }
+
+  // ---- skills ----
+
+  createSkill(
+    skill: {
+      name: string;
+      description?: string;
+      source: SkillSource;
+      instruction: string;
+      deviceId?: string | null;
+      sourcePath?: string | null;
+      runtimes?: BackendKind[];
+    },
+    now: number,
+  ): HarborSkill {
+    const id = newId("skill");
+    this.db.run(
+      `INSERT INTO skills
+       (id, name, description, source, instruction, device_id, source_path, runtimes, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      [
+        id,
+        skill.name,
+        skill.description ?? "",
+        skill.source,
+        skill.instruction,
+        skill.deviceId ?? null,
+        skill.sourcePath ?? null,
+        JSON.stringify(skill.runtimes ?? ["claude", "codex"]),
+        now,
+        now,
+      ],
+    );
+    return this.getSkill(id)!;
+  }
+
+  getSkill(id: string): HarborSkill | null {
+    const row = this.db.query<SkillRow, [string]>("SELECT * FROM skills WHERE id = ?").get(id);
+    return row ? toSkill(row) : null;
+  }
+
+  getSkillByName(name: string): HarborSkill | null {
+    const row = this.db.query<SkillRow, [string]>("SELECT * FROM skills WHERE name = ?").get(name);
+    return row ? toSkill(row) : null;
+  }
+
+  getRuntimeSkill(deviceId: string, sourcePath: string): HarborSkill | null {
+    const row = this.db
+      .query<SkillRow, [string, string]>(
+        "SELECT * FROM skills WHERE source = 'runtime' AND device_id = ? AND source_path = ?",
+      )
+      .get(deviceId, sourcePath);
+    return row ? toSkill(row) : null;
+  }
+
+  listSkills(includeArchived = false): HarborSkill[] {
+    const sql = includeArchived
+      ? "SELECT * FROM skills ORDER BY updated_at DESC, name"
+      : "SELECT * FROM skills WHERE archived_at IS NULL ORDER BY updated_at DESC, name";
+    return this.db.query<SkillRow, []>(sql).all().map(toSkill);
+  }
+
+  listSkillsForAgent(agentId: string): HarborSkill[] {
+    return this.db
+      .query<SkillRow, [string]>(
+        `SELECT s.* FROM agent_skills a
+         JOIN skills s ON s.id = a.skill_id
+         WHERE a.agent_id = ? AND s.archived_at IS NULL
+         ORDER BY a.position, a.created_at`,
+      )
+      .all(agentId)
+      .map(toSkill);
+  }
+
+  listAgentsForSkill(skillId: string): HarborAgent[] {
+    return this.db
+      .query<AgentRow, [string]>(
+        `SELECT a.* FROM agent_skills x
+         JOIN agents a ON a.id = x.agent_id
+         WHERE x.skill_id = ? AND a.archived_at IS NULL
+         ORDER BY a.name`,
+      )
+      .all(skillId)
+      .map((row) => this.withAgentSkills(toAgent(row)));
+  }
+
+  updateSkill(
+    id: string,
+    patch: { name?: string; description?: string; instruction?: string; runtimes?: BackendKind[] },
+    now: number,
+  ): void {
+    const sets: string[] = [];
+    const params: (string | number)[] = [];
+    if (patch.name !== undefined) {
+      sets.push("name = ?");
+      params.push(patch.name);
+    }
+    if (patch.description !== undefined) {
+      sets.push("description = ?");
+      params.push(patch.description);
+    }
+    if (patch.instruction !== undefined) {
+      sets.push("instruction = ?");
+      params.push(patch.instruction);
+    }
+    if (patch.runtimes !== undefined) {
+      sets.push("runtimes = ?");
+      params.push(JSON.stringify(patch.runtimes));
+    }
+    if (sets.length === 0) return;
+    sets.push("updated_at = ?");
+    params.push(now, id);
+    this.db.run(`UPDATE skills SET ${sets.join(", ")} WHERE id = ?`, params);
+  }
+
+  /** 归档即停止生效并解除全部 Agent 绑定；恢复不会隐式重新绑定。 */
+  setSkillArchived(id: string, archived: boolean, now: number): void {
+    this.db.transaction(() => {
+      if (archived) this.db.run("DELETE FROM agent_skills WHERE skill_id = ?", [id]);
+      this.db.run("UPDATE skills SET archived_at = ?, updated_at = ? WHERE id = ?", [
+        archived ? now : null,
+        now,
+        id,
+      ]);
+    })();
   }
 
   // ---- conversations ----
@@ -349,16 +624,31 @@ export class HarborStore {
   createConversation(c: {
     kind: ConversationKind;
     title?: string | null;
-    agentId: string;
+    agentId?: string | null;
+    description?: string | null;
+    priority?: IssuePriority;
     origin?: Origin;
     originRef?: string | null;
   }, now: number): Conversation {
     const id = newId("conversation");
-    const status: ConversationStatus = c.kind === "chat" ? "open" : "backlog";
+    const status: ConversationStatus = c.kind === "issue" ? "backlog" : "open";
     this.db.run(
-      `INSERT INTO conversations (id, kind, title, agent_id, status, origin, origin_ref, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?)`,
-      [id, c.kind, c.title ?? null, c.agentId, status, c.origin ?? "cli", c.originRef ?? null, now, now],
+      `INSERT INTO conversations
+       (id, kind, title, agent_id, description, priority, status, origin, origin_ref, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        id,
+        c.kind,
+        c.title ?? null,
+        c.agentId ?? null,
+        c.description ?? null,
+        c.priority ?? "medium",
+        status,
+        c.origin ?? "cli",
+        c.originRef ?? null,
+        now,
+        now,
+      ],
     );
     return this.getConversation(id)!;
   }
@@ -401,6 +691,59 @@ export class HarborStore {
     this.db.run("UPDATE conversations SET status = ?, updated_at = ? WHERE id = ?", [status, now, id]);
   }
 
+  updateConversation(
+    id: string,
+    patch: { title?: string | null; description?: string | null; priority?: IssuePriority },
+    now: number,
+  ): void {
+    const sets: string[] = [];
+    const params: (string | number | null)[] = [];
+    if ("title" in patch) {
+      sets.push("title = ?");
+      params.push(patch.title ?? null);
+    }
+    if ("description" in patch) {
+      sets.push("description = ?");
+      params.push(patch.description ?? null);
+    }
+    if ("priority" in patch) {
+      sets.push("priority = ?");
+      params.push(patch.priority ?? "medium");
+    }
+    if (sets.length === 0) return;
+    sets.push("updated_at = ?");
+    params.push(now, id);
+    this.db.run(`UPDATE conversations SET ${sets.join(", ")} WHERE id = ?`, params);
+  }
+
+  /** AI 分诊草稿在人工确认时才进入 Issue 看板；保留 triage Run 与 session 作为来源证据。 */
+  publishIssueDraft(
+    id: string,
+    patch: { title: string; description: string; priority: IssuePriority; status: "backlog" | "todo" },
+    now: number,
+  ): Conversation {
+    const current = this.getConversation(id);
+    if (!current || current.kind !== "issue_draft") throw new Error(`issue draft "${id}" 不存在`);
+    this.db.run(
+      `UPDATE conversations
+       SET kind = 'issue', title = ?, description = ?, priority = ?, status = ?, updated_at = ?
+       WHERE id = ?`,
+      [patch.title, patch.description, patch.priority, patch.status, now, id],
+    );
+    this.appendStatusLog(id, null, patch.status, "human", now);
+    return this.getConversation(id)!;
+  }
+
+  /** Assignee 变化时清空旧 Agent 的 resume session；Review Agent 不走这里。 */
+  setConversationAssignee(id: string, agentId: string | null, now: number): void {
+    const current = this.getConversation(id);
+    if (!current || current.agentId === agentId) return;
+    this.db.run(
+      "UPDATE conversations SET agent_id = ?, claude_session_id = NULL, updated_at = ? WHERE id = ?",
+      [agentId, now, id],
+    );
+  }
+
   setConversationClaudeSessionId(id: string, sid: string, now: number): void {
     this.db.run("UPDATE conversations SET claude_session_id = ?, updated_at = ? WHERE id = ?", [
       sid,
@@ -435,9 +778,10 @@ export class HarborStore {
          WHERE a.device_id = ? AND c.worktree_path IS NOT NULL AND c.status IN ('done','canceled')`,
       )
       .all(deviceId);
-    return rows.map((r) => {
+    return rows.flatMap((r) => {
       const conv = toConversation(r);
-      return { conversation: conv, agent: this.getAgent(conv.agentId)! };
+      const agent = conv.agentId ? this.getAgent(conv.agentId) : null;
+      return agent ? [{ conversation: conv, agent }] : [];
     });
   }
 
@@ -454,14 +798,154 @@ export class HarborStore {
     );
   }
 
+  // ---- delivery ----
+
+  createDelivery(
+    input: {
+      conversationId: string;
+      provider: DeliveryProviderKind;
+      changeUrl?: string | null;
+      externalId?: string | null;
+      headBranch?: string | null;
+      baseBranch?: string | null;
+      deploymentRequired?: boolean;
+    },
+    now: number,
+  ): Delivery {
+    const id = newId("delivery");
+    this.db.run(
+      `INSERT INTO deliveries
+       (id, conversation_id, provider, change_url, external_id, head_branch, base_branch, deployment_status, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?, ?,?,?)`,
+      [
+        id,
+        input.conversationId,
+        input.provider,
+        input.changeUrl ?? null,
+        input.externalId ?? null,
+        input.headBranch ?? null,
+        input.baseBranch ?? null,
+        input.deploymentRequired ? "pending" : "not_required",
+        now,
+        now,
+      ],
+    );
+    this.db.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, input.conversationId]);
+    return this.getDelivery(id)!;
+  }
+
+  getDelivery(id: string): Delivery | null {
+    const row = this.db.query<DeliveryRow, [string]>("SELECT * FROM deliveries WHERE id = ?").get(id);
+    return row ? toDelivery(row) : null;
+  }
+
+  getDeliveryForConversation(conversationId: string): Delivery | null {
+    const row = this.db
+      .query<DeliveryRow, [string]>("SELECT * FROM deliveries WHERE conversation_id = ?")
+      .get(conversationId);
+    return row ? toDelivery(row) : null;
+  }
+
+  updateDeliveryMetadata(
+    id: string,
+    patch: { changeUrl?: string | null; externalId?: string | null; headBranch?: string | null; baseBranch?: string | null },
+    now: number,
+  ): void {
+    const sets: string[] = [];
+    const params: (string | number | null)[] = [];
+    const fields: [keyof typeof patch, string][] = [
+      ["changeUrl", "change_url"],
+      ["externalId", "external_id"],
+      ["headBranch", "head_branch"],
+      ["baseBranch", "base_branch"],
+    ];
+    for (const [key, column] of fields) {
+      if (!(key in patch)) continue;
+      sets.push(`${column} = ?`);
+      params.push(patch[key] ?? null);
+    }
+    if (sets.length === 0) return;
+    sets.push("updated_at = ?");
+    params.push(now, id);
+    this.db.run(`UPDATE deliveries SET ${sets.join(", ")} WHERE id = ?`, params);
+    this.touchDeliveryConversation(id, now);
+  }
+
+  updateDeliveryState(
+    id: string,
+    patch: {
+      reviewStatus?: DeliveryReviewStatus;
+      checkStatus?: DeliveryCheckStatus;
+      mergeStatus?: DeliveryMergeStatus;
+      deploymentStatus?: DeliveryDeploymentStatus;
+      reviewApprovedAt?: number | null;
+      mergedAt?: number | null;
+      deployedAt?: number | null;
+    },
+    now: number,
+  ): void {
+    const sets: string[] = [];
+    const params: (string | number | null)[] = [];
+    const fields: [keyof typeof patch, string][] = [
+      ["reviewStatus", "review_status"],
+      ["checkStatus", "check_status"],
+      ["mergeStatus", "merge_status"],
+      ["deploymentStatus", "deployment_status"],
+      ["reviewApprovedAt", "review_approved_at"],
+      ["mergedAt", "merged_at"],
+      ["deployedAt", "deployed_at"],
+    ];
+    for (const [key, column] of fields) {
+      if (!(key in patch)) continue;
+      sets.push(`${column} = ?`);
+      params.push(patch[key] ?? null);
+    }
+    if (sets.length === 0) return;
+    sets.push("updated_at = ?");
+    params.push(now, id);
+    this.db.run(`UPDATE deliveries SET ${sets.join(", ")} WHERE id = ?`, params);
+    this.touchDeliveryConversation(id, now);
+  }
+
+  appendDeliveryEvent(
+    deliveryId: string,
+    kind: string,
+    data: unknown,
+    actor: DeliveryEvent["actor"],
+    now: number,
+  ): void {
+    this.db.run(
+      "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
+      [deliveryId, kind, JSON.stringify(data ?? {}), actor, now],
+    );
+  }
+
+  listDeliveryEvents(deliveryId: string): DeliveryEvent[] {
+    return this.db
+      .query<DeliveryEventRow, [string]>("SELECT * FROM delivery_events WHERE delivery_id = ? ORDER BY ts, rowid")
+      .all(deliveryId)
+      .map(toDeliveryEvent);
+  }
+
+  private touchDeliveryConversation(deliveryId: string, now: number): void {
+    this.db.run(
+      `UPDATE conversations SET updated_at = ?
+       WHERE id = (SELECT conversation_id FROM deliveries WHERE id = ?)`,
+      [now, deliveryId],
+    );
+  }
+
   // ---- runs ----
 
-  createRun(r: { conversationId: string; agentId: string; deviceId: string; prompt: string }, now: number): Run {
+  createRun(
+    r: { conversationId: string; agentId: string; deviceId: string; prompt: string; purpose?: RunPurpose },
+    now: number,
+  ): Run {
     const id = newId("run");
     this.db.run(
-      `INSERT INTO runs (id, conversation_id, agent_id, device_id, prompt, status, queued_at)
-       VALUES (?,?,?,?,?,'queued',?)`,
-      [id, r.conversationId, r.agentId, r.deviceId, r.prompt, now],
+      `INSERT INTO runs (id, conversation_id, agent_id, device_id, prompt, purpose, status, queued_at)
+       VALUES (?,?,?,?,?,?,'queued',?)`,
+      [id, r.conversationId, r.agentId, r.deviceId, r.prompt, r.purpose ?? "implementation", now],
     );
     this.db.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, r.conversationId]);
     return this.getRun(id)!;
@@ -485,6 +969,13 @@ export class HarborStore {
       .query<RunRow, [string]>("SELECT * FROM runs WHERE conversation_id = ? ORDER BY queued_at")
       .all(conversationId)
       .map(toRun);
+  }
+
+  latestRunForConversation(conversationId: string): Run | null {
+    const r = this.db
+      .query<RunRow, [string]>("SELECT * FROM runs WHERE conversation_id = ? ORDER BY queued_at DESC LIMIT 1")
+      .get(conversationId);
+    return r ? toRun(r) : null;
   }
 
   /** 该设备最老的一条 queued run（FIFO 调度） */

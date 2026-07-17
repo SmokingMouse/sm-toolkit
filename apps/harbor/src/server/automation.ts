@@ -102,6 +102,7 @@ export class AutomationService {
         {
           kind: "issue",
           title: `[auto] ${auto.name} ${new Date(now).toLocaleString("sv-SE")}`,
+          description: auto.prompt,
           agentId: agent.id,
           origin: "automation",
           originRef: auto.id,
@@ -110,7 +111,7 @@ export class AutomationService {
       );
     }
 
-    const run = this.coordinator.enqueueRun(conv, agent, auto.prompt);
+    const run = this.coordinator.enqueueRun(conv, agent, auto.prompt, "implementation");
     this.store.markAutomationFired(id, now);
     this.store.appendAutomationLog({ automationId: id, kind: "fired", runId: run.id }, now);
     console.log(`[automation] fired：${auto.name} → run ${run.id}（conv ${conv.id}）`);

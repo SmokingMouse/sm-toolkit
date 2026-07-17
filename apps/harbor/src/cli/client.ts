@@ -58,7 +58,7 @@ export class HarborClient {
     return this.req("POST", "/api/agents", body);
   }
 
-  conversations(q: { kind?: string; status?: string }): Promise<(Conversation & { agentName: string })[]> {
+  conversations(q: { kind?: string; status?: string }): Promise<(Conversation & { agentName: string | null })[]> {
     const params = new URLSearchParams();
     if (q.kind) params.set("kind", q.kind);
     if (q.status) params.set("status", q.status);
@@ -78,8 +78,32 @@ export class HarborClient {
     return this.req("PATCH", `/api/conversations/${encodeURIComponent(id)}`, { status });
   }
 
-  createRun(conversationId: string, prompt: string): Promise<Run> {
-    return this.req("POST", `/api/conversations/${encodeURIComponent(conversationId)}/runs`, { prompt });
+  updateConversation(id: string, body: Record<string, unknown>): Promise<Conversation> {
+    return this.req("PATCH", `/api/conversations/${encodeURIComponent(id)}`, body);
+  }
+
+  createRun(conversationId: string, prompt: string, options?: { agent?: string; purpose?: string }): Promise<Run> {
+    return this.req("POST", `/api/conversations/${encodeURIComponent(conversationId)}/runs`, { prompt, ...options });
+  }
+
+  dispatchIssue(id: string, agent?: string, prompt?: string): Promise<Run> {
+    return this.req("POST", `/api/conversations/${encodeURIComponent(id)}/dispatch`, { agent, prompt });
+  }
+
+  requestChanges(id: string, feedback: string, agent?: string): Promise<Run> {
+    return this.req("POST", `/api/conversations/${encodeURIComponent(id)}/request-changes`, { feedback, agent });
+  }
+
+  reviewIssue(id: string, agent: string, prompt?: string): Promise<Run> {
+    return this.req("POST", `/api/conversations/${encodeURIComponent(id)}/review`, { agent, prompt });
+  }
+
+  approveIssue(id: string): Promise<Conversation> {
+    return this.req("POST", `/api/conversations/${encodeURIComponent(id)}/approve`);
+  }
+
+  cancelIssue(id: string): Promise<Conversation> {
+    return this.req("POST", `/api/conversations/${encodeURIComponent(id)}/cancel`);
   }
 
   getRun(id: string): Promise<Run> {

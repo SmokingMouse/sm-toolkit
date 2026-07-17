@@ -9,9 +9,16 @@ test("scheduler dispatches wrapped prompt while persisting the raw request", () 
   const store = new HarborStore(openDb(":memory:"));
   const device = store.upsertDevice("worker", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
   const agent = store.createAgent(
-    { name: "builder", deviceId: device.id, backend: "claude", workdir: "/repo" },
+    { name: "builder", deviceId: device.id, backend: "claude", workdir: "/repo", instruction: "Own the outcome." },
     2,
   );
+  const skill = store.createSkill({
+    name: "review-first",
+    description: "Check existing behavior before editing",
+    source: "manual",
+    instruction: "Inspect the current implementation and tests before making changes.",
+  }, 2);
+  store.setAgentSkills(agent.id, [skill.id], 2);
   const conversation = store.createConversation(
     { kind: "issue", title: "Prompt boundary", agentId: agent.id, origin: "web" },
     3,
@@ -34,5 +41,8 @@ test("scheduler dispatches wrapped prompt while persisting the raw request", () 
   expect(start?.type).toBe("run_start");
   if (start?.type === "run_start") {
     expect(start.spec.prompt).toBe(`Context=${conversation.id}\nRequest=raw user request`);
+    expect(start.spec.systemPrompt).toContain("Own the outcome.");
+    expect(start.spec.systemPrompt).toContain("## Skill: review-first");
+    expect(start.spec.systemPrompt).toContain("Inspect the current implementation");
   }
 });

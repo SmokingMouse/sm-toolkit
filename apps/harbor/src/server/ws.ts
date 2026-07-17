@@ -137,7 +137,7 @@ export class DeviceHub implements DeviceTransport {
     this.conns.set(device.id, ws);
     ws.send(JSON.stringify({ type: "hello_ok", deviceId: device.id } satisfies ServerMsg));
     console.log(
-      `[hub] device 上线：${device.name}（${device.id}）clis=${JSON.stringify(capabilities.clis)} endpoints=${capabilities.endpoints.length} 个，对账 running=${runningRunIds.length}`,
+      `[hub] device 上线：${device.name}（${device.id}）clis=${JSON.stringify(capabilities.clis)} routes=${capabilities.modelRoutes?.filter((route) => route.ready).length ?? 0}/${capabilities.modelRoutes?.length ?? 0}，对账 running=${runningRunIds.length}`,
     );
 
     // 对账（清孤儿 + worktree 收尾补发）+ 决议补投 + 补位调度

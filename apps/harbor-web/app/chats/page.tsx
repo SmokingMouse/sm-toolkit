@@ -7,13 +7,15 @@ import {
   getConversation,
   listAgents,
   listConversations,
+  type ConversationWithAgent,
   type HarborAgent,
   type RunWithResult,
 } from "../../lib/api";
 import { ago, usePoll } from "../../lib/hooks";
 import { useToast } from "../../components/toast";
 import { btnGhost, btnPrimary, Empty, Field, inputCls, Modal, ModalFooter } from "../../components/ui";
-import { foldFrames, useRunFrames } from "../../components/run-stream";
+import { foldFrames, ToolCard, useRunFrames } from "../../components/run-stream";
+import { Markdown } from "../../components/markdown";
 
 export default function ChatsPage() {
   const convs = usePoll(() => listConversations({ kind: "chat" }), 10_000);
@@ -21,18 +23,31 @@ export default function ChatsPage() {
   const [selected, setSelected] = useState<string | null>(null);
   const [draftAgent, setDraftAgent] = useState<string | null>(null);
   const [newChatOpen, setNewChatOpen] = useState(false);
+  const [groupByAgent, setGroupByAgent] = useState(false);
+  const grouped = useMemo(() => {
+    const groups = new Map<string, ConversationWithAgent[]>();
+    for (const conversation of convs.data ?? []) {
+      const agentName = conversation.agentName ?? "Unknown Agent";
+      const rows = groups.get(agentName) ?? [];
+      rows.push(conversation);
+      groups.set(agentName, rows);
+    }
+    return [...groups.entries()];
+  }, [convs.data]);
+  const displayGroups = groupByAgent ? grouped : [["", convs.data ?? []] as const];
 
   return (
     <div className="page-enter flex h-full">
-      <aside className="flex w-[292px] shrink-0 flex-col border-r border-line bg-panel/80 max-lg:w-[250px] max-sm:w-[210px]">
-        <div className="flex items-end justify-between border-b border-line px-4 py-4">
+      <aside className="flex w-[316px] shrink-0 flex-col border-r border-line bg-panel/80 max-lg:w-[260px] max-sm:w-[210px]">
+        <div className="flex items-end justify-between gap-2 border-b border-line px-4 py-4">
           <div>
             <div className="text-[9px] font-bold uppercase tracking-[0.17em] text-accent">Conversations</div>
             <span className="mt-1 block text-lg font-semibold tracking-tight">Chats</span>
           </div>
-          <button className={btnGhost} onClick={() => setNewChatOpen(true)}>
-            ＋ New
-          </button>
+          <div className="flex gap-1.5">
+            <button className={`${btnGhost} min-h-9 px-2.5 ${groupByAgent ? "border-accent/35 bg-accent-soft/60 text-accent-strong" : ""}`} aria-pressed={groupByAgent} title="按 Agent 分组" onClick={() => setGroupByAgent((value) => !value)}>◎</button>
+            <button className={btnGhost} onClick={() => setNewChatOpen(true)}>＋ New</button>
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto px-2.5 py-3">
           {draftAgent && (
@@ -46,22 +61,29 @@ export default function ChatsPage() {
               <div className="text-[11px] text-dim">agent {draftAgent}</div>
             </button>
           )}
-          {(convs.data ?? []).map((c) => (
-            <button
-              key={c.id}
-              className={`mb-1.5 w-full rounded-xl border px-3 py-2.5 text-left ${
-                selected === c.id ? "border-accent/30 bg-accent-soft/55 shadow-[inset_3px_0_0_var(--color-accent)]" : "border-transparent hover:border-line hover:bg-white/70"
-              }`}
-              onClick={() => {
-                setSelected(c.id);
-              }}
-            >
-              <div className="truncate text-[13px] font-medium">{c.title || "(无标题)"}</div>
-              <div className="mt-1 flex gap-2 text-[10px] text-dim">
-                <span>{c.agentName}</span>
-                <span>{ago(c.updatedAt)}</span>
-              </div>
-            </button>
+          {displayGroups.map(([agentName, conversations]) => (
+            <section key={agentName} className="mb-3">
+              {groupByAgent && <div className="mb-1.5 flex items-center gap-2 px-2 text-[9px] font-bold uppercase tracking-[0.14em] text-dim">
+                <span className="grid h-4 w-4 place-items-center rounded bg-accent-soft text-[8px] text-accent-strong">{agentName.slice(0, 1).toUpperCase()}</span>
+                <span className="truncate">{agentName}</span>
+                <span className="ml-auto font-mono font-normal">{conversations?.length ?? 0}</span>
+              </div>}
+              {conversations?.map((c) => (
+                <button
+                  key={c.id}
+                  className={`mb-1 w-full rounded-xl border px-3 py-2.5 text-left ${
+                    selected === c.id ? "border-accent/30 bg-accent-soft/55 shadow-[inset_3px_0_0_var(--color-accent)]" : "border-transparent hover:border-line hover:bg-white/70"
+                  }`}
+                  onClick={() => setSelected(c.id)}
+                >
+                  <div className="truncate text-[13px] font-medium">{c.title || "(无标题)"}</div>
+                  <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-dim">
+                    <span className="truncate font-mono">{c.id.slice(0, 8)}</span>
+                    <span className="shrink-0">{ago(c.updatedAt)}</span>
+                  </div>
+                </button>
+              ))}
+            </section>
           ))}
           {(convs.data ?? []).length === 0 && !draftAgent && (
             <div className="px-2 py-6 text-center text-xs text-dim">还没有聊天</div>
@@ -209,14 +231,17 @@ function ChatView({
       <div className="flex h-[72px] shrink-0 items-center justify-between border-b border-line bg-panel/70 px-5 backdrop-blur">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold">{chatTitle}</div>
-          <div className="mt-1 flex items-center gap-1.5 text-[10px] text-dim"><span className="h-1.5 w-1.5 rounded-full bg-done" /> Agent · {agentName}</div>
+          <div className="mt-1 flex items-center gap-1.5 text-[10px] text-dim"><span className="h-1.5 w-1.5 rounded-full bg-done" /> Conversation context is preserved</div>
         </div>
-        <div className="rounded-full border border-line bg-white/60 px-2.5 py-1 font-mono text-[10px] text-dim">{runs.length} runs</div>
+        <div className="flex items-center gap-2">
+          <div className="rounded-full border border-line bg-white/70 px-3 py-1.5 text-[11px] font-semibold text-ink/80"><span className="mr-1.5 text-accent">◆</span>{agentName}</div>
+          <div className="rounded-full border border-line bg-white/60 px-2.5 py-1.5 font-mono text-[10px] text-dim">{runs.length} runs</div>
+        </div>
       </div>
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-6">
         <div className="mx-auto max-w-3xl">
-          {runs.filter((r) => r.id !== liveRunId).map((r) => <HistoryBubbles key={r.id} run={r} />)}
-          {liveRunId && <>{livePrompt && <UserBubble text={livePrompt} />}<LiveAssistantBubble frames={frames} streaming={streaming} /></>}
+          {runs.filter((r) => r.id !== liveRunId).map((r) => <HistoryBubbles key={r.id} run={r} agentName={agentName} />)}
+          {liveRunId && <>{livePrompt && <UserBubble text={livePrompt} />}<LiveAssistantBubble frames={frames} streaming={streaming} agentName={agentName} /></>}
           {runs.length === 0 && !liveRunId && (
             <div className="grid min-h-56 place-items-center text-center">
               <div>
@@ -229,10 +254,10 @@ function ChatView({
         </div>
       </div>
       <div className="border-t border-line bg-panel/90 p-4 backdrop-blur">
-        <div className="mx-auto flex max-w-3xl gap-2">
+        <div className="surface-shadow mx-auto max-w-3xl overflow-hidden rounded-2xl border border-line bg-white focus-within:border-accent focus-within:ring-3 focus-within:ring-accent/10">
           <textarea
-            className={`${inputCls} h-[58px] resize-none bg-white`}
-            placeholder={sending ? "上一轮还在跑…（串行闸）" : "输入消息，⌘/Ctrl+Enter 发送"}
+            className="h-[62px] w-full resize-none border-0 bg-transparent px-4 pt-3 text-sm leading-5 text-ink outline-none placeholder:text-zinc-400 disabled:bg-bg/70"
+            placeholder={sending ? "上一轮还在跑…（串行闸）" : `Message ${agentName}`}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -240,9 +265,10 @@ function ChatView({
             }}
             disabled={sending}
           />
-          <button className={`${btnPrimary} self-end`} disabled={sending || !input.trim()} onClick={send}>
-            发送
-          </button>
+          <div className="flex items-center justify-between border-t border-line/70 px-3 py-2">
+            <div className="text-[10px] text-dim">同一会话串行执行 · <span className="font-mono">⌘↵</span> 发送</div>
+            <button className={`${btnPrimary} min-h-8 px-3 py-1.5 text-xs`} disabled={sending || !input.trim()} onClick={send}>发送</button>
+          </div>
         </div>
       </div>
     </div>
@@ -251,35 +277,41 @@ function ChatView({
 
 function UserBubble({ text }: { text: string }) {
   return (
-    <div className="mb-3 flex justify-end">
-      <div className="max-w-[80%] whitespace-pre-wrap break-words rounded-2xl rounded-br-sm bg-accent-strong px-4 py-2.5 text-sm leading-6 text-white shadow-[0_5px_16px_rgba(5,100,87,.12)]">
+    <div className="mb-5 flex justify-end">
+      <div className="max-w-[80%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-[#e9eeeb] px-4 py-2.5 text-sm leading-6 text-ink shadow-[0_1px_2px_rgba(20,35,30,.04)]">
         {text}
       </div>
     </div>
   );
 }
 
-function AssistantShell({ children }: { children: React.ReactNode }) {
+function AssistantShell({ children, agentName, state }: { children: React.ReactNode; agentName: string; state?: string }) {
   return (
-    <div className="mb-3 flex justify-start">
-      <div className="surface-shadow max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-bl-sm border border-line bg-panel px-4 py-2.5 text-sm leading-6">
-        {children}
+    <div className="mb-6 flex items-start gap-3">
+      <div className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-harbor text-[10px] font-bold text-white">H</div>
+      <div className="min-w-0 max-w-[88%] flex-1">
+        <div className="mb-1.5 flex items-center gap-2 text-[10px] font-semibold text-dim">
+          <span className="text-ink/80">{agentName}</span>
+          {state && <span className="font-normal">{state}</span>}
+        </div>
+        <div className="whitespace-pre-wrap break-words text-sm leading-6 text-ink/90">{children}</div>
       </div>
     </div>
   );
 }
 
-function HistoryBubbles({ run }: { run: RunWithResult }) {
+function HistoryBubbles({ run, agentName }: { run: RunWithResult; agentName: string }) {
+  const duration = run.startedAt && run.finishedAt ? Math.max(1, Math.round((run.finishedAt - run.startedAt) / 1000)) : null;
   return (
     <>
       <UserBubble text={run.prompt} />
-      <AssistantShell>
+      <AssistantShell agentName={agentName} state={duration ? `Worked for ${duration}s` : run.status === "running" ? "Working…" : undefined}>
         {run.status === "queued" || run.status === "running" ? (
           <span className="text-dim">（进行中…）</span>
         ) : run.error ? (
           <span className="text-canceled">✗ {run.error}</span>
         ) : run.resultText != null ? (
-          run.resultText
+          <Markdown text={run.resultText} />
         ) : (
           <span className="text-dim">（记录已过期）</span>
         )}
@@ -291,17 +323,19 @@ function HistoryBubbles({ run }: { run: RunWithResult }) {
 function LiveAssistantBubble({
   frames,
   streaming,
+  agentName,
 }: {
   frames: Parameters<typeof foldFrames>[0];
   streaming: boolean;
+  agentName: string;
 }) {
   const items = useMemo(() => foldFrames(frames), [frames]);
   return (
-    <AssistantShell>
+    <AssistantShell agentName={agentName} state={streaming ? "Working…" : "Completed"}>
       {items.map((it, i) => {
         switch (it.kind) {
           case "text":
-            return <span key={i}>{it.text}</span>;
+            return <Markdown key={i} text={it.text} />;
           case "thinking":
             return (
               <details key={i} className="my-1 text-xs italic text-dim">
@@ -310,11 +344,7 @@ function LiveAssistantBubble({
               </details>
             );
           case "tool":
-            return (
-              <div key={i} className="my-0.5 font-mono text-xs text-dim">
-                ⚙ {it.name} {it.summary}
-              </div>
-            );
+            return <ToolCard key={i} item={it} />;
           case "error":
             return (
               <div key={i} className="text-canceled">

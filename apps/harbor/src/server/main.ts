@@ -15,6 +15,7 @@ import { ApprovalService } from "./approvals.js";
 import { AutomationService } from "./automation.js";
 import { FeishuEntry } from "./feishu.js";
 import { buildRest } from "./rest.js";
+import { DeliveryService } from "./delivery.js";
 import { feishuConfig, token } from "../config.js";
 import { DEFAULT_DEVICE_CONCURRENCY, DEFAULT_PORT, RUN_EVENTS_RETENTION_MS } from "../protocol.js";
 
@@ -27,7 +28,8 @@ const db = openDb(dbPath);
 const store = new HarborStore(db);
 const bus = new RunBus();
 const hub = new DeviceHub(store, authToken);
-const coordinator = new RunCoordinator(store, bus, hub, concurrency);
+const deliveries = new DeliveryService(store);
+const coordinator = new RunCoordinator(store, bus, hub, concurrency, deliveries);
 const approvals = new ApprovalService(store, bus, hub);
 const automations = new AutomationService(store, coordinator);
 hub.coordinator = coordinator;
@@ -61,7 +63,7 @@ coordinator.onRunFinished = (run, conv) => {
   feishu?.notifyRunDone(run, conv);
 };
 
-const app = buildRest(store, bus, hub, coordinator, approvals, automations, authToken);
+const app = buildRest(store, bus, hub, coordinator, approvals, automations, authToken, deliveries);
 
 Bun.serve<WsData>({
   port,

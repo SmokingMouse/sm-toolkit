@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * harbor CLI —— 入口层之一（P1）。
- * device ls / agent create·ls / chat / issue create·continue·ls·show·done·cancel / watch <run>
+ * device ls / agent create·ls / chat / issue draft·create·assign·continue·review·changes·done·cancel / watch
  * 连接配置：HARBOR_SERVER_URL / HARBOR_TOKEN（或 ~/.harbor.yaml）。
  */
 
@@ -26,9 +26,14 @@ ${c.bold}派活${c.reset}
                       [--instruction <系统提示>] [--description <说明>]
   harbor agent ls
   harbor chat <agent> "<prompt>"        [--detach]        临时对话（不留 issue）
+  harbor issue draft "<描述>" [--title <t>] [--priority <p>] [--agent <a>]
+                                                               保存到 Inbox，不启动 Run
   harbor issue create <agent> "<prompt>" [--title <t>] [--detach]
+  harbor issue assign <id> <agent> ["<prompt>"] [--detach]  指派并执行
   harbor issue continue <id> "<prompt>"  [--detach]        续多轮（resume 上下文）
-  harbor issue ls [--status backlog|doing|review|done|canceled]
+  harbor issue changes <id> "<反馈>" [--agent <a>] [--detach]
+  harbor issue review <id> <agent> ["<要求>"] [--detach]  独立 AI Review
+  harbor issue ls [--status backlog|todo|doing|review|done|canceled]
   harbor issue show <id>                                   详情 + run 流水
   harbor issue done <id> · harbor issue cancel <id>        人工验收/取消（收尾 worktree）
   harbor watch <run-id>                                    (重)连一个 run 的实时输出
@@ -174,7 +179,11 @@ async function main(): Promise<number> {
         d.online ? `${c.green}online${c.reset}` : `${c.red}offline${c.reset}`,
         fmtAgo(d.lastSeenAt),
         Object.entries(d.capabilities.clis).map(([k, v]) => `${k}@${v}`).join(" ") || "-",
-        String(new Set(d.capabilities.endpoints.map((e) => e.split(":")[0])).size || "-"),
+        String(
+          d.capabilities.modelRoutes
+            ? new Set(d.capabilities.modelRoutes.filter((route) => route.ready).map((route) => route.id)).size || "-"
+            : new Set(d.capabilities.endpoints).size || "-",
+        ),
         d.id,
       ]),
       ["NAME", "STATE", "SEEN", "CLIS", "MODELS", "ID"],
@@ -230,6 +239,20 @@ async function main(): Promise<number> {
   }
 
   if (domain === "issue") {
+    if (verb === "draft") {
+      const description = pos.slice(2).join(" ");
+      if (!description) throw new Error(`用法：harbor issue draft "<描述>" [--title t] [--agent a]`);
+      const conv = await client.createConversation({
+        kind: "issue",
+        agent: flags.agent,
+        title: typeof flags.title === "string" ? flags.title : description.slice(0, 60),
+        description,
+        priority: flags.priority,
+      });
+      console.log(`${c.green}✓${c.reset} issue ${c.bold}${conv.id}${c.reset} 已保存到 Inbox${conv.agentId ? "（已指派，未执行）" : ""}`);
+      return 0;
+    }
+
     if (verb === "create") {
       const agent = pos[2];
       const prompt = pos.slice(3).join(" ");
@@ -238,9 +261,21 @@ async function main(): Promise<number> {
         kind: "issue",
         agent,
         title: typeof flags.title === "string" ? flags.title : prompt.slice(0, 60),
+        description: prompt,
+        priority: flags.priority,
       });
-      const run = await client.createRun(conv.id, prompt);
+      const run = await client.dispatchIssue(conv.id, agent, prompt);
       console.log(`${c.green}✓${c.reset} issue ${c.bold}${conv.id}${c.reset} · run ${run.id}`);
+      return flags.detach ? 0 : watchRun(client, run.id);
+    }
+
+    if (verb === "assign") {
+      const id = pos[2];
+      const agent = pos[3];
+      const prompt = pos.slice(4).join(" ") || undefined;
+      if (!id || !agent) throw new Error(`用法：harbor issue assign <id> <agent> ["<prompt>"]`);
+      const run = await client.dispatchIssue(id, agent, prompt);
+      console.log(`${c.dim}issue ${run.conversationId} · run ${run.id}（assign & run）${c.reset}`);
       return flags.detach ? 0 : watchRun(client, run.id);
     }
 
@@ -253,11 +288,30 @@ async function main(): Promise<number> {
       return flags.detach ? 0 : watchRun(client, run.id);
     }
 
+    if (verb === "changes") {
+      const id = pos[2];
+      const feedback = pos.slice(3).join(" ");
+      if (!id || !feedback) throw new Error(`用法：harbor issue changes <id> "<反馈>" [--agent a]`);
+      const run = await client.requestChanges(id, feedback, typeof flags.agent === "string" ? flags.agent : undefined);
+      console.log(`${c.dim}issue ${run.conversationId} · run ${run.id}（request changes）${c.reset}`);
+      return flags.detach ? 0 : watchRun(client, run.id);
+    }
+
+    if (verb === "review") {
+      const id = pos[2];
+      const agent = pos[3];
+      const prompt = pos.slice(4).join(" ") || undefined;
+      if (!id || !agent) throw new Error(`用法：harbor issue review <id> <agent> ["<要求>"]`);
+      const run = await client.reviewIssue(id, agent, prompt);
+      console.log(`${c.dim}issue ${run.conversationId} · review run ${run.id}${c.reset}`);
+      return flags.detach ? 0 : watchRun(client, run.id);
+    }
+
     if (verb === "ls") {
       const status = typeof flags.status === "string" ? flags.status : undefined;
       const convs = await client.conversations({ kind: "issue", status });
       table(
-        convs.map((cv) => [cv.id, cv.status, (cv.title ?? "").slice(0, 40), cv.agentName, fmtAgo(cv.updatedAt)]),
+        convs.map((cv) => [cv.id, cv.status, (cv.title ?? "").slice(0, 40), cv.agentName ?? "(unassigned)", fmtAgo(cv.updatedAt)]),
         ["ID", "STATUS", "TITLE", "AGENT", "UPDATED"],
       );
       return 0;
@@ -269,12 +323,12 @@ async function main(): Promise<number> {
       const { conversation, agent, runs } = await client.getConversation(id);
       console.log(`${c.bold}${conversation.title ?? "(无标题)"}${c.reset}  ${c.dim}${conversation.id}${c.reset}`);
       console.log(
-        `${c.dim}kind=${conversation.kind} status=${c.reset}${conversation.status}${c.dim} agent=${agent?.name ?? conversation.agentId} session=${conversation.claudeSessionId?.slice(0, 8) ?? "-"}${c.reset}`,
+        `${c.dim}kind=${conversation.kind} status=${c.reset}${conversation.status}${c.dim} priority=${conversation.priority} agent=${agent?.name ?? conversation.agentId ?? "unassigned"} session=${conversation.claudeSessionId?.slice(0, 8) ?? "-"}${c.reset}`,
       );
       table(
         runs.map((r) => [
           r.id,
-          r.status,
+          `${r.purpose}/${r.status}`,
           fmtAgo(r.queuedAt),
           fmtRunCost(r) || "-",
           (r.error ?? r.prompt).slice(0, 50),
@@ -287,8 +341,7 @@ async function main(): Promise<number> {
     if (verb === "done" || verb === "cancel") {
       const id = pos[2];
       if (!id) throw new Error(`用法：harbor issue ${verb} <id>`);
-      const to: ConversationStatus = verb === "done" ? "done" : "canceled";
-      const conv = await client.setConversationStatus(id, to);
+      const conv = verb === "done" ? await client.approveIssue(id) : await client.cancelIssue(id);
       console.log(`${c.green}✓${c.reset} issue ${conv.id} → ${conv.status}`);
       return 0;
     }

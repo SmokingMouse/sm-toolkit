@@ -98,6 +98,184 @@ const MIGRATIONS: string[] = [
     updated_at INTEGER NOT NULL
   );
   `,
+  // v4 —— P4.10：Mew 式 Issue 工作流（可空 Assignee / Ready / 描述优先级 / Run purpose）
+  `
+  CREATE TABLE conversations_v4 (
+    id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('chat','issue')),
+    title TEXT, agent_id TEXT REFERENCES agents(id),
+    description TEXT,
+    priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('none','low','medium','high','urgent')),
+    status TEXT NOT NULL DEFAULT 'backlog',
+    worktree_path TEXT,
+    claude_session_id TEXT,
+    origin TEXT NOT NULL DEFAULT 'cli',
+    origin_ref TEXT,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  );
+  INSERT INTO conversations_v4
+    (id, kind, title, agent_id, description, priority, status, worktree_path, claude_session_id, origin, origin_ref, created_at, updated_at)
+    SELECT id, kind, title, agent_id, NULL, 'medium', status, worktree_path, claude_session_id, origin, origin_ref, created_at, updated_at
+    FROM conversations;
+
+  CREATE TABLE runs_v4 (
+    id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations_v4(id),
+    agent_id TEXT NOT NULL, device_id TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    purpose TEXT NOT NULL DEFAULT 'implementation' CHECK (purpose IN ('implementation','review','verification')),
+    status TEXT NOT NULL DEFAULT 'queued',
+    claude_session_id TEXT, error TEXT,
+    cost_usd REAL, input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER,
+    queued_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER
+  );
+  INSERT INTO runs_v4
+    (id, conversation_id, agent_id, device_id, prompt, purpose, status, claude_session_id, error,
+     cost_usd, input_tokens, output_tokens, cached_tokens, queued_at, started_at, finished_at)
+    SELECT id, conversation_id, agent_id, device_id, prompt, 'implementation', status, claude_session_id, error,
+           cost_usd, input_tokens, output_tokens, cached_tokens, queued_at, started_at, finished_at
+    FROM runs;
+
+  DROP TABLE runs;
+  DROP TABLE conversations;
+  ALTER TABLE conversations_v4 RENAME TO conversations;
+  ALTER TABLE runs_v4 RENAME TO runs;
+  CREATE INDEX idx_runs_device_status ON runs(device_id, status);
+  CREATE INDEX idx_runs_conversation ON runs(conversation_id);
+  CREATE INDEX idx_conversations_origin ON conversations(origin, origin_ref);
+  `,
+  // v5 —— v4 前可能遗留「Run 已终态但 Issue 仍 doing」；按最后一次 implementation Run 修复阶段
+  `
+  INSERT INTO status_log (conversation_id, from_status, to_status, actor, ts)
+    SELECT c.id, 'doing',
+      CASE
+        WHEN (SELECT r.status FROM runs r WHERE r.conversation_id = c.id AND r.purpose = 'implementation' ORDER BY r.queued_at DESC LIMIT 1) = 'succeeded'
+          THEN 'review'
+        ELSE 'todo'
+      END,
+      'system', CAST(strftime('%s','now') AS INTEGER) * 1000
+    FROM conversations c
+    WHERE c.kind = 'issue' AND c.status = 'doing'
+      AND NOT EXISTS (
+        SELECT 1 FROM runs active
+        WHERE active.conversation_id = c.id AND active.status IN ('queued','running')
+      );
+
+  UPDATE conversations
+    SET status = CASE
+      WHEN (SELECT r.status FROM runs r WHERE r.conversation_id = conversations.id AND r.purpose = 'implementation' ORDER BY r.queued_at DESC LIMIT 1) = 'succeeded'
+        THEN 'review'
+      ELSE 'todo'
+    END,
+    updated_at = CAST(strftime('%s','now') AS INTEGER) * 1000
+    WHERE kind = 'issue' AND status = 'doing'
+      AND NOT EXISTS (
+        SELECT 1 FROM runs active
+        WHERE active.conversation_id = conversations.id AND active.status IN ('queued','running')
+      );
+  `,
+  // v6 —— P4.11：Mew 式 AI issue draft（隐藏草稿 + 只读 triage Run）
+  `
+  CREATE TABLE conversations_v6 (
+    id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('chat','issue','issue_draft')),
+    title TEXT, agent_id TEXT REFERENCES agents(id),
+    description TEXT,
+    priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('none','low','medium','high','urgent')),
+    status TEXT NOT NULL DEFAULT 'backlog',
+    worktree_path TEXT,
+    claude_session_id TEXT,
+    origin TEXT NOT NULL DEFAULT 'cli',
+    origin_ref TEXT,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  );
+  INSERT INTO conversations_v6
+    (id, kind, title, agent_id, description, priority, status, worktree_path, claude_session_id, origin, origin_ref, created_at, updated_at)
+    SELECT id, kind, title, agent_id, description, priority, status, worktree_path, claude_session_id, origin, origin_ref, created_at, updated_at
+    FROM conversations;
+
+  CREATE TABLE runs_v6 (
+    id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations_v6(id),
+    agent_id TEXT NOT NULL, device_id TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    purpose TEXT NOT NULL DEFAULT 'implementation' CHECK (purpose IN ('implementation','triage','review','verification')),
+    status TEXT NOT NULL DEFAULT 'queued',
+    claude_session_id TEXT, error TEXT,
+    cost_usd REAL, input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER,
+    queued_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER
+  );
+  INSERT INTO runs_v6
+    (id, conversation_id, agent_id, device_id, prompt, purpose, status, claude_session_id, error,
+     cost_usd, input_tokens, output_tokens, cached_tokens, queued_at, started_at, finished_at)
+    SELECT id, conversation_id, agent_id, device_id, prompt, purpose, status, claude_session_id, error,
+           cost_usd, input_tokens, output_tokens, cached_tokens, queued_at, started_at, finished_at
+    FROM runs;
+
+  DROP TABLE runs;
+  DROP TABLE conversations;
+  ALTER TABLE conversations_v6 RENAME TO conversations;
+  ALTER TABLE runs_v6 RENAME TO runs;
+  CREATE INDEX idx_runs_device_status ON runs(device_id, status);
+  CREATE INDEX idx_runs_conversation ON runs(conversation_id);
+  CREATE INDEX idx_conversations_origin ON conversations(origin, origin_ref);
+  `,
+  // v7 —— P4.12：Workspace Skill 配置 + Agent 多对多绑定
+  `
+  CREATE TABLE skills (
+    id TEXT PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL CHECK (source IN ('manual','runtime')),
+    instruction TEXT NOT NULL,
+    device_id TEXT REFERENCES devices(id),
+    source_path TEXT,
+    runtimes TEXT NOT NULL DEFAULT '["claude","codex"]',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    archived_at INTEGER,
+    CHECK (
+      (source = 'manual' AND device_id IS NULL AND source_path IS NULL) OR
+      (source = 'runtime' AND device_id IS NOT NULL AND source_path IS NOT NULL)
+    )
+  );
+  CREATE UNIQUE INDEX idx_skills_runtime_source ON skills(device_id, source_path)
+    WHERE source = 'runtime';
+  CREATE TABLE agent_skills (
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (agent_id, skill_id)
+  );
+  CREATE INDEX idx_agent_skills_skill ON agent_skills(skill_id, agent_id);
+  `,
+  // v8 —— P4.13：代码交付控制面（MR/CI/合并/部署正交事实 + 审计事件）
+  `
+  CREATE TABLE deliveries (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id),
+    provider TEXT NOT NULL,
+    change_url TEXT,
+    external_id TEXT,
+    head_branch TEXT,
+    base_branch TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending' CHECK (review_status IN ('pending','approved')),
+    check_status TEXT NOT NULL DEFAULT 'unknown' CHECK (check_status IN ('unknown','pending','passed','failed')),
+    merge_status TEXT NOT NULL DEFAULT 'open' CHECK (merge_status IN ('open','merged')),
+    deployment_status TEXT NOT NULL DEFAULT 'not_required' CHECK (deployment_status IN ('not_required','pending','running','succeeded','failed')),
+    review_approved_at INTEGER,
+    merged_at INTEGER,
+    deployed_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
+  CREATE TABLE delivery_events (
+    delivery_id TEXT NOT NULL REFERENCES deliveries(id),
+    kind TEXT NOT NULL,
+    data TEXT NOT NULL DEFAULT '{}',
+    actor TEXT NOT NULL CHECK (actor IN ('human','system','provider')),
+    ts INTEGER NOT NULL
+  );
+  CREATE INDEX idx_delivery_events ON delivery_events(delivery_id, ts);
+  `,
 ];
 
 export function openDb(path: string): Database {

@@ -101,7 +101,9 @@ function connect(): void {
     }
     switch (msg.type) {
       case "hello_ok":
-        console.log(`[harbord] 已注册（deviceId=${msg.deviceId}），claude=${capabilities.clis.claude ?? "-"} endpoints=${capabilities.endpoints.length} 个`);
+        console.log(
+          `[harbord] 已注册（deviceId=${msg.deviceId}），claude=${capabilities.clis.claude ?? "-"} routes=${capabilities.modelRoutes?.filter((route) => route.ready).length ?? 0}/${capabilities.modelRoutes?.length ?? 0}`,
+        );
         break;
       case "hello_err":
         console.error(`[harbord] 注册被拒：${msg.message} —— 检查 HARBOR_TOKEN / ~/.harbor.yaml`);
