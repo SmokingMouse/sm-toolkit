@@ -5,6 +5,7 @@ import {
   createAgent,
   listAgents,
   listDevices,
+  listRepositories,
   listSkills,
   NATIVE_TIER_ALIASES,
   PERMISSIONS,
@@ -14,6 +15,7 @@ import {
   type BackendKind,
   type HarborAgent,
   type ModelRouteCapability,
+  type RepositoryWithMounts,
   type SkillWithAgents,
 } from "../../lib/api";
 import { usePoll } from "../../lib/hooks";
@@ -24,11 +26,16 @@ export default function AgentsPage() {
   const agents = usePoll(listAgents, 10_000);
   const devices = usePoll(listDevices, 10_000);
   const skills = usePoll(listSkills, 10_000);
+  const repositories = usePoll(listRepositories, 10_000);
   const [creating, setCreating] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const deviceById = useMemo(
     () => new Map((devices.data ?? []).map((d) => [d.id, d])),
     [devices.data],
+  );
+  const repositoryById = useMemo(
+    () => new Map((repositories.data ?? []).map((repository) => [repository.id, repository])),
+    [repositories.data],
   );
 
   const allAgents = agents.data ?? [];
@@ -46,7 +53,7 @@ export default function AgentsPage() {
       <PageHeader
         eyebrow="Execution roster"
         title="Agents"
-        description="一处管理执行 Runtime、sm-toolkit 模型路由与工作空间。"
+        description="Workspace 内的执行角色；代码目录由每次任务选择的 Repository mount 决定。"
         actions={
           <button
             className={btnPrimary}
@@ -87,6 +94,7 @@ export default function AgentsPage() {
             <NewAgentPanel
               devices={devices.data ?? []}
               skills={skills.data ?? []}
+              repositories={repositories.data ?? []}
               onClose={() => setCreating(false)}
               onCreated={() => {
                 setCreating(false);
@@ -98,6 +106,7 @@ export default function AgentsPage() {
             <AgentDetail
               agent={selectedAgent}
               device={deviceById.get(selectedAgent.deviceId)}
+              repository={selectedAgent.defaultRepositoryId ? repositoryById.get(selectedAgent.defaultRepositoryId) : undefined}
               skills={skills.data ?? []}
               onChanged={() => { agents.reload(); skills.reload(); }}
             />
@@ -145,11 +154,13 @@ function AgentListRow({
 function AgentDetail({
   agent,
   device,
+  repository,
   skills,
   onChanged,
 }: {
   agent: HarborAgent;
   device: Device | undefined;
+  repository: RepositoryWithMounts | undefined;
   skills: SkillWithAgents[];
   onChanged: () => void;
 }) {
@@ -217,8 +228,9 @@ function AgentDetail({
 
         <div className="grid gap-5 lg:grid-cols-2">
           <div className="rounded-xl border border-line bg-white/55 p-4">
-            <div className="mb-3 text-xs font-medium text-dim">Working directory</div>
-            <div className="break-all font-mono text-sm leading-6 text-ink/80">{agent.workdir}</div>
+            <div className="mb-3 text-xs font-medium text-dim">Default repository</div>
+            <div className="text-sm font-semibold leading-6 text-ink/80">{repository?.name ?? "No repository"}</div>
+            <div className="mt-1 break-all font-mono text-[11px] leading-5 text-dim">{repository?.mounts.find((mount) => mount.deviceId === agent.deviceId)?.path ?? "Select per Issue / Chat"}</div>
           </div>
           <div className="rounded-xl border border-line bg-white/55 p-4">
             <div className="mb-3 text-xs font-medium text-dim">Instruction</div>
@@ -249,11 +261,13 @@ function AgentFact({ label, value, mono }: { label: string; value: string; mono?
 function NewAgentPanel({
   devices,
   skills,
+  repositories,
   onClose,
   onCreated,
 }: {
   devices: Device[];
   skills: SkillWithAgents[];
+  repositories: RepositoryWithMounts[];
   onClose: () => void;
   onCreated: () => void;
 }) {
@@ -268,7 +282,7 @@ function NewAgentPanel({
     initialRuntimes.includes("claude") ? "claude" : (initialRuntimes[0] ?? ""),
   );
   const [model, setModel] = useState("");
-  const [workdir, setWorkdir] = useState("");
+  const [repository, setRepository] = useState("");
   const [permission, setPermission] = useState<string>("auto-edit");
   const [isolation, setIsolation] = useState("none");
   const [instruction, setInstruction] = useState("");
@@ -276,6 +290,10 @@ function NewAgentPanel({
   const [busy, setBusy] = useState(false);
 
   const selectedDevice = devices.find((d) => d.name === device);
+  const availableRepositories = repositories.filter((item) =>
+    item.mounts.some((mount) => mount.deviceId === selectedDevice?.id),
+  );
+  const selectedRepository = repositories.find((item) => item.id === repository);
   const availableRuntimes = (["claude", "codex"] as BackendKind[]).filter(
     (runtime) => !!selectedDevice?.capabilities.clis?.[runtime],
   );
@@ -308,6 +326,10 @@ function NewAgentPanel({
       return !!skill && !!nextBackend && skill.runtimes.includes(nextBackend) && (skill.source === "manual" || skill.deviceId === next?.id);
     }));
     if (!available.includes("claude") && permission === "default") setPermission("auto-edit");
+    if (repository && !repositories.find((item) => item.id === repository)?.mounts.some((mount) => mount.deviceId === next?.id)) {
+      setRepository("");
+      if (isolation === "worktree") setIsolation("none");
+    }
   };
 
   const selectRuntime = (value: BackendKind) => {
@@ -329,7 +351,7 @@ function NewAgentPanel({
         device,
         backend,
         model: model.trim() || undefined,
-        workdir: workdir.trim(),
+        repository: repository || undefined,
         permission,
         isolation,
         instruction: instruction.trim() || undefined,
@@ -432,9 +454,14 @@ function NewAgentPanel({
           )}
         </AgentFormSection>
 
-        <AgentFormSection title="Workspace">
-          <Field label="Working directory">
-            <input className={`${inputCls} font-mono text-xs`} value={workdir} onChange={(e) => setWorkdir(e.target.value)} placeholder="/absolute/path/to/repository" />
+        <AgentFormSection title="Execution target">
+          <Field label="Default repository">
+            <select className={inputCls} value={repository} onChange={(e) => { setRepository(e.target.value); if (!e.target.value && isolation === "worktree") setIsolation("none"); }}>
+              <option value="">No default repository</option>
+              {availableRepositories.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+            </select>
+            <p className="mt-2 text-xs leading-5 text-dim">只显示已挂载到当前 Device 的 Repository；Issue / Chat 仍可覆盖这个默认值。</p>
+            {selectedRepository && <div className="mt-2 rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[10px] text-dim">{selectedRepository.mounts.find((mount) => mount.deviceId === selectedDevice?.id)?.path}</div>}
           </Field>
           <Field label="Permission">
             <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
@@ -445,8 +472,8 @@ function NewAgentPanel({
           </Field>
           <Field label="Isolation">
             <div className="grid grid-cols-2 gap-2">
-              <ChoiceButton selected={isolation === "none"} onClick={() => setIsolation("none")}>Shared workspace</ChoiceButton>
-              <ChoiceButton selected={isolation === "worktree"} onClick={() => setIsolation("worktree")}>Git worktree</ChoiceButton>
+              <ChoiceButton selected={isolation === "none"} onClick={() => setIsolation("none")}>Direct checkout</ChoiceButton>
+              <ChoiceButton selected={isolation === "worktree"} onClick={() => repository && setIsolation("worktree")}>Git worktree</ChoiceButton>
             </div>
           </Field>
         </AgentFormSection>
@@ -462,7 +489,7 @@ function NewAgentPanel({
       </div>
       <div className="sticky bottom-0 flex items-center justify-between gap-4 border-t border-line bg-panel/95 px-7 py-4 backdrop-blur max-sm:px-4">
         <span className="text-xs text-dim">Agent 配置会作为新的执行快照保存</span>
-        <button type="submit" className={btnPrimary} disabled={busy || !name.trim() || !device || !backend || !workdir.trim()}>
+        <button type="submit" className={btnPrimary} disabled={busy || !name.trim() || !device || !backend || (isolation === "worktree" && !repository)}>
           {busy ? "创建中…" : "创建"}
         </button>
       </div>

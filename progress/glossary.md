@@ -2,7 +2,11 @@
 
 ## Harbor
 
+- **Workspace**：Harbor 的一级逻辑作用域，隔离 Agents、Skills、Conversations、Automations、prompt settings 与 Usage。它不是 Repository、目录、Device 或团队租户；一个 Workspace 可以没有仓库，也可以包含多个仓库。
+- **Repository**：Workspace 内的一份逻辑代码资源，不直接等于本地路径，也不是 Agent 的永久 cwd。同一 Repository 可以在多台 Device 上分别 checkout。
+- **Repository mount**：Repository 在某台 Device 上的绝对路径映射，`(repository, device)` 唯一。Conversation 选择 Repository，Run 冻结具体 mount 与 execution root；被 Agent 默认值、活跃任务、Run 或 worktree 引用时不能删除。
 - **Device**：运行一个 `harbord` 的真实机器。设备在线状态来自 WebSocket 连接，能力来自 daemon 启动时探测，不是用户手填标签。
+- **Harbor Agent**：固定归属一个 Workspace 与一台 Device 的执行配置；可保存默认 Repository 方便派活，但不永久绑定工作目录。具体 cwd 由 Conversation 的 Repository 与当前 Device mount 在 Run 入队时决定。
 - **Provider capability**：某台 Device 上实际可执行的 agent CLI（当前仅 `claude` / `codex`）及其版本。Agent 只能绑定设备已上报的 provider；provider 与模型 endpoint 是两类能力，不能互相代替。
 - **Runtime**：实际执行 coding session 的 CLI，当前是 Claude Code (`claude`) 或 Codex CLI (`codex`)；UI 和代码不再把它称为模型 Provider。
 - **Model route**：Device 从 sm-toolkit `endpoints.yaml` 解析并上报的 `provider:model` 路由。Harbor 只展示该 Runtime 真能消费的 route；当前 sm-toolkit route 由 Claude Code Runtime 消费 anthropic-compatible/native endpoint，Codex CLI 的模型名仍由其本地配置负责。

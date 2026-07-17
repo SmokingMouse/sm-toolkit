@@ -23,7 +23,7 @@ test("scheduler dispatches wrapped prompt while persisting the raw request", () 
     { kind: "issue", title: "Prompt boundary", agentId: agent.id, origin: "web" },
     3,
   );
-  store.setPromptTemplate("issue", true, "Context={{conversation.id}}\nRequest={{prompt}}", 4);
+  store.setPromptTemplate("ws_personal", "issue", true, "Context={{conversation.id}}\nRequest={{prompt}}", 4);
 
   const sent: ServerMsg[] = [];
   const transport: DeviceTransport = {

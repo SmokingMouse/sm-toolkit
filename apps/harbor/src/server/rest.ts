@@ -8,7 +8,7 @@
 
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type {
   BackendKind,
@@ -27,6 +27,7 @@ import type {
 } from "../protocol.js";
 import {
   DELIVERY_CHECK_STATUSES,
+  DEFAULT_WORKSPACE_ID,
   ISSUE_PRIORITIES,
   ISSUE_STATUSES,
   NATIVE_TIER_ALIASES,
@@ -111,6 +112,49 @@ export function buildRest(
     }
   };
 
+  const currentWorkspace = (c: Context) => {
+    const key = c.req.header("X-Harbor-Workspace")?.trim() || DEFAULT_WORKSPACE_ID;
+    const workspace = store.resolveWorkspace(key);
+    if (!workspace || workspace.archivedAt) bad(`workspace "${key}" 不存在或已归档`);
+    return workspace;
+  };
+
+  const scopedAgent = (workspaceId: string, key: string | null | undefined) => {
+    if (!key) return null;
+    const agent = store.getAgent(key) ?? store.getAgentByNameInWorkspace(workspaceId, key);
+    if (agent && agent.workspaceId !== workspaceId) bad(`agent "${key}" 不属于当前 Workspace`);
+    return agent;
+  };
+
+  const scopedRepository = (workspaceId: string, key: string | null | undefined) => {
+    if (!key) return null;
+    const repository = store.resolveRepository(workspaceId, key);
+    if (!repository || repository.archivedAt) bad(`repository "${key}" 不存在或已归档`);
+    return repository;
+  };
+
+  const assertConversationWorkspace = (workspaceId: string, id: string) => {
+    const conversation = store.resolveConversationPrefix(id);
+    if (!conversation) throw new HTTPException(404, { message: `conversation "${id}" 不存在` });
+    if (conversation.workspaceId !== workspaceId) throw new HTTPException(404, { message: `conversation "${id}" 不存在于当前 Workspace` });
+    return conversation;
+  };
+
+  const assertRunWorkspace = (workspaceId: string, id: string) => {
+    const run = store.resolveRunPrefix(id);
+    if (!run || run.workspaceId !== workspaceId) throw new HTTPException(404, { message: `run "${id}" 不存在于当前 Workspace` });
+    return run;
+  };
+
+  const assertDeliveryWorkspace = (workspaceId: string, id: string) => {
+    const delivery = store.getDelivery(id);
+    const conversation = delivery ? store.getConversation(delivery.conversationId) : null;
+    if (!delivery || conversation?.workspaceId !== workspaceId) {
+      throw new HTTPException(404, { message: `delivery "${id}" 不存在于当前 Workspace` });
+    }
+    return { delivery, conversation };
+  };
+
   const deliveryAction = async <T>(action: () => T | Promise<T>): Promise<T> => {
     try {
       return await action();
@@ -143,7 +187,7 @@ export function buildRest(
 
   app.get("/api/health", (c) => c.json({ ok: true }));
 
-  const resolveAgentSkills = (value: unknown, deviceId: string, backend: BackendKind) => {
+  const resolveAgentSkills = (value: unknown, workspaceId: string, deviceId: string, backend: BackendKind) => {
     if (value === undefined) return [];
     if (!Array.isArray(value) || value.some((id) => typeof id !== "string")) {
       bad("skills 需要是 Skill id 数组");
@@ -152,6 +196,7 @@ export function buildRest(
     return ids.map((id) => {
       const skill = store.getSkill(id);
       if (!skill || skill.archivedAt) bad(`skill "${id}" 不存在或已归档`);
+      if (skill.workspaceId !== workspaceId) bad(`skill "${skill.name}" 不属于当前 Workspace`);
       if (skill.source === "runtime" && skill.deviceId !== deviceId) {
         bad(`runtime skill "${skill.name}" 只能绑定来源设备上的 Agent`);
       }
@@ -162,13 +207,138 @@ export function buildRest(
     });
   };
 
+  // ---- workspaces / repositories ----
+
+  app.get("/api/workspaces", (c) => c.json(store.listWorkspaces()));
+
+  app.post("/api/workspaces", async (c) => {
+    const b = (await c.req.json()) as { name?: string; slug?: string; description?: string };
+    const name = b.name?.trim() ?? "";
+    if (!name) bad("缺少 Workspace name");
+    if (name.length > 80) bad("Workspace name 最多 80 字符");
+    let slug = (b.slug?.trim() || name.toLowerCase())
+      .normalize("NFKD")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 48);
+    if (!slug) slug = `workspace-${Date.now().toString(36)}`;
+    if (store.resolveWorkspace(name) || store.resolveWorkspace(slug)) bad(`Workspace name/slug "${name}" / "${slug}" 已存在`);
+    return c.json(store.createWorkspace({ name, slug, description: b.description?.trim() || null }, Date.now()), 201);
+  });
+
+  app.patch("/api/workspaces/:id", async (c) => {
+    const workspace = store.resolveWorkspace(c.req.param("id"));
+    if (!workspace) throw new HTTPException(404, { message: `workspace "${c.req.param("id")}" 不存在` });
+    const b = (await c.req.json()) as { name?: string; slug?: string; description?: string | null; archived?: boolean };
+    if (workspace.id === DEFAULT_WORKSPACE_ID && b.archived) bad("Personal 默认 Workspace 不能归档");
+    store.updateWorkspace(workspace.id, {
+      ...(b.name !== undefined ? { name: b.name.trim() } : {}),
+      ...(b.slug !== undefined ? { slug: b.slug.trim() } : {}),
+      ...(b.description !== undefined ? { description: b.description?.trim() || null } : {}),
+      ...(b.archived !== undefined ? { archived: b.archived } : {}),
+    }, Date.now());
+    return c.json(store.getWorkspace(workspace.id));
+  });
+
+  const repositoryView = (id: string) => {
+    const repository = store.getRepository(id);
+    if (!repository) return null;
+    return {
+      ...repository,
+      mounts: store.listRepositoryMounts(id).map((mount) => ({
+        ...mount,
+        deviceName: store.getDevice(mount.deviceId, hub.isOnline(mount.deviceId))?.name ?? mount.deviceId,
+      })),
+    };
+  };
+
+  app.get("/api/repositories", (c) => {
+    const workspace = currentWorkspace(c);
+    return c.json(store.listRepositories(workspace.id).map((repository) => repositoryView(repository.id)));
+  });
+
+  app.post("/api/repositories", async (c) => {
+    const workspace = currentWorkspace(c);
+    const b = (await c.req.json()) as {
+      name?: string;
+      remoteUrl?: string;
+      defaultBranch?: string;
+      device?: string;
+      path?: string;
+    };
+    const name = b.name?.trim() ?? "";
+    if (!name) bad("缺少 Repository name");
+    if (store.getRepositoryByName(workspace.id, name)) bad(`repository 名 "${name}" 已存在于当前 Workspace`);
+    if ((b.device && !b.path) || (!b.device && b.path)) bad("首次 mount 需要同时提供 device 与 path");
+    let device = null;
+    if (b.device) {
+      device = store.getDeviceByName(b.device, hub.isOnline(b.device)) ?? store.getDevice(b.device, hub.isOnline(b.device));
+      if (!device) bad(`device "${b.device}" 不存在`);
+      if (!b.path!.startsWith("/") && !b.path!.startsWith("~")) bad("Repository mount path 必须是绝对路径");
+    }
+    const repository = store.createRepository({
+      workspaceId: workspace.id,
+      name,
+      remoteUrl: b.remoteUrl?.trim() || null,
+      defaultBranch: b.defaultBranch?.trim() || "main",
+    }, Date.now());
+    if (device && b.path) store.setRepositoryMount(repository.id, device.id, b.path.trim(), Date.now());
+    return c.json(repositoryView(repository.id), 201);
+  });
+
+  app.patch("/api/repositories/:id", async (c) => {
+    const workspace = currentWorkspace(c);
+    const repository = scopedRepository(workspace.id, c.req.param("id"))!;
+    const b = (await c.req.json()) as { name?: string; remoteUrl?: string | null; defaultBranch?: string; archived?: boolean };
+    store.updateRepository(repository.id, {
+      ...(b.name !== undefined ? { name: b.name.trim() } : {}),
+      ...(b.remoteUrl !== undefined ? { remoteUrl: b.remoteUrl?.trim() || null } : {}),
+      ...(b.defaultBranch !== undefined ? { defaultBranch: b.defaultBranch.trim() } : {}),
+      ...(b.archived !== undefined ? { archived: b.archived } : {}),
+    }, Date.now());
+    return c.json(repositoryView(repository.id));
+  });
+
+  app.post("/api/repositories/:id/mounts", async (c) => {
+    const workspace = currentWorkspace(c);
+    const repository = scopedRepository(workspace.id, c.req.param("id"))!;
+    const b = (await c.req.json()) as { device?: string; path?: string };
+    if (!b.device || !b.path?.trim()) bad("mount 需要 device 与 path");
+    if (!b.path.startsWith("/") && !b.path.startsWith("~")) bad("Repository mount path 必须是绝对路径");
+    const device = store.getDeviceByName(b.device, hub.isOnline(b.device)) ?? store.getDevice(b.device, hub.isOnline(b.device));
+    if (!device) bad(`device "${b.device}" 不存在`);
+    const existing = store.getRepositoryMountForDevice(repository.id, device.id);
+    if (existing && existing.path !== b.path.trim()) {
+      const usage = store.repositoryMountUsage(existing.id);
+      if (usage.activeRuns || usage.worktrees) {
+        bad(`mount 正被 ${usage.activeRuns} 个 active Run / ${usage.worktrees} 个 worktree 使用，不能移动路径`);
+      }
+    }
+    store.setRepositoryMount(repository.id, device.id, b.path.trim(), Date.now());
+    return c.json(repositoryView(repository.id));
+  });
+
+  app.delete("/api/repositories/:repositoryId/mounts/:mountId", (c) => {
+    const workspace = currentWorkspace(c);
+    const repository = scopedRepository(workspace.id, c.req.param("repositoryId"))!;
+    const mount = store.getRepositoryMount(c.req.param("mountId"));
+    if (!mount || mount.repositoryId !== repository.id) throw new HTTPException(404, { message: "mount 不存在" });
+    const usage = store.repositoryMountUsage(mount.id);
+    if (usage.runs || usage.worktrees || usage.agents || usage.conversations) {
+      bad(`mount 已被 ${usage.runs} 个 Run / ${usage.worktrees} 个 worktree / ${usage.agents} 个 Agent / ${usage.conversations} 个任务引用，不能删除；可归档 Repository`);
+    }
+    store.deleteRepositoryMount(mount.id);
+    return c.json({ ok: true });
+  });
+
   // ---- settings / prompt wrappers ----
 
   app.get("/api/settings/prompt-wrappers", (c) =>
-    c.json({ wrappers: listPromptWrapperConfigs(store), variables: PROMPT_WRAPPER_VARIABLES }),
+    c.json({ wrappers: listPromptWrapperConfigs(store, currentWorkspace(c).id), variables: PROMPT_WRAPPER_VARIABLES }),
   );
 
   app.patch("/api/settings/prompt-wrappers", async (c) => {
+    const workspace = currentWorkspace(c);
     const b = (await c.req.json()) as { source?: string; enabled?: boolean; template?: string };
     if (!PROMPT_SOURCES.includes(b.source as PromptSource)) {
       bad(`source 可选 ${PROMPT_SOURCES.join("/")}（收到 "${b.source}"）`);
@@ -177,15 +347,16 @@ export function buildRest(
     if (typeof b.template !== "string") bad("需要 template: string");
     const invalid = validatePromptTemplate(b.template);
     if (invalid) bad(invalid);
-    store.setPromptTemplate(b.source as PromptSource, b.enabled, b.template, Date.now());
-    return c.json(getPromptWrapperConfig(store, b.source as PromptSource));
+    store.setPromptTemplate(workspace.id, b.source as PromptSource, b.enabled, b.template, Date.now());
+    return c.json(getPromptWrapperConfig(store, workspace.id, b.source as PromptSource));
   });
 
   app.delete("/api/settings/prompt-wrappers/:source", (c) => {
+    const workspace = currentWorkspace(c);
     const source = c.req.param("source") as PromptSource;
     if (!PROMPT_SOURCES.includes(source)) bad(`source 可选 ${PROMPT_SOURCES.join("/")}`);
-    store.resetPromptTemplate(source);
-    return c.json(getPromptWrapperConfig(store, source));
+    store.resetPromptTemplate(workspace.id, source);
+    return c.json(getPromptWrapperConfig(store, workspace.id, source));
   });
 
   // ---- devices ----
@@ -213,9 +384,13 @@ export function buildRest(
     };
   };
 
-  app.get("/api/skills", (c) => c.json(store.listSkills().map((skill) => skillView(skill.id))));
+  app.get("/api/skills", (c) => {
+    const workspace = currentWorkspace(c);
+    return c.json(store.listSkills(false, workspace.id).map((skill) => skillView(skill.id)));
+  });
 
   app.post("/api/skills", async (c) => {
+    const workspace = currentWorkspace(c);
     const b = (await c.req.json()) as { name?: string; description?: string; instruction?: string };
     const name = b.name?.trim() ?? "";
     const instruction = b.instruction?.trim() ?? "";
@@ -223,9 +398,10 @@ export function buildRest(
     if (name.length > 80) bad("Skill name 最多 80 字符");
     if (!instruction) bad("缺少 Skill instruction（SKILL.md 正文）");
     if (instruction.length > MAX_SKILL_INSTRUCTION) bad("Skill instruction 不能超过 128KB");
-    if (store.getSkillByName(name)) bad(`skill 名 "${name}" 已存在`);
+    if (store.getSkillByName(name, workspace.id)) bad(`skill 名 "${name}" 已存在`);
     const skill = store.createSkill(
       {
+        workspaceId: workspace.id,
         name,
         description: b.description?.trim() ?? "",
         source: "manual",
@@ -239,6 +415,7 @@ export function buildRest(
 
   /** Mew 式 local runtime sync：只接受 daemon hello 中真实探测到的 path，不信任客户端自报正文。 */
   app.post("/api/skills/import", async (c) => {
+    const workspace = currentWorkspace(c);
     const b = (await c.req.json()) as { device?: string; paths?: string[] };
     if (!b.device) bad("缺少 device");
     if (!Array.isArray(b.paths) || b.paths.length === 0 || b.paths.some((path) => typeof path !== "string")) {
@@ -253,8 +430,8 @@ export function buildRest(
     for (const path of [...new Set(b.paths)]) {
       const local = installed.find((skill) => skill.path === path);
       if (!local?.instruction) bad(`device "${device.name}" 未上报可导入的 Skill：${path}（重启 harbord 后重试）`);
-      const existing = store.getRuntimeSkill(device.id, path);
-      const owner = store.getSkillByName(local.name);
+      const existing = store.getRuntimeSkill(workspace.id, device.id, path);
+      const owner = store.getSkillByName(local.name, workspace.id);
       if (owner && owner.id !== existing?.id) {
         bad(`skill 名 "${local.name}" 已被占用；请先重命名现有 Skill 或本地 SKILL.md`);
       }
@@ -269,6 +446,7 @@ export function buildRest(
         imported.push(skillView(existing.id));
       } else {
         const skill = store.createSkill({
+          workspaceId: workspace.id,
           name: local.name,
           description: local.description,
           source: "runtime",
@@ -284,9 +462,10 @@ export function buildRest(
   });
 
   app.patch("/api/skills/:id", async (c) => {
+    const workspace = currentWorkspace(c);
     const id = c.req.param("id");
     const skill = store.getSkill(id);
-    if (!skill) throw new HTTPException(404, { message: `skill "${id}" 不存在` });
+    if (!skill || skill.workspaceId !== workspace.id) throw new HTTPException(404, { message: `skill "${id}" 不存在` });
     const b = (await c.req.json()) as {
       name?: string;
       description?: string;
@@ -297,7 +476,7 @@ export function buildRest(
     if (b.name !== undefined) {
       const name = b.name.trim();
       if (!name || name.length > 80) bad("Skill name 需要 1–80 字符");
-      const owner = store.getSkillByName(name);
+      const owner = store.getSkillByName(name, workspace.id);
       if (owner && owner.id !== skill.id) bad(`skill 名 "${name}" 已存在`);
       patch.name = name;
     }
@@ -320,9 +499,10 @@ export function buildRest(
 
   // ---- agents ----
 
-  app.get("/api/agents", (c) => c.json(store.listAgents()));
+  app.get("/api/agents", (c) => c.json(store.listAgents(false, currentWorkspace(c).id)));
 
   app.post("/api/agents", async (c) => {
+    const workspace = currentWorkspace(c);
     const b = (await c.req.json()) as {
       name?: string;
       description?: string;
@@ -330,6 +510,8 @@ export function buildRest(
       backend?: string;
       model?: string;
       permission?: string;
+      repository?: string;
+      /** legacy CLI compatibility */
       workdir?: string;
       isolation?: string;
       instruction?: string;
@@ -337,8 +519,7 @@ export function buildRest(
     };
     if (!b.name) bad("缺少 name");
     if (!b.device) bad("缺少 device（设备名或 id）");
-    if (!b.workdir) bad("缺少 workdir（device 上的绝对路径）");
-    if (!b.workdir.startsWith("/") && !b.workdir.startsWith("~")) {
+    if (b.workdir && !b.workdir.startsWith("/") && !b.workdir.startsWith("~")) {
       bad(`workdir 必须是绝对路径（收到 "${b.workdir}"）`);
     }
     if (b.backend !== undefined && b.backend !== "claude" && b.backend !== "codex") {
@@ -353,7 +534,7 @@ export function buildRest(
       store.getDeviceByName(b.device, hub.isOnline(b.device)) ??
       store.getDevice(b.device, hub.isOnline(b.device));
     if (!device) bad(`device "${b.device}" 未注册（先在该设备上启动 harbord）`);
-    if (store.getAgentByName(b.name)) bad(`agent 名 "${b.name}" 已存在`);
+    if (store.getAgentByNameInWorkspace(workspace.id, b.name)) bad(`agent 名 "${b.name}" 已存在于当前 Workspace`);
 
     const installed = (["claude", "codex"] as BackendKind[]).filter(
       (provider) => !!device.capabilities.clis?.[provider],
@@ -388,16 +569,28 @@ export function buildRest(
       }
     }
 
-    const skills = resolveAgentSkills(b.skills, device.id, backend);
+    let repository = scopedRepository(workspace.id, b.repository);
+    if (!repository && b.workdir) {
+      repository = store.ensureRepositoryForPath(workspace.id, device.id, b.workdir, Date.now());
+    }
+    if (repository && !store.getRepositoryMountForDevice(repository.id, device.id)) {
+      bad(`Repository "${repository.name}" 尚未挂载到设备 "${device.name}"`);
+    }
+    if (isolation === "worktree" && !repository) {
+      bad("Git worktree isolation 需要选择默认 Repository（非代码 Agent 请使用 Shared workspace）");
+    }
+
+    const skills = resolveAgentSkills(b.skills, workspace.id, device.id, backend);
     const agent = store.createAgent(
       {
+        workspaceId: workspace.id,
         name: b.name,
         description: b.description ?? null,
         deviceId: device.id,
         backend,
         model: b.model ?? null,
         permission: permission as import("@sm/agent").PermissionPolicy,
-        workdir: b.workdir,
+        defaultRepositoryId: repository?.id ?? null,
         isolation,
         instruction: b.instruction ?? null,
       },
@@ -408,12 +601,13 @@ export function buildRest(
   });
 
   app.patch("/api/agents/:id", async (c) => {
+    const workspace = currentWorkspace(c);
     const key = c.req.param("id");
-    const agent = store.getAgentByName(key) ?? store.getAgent(key);
+    const agent = scopedAgent(workspace.id, key);
     if (!agent) throw new HTTPException(404, { message: `agent "${key}" 不存在` });
     const b = (await c.req.json()) as { archived?: boolean; skills?: unknown };
     if (b.archived === undefined && b.skills === undefined) bad("需要 archived 或 skills");
-    const skills = b.skills !== undefined ? resolveAgentSkills(b.skills, agent.deviceId, agent.backend) : null;
+    const skills = b.skills !== undefined ? resolveAgentSkills(b.skills, workspace.id, agent.deviceId, agent.backend) : null;
     if (b.archived !== undefined) {
       if (typeof b.archived !== "boolean") bad("archived 需要 true/false");
       store.setAgentArchived(agent.id, b.archived, Date.now());
@@ -425,11 +619,12 @@ export function buildRest(
   // ---- conversations ----
 
   app.get("/api/conversations", (c) => {
+    const workspace = currentWorkspace(c);
     const kind = c.req.query("kind") as ConversationKind | undefined;
     const status = c.req.query("status") as ConversationStatus | undefined;
     // AI draft 是创建器内部态；正式发布前不进入 Chats / Issues / Automation target 列表。
-    const convs = store.listConversations({ kind, status }).filter((conversation) => conversation.kind !== "issue_draft");
-    const agentNames = new Map(store.listAgents(true).map((a) => [a.id, a.name]));
+    const convs = store.listConversations({ workspaceId: workspace.id, kind, status }).filter((conversation) => conversation.kind !== "issue_draft");
+    const agentNames = new Map(store.listAgents(true, workspace.id).map((a) => [a.id, a.name]));
     return c.json(
       convs.map((cv) => ({
         ...cv,
@@ -440,12 +635,14 @@ export function buildRest(
   });
 
   app.post("/api/conversations", async (c) => {
+    const workspace = currentWorkspace(c);
     const b = (await c.req.json()) as {
       kind?: string;
       agent?: string;
       title?: string;
       description?: string;
       priority?: string;
+      repository?: string;
       origin?: Origin;
       originRef?: string;
     };
@@ -454,16 +651,23 @@ export function buildRest(
     if (b.priority !== undefined && !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)) {
       bad(`priority 可选 ${ISSUE_PRIORITIES.join("/")}（收到 "${b.priority}"）`);
     }
-    const agent = b.agent ? (store.getAgentByName(b.agent) ?? store.getAgent(b.agent)) : null;
+    const agent = scopedAgent(workspace.id, b.agent);
     if (b.agent && !agent) bad(`agent "${b.agent}" 不存在（harbor agent ls 查看）`);
     if (agent?.archivedAt) bad(`agent "${agent.name}" 已归档`);
+    const repository = scopedRepository(workspace.id, b.repository) ??
+      (agent?.defaultRepositoryId ? store.getRepository(agent.defaultRepositoryId) : null);
+    if (repository && agent && !store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
+      bad(`Repository "${repository.name}" 尚未挂载到 Agent "${agent.name}" 的设备`);
+    }
     const conv = store.createConversation(
       {
+        workspaceId: workspace.id,
         kind: b.kind,
         title: b.title ?? null,
         description: b.description ?? null,
         priority: (b.priority as IssuePriority | undefined) ?? "medium",
         agentId: agent?.id ?? null,
+        repositoryId: repository?.id ?? null,
         origin: b.origin ?? "cli",
         originRef: b.originRef ?? null,
       },
@@ -474,19 +678,27 @@ export function buildRest(
 
   /** Mew AI draft：先用只读 Agent 分诊，人工确认标题/正文后才发布到 Issue 看板。 */
   app.post("/api/issue-drafts", async (c) => {
-    const b = (await c.req.json()) as { request?: string; agent?: string; priority?: string };
+    const workspace = currentWorkspace(c);
+    const b = (await c.req.json()) as { request?: string; agent?: string; priority?: string; repository?: string };
     if (!b.request?.trim()) bad("请描述要 Agent 分诊的请求");
     if (!b.agent) bad("请选择负责分诊的 Agent");
     if (b.priority !== undefined && !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)) {
       bad(`priority 可选 ${ISSUE_PRIORITIES.join("/")}（收到 "${b.priority}"）`);
     }
-    const agent = store.getAgentByName(b.agent) ?? store.getAgent(b.agent);
+    const agent = scopedAgent(workspace.id, b.agent);
     if (!agent) bad(`agent "${b.agent}" 不存在`);
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
+    const repository = scopedRepository(workspace.id, b.repository) ??
+      (agent.defaultRepositoryId ? store.getRepository(agent.defaultRepositoryId) : null);
+    if (repository && !store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
+      bad(`Repository "${repository.name}" 尚未挂载到 Agent "${agent.name}" 的设备`);
+    }
     const conv = store.createConversation(
       {
+        workspaceId: workspace.id,
         kind: "issue_draft",
         agentId: agent.id,
+        repositoryId: repository?.id ?? null,
         description: b.request.trim(),
         priority: (b.priority as IssuePriority | undefined) ?? "medium",
         origin: "web",
@@ -499,7 +711,8 @@ export function buildRest(
   });
 
   app.post("/api/issue-drafts/:id/publish", async (c) => {
-    const conv = store.resolveConversationPrefix(c.req.param("id"));
+    const workspace = currentWorkspace(c);
+    const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
     if (!conv || conv.kind !== "issue_draft") {
       throw new HTTPException(404, { message: `issue draft "${c.req.param("id")}" 不存在` });
     }
@@ -535,12 +748,14 @@ export function buildRest(
   });
 
   app.get("/api/conversations/:id", (c) => {
-    const conv = store.resolveConversationPrefix(c.req.param("id"));
-    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    const workspace = currentWorkspace(c);
+    const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
     const agent = conv.agentId ? store.getAgent(conv.agentId) : null;
+    const repository = conv.repositoryId ? store.getRepository(conv.repositoryId) : null;
     return c.json({
       conversation: conv,
       agent,
+      repository,
       // resultText：Chat/Issue 历史渲染用；run_events 7 天 prune 后为 null（UI 显示「记录已过期」）
       runs: store.listRunsByConversation(conv.id).map((r) => ({ ...r, resultText: store.getRunResultText(r.id) })),
       statusLog: store.listStatusLog(conv.id),
@@ -553,14 +768,15 @@ export function buildRest(
   });
 
   app.patch("/api/conversations/:id", async (c) => {
-    const conv = store.resolveConversationPrefix(c.req.param("id"));
-    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    const workspace = currentWorkspace(c);
+    const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
     const b = (await c.req.json()) as {
       status?: string;
       title?: string | null;
       description?: string | null;
       priority?: string;
       agent?: string | null;
+      repository?: string | null;
     };
     if (b.priority !== undefined && !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)) {
       bad(`priority 可选 ${ISSUE_PRIORITIES.join("/")}（收到 "${b.priority}"）`);
@@ -575,11 +791,26 @@ export function buildRest(
       Date.now(),
     );
     if (b.agent !== undefined) {
-      const agent = b.agent ? (store.getAgentByName(b.agent) ?? store.getAgent(b.agent)) : null;
+      const agent = scopedAgent(workspace.id, b.agent);
       if (b.agent && !agent) bad(`agent "${b.agent}" 不存在`);
       if (agent?.archivedAt) bad(`agent "${agent.name}" 已归档`);
       if (store.activeRunForConversation(conv.id)) bad("Run 进行中，不能更换 Assignee；请先停止 Run");
+      if (agent && conv.repositoryId && !store.getRepositoryMountForDevice(conv.repositoryId, agent.deviceId)) {
+        const repository = store.getRepository(conv.repositoryId);
+        bad(`Repository "${repository?.name ?? conv.repositoryId}" 尚未挂载到 Agent "${agent.name}" 的设备`);
+      }
       store.setConversationAssignee(conv.id, agent?.id ?? null, Date.now());
+    }
+    if (b.repository !== undefined) {
+      if (store.activeRunForConversation(conv.id)) bad("Run 进行中，不能更换 Repository；请先停止 Run");
+      if (conv.worktreePath) bad("Issue 已有 worktree，不能更换 Repository；请结束当前 Issue 后新建任务");
+      const repository = scopedRepository(workspace.id, b.repository);
+      const current = store.getConversation(conv.id)!;
+      const agent = current.agentId ? store.getAgent(current.agentId) : null;
+      if (repository && agent && !store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
+        bad(`Repository "${repository.name}" 尚未挂载到 Agent "${agent.name}" 的设备`);
+      }
+      store.setConversationRepository(conv.id, repository?.id ?? null, Date.now());
     }
     if (b.status !== undefined) {
       if (!ISSUE_STATUSES.includes(b.status as ConversationStatus)) {
@@ -605,14 +836,14 @@ export function buildRest(
   });
 
   app.post("/api/conversations/:id/runs", async (c) => {
-    const conv = store.resolveConversationPrefix(c.req.param("id"));
-    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    const workspace = currentWorkspace(c);
+    const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
     const b = (await c.req.json()) as { prompt?: string; agent?: string; purpose?: string };
     if (!b.prompt?.trim()) bad("缺少 prompt");
     const purpose = (b.purpose ?? "implementation") as RunPurpose;
     if (!RUN_PURPOSES.includes(purpose)) bad(`purpose 可选 ${RUN_PURPOSES.join("/")}`);
     const agentKey = b.agent ?? conv.agentId;
-    const agent = agentKey ? (store.getAgentByName(agentKey) ?? store.getAgent(agentKey)) : null;
+    const agent = scopedAgent(workspace.id, agentKey);
     if (!agent) bad("Issue 尚未指派 Agent，请先选择 Assignee");
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
     const run = enqueue(conv, agent, b.prompt.trim(), purpose);
@@ -621,12 +852,12 @@ export function buildRest(
 
   /** Mew 式一步派活：选择 Agent 即更新 Assignee + 创建 implementation Run。 */
   app.post("/api/conversations/:id/dispatch", async (c) => {
-    const conv = store.resolveConversationPrefix(c.req.param("id"));
-    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    const workspace = currentWorkspace(c);
+    const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
     if (conv.kind !== "issue") bad("dispatch 只适用于 Issue");
     const b = (await c.req.json()) as { agent?: string; prompt?: string };
     const agentKey = b.agent ?? conv.agentId;
-    const agent = agentKey ? (store.getAgentByName(agentKey) ?? store.getAgent(agentKey)) : null;
+    const agent = scopedAgent(workspace.id, agentKey);
     if (!agent) bad("请选择要执行的 Agent");
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
     const prompt = b.prompt?.trim() || conv.description?.trim();
@@ -635,24 +866,24 @@ export function buildRest(
   });
 
   app.post("/api/conversations/:id/request-changes", async (c) => {
-    const conv = store.resolveConversationPrefix(c.req.param("id"));
-    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    const workspace = currentWorkspace(c);
+    const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
     if (conv.kind !== "issue" || conv.status !== "review") bad("只有 Review 中的 Issue 可以要求修改");
     const b = (await c.req.json()) as { feedback?: string; agent?: string };
     if (!b.feedback?.trim()) bad("请填写修改意见");
     const agentKey = b.agent ?? conv.agentId;
-    const agent = agentKey ? (store.getAgentByName(agentKey) ?? store.getAgent(agentKey)) : null;
+    const agent = scopedAgent(workspace.id, agentKey);
     if (!agent) bad("请选择返工 Agent");
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
     return c.json(enqueue(conv, agent, b.feedback.trim(), "implementation"), 201);
   });
 
   app.post("/api/conversations/:id/review", async (c) => {
-    const conv = store.resolveConversationPrefix(c.req.param("id"));
-    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    const workspace = currentWorkspace(c);
+    const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
     if (conv.kind !== "issue" || conv.status !== "review") bad("AI Review 只能在 Review 阶段启动");
     const b = (await c.req.json()) as { agent?: string; prompt?: string };
-    const agent = b.agent ? (store.getAgentByName(b.agent) ?? store.getAgent(b.agent)) : null;
+    const agent = scopedAgent(workspace.id, b.agent);
     if (!agent) bad("请选择 Reviewer Agent");
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
     const prompt = b.prompt?.trim() || "请独立审查本 Issue 的实现结果、代码改动和测试证据，指出阻塞问题与改进建议；不要直接宣告 Issue 完成。";
@@ -660,8 +891,7 @@ export function buildRest(
   });
 
   app.post("/api/conversations/:id/delivery", async (c) => {
-    const conv = store.resolveConversationPrefix(c.req.param("id"));
-    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    const conv = assertConversationWorkspace(currentWorkspace(c).id, c.req.param("id"));
     const b = (await c.req.json()) as {
       provider?: DeliveryProviderKind;
       changeUrl?: string;
@@ -676,8 +906,7 @@ export function buildRest(
   });
 
   app.patch("/api/deliveries/:id", async (c) => {
-    const delivery = store.getDelivery(c.req.param("id"));
-    if (!delivery) throw new HTTPException(404, { message: `delivery "${c.req.param("id")}" 不存在` });
+    const { delivery } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
     const b = (await c.req.json()) as {
       changeUrl?: string | null;
       externalId?: string | null;
@@ -693,10 +922,7 @@ export function buildRest(
   });
 
   app.post("/api/deliveries/:id/merge", async (c) => {
-    const delivery = store.getDelivery(c.req.param("id"));
-    if (!delivery) throw new HTTPException(404, { message: `delivery "${c.req.param("id")}" 不存在` });
-    const conv = store.getConversation(delivery.conversationId);
-    if (!conv) throw new HTTPException(404, { message: "Delivery 所属 Issue 不存在" });
+    const { delivery, conversation: conv } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
     const b = (await c.req.json()) as { confirmed?: boolean };
     const fresh = await deliveryAction(() => deliveries.merge(delivery, conv, b));
     finalizeDelivery(fresh);
@@ -704,17 +930,13 @@ export function buildRest(
   });
 
   app.post("/api/deliveries/:id/deploy", async (c) => {
-    const delivery = store.getDelivery(c.req.param("id"));
-    if (!delivery) throw new HTTPException(404, { message: `delivery "${c.req.param("id")}" 不存在` });
-    const conv = store.getConversation(delivery.conversationId);
-    if (!conv) throw new HTTPException(404, { message: "Delivery 所属 Issue 不存在" });
+    const { delivery, conversation: conv } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
     const b = (await c.req.json()) as { confirmed?: boolean };
     return c.json(await deliveryAction(() => deliveries.startDeployment(delivery, conv, b)));
   });
 
   app.post("/api/deliveries/:id/deployment-result", async (c) => {
-    const delivery = store.getDelivery(c.req.param("id"));
-    if (!delivery) throw new HTTPException(404, { message: `delivery "${c.req.param("id")}" 不存在` });
+    const { delivery } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
     const b = (await c.req.json()) as { status?: "succeeded" | "failed" };
     if (b.status !== "succeeded" && b.status !== "failed") bad("status 可选 succeeded/failed");
     const fresh = await deliveryAction(() => deliveries.finishDeployment(delivery, b.status!));
@@ -723,8 +945,7 @@ export function buildRest(
   });
 
   app.post("/api/conversations/:id/approve", (c) => {
-    const conv = store.resolveConversationPrefix(c.req.param("id"));
-    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    const conv = assertConversationWorkspace(currentWorkspace(c).id, c.req.param("id"));
     if (conv.kind !== "issue" || conv.status !== "review") bad("只有 Review 中的 Issue 可以验收完成");
     if (store.activeRunForConversation(conv.id)) bad("仍有 Run 进行中，不能完成验收");
     const delivery = store.getDeliveryForConversation(conv.id);
@@ -743,8 +964,7 @@ export function buildRest(
   });
 
   app.post("/api/conversations/:id/cancel", (c) => {
-    const conv = store.resolveConversationPrefix(c.req.param("id"));
-    if (!conv) throw new HTTPException(404, { message: `conversation "${c.req.param("id")}" 不存在` });
+    const conv = assertConversationWorkspace(currentWorkspace(c).id, c.req.param("id"));
     if (conv.kind !== "issue") bad("chat 不能取消为 Issue 终态");
     const active = store.activeRunForConversation(conv.id);
     if (active) coordinator.cancelRun(active.id);
@@ -757,27 +977,27 @@ export function buildRest(
   // ---- runs ----
 
   app.get("/api/runs/:id", (c) => {
-    const run = store.resolveRunPrefix(c.req.param("id"));
-    if (!run) throw new HTTPException(404, { message: `run "${c.req.param("id")}" 不存在` });
+    const run = assertRunWorkspace(currentWorkspace(c).id, c.req.param("id"));
     return c.json(run);
   });
 
   app.post("/api/runs/:id/cancel", (c) => {
-    const run = store.resolveRunPrefix(c.req.param("id"));
-    if (!run) throw new HTTPException(404, { message: `run "${c.req.param("id")}" 不存在` });
+    const run = assertRunWorkspace(currentWorkspace(c).id, c.req.param("id"));
     return c.json(coordinator.cancelRun(run.id));
   });
 
   // ---- approvals（P2 审批链路） ----
 
   app.get("/api/approvals", (c) => {
+    const workspace = currentWorkspace(c);
     const status = c.req.query("status") as import("../protocol.js").ApprovalStatus | undefined;
-    return c.json(store.listApprovals(status));
+    return c.json(store.listApprovals(status).filter((approval) => store.getRun(approval.runId)?.workspaceId === workspace.id));
   });
 
   app.post("/api/approvals/:id", async (c) => {
+    const workspace = currentWorkspace(c);
     const a = store.resolveApprovalPrefix(c.req.param("id"));
-    if (!a) throw new HTTPException(404, { message: `approval "${c.req.param("id")}" 不存在` });
+    if (!a || store.getRun(a.runId)?.workspaceId !== workspace.id) throw new HTTPException(404, { message: `approval "${c.req.param("id")}" 不存在` });
     const b = (await c.req.json()) as { behavior?: string };
     if (b.behavior !== "allow" && b.behavior !== "deny") bad(`behavior 只支持 allow/deny（收到 "${b.behavior}"）`);
     const decided = approvals.decide(a.id, b.behavior, "cli");
@@ -787,13 +1007,15 @@ export function buildRest(
   // ---- automations（P3 cron） ----
 
   app.get("/api/automations", (c) => {
-    const agentNames = new Map(store.listAgents(true).map((a) => [a.id, a.name]));
+    const workspace = currentWorkspace(c);
+    const agentNames = new Map(store.listAgents(true, workspace.id).map((a) => [a.id, a.name]));
     return c.json(
-      store.listAutomations().map((a) => ({ ...a, agentName: agentNames.get(a.agentId) ?? a.agentId })),
+      store.listAutomations(workspace.id).map((a) => ({ ...a, agentName: agentNames.get(a.agentId) ?? a.agentId })),
     );
   });
 
   app.post("/api/automations", async (c) => {
+    const workspace = currentWorkspace(c);
     const b = (await c.req.json()) as {
       name?: string;
       agent?: string;
@@ -801,9 +1023,13 @@ export function buildRest(
       prompt?: string;
       mode?: string;
       target?: string;
+      repository?: string;
       notifyChat?: string;
     };
     if (!b.name) bad("缺少 name");
+    if (store.listAutomations(workspace.id).some((automation) => automation.name === b.name)) {
+      bad(`automation 名 "${b.name}" 已存在于当前 Workspace`);
+    }
     if (!b.cron) bad("缺少 cron（5 段标准 cron 表达式，server 本机时区）");
     if (!b.prompt?.trim()) bad("缺少 prompt");
     try {
@@ -811,7 +1037,7 @@ export function buildRest(
     } catch (e) {
       bad(`cron 表达式非法："${b.cron}"（${e instanceof Error ? e.message : e}）`);
     }
-    const agent = b.agent ? (store.getAgentByName(b.agent) ?? store.getAgent(b.agent)) : null;
+    const agent = scopedAgent(workspace.id, b.agent);
     if (!agent) bad(`agent "${b.agent}" 不存在（harbor agent ls 查看）`);
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
     const mode = (b.mode ?? "new_issue") as import("../protocol.js").AutomationMode;
@@ -820,13 +1046,22 @@ export function buildRest(
     if (mode === "append") {
       if (!b.target) bad("mode=append 需要 --target <conversation-id>");
       const target = store.resolveConversationPrefix(b.target);
-      if (!target) bad(`target conversation "${b.target}" 不存在`);
+      if (!target || target.workspaceId !== workspace.id) bad(`target conversation "${b.target}" 不存在于当前 Workspace`);
       targetId = target.id;
+    }
+    const repository = mode === "append"
+      ? null
+      : (scopedRepository(workspace.id, b.repository) ??
+        (agent.defaultRepositoryId ? store.getRepository(agent.defaultRepositoryId) : null));
+    if (repository && !store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
+      bad(`Repository "${repository.name}" 尚未挂载到 Agent "${agent.name}" 的设备`);
     }
     const auto = store.createAutomation(
       {
+        workspaceId: workspace.id,
         name: b.name,
         agentId: agent.id,
+        repositoryId: repository?.id ?? null,
         cron: b.cron,
         prompt: b.prompt,
         mode,
@@ -840,8 +1075,9 @@ export function buildRest(
   });
 
   app.patch("/api/automations/:id", async (c) => {
-    const auto = store.resolveAutomationPrefix(c.req.param("id"));
-    if (!auto) throw new HTTPException(404, { message: `automation "${c.req.param("id")}" 不存在` });
+    const workspace = currentWorkspace(c);
+    const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
+    if (!auto || auto.workspaceId !== workspace.id) throw new HTTPException(404, { message: `automation "${c.req.param("id")}" 不存在` });
     const b = (await c.req.json()) as { enabled?: boolean };
     if (typeof b.enabled !== "boolean") bad("需要 enabled: true/false");
     store.setAutomationEnabled(auto.id, b.enabled);
@@ -852,45 +1088,48 @@ export function buildRest(
   });
 
   app.delete("/api/automations/:id", (c) => {
-    const auto = store.resolveAutomationPrefix(c.req.param("id"));
-    if (!auto) throw new HTTPException(404, { message: `automation "${c.req.param("id")}" 不存在` });
+    const workspace = currentWorkspace(c);
+    const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
+    if (!auto || auto.workspaceId !== workspace.id) throw new HTTPException(404, { message: `automation "${c.req.param("id")}" 不存在` });
     automations.unschedule(auto.id);
     store.deleteAutomation(auto.id);
     return c.json({ ok: true });
   });
 
   app.get("/api/automations/:id/log", (c) => {
-    const auto = store.resolveAutomationPrefix(c.req.param("id"));
-    if (!auto) throw new HTTPException(404, { message: `automation "${c.req.param("id")}" 不存在` });
+    const workspace = currentWorkspace(c);
+    const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
+    if (!auto || auto.workspaceId !== workspace.id) throw new HTTPException(404, { message: `automation "${c.req.param("id")}" 不存在` });
     return c.json(store.listAutomationLog(auto.id));
   });
 
   // ---- usage（P3 报表） ----
 
   app.get("/api/usage", (c) => {
+    const workspace = currentWorkspace(c);
     const days = Math.max(1, Number(c.req.query("days") ?? 7));
     const fromTs = Date.now() - days * 24 * 3600 * 1000;
-    return c.json(store.usageAggregate(fromTs));
+    return c.json(store.usageAggregate(fromTs, workspace.id));
   });
 
   app.get("/api/usage/runs", (c) => {
+    const workspace = currentWorkspace(c);
     const days = Math.max(1, Number(c.req.query("days") ?? 7));
     const fromTs = Date.now() - days * 24 * 3600 * 1000;
     const agentQ = c.req.query("agent");
     let agentId: string | undefined;
     if (agentQ) {
-      const agent = store.getAgentByName(agentQ) ?? store.getAgent(agentQ);
+      const agent = scopedAgent(workspace.id, agentQ);
       if (!agent) bad(`agent "${agentQ}" 不存在`);
       agentId = agent.id;
     }
-    return c.json(store.listRunsForUsage({ agentId, day: c.req.query("day"), fromTs }));
+    return c.json(store.listRunsForUsage({ workspaceId: workspace.id, agentId, day: c.req.query("day"), fromTs }));
   });
 
   // SSE：回放 run_events 已有行 → 实时直播 → run 终态发 done 帧收流。
   // 先订阅（缓冲）再回放，seq 去重弥合两段之间的竞态窗口。
   app.get("/api/runs/:id/events", (c) => {
-    const run = store.resolveRunPrefix(c.req.param("id"));
-    if (!run) throw new HTTPException(404, { message: `run "${c.req.param("id")}" 不存在` });
+    const run = assertRunWorkspace(currentWorkspace(c).id, c.req.param("id"));
 
     let unsub: (() => void) | null = null;
     let ping: ReturnType<typeof setInterval> | null = null;

@@ -42,6 +42,16 @@ test("v4 migration preserves legacy conversations and runs while adding workflow
         conversation_id TEXT NOT NULL, from_status TEXT, to_status TEXT NOT NULL,
         actor TEXT NOT NULL, ts INTEGER NOT NULL
       );
+      CREATE TABLE automations (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, agent_id TEXT NOT NULL REFERENCES agents(id),
+        cron TEXT NOT NULL, prompt TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'new_issue',
+        target_conversation_id TEXT, notify_chat_id TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+        last_fired_at INTEGER
+      );
+      CREATE TABLE prompt_templates (
+        source TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1,
+        template TEXT NOT NULL, updated_at INTEGER NOT NULL
+      );
       INSERT INTO devices VALUES ('device_1', 'worker', 'hash', '{}', NULL, 1);
       INSERT INTO agents VALUES ('agent_1', 'builder', NULL, 'device_1', 'claude', NULL, 'auto-edit', '/repo', 'none', NULL, 2, NULL);
       INSERT INTO conversations VALUES ('conversation_1', 'issue', 'Legacy issue', 'agent_1', 'doing', '/repo/wt', 'session_1', 'cli', NULL, 3, 4);
@@ -51,7 +61,7 @@ test("v4 migration preserves legacy conversations and runs while adding workflow
     legacy.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(8);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(9);
     expect(
       migrated.query<{ agent_id: string | null; description: string | null; priority: string; status: string }, []>(
         "SELECT agent_id, description, priority, status FROM conversations WHERE id = 'conversation_1'",
@@ -62,6 +72,26 @@ test("v4 migration preserves legacy conversations and runs while adding workflow
         "SELECT purpose, prompt FROM runs WHERE id = 'run_1'",
       ).get(),
     ).toEqual({ purpose: "implementation", prompt: "legacy prompt" });
+    expect(
+      migrated.query<{ workspace_id: string; repository_name: string; path: string }, []>(
+        `SELECT a.workspace_id, r.name AS repository_name, m.path
+         FROM agents a
+         JOIN repositories r ON r.id = a.default_repository_id
+         JOIN repository_mounts m ON m.repository_id = r.id AND m.device_id = a.device_id
+         WHERE a.id = 'agent_1'`,
+      ).get(),
+    ).toEqual({ workspace_id: "ws_personal", repository_name: "repo", path: "/repo" });
+    expect(
+      migrated.query<{ workspace_id: string; repository_id: string; worktree_mount_id: string }, []>(
+        "SELECT workspace_id, repository_id, worktree_mount_id FROM conversations WHERE id = 'conversation_1'",
+      ).get(),
+    ).toEqual(expect.objectContaining({ workspace_id: "ws_personal" }));
+    expect(
+      migrated.query<{ workspace_id: string; execution_root: string }, []>(
+        "SELECT workspace_id, execution_root FROM runs WHERE id = 'run_1'",
+      ).get(),
+    ).toEqual({ workspace_id: "ws_personal", execution_root: "/repo/wt" });
+    expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
 
     migrated.run(
       `INSERT INTO conversations

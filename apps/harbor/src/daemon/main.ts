@@ -121,7 +121,7 @@ function connect(): void {
         executor.resolveApproval(msg.runId, msg.requestId, msg.behavior, msg.updatedInput, msg.message);
         break;
       case "worktree_cleanup": {
-        const r = removeWorktree(msg.workdir, msg.worktreePath);
+        const r = removeWorktree(msg.repositoryRoot, msg.worktreePath);
         console.log(`[harbord] worktree_cleanup ${msg.conversationId}：${r.ok ? "✓" : "✗"} ${r.message}`);
         sendOrQueue({ type: "worktree_cleanup_result", conversationId: msg.conversationId, ok: r.ok, message: r.message });
         break;

@@ -12,13 +12,16 @@ import {
 function fixtures(origin: Conversation["origin"] = "web", kind: Conversation["kind"] = "issue") {
   const conversation: Conversation = {
     id: "conversation_1",
+    workspaceId: "ws_personal",
     kind,
     title: "Ship control plane",
     agentId: "agent_1",
     description: "Implement the control plane",
     priority: "medium",
     status: kind === "issue" ? "backlog" : "open",
+    repositoryId: null,
     worktreePath: null,
+    worktreeMountId: null,
     claudeSessionId: null,
     origin,
     originRef: origin === "automation" ? "automation_1" : null,
@@ -27,13 +30,14 @@ function fixtures(origin: Conversation["origin"] = "web", kind: Conversation["ki
   };
   const agent: HarborAgent = {
     id: "agent_1",
+    workspaceId: "ws_personal",
     name: "builder",
     description: null,
     deviceId: "device_1",
     backend: "claude",
     model: "sonnet",
     permission: "auto-edit",
-    workdir: "/repo",
+    defaultRepositoryId: null,
     isolation: "none",
     instruction: null,
     skillIds: [],
@@ -42,9 +46,13 @@ function fixtures(origin: Conversation["origin"] = "web", kind: Conversation["ki
   };
   const run: Run = {
     id: "run_1",
+    workspaceId: "ws_personal",
     conversationId: conversation.id,
     agentId: agent.id,
     deviceId: agent.deviceId,
+    repositoryId: null,
+    repositoryMountId: null,
+    executionRoot: "/repo",
     prompt: "Implement the missing page",
     purpose: "implementation",
     status: "queued",
@@ -62,7 +70,7 @@ describe("prompt wrapper", () => {
   test("latest migration and defaults render without mutating raw prompt", () => {
     const db = openDb(":memory:");
     const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version;
-    expect(version).toBe(8);
+    expect(version).toBe(9);
     const store = new HarborStore(db);
     const input = fixtures();
     const rendered = renderRunPrompt(store, input);
@@ -70,7 +78,7 @@ describe("prompt wrapper", () => {
     expect(rendered).toContain("Implement the missing page");
     expect(rendered).toContain("Run purpose: implementation");
     expect(input.run.prompt).toBe("Implement the missing page");
-    expect(getPromptWrapperConfig(store, "issue").isDefault).toBe(true);
+    expect(getPromptWrapperConfig(store, "ws_personal", "issue").isDefault).toBe(true);
   });
 
   test("automation source wins over issue kind", () => {
@@ -81,9 +89,9 @@ describe("prompt wrapper", () => {
   test("custom template applies immediately and disabled returns raw prompt", () => {
     const store = new HarborStore(openDb(":memory:"));
     const input = fixtures();
-    store.setPromptTemplate("issue", true, "Agent={{agent.name}}\n{{prompt}}", 10);
+    store.setPromptTemplate("ws_personal", "issue", true, "Agent={{agent.name}}\n{{prompt}}", 10);
     expect(renderRunPrompt(store, input)).toBe("Agent=builder\nImplement the missing page");
-    store.setPromptTemplate("issue", false, "{{prompt}}", 11);
+    store.setPromptTemplate("ws_personal", "issue", false, "{{prompt}}", 11);
     expect(renderRunPrompt(store, input)).toBe(input.run.prompt);
   });
 

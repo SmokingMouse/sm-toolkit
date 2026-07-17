@@ -39,6 +39,9 @@ export class RunCoordinator {
 
   /** 入队并尝试即时下发（REST/飞书/automation 共用）。同 conversation 串行——防 resume 分叉 */
   enqueueRun(conv: Conversation, agent: HarborAgent, prompt: string, purpose: RunPurpose = "implementation"): Run {
+    if (conv.workspaceId !== agent.workspaceId) {
+      throw new Error(`Agent "${agent.name}" 不属于当前 Workspace，不能跨作用域执行`);
+    }
     const active = this.store.activeRunForConversation(conv.id);
     if (active) {
       throw new Error(
@@ -51,22 +54,35 @@ export class RunCoordinator {
     if (conv.kind === "issue_draft" && purpose !== "triage") {
       throw new Error("AI Issue 草稿只允许 triage run");
     }
+    const repositoryId = conv.repositoryId ?? agent.defaultRepositoryId;
+    const repository = repositoryId ? this.store.getRepository(repositoryId) : null;
+    if (repository?.archivedAt) {
+      throw new Error(`Repository "${repository.name}" 已归档，不能启动新的 Run`);
+    }
+    const mount = repositoryId ? this.store.getRepositoryMountForDevice(repositoryId, agent.deviceId) : null;
+    if (repositoryId && !mount) {
+      throw new Error(
+        `Repository "${repository?.name ?? repositoryId}" 没有挂载到 Agent 设备；请先在 Repositories 配置该 Device 的本地路径`,
+      );
+    }
+    const effectiveIsolation = purpose === "triage" ? "none" : agent.isolation;
+    if (effectiveIsolation === "worktree" && !mount) {
+      throw new Error(`Agent "${agent.name}" 使用 Git worktree 隔离，但当前任务没有 Repository mount`);
+    }
+    if (conv.worktreePath && conv.worktreeMountId !== mount?.id) {
+      throw new Error("当前 Issue 已有 worktree，只能继续使用创建该 worktree 的 Repository mount");
+    }
+    if (!conv.repositoryId && repositoryId) {
+      this.store.setConversationRepository(conv.id, repositoryId, Date.now());
+      conv = this.store.getConversation(conv.id)!;
+    }
     if (conv.kind === "issue") {
       if (conv.status === "done" || conv.status === "canceled") {
         throw new Error(`issue 已是 ${conv.status}，不能继续执行`);
       }
       if (purpose === "review" || purpose === "verification") {
         if (conv.status !== "review") throw new Error(`${purpose} run 只能在 review 阶段启动`);
-        // Review 必须看到 implementation 的真实 worktree。跨设备/仓库派给 Reviewer 会静默审错代码，
-        // 因此在调度层统一拒绝（REST / CLI / 飞书都不能绕过）。
-        if (conv.worktreePath && conv.agentId) {
-          const implementer = this.store.getAgent(conv.agentId);
-          if (implementer && (implementer.deviceId !== agent.deviceId || implementer.workdir !== agent.workdir)) {
-            throw new Error(
-              `Reviewer Agent 必须与实现 Agent 位于同一设备和 workdir（实现：${implementer.name} @ ${implementer.workdir}）`,
-            );
-          }
-        }
+        // worktreeMountId 闸保证 Reviewer 看到 implementation 的真实 checkout。
       } else {
         const now = Date.now();
         // 新实现会改变 commit 集合，旧人工验收与 CI 证据必须失效；已合并交付在这里硬拒绝。
@@ -79,7 +95,17 @@ export class RunCoordinator {
       }
     }
     const run = this.store.createRun(
-      { conversationId: conv.id, agentId: agent.id, deviceId: agent.deviceId, prompt, purpose },
+      {
+        workspaceId: conv.workspaceId,
+        conversationId: conv.id,
+        agentId: agent.id,
+        deviceId: agent.deviceId,
+        repositoryId: repositoryId ?? null,
+        repositoryMountId: mount?.id ?? null,
+        executionRoot: conv.worktreePath ?? mount?.path ?? null,
+        prompt,
+        purpose,
+      },
       Date.now(),
     );
     this.pump(agent.deviceId);
@@ -140,7 +166,7 @@ export class RunCoordinator {
         model: agent.model,
         // runs.prompt 保留原文；只在 dispatch 瞬间按来源包裹结构化上下文。
         prompt: renderRunPrompt(this.store, { run, conversation: conv, agent }),
-        workdir: agent.workdir,
+        repositoryRoot: run.executionRoot,
         // AI draft 只允许读取仓库做分诊，不能在 Issue 尚未确认时改文件或创建 worktree。
         permission: run.purpose === "triage" ? "readonly" : agent.permission,
         systemPrompt: composeAgentSystemPrompt(agent.instruction, this.store.listSkillsForAgent(agent.id)),
@@ -214,24 +240,26 @@ export class RunCoordinator {
   }
 
   /** worktree 回填（daemon 首跑创建后回报） */
-  onWorktreeReady(conversationId: string, path: string): void {
+  onWorktreeReady(runId: string, conversationId: string, path: string): void {
+    const run = this.store.getRun(runId);
     const conv = this.store.getConversation(conversationId);
-    if (!conv) return;
+    if (!conv || !run) return;
     if (conv.worktreePath !== path) {
-      this.store.setConversationWorktreePath(conversationId, path, Date.now());
+      this.store.setConversationWorktreePath(conversationId, path, run.repositoryMountId, Date.now());
+      this.store.setRunExecutionRoot(runId, path);
       console.log(`[coordinator] worktree 就绪：${conversationId} → ${path}`);
     }
   }
 
   /** issue 终结后的 worktree 收尾（保留分支删目录）。设备离线时静默跳过——重连对账补发 */
   requestWorktreeCleanup(conv: Conversation): void {
-    if (!conv.worktreePath) return;
-    const agent = conv.agentId ? this.store.getAgent(conv.agentId) : null;
-    if (!agent) return;
-    const sent = this.transport.send(agent.deviceId, {
+    if (!conv.worktreePath || !conv.worktreeMountId) return;
+    const mount = this.store.getRepositoryMount(conv.worktreeMountId);
+    if (!mount) return;
+    const sent = this.transport.send(mount.deviceId, {
       type: "worktree_cleanup",
       conversationId: conv.id,
-      workdir: agent.workdir,
+      repositoryRoot: mount.path,
       worktreePath: conv.worktreePath,
     });
     if (!sent) {
@@ -243,7 +271,7 @@ export class RunCoordinator {
     const conv = this.store.getConversation(conversationId);
     if (!conv) return;
     if (ok) {
-      this.store.setConversationWorktreePath(conversationId, null, Date.now());
+      this.store.setConversationWorktreePath(conversationId, null, null, Date.now());
       console.log(`[coordinator] worktree 已清理：${conversationId}`);
     } else {
       // 保留 worktree_path（目录还在是事实），fail loudly；daemon 重连时会再试一次

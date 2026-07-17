@@ -65,7 +65,7 @@ describe("Mew-style Issue workflow", () => {
     expect(h.store.getConversation(issue.id)?.status).toBe("doing");
     expect(h.store.getRun(implementation.id)?.status).toBe("running");
 
-    h.coordinator.onWorktreeReady(issue.id, "/repo/.harbor-worktrees/ship-workflow");
+    h.coordinator.onWorktreeReady(implementation.id, issue.id, "/repo/.harbor-worktrees/ship-workflow");
     h.coordinator.onRunDone({
       runId: implementation.id,
       status: "succeeded",
@@ -120,7 +120,7 @@ describe("Mew-style Issue workflow", () => {
 
     expect(() =>
       h.coordinator.enqueueRun(h.store.getConversation(issue.id)!, remoteReviewer, "Review", "review"),
-    ).toThrow("同一设备和 workdir");
+    ).toThrow("没有挂载到 Agent 设备");
   });
 
   test("AI draft triage is read-only and never creates a worktree or advances Issue status", () => {

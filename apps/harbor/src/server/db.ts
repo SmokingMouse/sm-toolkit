@@ -6,7 +6,7 @@
 
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 
 const MIGRATIONS: string[] = [
   // v1 —— 全部领域表
@@ -276,7 +276,188 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX idx_delivery_events ON delivery_events(delivery_id, ts);
   `,
+  // v9 —— Workspace 一级作用域 + Repository / Device mount；Agent 不再持有代码目录
+  `
+  CREATE TABLE workspaces (
+    id TEXT PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    slug TEXT UNIQUE NOT NULL,
+    description TEXT,
+    created_at INTEGER NOT NULL,
+    archived_at INTEGER
+  );
+  INSERT INTO workspaces (id, name, slug, description, created_at)
+    VALUES ('ws_personal', 'Personal', 'personal', 'Migrated Harbor workspace', CAST(strftime('%s','now') AS INTEGER) * 1000);
+
+  CREATE TABLE repositories (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    name TEXT NOT NULL,
+    remote_url TEXT,
+    default_branch TEXT NOT NULL DEFAULT 'main',
+    created_at INTEGER NOT NULL,
+    archived_at INTEGER,
+    UNIQUE (workspace_id, name)
+  );
+  CREATE INDEX idx_repositories_workspace ON repositories(workspace_id, archived_at, name);
+
+  CREATE TABLE repository_mounts (
+    id TEXT PRIMARY KEY,
+    repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL REFERENCES devices(id),
+    path TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (repository_id, device_id),
+    UNIQUE (device_id, path)
+  );
+  CREATE INDEX idx_repository_mounts_device ON repository_mounts(device_id, repository_id);
+
+  -- 旧 Agent.workdir 按路径折叠成默认 Workspace 下的 Repository，再按 Device 建 mount。
+  INSERT INTO repositories (id, workspace_id, name, default_branch, created_at)
+    SELECT 'repo_legacy_' || lower(substr(hex(randomblob(8)), 1, 10)), 'ws_personal', workdir, 'main',
+           CAST(strftime('%s','now') AS INTEGER) * 1000
+    FROM agents WHERE trim(workdir) <> '' GROUP BY workdir;
+  INSERT INTO repository_mounts (id, repository_id, device_id, path, created_at)
+    SELECT 'mount_legacy_' || lower(substr(hex(randomblob(8)), 1, 10)), r.id, a.device_id, a.workdir,
+           CAST(strftime('%s','now') AS INTEGER) * 1000
+    FROM agents a JOIN repositories r ON r.workspace_id = 'ws_personal' AND r.name = a.workdir
+    WHERE trim(a.workdir) <> '' GROUP BY r.id, a.device_id, a.workdir;
+
+  CREATE TABLE agents_v9 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    name TEXT NOT NULL,
+    description TEXT,
+    device_id TEXT NOT NULL REFERENCES devices(id),
+    backend TEXT NOT NULL CHECK (backend IN ('claude','codex')),
+    model TEXT,
+    permission TEXT NOT NULL DEFAULT 'auto-edit',
+    default_repository_id TEXT REFERENCES repositories(id),
+    isolation TEXT NOT NULL DEFAULT 'none' CHECK (isolation IN ('none','worktree')),
+    instruction TEXT,
+    created_at INTEGER NOT NULL,
+    archived_at INTEGER,
+    UNIQUE (workspace_id, name)
+  );
+  INSERT INTO agents_v9
+    (id, workspace_id, name, description, device_id, backend, model, permission, default_repository_id,
+     isolation, instruction, created_at, archived_at)
+    SELECT a.id, 'ws_personal', a.name, a.description, a.device_id, a.backend, a.model, a.permission,
+           (SELECT r.id FROM repositories r WHERE r.workspace_id = 'ws_personal' AND r.name = a.workdir LIMIT 1),
+           a.isolation, a.instruction, a.created_at, a.archived_at
+    FROM agents a;
+  DROP TABLE agents;
+  ALTER TABLE agents_v9 RENAME TO agents;
+  CREATE INDEX idx_agents_workspace ON agents(workspace_id, archived_at, created_at);
+
+  CREATE TABLE skills_v9 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL CHECK (source IN ('manual','runtime')),
+    instruction TEXT NOT NULL,
+    device_id TEXT REFERENCES devices(id),
+    source_path TEXT,
+    runtimes TEXT NOT NULL DEFAULT '["claude","codex"]',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    archived_at INTEGER,
+    UNIQUE (workspace_id, name),
+    CHECK (
+      (source = 'manual' AND device_id IS NULL AND source_path IS NULL) OR
+      (source = 'runtime' AND device_id IS NOT NULL AND source_path IS NOT NULL)
+    )
+  );
+  INSERT INTO skills_v9
+    (id, workspace_id, name, description, source, instruction, device_id, source_path, runtimes,
+     created_at, updated_at, archived_at)
+    SELECT id, 'ws_personal', name, description, source, instruction, device_id, source_path, runtimes,
+           created_at, updated_at, archived_at
+    FROM skills;
+  DROP TABLE skills;
+  ALTER TABLE skills_v9 RENAME TO skills;
+  CREATE UNIQUE INDEX idx_skills_runtime_source ON skills(workspace_id, device_id, source_path)
+    WHERE source = 'runtime';
+  CREATE INDEX idx_skills_workspace ON skills(workspace_id, archived_at, updated_at);
+
+  ALTER TABLE conversations ADD COLUMN workspace_id TEXT REFERENCES workspaces(id);
+  ALTER TABLE conversations ADD COLUMN repository_id TEXT REFERENCES repositories(id);
+  ALTER TABLE conversations ADD COLUMN worktree_mount_id TEXT REFERENCES repository_mounts(id);
+  UPDATE conversations
+    SET workspace_id = COALESCE((SELECT a.workspace_id FROM agents a WHERE a.id = conversations.agent_id), 'ws_personal'),
+        repository_id = (SELECT a.default_repository_id FROM agents a WHERE a.id = conversations.agent_id);
+  UPDATE conversations
+    SET worktree_mount_id = (
+      SELECT m.id FROM repository_mounts m JOIN agents a ON a.device_id = m.device_id
+      WHERE a.id = conversations.agent_id AND m.repository_id = conversations.repository_id LIMIT 1
+    )
+    WHERE worktree_path IS NOT NULL;
+  CREATE INDEX idx_conversations_workspace ON conversations(workspace_id, kind, updated_at);
+
+  ALTER TABLE runs ADD COLUMN workspace_id TEXT REFERENCES workspaces(id);
+  ALTER TABLE runs ADD COLUMN repository_id TEXT REFERENCES repositories(id);
+  ALTER TABLE runs ADD COLUMN repository_mount_id TEXT REFERENCES repository_mounts(id);
+  ALTER TABLE runs ADD COLUMN execution_root TEXT;
+  UPDATE runs
+    SET workspace_id = COALESCE((SELECT c.workspace_id FROM conversations c WHERE c.id = runs.conversation_id), 'ws_personal'),
+        repository_id = (SELECT c.repository_id FROM conversations c WHERE c.id = runs.conversation_id),
+        repository_mount_id = (
+          SELECT m.id FROM repository_mounts m
+          WHERE m.repository_id = (SELECT c.repository_id FROM conversations c WHERE c.id = runs.conversation_id)
+            AND m.device_id = runs.device_id LIMIT 1
+        ),
+        execution_root = COALESCE(
+          (SELECT c.worktree_path FROM conversations c WHERE c.id = runs.conversation_id),
+          (SELECT m.path FROM repository_mounts m
+           WHERE m.repository_id = (SELECT c.repository_id FROM conversations c WHERE c.id = runs.conversation_id)
+             AND m.device_id = runs.device_id LIMIT 1)
+        );
+  CREATE INDEX idx_runs_workspace ON runs(workspace_id, queued_at);
+
+  ALTER TABLE automations ADD COLUMN workspace_id TEXT REFERENCES workspaces(id);
+  ALTER TABLE automations ADD COLUMN repository_id TEXT REFERENCES repositories(id);
+  UPDATE automations
+    SET workspace_id = COALESCE((SELECT a.workspace_id FROM agents a WHERE a.id = automations.agent_id), 'ws_personal'),
+        repository_id = (SELECT a.default_repository_id FROM agents a WHERE a.id = automations.agent_id);
+  CREATE INDEX idx_automations_workspace ON automations(workspace_id, name);
+
+  CREATE TABLE workspace_prompt_templates (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    source TEXT NOT NULL CHECK (source IN ('issue','chat','automation')),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    template TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, source)
+  );
+  INSERT INTO workspace_prompt_templates (workspace_id, source, enabled, template, updated_at)
+    SELECT 'ws_personal', source, enabled, replace(template, '{{agent.workdir}}', '{{repository.root}}'), updated_at
+    FROM prompt_templates;
+  `,
 ];
+
+function normalizeLegacyRepositoryNames(db: Database): void {
+  const rows = db
+    .query<{ id: string; workspace_id: string; name: string }, []>(
+      "SELECT id, workspace_id, name FROM repositories WHERE name LIKE '/%' OR name LIKE '~%'",
+    )
+    .all();
+  for (const row of rows) {
+    const base = basename(row.name.replace(/\/$/, "")) || "repository";
+    let candidate = base;
+    let n = 2;
+    while (
+      db
+        .query<{ id: string }, [string, string, string]>(
+          "SELECT id FROM repositories WHERE workspace_id = ? AND name = ? AND id <> ?",
+        )
+        .get(row.workspace_id, candidate, row.id)
+    ) {
+      candidate = `${base} (${n++})`;
+    }
+    db.run("UPDATE repositories SET name = ? WHERE id = ?", [candidate, row.id]);
+  }
+}
 
 export function openDb(path: string): Database {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
@@ -288,11 +469,18 @@ export function openDb(path: string): Database {
   let version = row?.user_version ?? 0;
   while (version < MIGRATIONS.length) {
     const sql = MIGRATIONS[version]!;
-    db.transaction(() => {
-      db.exec(sql);
-      db.exec(`PRAGMA user_version = ${version + 1}`);
-    })();
+    const rebuildsReferencedTables = version === 8;
+    if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = OFF;");
+    try {
+      db.transaction(() => {
+        db.exec(sql);
+        db.exec(`PRAGMA user_version = ${version + 1}`);
+      })();
+    } finally {
+      if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = ON;");
+    }
     version++;
   }
+  normalizeLegacyRepositoryNames(db);
   return db;
 }

@@ -72,8 +72,39 @@ export interface Device {
   createdAt: number;
 }
 
+/** Harbor 的一级逻辑作用域；不是租户，也不是代码目录。 */
+export interface HarborWorkspace {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  createdAt: number;
+  archivedAt: number | null;
+}
+
+/** Workspace 可使用的逻辑代码仓库；物理路径由 RepositoryMount 表达。 */
+export interface HarborRepository {
+  id: string;
+  workspaceId: string;
+  name: string;
+  remoteUrl: string | null;
+  defaultBranch: string;
+  createdAt: number;
+  archivedAt: number | null;
+}
+
+/** 一个 Repository 在某台 Device 上的 checkout。每台设备至多一个主 mount。 */
+export interface RepositoryMount {
+  id: string;
+  repositoryId: string;
+  deviceId: string;
+  path: string;
+  createdAt: number;
+}
+
 export interface HarborAgent {
   id: string;
+  workspaceId: string;
   name: string;
   description: string | null;
   deviceId: string;
@@ -81,8 +112,8 @@ export interface HarborAgent {
   /** endpoints.yaml 名 / 裸 tier / 透传；null = 该 CLI 自己的默认模型 */
   model: string | null;
   permission: PermissionPolicy;
-  /** device 上的绝对路径 */
-  workdir: string;
+  /** 可为空；Run/Conversation 也可显式选择其他 Repository。 */
+  defaultRepositoryId: string | null;
   isolation: IsolationKind;
   /** systemPrompt 注入 */
   instruction: string | null;
@@ -97,6 +128,7 @@ export type SkillSource = "manual" | "runtime";
 /** Workspace 级 Skill 配置；manual 可跨设备，runtime 绑定其来源 Device。 */
 export interface HarborSkill {
   id: string;
+  workspaceId: string;
   name: string;
   description: string;
   source: SkillSource;
@@ -113,6 +145,7 @@ export interface HarborSkill {
 
 export interface Conversation {
   id: string;
+  workspaceId: string;
   kind: ConversationKind;
   title: string | null;
   /** Issue 的当前实现 Assignee；Issue 可为空，Chat 始终有值。 */
@@ -120,7 +153,11 @@ export interface Conversation {
   description: string | null;
   priority: IssuePriority;
   status: ConversationStatus;
+  /** 当前会话唯一的代码执行目标；非代码会话可为空。 */
+  repositoryId: string | null;
   worktreePath: string | null;
+  /** worktree 属于哪个物理 mount，防止跨设备/仓库误复用。 */
+  worktreeMountId: string | null;
   /** 最新一轮的 claude session id，resume 用 */
   claudeSessionId: string | null;
   origin: Origin;
@@ -187,10 +224,15 @@ export interface RunCost {
 
 export interface Run {
   id: string;
+  workspaceId: string;
   conversationId: string;
   /** 快照，不 FK 约束（agent 可归档） */
   agentId: string;
   deviceId: string;
+  repositoryId: string | null;
+  repositoryMountId: string | null;
+  /** 下发时快照；worktree ready 后更新为实际 worktree 路径。 */
+  executionRoot: string | null;
   prompt: string;
   purpose: RunPurpose;
   status: RunStatus;
@@ -239,8 +281,11 @@ export type AutomationMode = "new_issue" | "append";
 
 export interface Automation {
   id: string;
+  workspaceId: string;
   name: string;
   agentId: string;
+  /** new_issue 的默认执行仓库；append 模式继承目标 Conversation。 */
+  repositoryId: string | null;
   cron: string;
   prompt: string;
   mode: AutomationMode;
@@ -287,7 +332,8 @@ export interface RunSpec {
   backend: BackendKind;
   model: string | null;
   prompt: string;
-  workdir: string;
+  /** Repository 在目标 Device 上的 checkout；非代码 Run 可为空。 */
+  repositoryRoot: string | null;
   permission: PermissionPolicy;
   systemPrompt: string | null;
   /** 上一轮 claude_session_id，多轮续接 */
@@ -341,8 +387,8 @@ export type ServerMsg =
       updatedInput?: unknown;
       message?: string;
     }
-  // issue → done/canceled 后触发（默认保留分支删目录）；workdir 是 git 上下文
-  | { type: "worktree_cleanup"; conversationId: string; workdir: string; worktreePath: string };
+  // issue → done/canceled 后触发（默认保留分支删目录）；repositoryRoot 是 git 上下文
+  | { type: "worktree_cleanup"; conversationId: string; repositoryRoot: string; worktreePath: string };
 
 // ── SSE 帧（GET /api/runs/:id/events） ──────────────────
 
@@ -359,6 +405,8 @@ export const HEARTBEAT_INTERVAL_MS = 30_000;
 export const OFFLINE_AFTER_MS = 90_000;
 export const DEFAULT_PORT = 7777;
 export const DEFAULT_DEVICE_CONCURRENCY = 2;
+/** 旧库与未显式选择 Workspace 的 CLI/API 都落到这里。 */
+export const DEFAULT_WORKSPACE_ID = "ws_personal";
 /** claude CLI 原生 tier 别名——不在 endpoints.yaml 也放行（agent create model 校验） */
 export const NATIVE_TIER_ALIASES = ["opus", "sonnet", "haiku"];
 /** 审批悬空上限：pending 超时标 expired 并回 deny（防 claude 进程无限挂） */

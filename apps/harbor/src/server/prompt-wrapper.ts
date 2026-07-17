@@ -23,9 +23,15 @@ export const PROMPT_WRAPPER_VARIABLES = [
   "conversation.priority",
   "conversation.origin",
   "conversation.originRef",
+  "workspace.id",
+  "workspace.name",
+  "repository.id",
+  "repository.name",
+  "repository.root",
   "agent.name",
   "agent.backend",
   "agent.model",
+  /** @deprecated custom templates migrate to repository.root; retained for one compatibility cycle. */
   "agent.workdir",
   "run.id",
   "run.purpose",
@@ -37,8 +43,10 @@ const DEFAULT_TEMPLATES: Record<PromptSource, string> = {
 - Title: {{conversation.title}}
 - Status: {{conversation.status}}
 - Priority: {{conversation.priority}}
+- Workspace: {{workspace.name}}
+- Repository: {{repository.name}}
+- Execution root: {{repository.root}}
 - Agent: {{agent.name}} ({{agent.backend}} / {{agent.model}})
-- Workspace: {{agent.workdir}}
 - Run: {{run.id}}
 - Run purpose: {{run.purpose}}
 
@@ -48,8 +56,10 @@ Use earlier session context as background. The current request below has highest
 {{prompt}}`,
   chat: `## Harbor Chat Context
 - Conversation: {{conversation.id}}
+- Workspace: {{workspace.name}}
+- Repository: {{repository.name}}
+- Execution root: {{repository.root}}
 - Agent: {{agent.name}} ({{agent.backend}} / {{agent.model}})
-- Workspace: {{agent.workdir}}
 - Run: {{run.id}}
 - Run purpose: {{run.purpose}}
 
@@ -61,8 +71,10 @@ Answer the current request below. Treat earlier session context as background wh
 - Automation: {{conversation.originRef}}
 - Issue: {{conversation.id}}
 - Title: {{conversation.title}}
+- Workspace: {{workspace.name}}
+- Repository: {{repository.name}}
+- Execution root: {{repository.root}}
 - Agent: {{agent.name}} ({{agent.backend}} / {{agent.model}})
-- Workspace: {{agent.workdir}}
 - Run: {{run.id}}
 - Run purpose: {{run.purpose}}
 
@@ -91,8 +103,12 @@ export function promptSourceForConversation(conv: Conversation): PromptSource {
   return conv.kind === "issue" ? "issue" : "chat";
 }
 
-export function getPromptWrapperConfig(store: HarborStore, source: PromptSource): PromptWrapperConfig {
-  const override = store.getPromptTemplate(source);
+export function getPromptWrapperConfig(
+  store: HarborStore,
+  workspaceId: string,
+  source: PromptSource,
+): PromptWrapperConfig {
+  const override = store.getPromptTemplate(workspaceId, source);
   return override
     ? { ...override, isDefault: false }
     : {
@@ -104,8 +120,8 @@ export function getPromptWrapperConfig(store: HarborStore, source: PromptSource)
       };
 }
 
-export function listPromptWrapperConfigs(store: HarborStore): PromptWrapperConfig[] {
-  return PROMPT_SOURCES.map((source) => getPromptWrapperConfig(store, source));
+export function listPromptWrapperConfigs(store: HarborStore, workspaceId: string): PromptWrapperConfig[] {
+  return PROMPT_SOURCES.map((source) => getPromptWrapperConfig(store, workspaceId, source));
 }
 
 export function renderRunPrompt(
@@ -113,11 +129,15 @@ export function renderRunPrompt(
   input: { run: Run; conversation: Conversation; agent: HarborAgent },
 ): string {
   const source = promptSourceForConversation(input.conversation);
-  const config = getPromptWrapperConfig(store, source);
+  const config = getPromptWrapperConfig(store, input.conversation.workspaceId, source);
   if (!config.enabled) return input.run.prompt;
   const invalid = validatePromptTemplate(config.template);
   if (invalid) throw new Error(`Prompt wrapper(${source}) 配置无效：${invalid}`);
 
+  const workspace = store.getWorkspace(input.conversation.workspaceId);
+  const repository = input.conversation.repositoryId
+    ? store.getRepository(input.conversation.repositoryId)
+    : null;
   const values: Record<(typeof PROMPT_WRAPPER_VARIABLES)[number], string> = {
     prompt: input.run.prompt,
     "conversation.id": input.conversation.id,
@@ -127,10 +147,15 @@ export function renderRunPrompt(
     "conversation.priority": input.conversation.priority,
     "conversation.origin": input.conversation.origin,
     "conversation.originRef": input.conversation.originRef ?? "-",
+    "workspace.id": workspace?.id ?? input.conversation.workspaceId,
+    "workspace.name": workspace?.name ?? input.conversation.workspaceId,
+    "repository.id": repository?.id ?? "-",
+    "repository.name": repository?.name ?? "No repository",
+    "repository.root": input.run.executionRoot ?? "-",
     "agent.name": input.agent.name,
     "agent.backend": input.agent.backend,
     "agent.model": input.agent.model ?? "CLI default",
-    "agent.workdir": input.agent.workdir,
+    "agent.workdir": input.run.executionRoot ?? "-",
     "run.id": input.run.id,
     "run.purpose": input.run.purpose,
   };

@@ -28,10 +28,10 @@ export interface FeishuPort extends Channel {
 }
 
 const HELP = [
-  { command: "<agent名> <指令>", description: "派新 issue 给该 agent（本条消息即话题锚点）" },
+  { command: "<workspace/agent> <指令>", description: "派新 issue 给该 agent（agent 名全局唯一时可省 workspace/）" },
   { command: "（话题内回复）<指令>", description: "续该 issue 多轮（resume 上下文）" },
-  { command: "/chat <agent名> <指令>", description: "临时对话（不留 issue）" },
-  { command: "/bind <agent名>", description: "绑定本群默认 agent（此后裸指令直接派活）" },
+  { command: "/chat <workspace/agent> <指令>", description: "临时对话（不留 issue）" },
+  { command: "/bind <workspace/agent>", description: "绑定本群默认 agent（此后裸指令直接派活）" },
   { command: "/status", description: "（话题内）看 issue 状态与 run 流水" },
   { command: "/review <agent名> [要求]", description: "（Review 中）派独立 Reviewer Agent" },
   { command: "/done · /cancel", description: "（话题内）人工验收 / 取消 issue" },
@@ -118,10 +118,11 @@ export class FeishuEntry implements ApprovalSink {
       case "/agents": {
         const agents = this.store.listAgents();
         const devices = new Map(this.store.listDevices(new Set()).map((d) => [d.id, d.name]));
+        const workspaces = new Map(this.store.listWorkspaces().map((workspace) => [workspace.id, workspace.slug]));
         const lines = agents.length
           ? agents.map(
               (a) =>
-                `**${a.name}** @ ${devices.get(a.deviceId) ?? a.deviceId} · ${a.backend}/${a.model ?? "默认"} · ${a.permission}${a.isolation === "worktree" ? " · worktree" : ""}`,
+                `**${workspaces.get(a.workspaceId) ?? a.workspaceId}/${a.name}** @ ${devices.get(a.deviceId) ?? a.deviceId} · ${a.backend}/${a.model ?? "默认"} · ${a.permission}${a.isolation === "worktree" ? " · worktree" : ""}`,
             )
           : ["（还没有 agent，先在 CLI 上 `harbor agent create`）"];
         await this.channel.reply(msg.id, { type: "result", text: lines.join("\n") });
@@ -129,7 +130,7 @@ export class FeishuEntry implements ApprovalSink {
       }
 
       case "/bind": {
-        const agent = this.store.getAgentByName(restText);
+        const agent = this.resolveAgentRef(restText);
         if (!agent) throw new Error(`agent "${restText}" 不存在（/agents 查看）`);
         this.store.setChatBinding(msg.chatId, agent.id, Date.now());
         await this.channel.reply(msg.id, {
@@ -187,7 +188,7 @@ export class FeishuEntry implements ApprovalSink {
           throw new Error("/review 只能在 Review 阶段使用");
         }
         const [agentName, ...promptParts] = rest;
-        const reviewer = agentName ? this.store.getAgentByName(agentName) : null;
+        const reviewer = agentName ? this.resolveAgentRef(agentName, conv.workspaceId) : null;
         if (!reviewer) throw new Error("用法：/review <agent名> [审查要求]");
         if (reviewer.archivedAt) throw new Error(`Reviewer Agent "${reviewer.name}" 已归档`);
         const prompt =
@@ -218,6 +219,7 @@ export class FeishuEntry implements ApprovalSink {
     const anchor = this.anchorOf(msg, true);
     const conv = this.store.createConversation(
       {
+        workspaceId: agent.workspaceId,
         kind,
         title: kind === "issue" ? prompt.slice(0, 60) : null,
         description: kind === "issue" ? prompt : null,
@@ -425,9 +427,34 @@ export class FeishuEntry implements ApprovalSink {
   private parseAgentPrefix(text: string): { agent: HarborAgent; prompt: string } | null {
     const m = /^(\S+)\s+([\s\S]+)$/.exec(text.trim());
     if (!m) return null;
-    const agent = this.store.getAgentByName(m[1]!);
+    const agent = this.resolveAgentRef(m[1]!);
     if (!agent || agent.archivedAt) return null;
     return { agent, prompt: m[2]! };
+  }
+
+  private resolveAgentRef(ref: string, workspaceId?: string): HarborAgent | null {
+    if (workspaceId) {
+      const separator = ref.indexOf("/");
+      if (separator > 0) {
+        const workspace = this.store.resolveWorkspace(ref.slice(0, separator));
+        if (!workspace || workspace.id !== workspaceId) return null;
+        return this.store.getAgentByNameInWorkspace(workspaceId, ref.slice(separator + 1));
+      }
+      const direct = this.store.getAgent(ref);
+      if (direct && direct.workspaceId === workspaceId) return direct;
+      return this.store.getAgentByNameInWorkspace(workspaceId, ref);
+    }
+    const separator = ref.indexOf("/");
+    if (separator > 0) {
+      const workspace = this.store.resolveWorkspace(ref.slice(0, separator));
+      if (!workspace || workspace.archivedAt) return null;
+      return this.store.getAgentByNameInWorkspace(workspace.id, ref.slice(separator + 1));
+    }
+    try {
+      return this.store.getAgent(ref) ?? this.store.getAgentByName(ref);
+    } catch {
+      throw new Error(`agent "${ref}" 存在于多个 Workspace，请使用 <workspace/agent>（/agents 查看）`);
+    }
   }
 
   private boundAgent(chatId: string, text: string): { agent: HarborAgent; prompt: string } | null {

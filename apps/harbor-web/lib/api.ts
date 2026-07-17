@@ -18,13 +18,16 @@ import type {
   DeliveryStatus,
   Device,
   HarborAgent,
+  HarborRepository,
   HarborSkill,
+  HarborWorkspace,
   IssuePriority,
   ModelRouteCapability,
   PromptSource,
   PromptWrapperConfig,
   Run,
   RunStreamFrame,
+  RepositoryMount,
   UsageRow,
 } from "../../harbor/src/protocol";
 
@@ -42,13 +45,16 @@ export type {
   DeliveryStatus,
   Device,
   HarborAgent,
+  HarborRepository,
   HarborSkill,
+  HarborWorkspace,
   IssuePriority,
   ModelRouteCapability,
   PromptSource,
   PromptWrapperConfig,
   Run,
   RunStreamFrame,
+  RepositoryMount,
   UsageRow,
 };
 
@@ -64,9 +70,13 @@ export type ConversationWithAgent = Conversation & { agentName: string | null; l
 export type AutomationWithAgent = Automation & { agentName: string };
 export type RunWithResult = Run & { resultText: string | null };
 export type SkillWithAgents = HarborSkill & { agents: { id: string; name: string }[] };
+export type RepositoryWithMounts = HarborRepository & {
+  mounts: (RepositoryMount & { deviceName: string })[];
+};
 export interface ConversationDetail {
   conversation: Conversation;
   agent: HarborAgent | null;
+  repository: HarborRepository | null;
   runs: RunWithResult[];
   statusLog: { fromStatus: string | null; toStatus: string; actor: string; ts: number }[];
   delivery: Delivery | null;
@@ -76,6 +86,7 @@ export interface ConversationDetail {
 // ── token（localStorage） ───────────────────────────────
 
 const TOKEN_KEY = "harbor_token";
+const WORKSPACE_KEY = "harbor_workspace";
 
 export function getToken(): string {
   if (typeof window === "undefined") return "";
@@ -84,6 +95,15 @@ export function getToken(): string {
 
 export function setToken(t: string): void {
   localStorage.setItem(TOKEN_KEY, t);
+}
+
+export function getActiveWorkspace(): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem(WORKSPACE_KEY) ?? "";
+}
+
+export function setActiveWorkspace(id: string): void {
+  localStorage.setItem(WORKSPACE_KEY, id);
 }
 
 // ── fetch 封装 ──────────────────────────────────────────
@@ -104,6 +124,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
       method,
       headers: {
         Authorization: `Bearer ${getToken()}`,
+        ...(getActiveWorkspace() ? { "X-Harbor-Workspace": getActiveWorkspace() } : {}),
         ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -131,6 +152,27 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 // ── 域 API ──────────────────────────────────────────────
 
 export const listDevices = () => req<Device[]>("GET", "/api/devices");
+
+export const listWorkspaces = () => req<HarborWorkspace[]>("GET", "/api/workspaces");
+export const createWorkspace = (body: { name: string; slug?: string; description?: string }) =>
+  req<HarborWorkspace>("POST", "/api/workspaces", body);
+export const updateWorkspace = (id: string, body: Record<string, unknown>) =>
+  req<HarborWorkspace>("PATCH", `/api/workspaces/${encodeURIComponent(id)}`, body);
+
+export const listRepositories = () => req<RepositoryWithMounts[]>("GET", "/api/repositories");
+export const createRepository = (body: {
+  name: string;
+  remoteUrl?: string;
+  defaultBranch?: string;
+  device?: string;
+  path?: string;
+}) => req<RepositoryWithMounts>("POST", "/api/repositories", body);
+export const updateRepository = (id: string, body: Record<string, unknown>) =>
+  req<RepositoryWithMounts>("PATCH", `/api/repositories/${encodeURIComponent(id)}`, body);
+export const setRepositoryMount = (id: string, body: { device: string; path: string }) =>
+  req<RepositoryWithMounts>("POST", `/api/repositories/${encodeURIComponent(id)}/mounts`, body);
+export const deleteRepositoryMount = (repositoryId: string, mountId: string) =>
+  req<{ ok: boolean }>("DELETE", `/api/repositories/${encodeURIComponent(repositoryId)}/mounts/${encodeURIComponent(mountId)}`);
 
 export const listAgents = () => req<HarborAgent[]>("GET", "/api/agents");
 export const createAgent = (body: Record<string, unknown>) => req<HarborAgent>("POST", "/api/agents", body);
@@ -160,10 +202,11 @@ export const createConversation = (body: {
   title?: string;
   description?: string;
   priority?: IssuePriority;
+  repository?: string;
   origin?: string;
   originRef?: string;
 }) => req<Conversation>("POST", "/api/conversations", body);
-export const createIssueDraft = (body: { request: string; agent: string; priority: IssuePriority }) =>
+export const createIssueDraft = (body: { request: string; agent: string; priority: IssuePriority; repository?: string }) =>
   req<{ conversation: Conversation; run: Run }>("POST", "/api/issue-drafts", body);
 export const publishIssueDraft = (
   id: string,
@@ -239,7 +282,10 @@ export const resetPromptWrapper = (source: PromptSource) =>
 
 export async function* watchRun(runId: string, signal?: AbortSignal): AsyncGenerator<RunStreamFrame> {
   const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/events`, {
-    headers: { Authorization: `Bearer ${getToken()}` },
+    headers: {
+      Authorization: `Bearer ${getToken()}`,
+      ...(getActiveWorkspace() ? { "X-Harbor-Workspace": getActiveWorkspace() } : {}),
+    },
     signal,
   });
   if (!res.ok) {

@@ -5,6 +5,7 @@
 
 import type { Database } from "bun:sqlite";
 import type { AgentEvent, Cost } from "@sm/agent";
+import { basename } from "node:path";
 import type {
   Approval,
   ApprovalStatus,
@@ -26,7 +27,9 @@ import type {
   Device,
   DeviceCapabilities,
   HarborAgent,
+  HarborRepository,
   HarborSkill,
+  HarborWorkspace,
   IsolationKind,
   IssuePriority,
   Origin,
@@ -35,9 +38,11 @@ import type {
   RunEventRow,
   RunPurpose,
   RunStatus,
+  RepositoryMount,
   SkillSource,
   UsageRow,
 } from "../protocol.js";
+import { DEFAULT_WORKSPACE_ID } from "../protocol.js";
 import type { PermissionPolicy } from "@sm/agent";
 import { newId } from "../ids.js";
 
@@ -54,13 +59,14 @@ interface DeviceRow {
 
 interface AgentRow {
   id: string;
+  workspace_id: string;
   name: string;
   description: string | null;
   device_id: string;
   backend: string;
   model: string | null;
   permission: string;
-  workdir: string;
+  default_repository_id: string | null;
   isolation: string;
   instruction: string | null;
   created_at: number;
@@ -69,6 +75,7 @@ interface AgentRow {
 
 interface SkillRow {
   id: string;
+  workspace_id: string;
   name: string;
   description: string;
   source: string;
@@ -83,13 +90,16 @@ interface SkillRow {
 
 interface ConversationRow {
   id: string;
+  workspace_id: string;
   kind: string;
   title: string | null;
   agent_id: string | null;
   description: string | null;
   priority: string;
   status: string;
+  repository_id: string | null;
   worktree_path: string | null;
+  worktree_mount_id: string | null;
   claude_session_id: string | null;
   origin: string;
   origin_ref: string | null;
@@ -126,9 +136,13 @@ interface DeliveryEventRow {
 
 interface RunRow {
   id: string;
+  workspace_id: string;
   conversation_id: string;
   agent_id: string;
   device_id: string;
+  repository_id: string | null;
+  repository_mount_id: string | null;
+  execution_root: string | null;
   prompt: string;
   purpose: string;
   status: string;
@@ -166,8 +180,10 @@ interface ApprovalRow {
 
 interface AutomationRow {
   id: string;
+  workspace_id: string;
   name: string;
   agent_id: string;
+  repository_id: string | null;
   cron: string;
   prompt: string;
   mode: string;
@@ -178,10 +194,38 @@ interface AutomationRow {
 }
 
 interface PromptTemplateRow {
+  workspace_id: string;
   source: string;
   enabled: number;
   template: string;
   updated_at: number;
+}
+
+interface WorkspaceRow {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  created_at: number;
+  archived_at: number | null;
+}
+
+interface RepositoryRow {
+  id: string;
+  workspace_id: string;
+  name: string;
+  remote_url: string | null;
+  default_branch: string;
+  created_at: number;
+  archived_at: number | null;
+}
+
+interface RepositoryMountRow {
+  id: string;
+  repository_id: string;
+  device_id: string;
+  path: string;
+  created_at: number;
 }
 
 export interface PromptTemplateOverride {
@@ -204,16 +248,50 @@ function toDevice(r: DeviceRow, online: boolean): Device {
   };
 }
 
+function toWorkspace(r: WorkspaceRow): HarborWorkspace {
+  return {
+    id: r.id,
+    name: r.name,
+    slug: r.slug,
+    description: r.description,
+    createdAt: r.created_at,
+    archivedAt: r.archived_at,
+  };
+}
+
+function toRepository(r: RepositoryRow): HarborRepository {
+  return {
+    id: r.id,
+    workspaceId: r.workspace_id,
+    name: r.name,
+    remoteUrl: r.remote_url,
+    defaultBranch: r.default_branch,
+    createdAt: r.created_at,
+    archivedAt: r.archived_at,
+  };
+}
+
+function toRepositoryMount(r: RepositoryMountRow): RepositoryMount {
+  return {
+    id: r.id,
+    repositoryId: r.repository_id,
+    deviceId: r.device_id,
+    path: r.path,
+    createdAt: r.created_at,
+  };
+}
+
 function toAgent(r: AgentRow): HarborAgent {
   return {
     id: r.id,
+    workspaceId: r.workspace_id,
     name: r.name,
     description: r.description,
     deviceId: r.device_id,
     backend: r.backend as BackendKind,
     model: r.model,
     permission: r.permission as PermissionPolicy,
-    workdir: r.workdir,
+    defaultRepositoryId: r.default_repository_id,
     isolation: r.isolation as IsolationKind,
     instruction: r.instruction,
     skillIds: [],
@@ -225,6 +303,7 @@ function toAgent(r: AgentRow): HarborAgent {
 function toSkill(r: SkillRow): HarborSkill {
   return {
     id: r.id,
+    workspaceId: r.workspace_id,
     name: r.name,
     description: r.description,
     source: r.source as SkillSource,
@@ -241,13 +320,16 @@ function toSkill(r: SkillRow): HarborSkill {
 function toConversation(r: ConversationRow): Conversation {
   return {
     id: r.id,
+    workspaceId: r.workspace_id,
     kind: r.kind as ConversationKind,
     title: r.title,
     agentId: r.agent_id,
     description: r.description,
     priority: r.priority as IssuePriority,
     status: r.status as ConversationStatus,
+    repositoryId: r.repository_id,
     worktreePath: r.worktree_path,
+    worktreeMountId: r.worktree_mount_id,
     claudeSessionId: r.claude_session_id,
     origin: r.origin as Origin,
     originRef: r.origin_ref,
@@ -313,9 +395,13 @@ function toRun(r: RunRow): Run {
     r.cost_usd !== null || r.input_tokens !== null || r.output_tokens !== null || r.cached_tokens !== null;
   return {
     id: r.id,
+    workspaceId: r.workspace_id,
     conversationId: r.conversation_id,
     agentId: r.agent_id,
     deviceId: r.device_id,
+    repositoryId: r.repository_id,
+    repositoryMountId: r.repository_mount_id,
+    executionRoot: r.execution_root,
     prompt: r.prompt,
     purpose: r.purpose as RunPurpose,
     status: r.status as RunStatus,
@@ -356,8 +442,10 @@ function toApproval(r: ApprovalRow): Approval {
 function toAutomation(r: AutomationRow): Automation {
   return {
     id: r.id,
+    workspaceId: r.workspace_id,
     name: r.name,
     agentId: r.agent_id,
+    repositoryId: r.repository_id,
     cron: r.cron,
     prompt: r.prompt,
     mode: r.mode as AutomationMode,
@@ -372,6 +460,195 @@ function toAutomation(r: AutomationRow): Automation {
 
 export class HarborStore {
   constructor(private db: Database) {}
+
+  // ---- workspaces / repositories ----
+
+  defaultWorkspace(): HarborWorkspace {
+    const workspace = this.getWorkspace(DEFAULT_WORKSPACE_ID);
+    if (!workspace) throw new Error("默认 Workspace 不存在；SQLite migration 未完成");
+    return workspace;
+  }
+
+  createWorkspace(
+    input: { name: string; slug: string; description?: string | null },
+    now: number,
+  ): HarborWorkspace {
+    const id = newId("workspace");
+    this.db.run(
+      "INSERT INTO workspaces (id, name, slug, description, created_at) VALUES (?,?,?,?,?)",
+      [id, input.name, input.slug, input.description ?? null, now],
+    );
+    return this.getWorkspace(id)!;
+  }
+
+  getWorkspace(id: string): HarborWorkspace | null {
+    const row = this.db.query<WorkspaceRow, [string]>("SELECT * FROM workspaces WHERE id = ?").get(id);
+    return row ? toWorkspace(row) : null;
+  }
+
+  resolveWorkspace(key: string): HarborWorkspace | null {
+    const rows = this.db
+      .query<WorkspaceRow, [string, string, string]>(
+        "SELECT * FROM workspaces WHERE id = ? OR slug = ? OR name = ? LIMIT 2",
+      )
+      .all(key, key, key);
+    if (rows.length > 1) throw new Error(`workspace "${key}" 有多个匹配，请使用 id`);
+    return rows[0] ? toWorkspace(rows[0]) : null;
+  }
+
+  listWorkspaces(includeArchived = false): HarborWorkspace[] {
+    const sql = includeArchived
+      ? "SELECT * FROM workspaces ORDER BY created_at"
+      : "SELECT * FROM workspaces WHERE archived_at IS NULL ORDER BY created_at";
+    return this.db.query<WorkspaceRow, []>(sql).all().map(toWorkspace);
+  }
+
+  updateWorkspace(
+    id: string,
+    patch: { name?: string; slug?: string; description?: string | null; archived?: boolean },
+    now: number,
+  ): void {
+    const sets: string[] = [];
+    const params: (string | number | null)[] = [];
+    if (patch.name !== undefined) { sets.push("name = ?"); params.push(patch.name); }
+    if (patch.slug !== undefined) { sets.push("slug = ?"); params.push(patch.slug); }
+    if (patch.description !== undefined) { sets.push("description = ?"); params.push(patch.description); }
+    if (patch.archived !== undefined) { sets.push("archived_at = ?"); params.push(patch.archived ? now : null); }
+    if (sets.length === 0) return;
+    params.push(id);
+    this.db.run(`UPDATE workspaces SET ${sets.join(", ")} WHERE id = ?`, params);
+  }
+
+  createRepository(
+    input: { workspaceId: string; name: string; remoteUrl?: string | null; defaultBranch?: string },
+    now: number,
+  ): HarborRepository {
+    const id = newId("repository");
+    this.db.run(
+      `INSERT INTO repositories (id, workspace_id, name, remote_url, default_branch, created_at)
+       VALUES (?,?,?,?,?,?)`,
+      [id, input.workspaceId, input.name, input.remoteUrl ?? null, input.defaultBranch ?? "main", now],
+    );
+    return this.getRepository(id)!;
+  }
+
+  getRepository(id: string): HarborRepository | null {
+    const row = this.db.query<RepositoryRow, [string]>("SELECT * FROM repositories WHERE id = ?").get(id);
+    return row ? toRepository(row) : null;
+  }
+
+  getRepositoryByName(workspaceId: string, name: string): HarborRepository | null {
+    const row = this.db
+      .query<RepositoryRow, [string, string]>("SELECT * FROM repositories WHERE workspace_id = ? AND name = ?")
+      .get(workspaceId, name);
+    return row ? toRepository(row) : null;
+  }
+
+  resolveRepository(workspaceId: string, key: string): HarborRepository | null {
+    const rows = this.db
+      .query<RepositoryRow, [string, string, string]>(
+        "SELECT * FROM repositories WHERE workspace_id = ? AND (id = ? OR name = ?) LIMIT 2",
+      )
+      .all(workspaceId, key, key);
+    if (rows.length > 1) throw new Error(`repository "${key}" 有多个匹配，请使用 id`);
+    return rows[0] ? toRepository(rows[0]) : null;
+  }
+
+  listRepositories(workspaceId: string, includeArchived = false): HarborRepository[] {
+    const sql = includeArchived
+      ? "SELECT * FROM repositories WHERE workspace_id = ? ORDER BY name"
+      : "SELECT * FROM repositories WHERE workspace_id = ? AND archived_at IS NULL ORDER BY name";
+    return this.db.query<RepositoryRow, [string]>(sql).all(workspaceId).map(toRepository);
+  }
+
+  updateRepository(
+    id: string,
+    patch: { name?: string; remoteUrl?: string | null; defaultBranch?: string; archived?: boolean },
+    now: number,
+  ): void {
+    const sets: string[] = [];
+    const params: (string | number | null)[] = [];
+    if (patch.name !== undefined) { sets.push("name = ?"); params.push(patch.name); }
+    if (patch.remoteUrl !== undefined) { sets.push("remote_url = ?"); params.push(patch.remoteUrl); }
+    if (patch.defaultBranch !== undefined) { sets.push("default_branch = ?"); params.push(patch.defaultBranch); }
+    if (patch.archived !== undefined) { sets.push("archived_at = ?"); params.push(patch.archived ? now : null); }
+    if (sets.length === 0) return;
+    params.push(id);
+    this.db.run(`UPDATE repositories SET ${sets.join(", ")} WHERE id = ?`, params);
+  }
+
+  listRepositoryMounts(repositoryId: string): RepositoryMount[] {
+    return this.db
+      .query<RepositoryMountRow, [string]>("SELECT * FROM repository_mounts WHERE repository_id = ? ORDER BY created_at")
+      .all(repositoryId)
+      .map(toRepositoryMount);
+  }
+
+  getRepositoryMount(id: string): RepositoryMount | null {
+    const row = this.db.query<RepositoryMountRow, [string]>("SELECT * FROM repository_mounts WHERE id = ?").get(id);
+    return row ? toRepositoryMount(row) : null;
+  }
+
+  getRepositoryMountForDevice(repositoryId: string, deviceId: string): RepositoryMount | null {
+    const row = this.db
+      .query<RepositoryMountRow, [string, string]>(
+        "SELECT * FROM repository_mounts WHERE repository_id = ? AND device_id = ?",
+      )
+      .get(repositoryId, deviceId);
+    return row ? toRepositoryMount(row) : null;
+  }
+
+  setRepositoryMount(repositoryId: string, deviceId: string, path: string, now: number): RepositoryMount {
+    const existing = this.getRepositoryMountForDevice(repositoryId, deviceId);
+    if (existing) {
+      this.db.run("UPDATE repository_mounts SET path = ? WHERE id = ?", [path, existing.id]);
+      return this.getRepositoryMount(existing.id)!;
+    }
+    const id = newId("repositoryMount");
+    this.db.run(
+      "INSERT INTO repository_mounts (id, repository_id, device_id, path, created_at) VALUES (?,?,?,?,?)",
+      [id, repositoryId, deviceId, path, now],
+    );
+    return this.getRepositoryMount(id)!;
+  }
+
+  deleteRepositoryMount(id: string): void {
+    this.db.run("DELETE FROM repository_mounts WHERE id = ?", [id]);
+  }
+
+  repositoryMountUsage(id: string): { runs: number; activeRuns: number; worktrees: number; agents: number; conversations: number } {
+    const mount = this.getRepositoryMount(id);
+    if (!mount) return { runs: 0, activeRuns: 0, worktrees: 0, agents: 0, conversations: 0 };
+    const runs = this.db.query<{ count: number }, [string]>("SELECT COUNT(*) AS count FROM runs WHERE repository_mount_id = ?").get(id)?.count ?? 0;
+    const activeRuns = this.db.query<{ count: number }, [string]>("SELECT COUNT(*) AS count FROM runs WHERE repository_mount_id = ? AND status IN ('queued','running')").get(id)?.count ?? 0;
+    const worktrees = this.db.query<{ count: number }, [string]>("SELECT COUNT(*) AS count FROM conversations WHERE worktree_mount_id = ?").get(id)?.count ?? 0;
+    const agents = this.db.query<{ count: number }, [string, string]>(
+      "SELECT COUNT(*) AS count FROM agents WHERE default_repository_id = ? AND device_id = ? AND archived_at IS NULL",
+    ).get(mount.repositoryId, mount.deviceId)?.count ?? 0;
+    const conversations = this.db.query<{ count: number }, [string, string]>(
+      `SELECT COUNT(*) AS count FROM conversations c JOIN agents a ON a.id = c.agent_id
+       WHERE c.repository_id = ? AND a.device_id = ? AND c.status NOT IN ('done','canceled')`,
+    ).get(mount.repositoryId, mount.deviceId)?.count ?? 0;
+    return { runs, activeRuns, worktrees, agents, conversations };
+  }
+
+  /** 旧 CLI --workdir 兼容：同 Workspace + Device + path 复用 mount，否则注册 Repository。 */
+  ensureRepositoryForPath(workspaceId: string, deviceId: string, path: string, now: number): HarborRepository {
+    const existing = this.db
+      .query<RepositoryRow, [string, string, string]>(
+        `SELECT r.* FROM repositories r JOIN repository_mounts m ON m.repository_id = r.id
+         WHERE r.workspace_id = ? AND m.device_id = ? AND m.path = ? LIMIT 1`,
+      )
+      .get(workspaceId, deviceId, path);
+    if (existing) return toRepository(existing);
+    const base = basename(path.replace(/\/$/, "")) || "repository";
+    let name = base;
+    let n = 2;
+    while (this.getRepositoryByName(workspaceId, name)) name = `${base} (${n++})`;
+    const repository = this.createRepository({ workspaceId, name }, now);
+    this.setRepositoryMount(repository.id, deviceId, path, now);
+    return repository;
+  }
 
   // ---- devices ----
 
@@ -419,29 +696,39 @@ export class HarborStore {
   // ---- agents ----
 
   createAgent(a: {
+    workspaceId?: string;
     name: string;
     description?: string | null;
     deviceId: string;
     backend: BackendKind;
     model?: string | null;
     permission?: PermissionPolicy;
-    workdir: string;
+    defaultRepositoryId?: string | null;
+    /** @deprecated REST/CLI compatibility; converted to Repository + mount immediately. */
+    workdir?: string;
     isolation?: IsolationKind;
     instruction?: string | null;
   }, now: number): HarborAgent {
     const id = newId("agent");
+    const workspaceId = a.workspaceId ?? DEFAULT_WORKSPACE_ID;
+    const defaultRepositoryId =
+      a.defaultRepositoryId === undefined && a.workdir
+        ? this.ensureRepositoryForPath(workspaceId, a.deviceId, a.workdir, now).id
+        : (a.defaultRepositoryId ?? null);
     this.db.run(
-      `INSERT INTO agents (id, name, description, device_id, backend, model, permission, workdir, isolation, instruction, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO agents
+       (id, workspace_id, name, description, device_id, backend, model, permission, default_repository_id, isolation, instruction, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         id,
+        workspaceId,
         a.name,
         a.description ?? null,
         a.deviceId,
         a.backend,
         a.model ?? null,
         a.permission ?? "auto-edit",
-        a.workdir,
+        defaultRepositoryId,
         a.isolation ?? "none",
         a.instruction ?? null,
         now,
@@ -456,7 +743,15 @@ export class HarborStore {
   }
 
   getAgentByName(name: string): HarborAgent | null {
-    const r = this.db.query<AgentRow, [string]>("SELECT * FROM agents WHERE name = ?").get(name);
+    const rows = this.db.query<AgentRow, [string]>("SELECT * FROM agents WHERE name = ? LIMIT 2").all(name);
+    if (rows.length > 1) throw new Error(`agent 名 "${name}" 存在于多个 Workspace，请使用 id`);
+    return rows[0] ? this.withAgentSkills(toAgent(rows[0])) : null;
+  }
+
+  getAgentByNameInWorkspace(workspaceId: string, name: string): HarborAgent | null {
+    const r = this.db
+      .query<AgentRow, [string, string]>("SELECT * FROM agents WHERE workspace_id = ? AND name = ?")
+      .get(workspaceId, name);
     return r ? this.withAgentSkills(toAgent(r)) : null;
   }
 
@@ -465,11 +760,16 @@ export class HarborStore {
     this.db.run("UPDATE agents SET archived_at = ? WHERE id = ?", [archived ? now : null, id]);
   }
 
-  listAgents(includeArchived = false): HarborAgent[] {
-    const sql = includeArchived
-      ? "SELECT * FROM agents ORDER BY created_at"
-      : "SELECT * FROM agents WHERE archived_at IS NULL ORDER BY created_at";
-    return this.db.query<AgentRow, []>(sql).all().map((row) => this.withAgentSkills(toAgent(row)));
+  listAgents(includeArchived = false, workspaceId?: string): HarborAgent[] {
+    const clauses: string[] = [];
+    const params: string[] = [];
+    if (!includeArchived) clauses.push("archived_at IS NULL");
+    if (workspaceId) { clauses.push("workspace_id = ?"); params.push(workspaceId); }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    return this.db
+      .query<AgentRow, string[]>(`SELECT * FROM agents ${where} ORDER BY created_at`)
+      .all(...params)
+      .map((row) => this.withAgentSkills(toAgent(row)));
   }
 
   private withAgentSkills(agent: HarborAgent): HarborAgent {
@@ -497,6 +797,7 @@ export class HarborStore {
 
   createSkill(
     skill: {
+      workspaceId?: string;
       name: string;
       description?: string;
       source: SkillSource;
@@ -510,10 +811,11 @@ export class HarborStore {
     const id = newId("skill");
     this.db.run(
       `INSERT INTO skills
-       (id, name, description, source, instruction, device_id, source_path, runtimes, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+       (id, workspace_id, name, description, source, instruction, device_id, source_path, runtimes, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
       [
         id,
+        skill.workspaceId ?? DEFAULT_WORKSPACE_ID,
         skill.name,
         skill.description ?? "",
         skill.source,
@@ -533,25 +835,32 @@ export class HarborStore {
     return row ? toSkill(row) : null;
   }
 
-  getSkillByName(name: string): HarborSkill | null {
-    const row = this.db.query<SkillRow, [string]>("SELECT * FROM skills WHERE name = ?").get(name);
-    return row ? toSkill(row) : null;
-  }
-
-  getRuntimeSkill(deviceId: string, sourcePath: string): HarborSkill | null {
+  getSkillByName(name: string, workspaceId = DEFAULT_WORKSPACE_ID): HarborSkill | null {
     const row = this.db
-      .query<SkillRow, [string, string]>(
-        "SELECT * FROM skills WHERE source = 'runtime' AND device_id = ? AND source_path = ?",
-      )
-      .get(deviceId, sourcePath);
+      .query<SkillRow, [string, string]>("SELECT * FROM skills WHERE workspace_id = ? AND name = ?")
+      .get(workspaceId, name);
     return row ? toSkill(row) : null;
   }
 
-  listSkills(includeArchived = false): HarborSkill[] {
-    const sql = includeArchived
-      ? "SELECT * FROM skills ORDER BY updated_at DESC, name"
-      : "SELECT * FROM skills WHERE archived_at IS NULL ORDER BY updated_at DESC, name";
-    return this.db.query<SkillRow, []>(sql).all().map(toSkill);
+  getRuntimeSkill(workspaceId: string, deviceId: string, sourcePath: string): HarborSkill | null {
+    const row = this.db
+      .query<SkillRow, [string, string, string]>(
+        "SELECT * FROM skills WHERE workspace_id = ? AND source = 'runtime' AND device_id = ? AND source_path = ?",
+      )
+      .get(workspaceId, deviceId, sourcePath);
+    return row ? toSkill(row) : null;
+  }
+
+  listSkills(includeArchived = false, workspaceId?: string): HarborSkill[] {
+    const clauses: string[] = [];
+    const params: string[] = [];
+    if (!includeArchived) clauses.push("archived_at IS NULL");
+    if (workspaceId) { clauses.push("workspace_id = ?"); params.push(workspaceId); }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    return this.db
+      .query<SkillRow, string[]>(`SELECT * FROM skills ${where} ORDER BY updated_at DESC, name`)
+      .all(...params)
+      .map(toSkill);
   }
 
   listSkillsForAgent(agentId: string): HarborSkill[] {
@@ -622,28 +931,35 @@ export class HarborStore {
   // ---- conversations ----
 
   createConversation(c: {
+    workspaceId?: string;
     kind: ConversationKind;
     title?: string | null;
     agentId?: string | null;
     description?: string | null;
     priority?: IssuePriority;
+    repositoryId?: string | null;
     origin?: Origin;
     originRef?: string | null;
   }, now: number): Conversation {
     const id = newId("conversation");
     const status: ConversationStatus = c.kind === "issue" ? "backlog" : "open";
+    const agent = c.agentId ? this.getAgent(c.agentId) : null;
+    const workspaceId = c.workspaceId ?? agent?.workspaceId ?? DEFAULT_WORKSPACE_ID;
+    const repositoryId = c.repositoryId === undefined ? (agent?.defaultRepositoryId ?? null) : c.repositoryId;
     this.db.run(
       `INSERT INTO conversations
-       (id, kind, title, agent_id, description, priority, status, origin, origin_ref, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+       (id, workspace_id, kind, title, agent_id, description, priority, status, repository_id, origin, origin_ref, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         id,
+        workspaceId,
         c.kind,
         c.title ?? null,
         c.agentId ?? null,
         c.description ?? null,
         c.priority ?? "medium",
         status,
+        repositoryId,
         c.origin ?? "cli",
         c.originRef ?? null,
         now,
@@ -669,9 +985,13 @@ export class HarborStore {
     return rows[0] ? toConversation(rows[0]) : null;
   }
 
-  listConversations(filter: { kind?: ConversationKind; status?: ConversationStatus }): Conversation[] {
+  listConversations(filter: { workspaceId?: string; kind?: ConversationKind; status?: ConversationStatus }): Conversation[] {
     const clauses: string[] = [];
     const params: string[] = [];
+    if (filter.workspaceId) {
+      clauses.push("workspace_id = ?");
+      params.push(filter.workspaceId);
+    }
     if (filter.kind) {
       clauses.push("kind = ?");
       params.push(filter.kind);
@@ -744,6 +1064,16 @@ export class HarborStore {
     );
   }
 
+  /** Repository 变化会使旧 session 失效；已有 worktree 时由上层禁止切换。 */
+  setConversationRepository(id: string, repositoryId: string | null, now: number): void {
+    const current = this.getConversation(id);
+    if (!current || current.repositoryId === repositoryId) return;
+    this.db.run(
+      "UPDATE conversations SET repository_id = ?, claude_session_id = NULL, updated_at = ? WHERE id = ?",
+      [repositoryId, now, id],
+    );
+  }
+
   setConversationClaudeSessionId(id: string, sid: string, now: number): void {
     this.db.run("UPDATE conversations SET claude_session_id = ?, updated_at = ? WHERE id = ?", [
       sid,
@@ -752,9 +1082,18 @@ export class HarborStore {
     ]);
   }
 
-  setConversationWorktreePath(id: string, path: string | null, now: number): void {
-    this.db.run("UPDATE conversations SET worktree_path = ?, updated_at = ? WHERE id = ?", [
+  setConversationWorktreePath(
+    id: string,
+    path: string | null,
+    mountIdOrNow: string | number | null,
+    explicitNow?: number,
+  ): void {
+    const legacyCall = typeof mountIdOrNow === "number";
+    const mountId = legacyCall ? (this.getConversation(id)?.worktreeMountId ?? null) : mountIdOrNow;
+    const now = legacyCall ? mountIdOrNow : explicitNow!;
+    this.db.run("UPDATE conversations SET worktree_path = ?, worktree_mount_id = ?, updated_at = ? WHERE id = ?", [
       path,
+      mountId,
       now,
       id,
     ]);
@@ -771,17 +1110,17 @@ export class HarborStore {
   }
 
   /** 该设备上「已终结但 worktree 还挂着」的 issue（设备离线时 cleanup 丢失 → 重连补发） */
-  listWorktreeCleanupsForDevice(deviceId: string): { conversation: Conversation; agent: HarborAgent }[] {
+  listWorktreeCleanupsForDevice(deviceId: string): { conversation: Conversation; mount: RepositoryMount }[] {
     const rows = this.db
       .query<ConversationRow, [string]>(
-        `SELECT c.* FROM conversations c JOIN agents a ON a.id = c.agent_id
-         WHERE a.device_id = ? AND c.worktree_path IS NOT NULL AND c.status IN ('done','canceled')`,
+        `SELECT c.* FROM conversations c JOIN repository_mounts m ON m.id = c.worktree_mount_id
+         WHERE m.device_id = ? AND c.worktree_path IS NOT NULL AND c.status IN ('done','canceled')`,
       )
       .all(deviceId);
     return rows.flatMap((r) => {
       const conv = toConversation(r);
-      const agent = conv.agentId ? this.getAgent(conv.agentId) : null;
-      return agent ? [{ conversation: conv, agent }] : [];
+      const mount = conv.worktreeMountId ? this.getRepositoryMount(conv.worktreeMountId) : null;
+      return mount ? [{ conversation: conv, mount }] : [];
     });
   }
 
@@ -922,7 +1261,7 @@ export class HarborStore {
 
   listDeliveryEvents(deliveryId: string): DeliveryEvent[] {
     return this.db
-      .query<DeliveryEventRow, [string]>("SELECT * FROM delivery_events WHERE delivery_id = ? ORDER BY ts, rowid")
+      .query<DeliveryEventRow, [string]>("SELECT * FROM delivery_events WHERE delivery_id = ? ORDER BY ts")
       .all(deliveryId)
       .map(toDeliveryEvent);
   }
@@ -938,14 +1277,40 @@ export class HarborStore {
   // ---- runs ----
 
   createRun(
-    r: { conversationId: string; agentId: string; deviceId: string; prompt: string; purpose?: RunPurpose },
+    r: {
+      workspaceId?: string;
+      conversationId: string;
+      agentId: string;
+      deviceId: string;
+      repositoryId?: string | null;
+      repositoryMountId?: string | null;
+      executionRoot?: string | null;
+      prompt: string;
+      purpose?: RunPurpose;
+    },
     now: number,
   ): Run {
     const id = newId("run");
+    const conversation = this.getConversation(r.conversationId);
+    const workspaceId = r.workspaceId ?? conversation?.workspaceId ?? DEFAULT_WORKSPACE_ID;
     this.db.run(
-      `INSERT INTO runs (id, conversation_id, agent_id, device_id, prompt, purpose, status, queued_at)
-       VALUES (?,?,?,?,?,?,'queued',?)`,
-      [id, r.conversationId, r.agentId, r.deviceId, r.prompt, r.purpose ?? "implementation", now],
+      `INSERT INTO runs
+       (id, workspace_id, conversation_id, agent_id, device_id, repository_id, repository_mount_id, execution_root,
+        prompt, purpose, status, queued_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,'queued',?)`,
+      [
+        id,
+        workspaceId,
+        r.conversationId,
+        r.agentId,
+        r.deviceId,
+        r.repositoryId ?? null,
+        r.repositoryMountId ?? null,
+        r.executionRoot ?? null,
+        r.prompt,
+        r.purpose ?? "implementation",
+        now,
+      ],
     );
     this.db.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, r.conversationId]);
     return this.getRun(id)!;
@@ -1041,6 +1406,10 @@ export class HarborStore {
 
   markRunRunning(id: string, now: number): void {
     this.db.run("UPDATE runs SET status = 'running', started_at = ? WHERE id = ?", [now, id]);
+  }
+
+  setRunExecutionRoot(id: string, executionRoot: string): void {
+    this.db.run("UPDATE runs SET execution_root = ? WHERE id = ?", [executionRoot, id]);
   }
 
   finishRun(
@@ -1182,8 +1551,10 @@ export class HarborStore {
 
   createAutomation(
     a: {
+      workspaceId?: string;
       name: string;
       agentId: string;
+      repositoryId?: string | null;
       cron: string;
       prompt: string;
       mode: AutomationMode;
@@ -1194,9 +1565,21 @@ export class HarborStore {
   ): Automation {
     const id = newId("automation");
     this.db.run(
-      `INSERT INTO automations (id, name, agent_id, cron, prompt, mode, target_conversation_id, notify_chat_id, enabled)
-       VALUES (?,?,?,?,?,?,?,?,1)`,
-      [id, a.name, a.agentId, a.cron, a.prompt, a.mode, a.targetConversationId ?? null, a.notifyChatId ?? null],
+      `INSERT INTO automations
+       (id, workspace_id, name, agent_id, repository_id, cron, prompt, mode, target_conversation_id, notify_chat_id, enabled)
+       VALUES (?,?,?,?,?,?,?,?,?,?,1)`,
+      [
+        id,
+        a.workspaceId ?? DEFAULT_WORKSPACE_ID,
+        a.name,
+        a.agentId,
+        a.repositoryId ?? null,
+        a.cron,
+        a.prompt,
+        a.mode,
+        a.targetConversationId ?? null,
+        a.notifyChatId ?? null,
+      ],
     );
     return this.getAutomation(id)!;
   }
@@ -1206,18 +1589,24 @@ export class HarborStore {
     return r ? toAutomation(r) : null;
   }
 
-  resolveAutomationPrefix(prefix: string): Automation | null {
-    const rows = this.db
-      .query<AutomationRow, [string, string]>(
+  resolveAutomationPrefix(prefix: string, workspaceId?: string): Automation | null {
+    const rows = workspaceId
+      ? this.db.query<AutomationRow, [string, string, string]>(
+        "SELECT * FROM automations WHERE workspace_id = ? AND (id LIKE ? || '%' OR name = ?) LIMIT 2",
+      ).all(workspaceId, prefix, prefix)
+      : this.db.query<AutomationRow, [string, string]>(
         "SELECT * FROM automations WHERE id LIKE ? || '%' OR name = ? LIMIT 2",
-      )
-      .all(prefix, prefix);
+      ).all(prefix, prefix);
     if (rows.length > 1) throw new Error(`automation "${prefix}" 有多个匹配，请给更长前缀或用完整 id`);
     return rows[0] ? toAutomation(rows[0]) : null;
   }
 
-  listAutomations(): Automation[] {
-    return this.db.query<AutomationRow, []>("SELECT * FROM automations ORDER BY name").all().map(toAutomation);
+  listAutomations(workspaceId?: string): Automation[] {
+    if (!workspaceId) return this.db.query<AutomationRow, []>("SELECT * FROM automations ORDER BY name").all().map(toAutomation);
+    return this.db
+      .query<AutomationRow, [string]>("SELECT * FROM automations WHERE workspace_id = ? ORDER BY name")
+      .all(workspaceId)
+      .map(toAutomation);
   }
 
   setAutomationEnabled(id: string, enabled: boolean): void {
@@ -1276,10 +1665,12 @@ export class HarborStore {
 
   // ---- prompt_templates（P4.6 server 级 Prompt wrapper） ----
 
-  getPromptTemplate(source: PromptSource): PromptTemplateOverride | null {
+  getPromptTemplate(workspaceId: string, source: PromptSource): PromptTemplateOverride | null {
     const r = this.db
-      .query<PromptTemplateRow, [string]>("SELECT * FROM prompt_templates WHERE source = ?")
-      .get(source);
+      .query<PromptTemplateRow, [string, string]>(
+        "SELECT * FROM workspace_prompt_templates WHERE workspace_id = ? AND source = ?",
+      )
+      .get(workspaceId, source);
     return r
       ? {
           source: r.source as PromptSource,
@@ -1290,22 +1681,23 @@ export class HarborStore {
       : null;
   }
 
-  setPromptTemplate(source: PromptSource, enabled: boolean, template: string, now: number): void {
+  setPromptTemplate(workspaceId: string, source: PromptSource, enabled: boolean, template: string, now: number): void {
     this.db.run(
-      `INSERT INTO prompt_templates (source, enabled, template, updated_at) VALUES (?,?,?,?)
-       ON CONFLICT(source) DO UPDATE SET enabled = excluded.enabled, template = excluded.template, updated_at = excluded.updated_at`,
-      [source, enabled ? 1 : 0, template, now],
+      `INSERT INTO workspace_prompt_templates (workspace_id, source, enabled, template, updated_at) VALUES (?,?,?,?,?)
+       ON CONFLICT(workspace_id, source) DO UPDATE SET enabled = excluded.enabled, template = excluded.template, updated_at = excluded.updated_at`,
+      [workspaceId, source, enabled ? 1 : 0, template, now],
     );
   }
 
-  resetPromptTemplate(source: PromptSource): void {
-    this.db.run("DELETE FROM prompt_templates WHERE source = ?", [source]);
+  resetPromptTemplate(workspaceId: string, source: PromptSource): void {
+    this.db.run("DELETE FROM workspace_prompt_templates WHERE workspace_id = ? AND source = ?", [workspaceId, source]);
   }
 
   // ---- usage（P3 报表） ----
 
   /** agent × model × 日 聚合（server 本地时区），只统计有终态的 run */
-  usageAggregate(fromTs: number): UsageRow[] {
+  usageAggregate(fromTs: number, workspaceId?: string): UsageRow[] {
+    const workspaceClause = workspaceId ? "AND r.workspace_id = ?" : "";
     return this.db
       .query<
         {
@@ -1318,7 +1710,7 @@ export class HarborStore {
           output_tokens: number | null;
           cached_tokens: number | null;
         },
-        [number]
+        (number | string)[]
       >(
         `SELECT date(r.queued_at / 1000, 'unixepoch', 'localtime') AS day,
                 a.name AS agent_name, a.model AS model,
@@ -1328,11 +1720,11 @@ export class HarborStore {
                 SUM(COALESCE(r.output_tokens, 0)) AS output_tokens,
                 SUM(COALESCE(r.cached_tokens, 0)) AS cached_tokens
          FROM runs r JOIN agents a ON a.id = r.agent_id
-         WHERE r.queued_at >= ? AND r.status IN ('succeeded','failed','canceled')
+         WHERE r.queued_at >= ? AND r.status IN ('succeeded','failed','canceled') ${workspaceClause}
          GROUP BY day, a.name, a.model
          ORDER BY day DESC, usd DESC`,
       )
-      .all(fromTs)
+      .all(...(workspaceId ? [fromTs, workspaceId] : [fromTs]))
       .map((r) => ({
         day: r.day,
         agentName: r.agent_name,
@@ -1346,9 +1738,13 @@ export class HarborStore {
   }
 
   /** usage 下钻：某 agent（可选）某日（可选）的逐 run 明细 */
-  listRunsForUsage(filter: { agentId?: string; day?: string; fromTs: number }): Run[] {
+  listRunsForUsage(filter: { workspaceId?: string; agentId?: string; day?: string; fromTs: number }): Run[] {
     const clauses = ["r.queued_at >= ?", "r.status IN ('succeeded','failed','canceled')"];
     const params: (string | number)[] = [filter.fromTs];
+    if (filter.workspaceId) {
+      clauses.push("r.workspace_id = ?");
+      params.push(filter.workspaceId);
+    }
     if (filter.agentId) {
       clauses.push("r.agent_id = ?");
       params.push(filter.agentId);

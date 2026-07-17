@@ -88,9 +88,10 @@ export class Executor {
     let errMsg: string | null = null;
     try {
       // worktree 隔离：首跑创建 + 回报路径；失败直接 run failed（拒绝静默降级回主仓库）
-      let effectiveDir = spec.workdir;
+      let effectiveDir = spec.repositoryRoot;
       if (spec.isolation === "worktree") {
-        effectiveDir = ensureWorktree(spec.workdir, spec.conversationId, spec.worktreePath);
+        if (!spec.repositoryRoot) throw new Error("worktree isolation 需要 Repository mount");
+        effectiveDir = ensureWorktree(spec.repositoryRoot, spec.conversationId, spec.worktreePath);
         if (effectiveDir !== spec.worktreePath) {
           this.send({ type: "worktree_ready", runId, conversationId: spec.conversationId, path: effectiveDir });
         }
@@ -98,8 +99,7 @@ export class Executor {
 
       const interactive = spec.permission === "default";
       for await (const ev of backend.run(spec.prompt, {
-        workspace: effectiveDir,
-        cwd: effectiveDir,
+        ...(effectiveDir ? { workspace: effectiveDir, cwd: effectiveDir } : {}),
         permission: spec.permission,
         systemPrompt: spec.systemPrompt,
         resume: spec.resume,

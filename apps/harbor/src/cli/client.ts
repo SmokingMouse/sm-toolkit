@@ -11,6 +11,9 @@ import type {
   ConversationStatus,
   Device,
   HarborAgent,
+  HarborRepository,
+  HarborWorkspace,
+  RepositoryMount,
   Run,
   RunStreamFrame,
   UsageRow,
@@ -20,6 +23,7 @@ export class HarborClient {
   constructor(
     private base: string,
     private tok: string,
+    private workspace?: string,
   ) {}
 
   private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -29,6 +33,7 @@ export class HarborClient {
         method,
         headers: {
           Authorization: `Bearer ${this.tok}`,
+          ...(this.workspace ? { "X-Harbor-Workspace": this.workspace } : {}),
           ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
         },
         body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -48,6 +53,26 @@ export class HarborClient {
 
   devices(): Promise<Device[]> {
     return this.req("GET", "/api/devices");
+  }
+
+  workspaces(): Promise<HarborWorkspace[]> {
+    return this.req("GET", "/api/workspaces");
+  }
+
+  createWorkspace(body: Record<string, unknown>): Promise<HarborWorkspace> {
+    return this.req("POST", "/api/workspaces", body);
+  }
+
+  repositories(): Promise<(HarborRepository & { mounts: (RepositoryMount & { deviceName: string })[] })[]> {
+    return this.req("GET", "/api/repositories");
+  }
+
+  createRepository(body: Record<string, unknown>): Promise<HarborRepository> {
+    return this.req("POST", "/api/repositories", body);
+  }
+
+  mountRepository(id: string, body: Record<string, unknown>): Promise<HarborRepository> {
+    return this.req("POST", `/api/repositories/${encodeURIComponent(id)}/mounts`, body);
   }
 
   agents(): Promise<HarborAgent[]> {
@@ -152,7 +177,10 @@ export class HarborClient {
   /** SSE：手写解析（data: 行 + \n\n 分帧），done 帧后 server 关流、生成器自然结束 */
   async *watchRun(runId: string): AsyncGenerator<RunStreamFrame> {
     const res = await fetch(`${this.base}/api/runs/${encodeURIComponent(runId)}/events`, {
-      headers: { Authorization: `Bearer ${this.tok}` },
+      headers: {
+        Authorization: `Bearer ${this.tok}`,
+        ...(this.workspace ? { "X-Harbor-Workspace": this.workspace } : {}),
+      },
     });
     if (!res.ok) {
       let msg = res.statusText;
