@@ -20,7 +20,7 @@ import type {
   IssuePriority,
   IsolationKind,
   Origin,
-  PromptSource,
+  PromptBlockKey,
   Run,
   RunPurpose,
   RunStreamFrame,
@@ -41,10 +41,9 @@ import { AutomationService } from "./automation.js";
 import { transitionConversation } from "./statemachine.js";
 import { DeliveryService } from "./delivery.js";
 import {
-  getPromptWrapperConfig,
-  listPromptWrapperConfigs,
-  PROMPT_SOURCES,
-  PROMPT_WRAPPER_VARIABLES,
+  getPromptBlockConfig,
+  listPromptBlockConfigs,
+  PROMPT_BLOCK_KEYS,
   validatePromptTemplate,
 } from "./prompt-wrapper.js";
 
@@ -162,30 +161,28 @@ export function buildRest(
     });
   };
 
-  // ---- settings / prompt wrappers ----
+  // ---- settings / prompt blocks ----
 
-  app.get("/api/settings/prompt-wrappers", (c) =>
-    c.json({ wrappers: listPromptWrapperConfigs(store), variables: PROMPT_WRAPPER_VARIABLES }),
-  );
+  app.get("/api/settings/prompt-blocks", (c) => c.json({ blocks: listPromptBlockConfigs(store) }));
 
-  app.patch("/api/settings/prompt-wrappers", async (c) => {
-    const b = (await c.req.json()) as { source?: string; enabled?: boolean; template?: string };
-    if (!PROMPT_SOURCES.includes(b.source as PromptSource)) {
-      bad(`source 可选 ${PROMPT_SOURCES.join("/")}（收到 "${b.source}"）`);
+  app.patch("/api/settings/prompt-blocks", async (c) => {
+    const b = (await c.req.json()) as { key?: string; enabled?: boolean; template?: string };
+    if (!PROMPT_BLOCK_KEYS.includes(b.key as PromptBlockKey)) {
+      bad(`key 可选 ${PROMPT_BLOCK_KEYS.join("/")}（收到 "${b.key}"）`);
     }
     if (typeof b.enabled !== "boolean") bad("需要 enabled: true/false");
     if (typeof b.template !== "string") bad("需要 template: string");
-    const invalid = validatePromptTemplate(b.template);
+    const invalid = validatePromptTemplate(b.key as PromptBlockKey, b.template);
     if (invalid) bad(invalid);
-    store.setPromptTemplate(b.source as PromptSource, b.enabled, b.template, Date.now());
-    return c.json(getPromptWrapperConfig(store, b.source as PromptSource));
+    store.setPromptBlock(b.key as PromptBlockKey, b.enabled, b.template, Date.now());
+    return c.json(getPromptBlockConfig(store, b.key as PromptBlockKey));
   });
 
-  app.delete("/api/settings/prompt-wrappers/:source", (c) => {
-    const source = c.req.param("source") as PromptSource;
-    if (!PROMPT_SOURCES.includes(source)) bad(`source 可选 ${PROMPT_SOURCES.join("/")}`);
-    store.resetPromptTemplate(source);
-    return c.json(getPromptWrapperConfig(store, source));
+  app.delete("/api/settings/prompt-blocks/:key", (c) => {
+    const key = c.req.param("key") as PromptBlockKey;
+    if (!PROMPT_BLOCK_KEYS.includes(key)) bad(`key 可选 ${PROMPT_BLOCK_KEYS.join("/")}`);
+    store.resetPromptBlock(key);
+    return c.json(getPromptBlockConfig(store, key));
   });
 
   // ---- devices ----
@@ -849,6 +846,16 @@ export function buildRest(
     if (b.enabled) automations.schedule(fresh);
     else automations.unschedule(auto.id);
     return c.json(fresh);
+  });
+
+  app.post("/api/automations/:id/run", (c) => {
+    const auto = store.resolveAutomationPrefix(c.req.param("id"));
+    if (!auto) throw new HTTPException(404, { message: `automation "${c.req.param("id")}" 不存在` });
+    try {
+      return c.json(automations.runNow(auto.id), 201);
+    } catch (error) {
+      bad(error instanceof Error ? error.message : String(error));
+    }
   });
 
   app.delete("/api/automations/:id", (c) => {

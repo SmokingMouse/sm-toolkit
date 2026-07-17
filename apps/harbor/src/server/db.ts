@@ -276,6 +276,70 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX idx_delivery_events ON delivery_events(delivery_id, ts);
   `,
+  // v9 —— Mew 式 Prompt pipeline：session context + event trigger；Run 持久化触发原因
+  `
+  ALTER TABLE runs ADD COLUMN prompt_event TEXT NOT NULL DEFAULT 'event.issue.message_created'
+    CHECK (prompt_event IN (
+      'event.issue.assigned','event.issue.mentioned','event.issue.message_created',
+      'event.chat.message_created','event.automation.schedule','event.automation.manual'
+    ));
+  ALTER TABLE runs ADD COLUMN trigger_ref TEXT;
+  UPDATE runs
+    SET prompt_event = CASE
+      WHEN EXISTS (
+        SELECT 1 FROM conversations c
+        WHERE c.id = runs.conversation_id AND c.origin = 'automation'
+      ) THEN 'event.automation.schedule'
+      WHEN EXISTS (
+        SELECT 1 FROM conversations c
+        WHERE c.id = runs.conversation_id AND c.kind = 'chat'
+      ) THEN 'event.chat.message_created'
+      ELSE 'event.issue.message_created'
+    END;
+  UPDATE runs
+    SET trigger_ref = (
+      SELECT c.origin_ref FROM conversations c WHERE c.id = runs.conversation_id
+    )
+    WHERE prompt_event IN ('event.automation.schedule','event.automation.manual','event.issue.mentioned');
+
+  CREATE TABLE prompt_blocks (
+    block_key TEXT PRIMARY KEY CHECK (block_key IN (
+      'session.issue.context','event.issue.assigned','event.issue.mentioned','event.issue.message_created',
+      'session.chat.context','event.chat.message_created',
+      'event.automation.schedule','event.automation.manual'
+    )),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    template TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  -- 旧 issue/chat wrapper 是 context + request 的合并模板。迁到 context 后，renderer
+  -- 识别其中的 request 变量并继续单独渲染，重置该 block 后才切到两段式 pipeline。
+  INSERT INTO prompt_blocks (block_key, enabled, template, updated_at)
+    SELECT CASE source
+      WHEN 'issue' THEN 'session.issue.context'
+      WHEN 'chat' THEN 'session.chat.context'
+      ELSE 'event.automation.schedule'
+    END, enabled, template, updated_at
+    FROM prompt_templates;
+  INSERT INTO prompt_blocks (block_key, enabled, template, updated_at)
+    SELECT 'event.automation.manual', enabled, template, updated_at
+    FROM prompt_templates WHERE source = 'automation';
+
+  -- 旧 source 被整体禁用时，event 也要透传原始请求，避免迁移后重新启用包装。
+  INSERT INTO prompt_blocks (block_key, enabled, template, updated_at)
+    SELECT event_key, 0, '', updated_at
+    FROM prompt_templates
+    JOIN (
+      SELECT 'issue' AS source_key, 'event.issue.assigned' AS event_key
+      UNION ALL SELECT 'issue', 'event.issue.mentioned'
+      UNION ALL SELECT 'issue', 'event.issue.message_created'
+      UNION ALL SELECT 'chat', 'event.chat.message_created'
+    ) legacy_events ON legacy_events.source_key = prompt_templates.source
+    WHERE prompt_templates.enabled = 0;
+
+  DROP TABLE prompt_templates;
+  `,
 ];
 
 export function openDb(path: string): Database {

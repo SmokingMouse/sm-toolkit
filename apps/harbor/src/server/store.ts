@@ -30,7 +30,8 @@ import type {
   IsolationKind,
   IssuePriority,
   Origin,
-  PromptSource,
+  PromptBlockKey,
+  PromptEventBlockKey,
   Run,
   RunEventRow,
   RunPurpose,
@@ -131,6 +132,8 @@ interface RunRow {
   device_id: string;
   prompt: string;
   purpose: string;
+  prompt_event: string;
+  trigger_ref: string | null;
   status: string;
   claude_session_id: string | null;
   error: string | null;
@@ -177,15 +180,15 @@ interface AutomationRow {
   last_fired_at: number | null;
 }
 
-interface PromptTemplateRow {
-  source: string;
+interface PromptBlockRow {
+  block_key: string;
   enabled: number;
   template: string;
   updated_at: number;
 }
 
-export interface PromptTemplateOverride {
-  source: PromptSource;
+export interface PromptBlockOverride {
+  key: PromptBlockKey;
   enabled: boolean;
   template: string;
   updatedAt: number;
@@ -318,6 +321,8 @@ function toRun(r: RunRow): Run {
     deviceId: r.device_id,
     prompt: r.prompt,
     purpose: r.purpose as RunPurpose,
+    promptEvent: r.prompt_event as PromptEventBlockKey,
+    triggerRef: r.trigger_ref,
     status: r.status as RunStatus,
     claudeSessionId: r.claude_session_id,
     error: r.error,
@@ -938,14 +943,22 @@ export class HarborStore {
   // ---- runs ----
 
   createRun(
-    r: { conversationId: string; agentId: string; deviceId: string; prompt: string; purpose?: RunPurpose },
+    r: {
+      conversationId: string;
+      agentId: string;
+      deviceId: string;
+      prompt: string;
+      purpose?: RunPurpose;
+      promptEvent: PromptEventBlockKey;
+      triggerRef?: string | null;
+    },
     now: number,
   ): Run {
     const id = newId("run");
     this.db.run(
-      `INSERT INTO runs (id, conversation_id, agent_id, device_id, prompt, purpose, status, queued_at)
-       VALUES (?,?,?,?,?,?,'queued',?)`,
-      [id, r.conversationId, r.agentId, r.deviceId, r.prompt, r.purpose ?? "implementation", now],
+      `INSERT INTO runs (id, conversation_id, agent_id, device_id, prompt, purpose, prompt_event, trigger_ref, status, queued_at)
+       VALUES (?,?,?,?,?,?,?,?,'queued',?)`,
+      [id, r.conversationId, r.agentId, r.deviceId, r.prompt, r.purpose ?? "implementation", r.promptEvent, r.triggerRef ?? null, now],
     );
     this.db.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, r.conversationId]);
     return this.getRun(id)!;
@@ -1274,15 +1287,15 @@ export class HarborStore {
     return r?.agent_id ?? null;
   }
 
-  // ---- prompt_templates（P4.6 server 级 Prompt wrapper） ----
+  // ---- prompt_blocks（session context + event trigger） ----
 
-  getPromptTemplate(source: PromptSource): PromptTemplateOverride | null {
+  getPromptBlock(key: PromptBlockKey): PromptBlockOverride | null {
     const r = this.db
-      .query<PromptTemplateRow, [string]>("SELECT * FROM prompt_templates WHERE source = ?")
-      .get(source);
+      .query<PromptBlockRow, [string]>("SELECT * FROM prompt_blocks WHERE block_key = ?")
+      .get(key);
     return r
       ? {
-          source: r.source as PromptSource,
+          key: r.block_key as PromptBlockKey,
           enabled: r.enabled === 1,
           template: r.template,
           updatedAt: r.updated_at,
@@ -1290,16 +1303,16 @@ export class HarborStore {
       : null;
   }
 
-  setPromptTemplate(source: PromptSource, enabled: boolean, template: string, now: number): void {
+  setPromptBlock(key: PromptBlockKey, enabled: boolean, template: string, now: number): void {
     this.db.run(
-      `INSERT INTO prompt_templates (source, enabled, template, updated_at) VALUES (?,?,?,?)
-       ON CONFLICT(source) DO UPDATE SET enabled = excluded.enabled, template = excluded.template, updated_at = excluded.updated_at`,
-      [source, enabled ? 1 : 0, template, now],
+      `INSERT INTO prompt_blocks (block_key, enabled, template, updated_at) VALUES (?,?,?,?)
+       ON CONFLICT(block_key) DO UPDATE SET enabled = excluded.enabled, template = excluded.template, updated_at = excluded.updated_at`,
+      [key, enabled ? 1 : 0, template, now],
     );
   }
 
-  resetPromptTemplate(source: PromptSource): void {
-    this.db.run("DELETE FROM prompt_templates WHERE source = ?", [source]);
+  resetPromptBlock(key: PromptBlockKey): void {
+    this.db.run("DELETE FROM prompt_blocks WHERE block_key = ?", [key]);
   }
 
   // ---- usage（P3 报表） ----

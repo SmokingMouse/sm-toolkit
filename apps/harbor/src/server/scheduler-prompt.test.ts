@@ -23,7 +23,8 @@ test("scheduler dispatches wrapped prompt while persisting the raw request", () 
     { kind: "issue", title: "Prompt boundary", agentId: agent.id, origin: "web" },
     3,
   );
-  store.setPromptTemplate("issue", true, "Context={{conversation.id}}\nRequest={{prompt}}", 4);
+  store.setPromptBlock("session.issue.context", true, "Context={{conversation.id}}", 4);
+  store.setPromptBlock("event.issue.assigned", true, "Request={{prompt}}", 4);
 
   const sent: ServerMsg[] = [];
   const transport: DeviceTransport = {
@@ -37,10 +38,11 @@ test("scheduler dispatches wrapped prompt while persisting the raw request", () 
   const run = coordinator.enqueueRun(conversation, agent, "raw user request");
 
   expect(store.getRun(run.id)?.prompt).toBe("raw user request");
+  expect(store.getRun(run.id)?.promptEvent).toBe("event.issue.assigned");
   const start = sent.find((message) => message.type === "run_start");
   expect(start?.type).toBe("run_start");
   if (start?.type === "run_start") {
-    expect(start.spec.prompt).toBe(`Context=${conversation.id}\nRequest=raw user request`);
+    expect(start.spec.prompt).toBe(`Context=${conversation.id}\n\n---\n\nRequest=raw user request`);
     expect(start.spec.systemPrompt).toContain("Own the outcome.");
     expect(start.spec.systemPrompt).toContain("## Skill: review-first");
     expect(start.spec.systemPrompt).toContain("Inspect the current implementation");
