@@ -101,7 +101,9 @@ function connect(): void {
     }
     switch (msg.type) {
       case "hello_ok":
-        console.log(`[harbord] 已注册（deviceId=${msg.deviceId}），claude=${capabilities.clis.claude ?? "-"} endpoints=${capabilities.endpoints.length} 个`);
+        console.log(
+          `[harbord] 已注册（deviceId=${msg.deviceId}），claude=${capabilities.clis.claude ?? "-"} routes=${capabilities.modelRoutes?.filter((route) => route.ready).length ?? 0}/${capabilities.modelRoutes?.length ?? 0}`,
+        );
         break;
       case "hello_err":
         console.error(`[harbord] 注册被拒：${msg.message} —— 检查 HARBOR_TOKEN / ~/.harbor.yaml`);
@@ -119,7 +121,7 @@ function connect(): void {
         executor.resolveApproval(msg.runId, msg.requestId, msg.behavior, msg.updatedInput, msg.message);
         break;
       case "worktree_cleanup": {
-        const r = removeWorktree(msg.workdir, msg.worktreePath);
+        const r = removeWorktree(msg.repositoryRoot, msg.worktreePath);
         console.log(`[harbord] worktree_cleanup ${msg.conversationId}：${r.ok ? "✓" : "✗"} ${r.message}`);
         sendOrQueue({ type: "worktree_cleanup_result", conversationId: msg.conversationId, ok: r.ok, message: r.message });
         break;

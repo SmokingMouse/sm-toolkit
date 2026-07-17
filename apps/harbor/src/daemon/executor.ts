@@ -88,9 +88,10 @@ export class Executor {
     let errMsg: string | null = null;
     try {
       // worktree 隔离：首跑创建 + 回报路径；失败直接 run failed（拒绝静默降级回主仓库）
-      let effectiveDir = spec.workdir;
+      let effectiveDir = spec.repositoryRoot;
       if (spec.isolation === "worktree") {
-        effectiveDir = ensureWorktree(spec.workdir, spec.conversationId, spec.worktreePath);
+        if (!spec.repositoryRoot) throw new Error("worktree isolation 需要 Repository mount");
+        effectiveDir = ensureWorktree(spec.repositoryRoot, spec.conversationId, spec.worktreePath);
         if (effectiveDir !== spec.worktreePath) {
           this.send({ type: "worktree_ready", runId, conversationId: spec.conversationId, path: effectiveDir });
         }
@@ -98,8 +99,7 @@ export class Executor {
 
       const interactive = spec.permission === "default";
       for await (const ev of backend.run(spec.prompt, {
-        workspace: effectiveDir,
-        cwd: effectiveDir,
+        ...(effectiveDir ? { workspace: effectiveDir, cwd: effectiveDir } : {}),
         permission: spec.permission,
         systemPrompt: spec.systemPrompt,
         resume: spec.resume,
@@ -122,8 +122,17 @@ export class Executor {
             }
           : {}),
       })) {
-        seq++;
-        batch.push({ runId, seq, event: truncateEvent(ev) });
+        const event = truncateEvent(ev);
+        const last = batch[batch.length - 1];
+        const merged = coalesceStreamingEvent(last?.event, event);
+        if (last && merged) {
+          // Claude/Kimi 可能逐 token 发 thinking/text。按 200ms 发送窗合并，避免一次普通 Run
+          // 产生数千 SQLite 行和 SSE 帧，同时保留工具调用之间的真实边界。
+          last.event = truncateEvent(merged);
+        } else {
+          seq++;
+          batch.push({ runId, seq, event });
+        }
         if (batch.length >= FLUSH_COUNT) flush();
         if (ev.sessionId) sessionId = ev.sessionId;
         if (ev.type === EventType.Result) cost = (ev.data.cost as Cost) ?? null;
@@ -146,6 +155,27 @@ export class Executor {
       ...(errMsg ? { error: errMsg } : {}),
     });
   }
+}
+
+/** 仅合并同一会话中连续的流式文本；工具、结果和不同 event type 必须保留顺序边界。 */
+export function coalesceStreamingEvent(previous: AgentEvent | undefined, next: AgentEvent): AgentEvent | null {
+  if (
+    !previous ||
+    (next.type !== EventType.Thinking && next.type !== EventType.TextChunk) ||
+    previous.type !== next.type ||
+    previous.backend !== next.backend ||
+    previous.sessionId !== next.sessionId
+  ) {
+    return null;
+  }
+  return {
+    ...next,
+    data: {
+      ...previous.data,
+      ...next.data,
+      text: `${String(previous.data.text ?? "")}${String(next.data.text ?? "")}`,
+    },
+  };
 }
 
 /** 单事件字段截断（>8KB 的 output/stderr/input），防单条工具输出撑爆存储与流 */

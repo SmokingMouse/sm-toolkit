@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
 /**
  * harbor CLI —— 入口层之一（P1）。
- * device ls / agent create·ls / chat / issue create·continue·ls·show·done·cancel / watch <run>
+ * device ls / agent create·ls / chat / issue draft·create·assign·continue·review·changes·done·cancel / watch
  * 连接配置：HARBOR_SERVER_URL / HARBOR_TOKEN（或 ~/.harbor.yaml）。
  */
 
-import { serverUrl, token as harborToken } from "../config.js";
+import { serverUrl, token as harborToken, workspace as configuredWorkspace } from "../config.js";
 import { HarborClient } from "./client.js";
 import { RunRenderer, c, fmtAgo, fmtRunCost } from "./render.js";
 import type { ConversationStatus } from "../protocol.js";
@@ -19,16 +19,25 @@ import {
 const USAGE = `${c.bold}harbor${c.reset} — 个人多设备 agent 调度
 
 ${c.bold}派活${c.reset}
+  harbor workspace ls · workspace create --name <n> [--slug <s>]
+  harbor repo ls · repo create --name <n> [--device <d> --path <绝对路径>]
+  harbor repo mount <repo> --device <d> --path <绝对路径>
   harbor device ls                                        已注册设备（在线状态/能力）
-  harbor agent create --name <n> --device <d> --workdir <路径>
+  harbor agent create --name <n> --device <d> [--repository <repo>]
+                      [--workdir <路径>]  # 兼容：自动注册 Repository mount
                       [--model <m>] [--permission readonly|auto-edit|full|default]
                       [--backend claude|codex] [--isolation none|worktree]
                       [--instruction <系统提示>] [--description <说明>]
   harbor agent ls
-  harbor chat <agent> "<prompt>"        [--detach]        临时对话（不留 issue）
-  harbor issue create <agent> "<prompt>" [--title <t>] [--detach]
+  harbor chat <agent> "<prompt>"        [--repository <repo>] [--detach]
+  harbor issue draft "<描述>" [--title <t>] [--priority <p>] [--agent <a>] [--repository <repo>]
+                                                               保存到 Inbox，不启动 Run
+  harbor issue create <agent> "<prompt>" [--title <t>] [--repository <repo>] [--detach]
+  harbor issue assign <id> <agent> ["<prompt>"] [--detach]  指派并执行
   harbor issue continue <id> "<prompt>"  [--detach]        续多轮（resume 上下文）
-  harbor issue ls [--status backlog|doing|review|done|canceled]
+  harbor issue changes <id> "<反馈>" [--agent <a>] [--detach]
+  harbor issue review <id> <agent> ["<要求>"] [--detach]  独立 AI Review
+  harbor issue ls [--status backlog|todo|doing|review|done|canceled]
   harbor issue show <id>                                   详情 + run 流水
   harbor issue done <id> · harbor issue cancel <id>        人工验收/取消（收尾 worktree）
   harbor watch <run-id>                                    (重)连一个 run 的实时输出
@@ -45,13 +54,14 @@ ${c.bold}审批${c.reset}（permission=default 的 agent 用工具时上抛）
 
 ${c.bold}定时${c.reset}
   harbor auto create --name <n> --agent <a> --cron "<表达式>" --prompt "<p>"
-                     [--mode new_issue|append --target <conv-id>] [--notify-chat <oc_xx>]
+                     [--repository <repo>] [--mode new_issue|append --target <conv-id>]
+                     [--notify-chat <oc_xx>]
   harbor auto ls · auto log <id> · auto enable|disable|rm <id>
 
 ${c.bold}用量${c.reset}
   harbor usage [--days 7] [--agent <a>] [--runs]           agent×model×日聚合 / 逐 run 下钻
 
-${c.dim}id 支持前缀匹配；--detach 派活后不等输出。server 地址/token 走 env 或 ~/.harbor.yaml${c.reset}`;
+${c.dim}id 支持前缀匹配；--workspace <id|slug> 选择作用域；server 地址/token 走 env 或 ~/.harbor.yaml${c.reset}`;
 
 // ── 极简 argparse：--flag value / --flag（bool 白名单）+ 位置参数 ──
 
@@ -164,7 +174,54 @@ async function main(): Promise<number> {
     throw new Error("用法：harbor daemon setup|status|logs|uninstall");
   }
 
-  const client = new HarborClient(serverUrl(), harborToken());
+  const workspace = typeof flags.workspace === "string" ? flags.workspace : configuredWorkspace();
+  const client = new HarborClient(serverUrl(), harborToken(), workspace);
+
+  if (domain === "workspace" && verb === "ls") {
+    const workspaces = await client.workspaces();
+    table(workspaces.map((item) => [item.name, item.slug, item.id]), ["NAME", "SLUG", "ID"]);
+    return 0;
+  }
+
+  if (domain === "workspace" && verb === "create") {
+    const created = await client.createWorkspace({ name: req(flags, "name"), slug: flags.slug, description: flags.description });
+    console.log(`${c.green}✓${c.reset} workspace ${c.bold}${created.name}${c.reset}（${created.slug} · ${created.id}）已创建`);
+    return 0;
+  }
+
+  if (domain === "repo" && verb === "ls") {
+    const repositories = await client.repositories();
+    table(
+      repositories.map((repository) => [
+        repository.name,
+        repository.defaultBranch,
+        repository.mounts.map((mount) => `${mount.deviceName}:${mount.path}`).join(" · ") || "-",
+        repository.id,
+      ]),
+      ["NAME", "BRANCH", "MOUNTS", "ID"],
+    );
+    return 0;
+  }
+
+  if (domain === "repo" && verb === "create") {
+    const repository = await client.createRepository({
+      name: req(flags, "name"),
+      remoteUrl: flags.remote,
+      defaultBranch: flags.branch,
+      device: flags.device,
+      path: flags.path,
+    });
+    console.log(`${c.green}✓${c.reset} repository ${c.bold}${repository.name}${c.reset}（${repository.id}）已创建`);
+    return 0;
+  }
+
+  if (domain === "repo" && verb === "mount") {
+    const id = pos[2];
+    if (!id) throw new Error("用法：harbor repo mount <repo> --device <d> --path <绝对路径>");
+    await client.mountRepository(id, { device: req(flags, "device"), path: req(flags, "path") });
+    console.log(`${c.green}✓${c.reset} repository mount 已保存`);
+    return 0;
+  }
 
   if (domain === "device" && verb === "ls") {
     const devices = await client.devices();
@@ -174,7 +231,11 @@ async function main(): Promise<number> {
         d.online ? `${c.green}online${c.reset}` : `${c.red}offline${c.reset}`,
         fmtAgo(d.lastSeenAt),
         Object.entries(d.capabilities.clis).map(([k, v]) => `${k}@${v}`).join(" ") || "-",
-        String(new Set(d.capabilities.endpoints.map((e) => e.split(":")[0])).size || "-"),
+        String(
+          d.capabilities.modelRoutes
+            ? new Set(d.capabilities.modelRoutes.filter((route) => route.ready).map((route) => route.id)).size || "-"
+            : new Set(d.capabilities.endpoints).size || "-",
+        ),
         d.id,
       ]),
       ["NAME", "STATE", "SEEN", "CLIS", "MODELS", "ID"],
@@ -186,7 +247,8 @@ async function main(): Promise<number> {
     const agent = await client.createAgent({
       name: req(flags, "name"),
       device: req(flags, "device"),
-      workdir: req(flags, "workdir"),
+      repository: flags.repository,
+      workdir: flags.workdir,
       model: flags.model,
       permission: flags.permission,
       backend: flags.backend,
@@ -196,7 +258,7 @@ async function main(): Promise<number> {
     });
     console.log(`${c.green}✓${c.reset} agent ${c.bold}${agent.name}${c.reset}（${agent.id}）已创建`);
     console.log(
-      `${c.dim}  device=${agent.deviceId} model=${agent.model ?? "CLI 默认"} permission=${agent.permission} isolation=${agent.isolation} workdir=${agent.workdir}${c.reset}`,
+      `${c.dim}  device=${agent.deviceId} model=${agent.model ?? "CLI 默认"} permission=${agent.permission} isolation=${agent.isolation} repository=${agent.defaultRepositoryId ?? "none"}${c.reset}`,
     );
     return 0;
   }
@@ -212,9 +274,9 @@ async function main(): Promise<number> {
         a.model ?? "(默认)",
         a.permission,
         a.isolation === "worktree" ? "worktree" : "-",
-        a.workdir,
+        a.defaultRepositoryId ?? "-",
       ]),
-      ["NAME", "DEVICE", "BACKEND", "MODEL", "PERM", "ISO", "WORKDIR"],
+      ["NAME", "DEVICE", "BACKEND", "MODEL", "PERM", "ISO", "DEFAULT REPO"],
     );
     return 0;
   }
@@ -223,13 +285,28 @@ async function main(): Promise<number> {
     const agent = pos[1];
     const prompt = pos.slice(2).join(" ");
     if (!agent || !prompt) throw new Error(`用法：harbor chat <agent> "<prompt>"`);
-    const conv = await client.createConversation({ kind: "chat", agent });
+    const conv = await client.createConversation({ kind: "chat", agent, repository: flags.repository });
     const run = await client.createRun(conv.id, prompt);
     console.log(`${c.dim}chat ${conv.id} · run ${run.id}${c.reset}`);
     return flags.detach ? 0 : watchRun(client, run.id);
   }
 
   if (domain === "issue") {
+    if (verb === "draft") {
+      const description = pos.slice(2).join(" ");
+      if (!description) throw new Error(`用法：harbor issue draft "<描述>" [--title t] [--agent a]`);
+      const conv = await client.createConversation({
+        kind: "issue",
+        agent: flags.agent,
+        title: typeof flags.title === "string" ? flags.title : description.slice(0, 60),
+        description,
+        priority: flags.priority,
+        repository: flags.repository,
+      });
+      console.log(`${c.green}✓${c.reset} issue ${c.bold}${conv.id}${c.reset} 已保存到 Inbox${conv.agentId ? "（已指派，未执行）" : ""}`);
+      return 0;
+    }
+
     if (verb === "create") {
       const agent = pos[2];
       const prompt = pos.slice(3).join(" ");
@@ -238,9 +315,22 @@ async function main(): Promise<number> {
         kind: "issue",
         agent,
         title: typeof flags.title === "string" ? flags.title : prompt.slice(0, 60),
+        description: prompt,
+        priority: flags.priority,
+        repository: flags.repository,
       });
-      const run = await client.createRun(conv.id, prompt);
+      const run = await client.dispatchIssue(conv.id, agent, prompt);
       console.log(`${c.green}✓${c.reset} issue ${c.bold}${conv.id}${c.reset} · run ${run.id}`);
+      return flags.detach ? 0 : watchRun(client, run.id);
+    }
+
+    if (verb === "assign") {
+      const id = pos[2];
+      const agent = pos[3];
+      const prompt = pos.slice(4).join(" ") || undefined;
+      if (!id || !agent) throw new Error(`用法：harbor issue assign <id> <agent> ["<prompt>"]`);
+      const run = await client.dispatchIssue(id, agent, prompt);
+      console.log(`${c.dim}issue ${run.conversationId} · run ${run.id}（assign & run）${c.reset}`);
       return flags.detach ? 0 : watchRun(client, run.id);
     }
 
@@ -253,11 +343,30 @@ async function main(): Promise<number> {
       return flags.detach ? 0 : watchRun(client, run.id);
     }
 
+    if (verb === "changes") {
+      const id = pos[2];
+      const feedback = pos.slice(3).join(" ");
+      if (!id || !feedback) throw new Error(`用法：harbor issue changes <id> "<反馈>" [--agent a]`);
+      const run = await client.requestChanges(id, feedback, typeof flags.agent === "string" ? flags.agent : undefined);
+      console.log(`${c.dim}issue ${run.conversationId} · run ${run.id}（request changes）${c.reset}`);
+      return flags.detach ? 0 : watchRun(client, run.id);
+    }
+
+    if (verb === "review") {
+      const id = pos[2];
+      const agent = pos[3];
+      const prompt = pos.slice(4).join(" ") || undefined;
+      if (!id || !agent) throw new Error(`用法：harbor issue review <id> <agent> ["<要求>"]`);
+      const run = await client.reviewIssue(id, agent, prompt);
+      console.log(`${c.dim}issue ${run.conversationId} · review run ${run.id}${c.reset}`);
+      return flags.detach ? 0 : watchRun(client, run.id);
+    }
+
     if (verb === "ls") {
       const status = typeof flags.status === "string" ? flags.status : undefined;
       const convs = await client.conversations({ kind: "issue", status });
       table(
-        convs.map((cv) => [cv.id, cv.status, (cv.title ?? "").slice(0, 40), cv.agentName, fmtAgo(cv.updatedAt)]),
+        convs.map((cv) => [cv.id, cv.status, (cv.title ?? "").slice(0, 40), cv.agentName ?? "(unassigned)", fmtAgo(cv.updatedAt)]),
         ["ID", "STATUS", "TITLE", "AGENT", "UPDATED"],
       );
       return 0;
@@ -269,12 +378,12 @@ async function main(): Promise<number> {
       const { conversation, agent, runs } = await client.getConversation(id);
       console.log(`${c.bold}${conversation.title ?? "(无标题)"}${c.reset}  ${c.dim}${conversation.id}${c.reset}`);
       console.log(
-        `${c.dim}kind=${conversation.kind} status=${c.reset}${conversation.status}${c.dim} agent=${agent?.name ?? conversation.agentId} session=${conversation.claudeSessionId?.slice(0, 8) ?? "-"}${c.reset}`,
+        `${c.dim}kind=${conversation.kind} status=${c.reset}${conversation.status}${c.dim} priority=${conversation.priority} agent=${agent?.name ?? conversation.agentId ?? "unassigned"} session=${conversation.claudeSessionId?.slice(0, 8) ?? "-"}${c.reset}`,
       );
       table(
         runs.map((r) => [
           r.id,
-          r.status,
+          `${r.purpose}/${r.status}`,
           fmtAgo(r.queuedAt),
           fmtRunCost(r) || "-",
           (r.error ?? r.prompt).slice(0, 50),
@@ -287,8 +396,7 @@ async function main(): Promise<number> {
     if (verb === "done" || verb === "cancel") {
       const id = pos[2];
       if (!id) throw new Error(`用法：harbor issue ${verb} <id>`);
-      const to: ConversationStatus = verb === "done" ? "done" : "canceled";
-      const conv = await client.setConversationStatus(id, to);
+      const conv = verb === "done" ? await client.approveIssue(id) : await client.cancelIssue(id);
       console.log(`${c.green}✓${c.reset} issue ${conv.id} → ${conv.status}`);
       return 0;
     }
@@ -342,6 +450,7 @@ async function main(): Promise<number> {
         prompt: req(flags, "prompt"),
         mode: flags.mode,
         target: flags.target,
+        repository: flags.repository,
         notifyChat: flags["notify-chat"],
       });
       console.log(`${c.green}✓${c.reset} automation ${c.bold}${auto.name}${c.reset}（${auto.id}）已创建并排班`);

@@ -13,19 +13,54 @@ import type { AgentEvent, Cost, PermissionPolicy } from "@sm/agent";
 
 export type BackendKind = "claude" | "codex";
 export type IsolationKind = "none" | "worktree";
-export type ConversationKind = "chat" | "issue";
-/** chat 恒为 open；issue 走 backlog→doing→review→done/canceled（允许任意回退） */
-export type ConversationStatus = "open" | "backlog" | "doing" | "review" | "done" | "canceled";
-export const ISSUE_STATUSES: ConversationStatus[] = ["backlog", "doing", "review", "done", "canceled"];
+/** issue_draft 是 AI 提单的隐藏草稿；Agent 分诊完成、人工确认后才发布为 issue。 */
+export type ConversationKind = "chat" | "issue" | "issue_draft";
+/** chat 恒为 open；Issue 阶段与 Run 状态分离，doing/review 主要由系统推进。 */
+export type ConversationStatus = "open" | "backlog" | "todo" | "doing" | "review" | "done" | "canceled";
+export const ISSUE_STATUSES: ConversationStatus[] = ["backlog", "todo", "doing", "review", "done", "canceled"];
+export type IssuePriority = "none" | "low" | "medium" | "high" | "urgent";
+export const ISSUE_PRIORITIES: IssuePriority[] = ["none", "low", "medium", "high", "urgent"];
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
+/** implementation 推进 Issue；triage 只读分诊草稿；review/verification 不覆盖 Assignee。 */
+export type RunPurpose = "implementation" | "triage" | "review" | "verification";
+export const RUN_PURPOSES: RunPurpose[] = ["implementation", "triage", "review", "verification"];
 export type Origin = "cli" | "feishu" | "web" | "automation";
 export type PromptSource = "issue" | "chat" | "automation";
+
+/** daemon 从本机 Runtime 配置目录发现、可同步进 Workspace 的 Skill。 */
+export interface InstalledSkillCapability {
+  name: string;
+  description: string;
+  /** SKILL.md 所在目录的真实路径。 */
+  path: string;
+  runtimes: BackendKind[];
+  /** 仅 daemon → server hello 携带；GET /api/devices 会移除正文，避免列表接口膨胀。 */
+  instruction?: string;
+}
+
+/** 某个 coding runtime 真正可执行的模型路由（claude 来自 endpoints.yaml，codex 来自本机 models cache）。 */
+export interface ModelRouteCapability {
+  /** 始终使用 provider-qualified id，避免同名模型跨 provider 歧义。 */
+  id: string;
+  provider: string;
+  model: string;
+  /** UI 展示名（如 codex display_name）；传给 CLI 的始终是 model。 */
+  label?: string;
+  runtime: BackendKind;
+  kind: "native" | "anthropic";
+  /** native 依赖 CLI 登录态；代理 route 依赖 endpoints.yaml 的 key env。 */
+  ready: boolean;
+}
 
 export interface DeviceCapabilities {
   /** 已装 CLI 及版本，如 {claude: "2.1.207"} */
   clis: Record<string, string>;
-  /** 本机 endpoints.yaml 可用模型清单（含 "provider:model" 限定 id 两种形式） */
+  /** 旧兼容清单；新 UI / 校验优先使用 modelRoutes。 */
   endpoints: string[];
+  /** 本机 sm-toolkit 配置解析出的结构化、runtime-compatible 路由。 */
+  modelRoutes?: ModelRouteCapability[];
+  /** 本机 Claude Code / Codex / shared skills 目录发现的可导入 Skill。 */
+  installedSkills?: InstalledSkillCapability[];
 }
 
 export interface Device {
@@ -37,8 +72,39 @@ export interface Device {
   createdAt: number;
 }
 
+/** Harbor 的一级逻辑作用域；不是租户，也不是代码目录。 */
+export interface HarborWorkspace {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  createdAt: number;
+  archivedAt: number | null;
+}
+
+/** Workspace 可使用的逻辑代码仓库；物理路径由 RepositoryMount 表达。 */
+export interface HarborRepository {
+  id: string;
+  workspaceId: string;
+  name: string;
+  remoteUrl: string | null;
+  defaultBranch: string;
+  createdAt: number;
+  archivedAt: number | null;
+}
+
+/** 一个 Repository 在某台 Device 上的 checkout。每台设备至多一个主 mount。 */
+export interface RepositoryMount {
+  id: string;
+  repositoryId: string;
+  deviceId: string;
+  path: string;
+  createdAt: number;
+}
+
 export interface HarborAgent {
   id: string;
+  workspaceId: string;
   name: string;
   description: string | null;
   deviceId: string;
@@ -46,28 +112,107 @@ export interface HarborAgent {
   /** endpoints.yaml 名 / 裸 tier / 透传；null = 该 CLI 自己的默认模型 */
   model: string | null;
   permission: PermissionPolicy;
-  /** device 上的绝对路径 */
-  workdir: string;
+  /** 可为空；Run/Conversation 也可显式选择其他 Repository。 */
+  defaultRepositoryId: string | null;
   isolation: IsolationKind;
   /** systemPrompt 注入 */
   instruction: string | null;
+  /** 当前绑定的 Workspace Skill，顺序即 system prompt 注入顺序。 */
+  skillIds: string[];
   createdAt: number;
+  archivedAt: number | null;
+}
+
+export type SkillSource = "manual" | "runtime";
+
+/** Workspace 级 Skill 配置；manual 可跨设备，runtime 绑定其来源 Device。 */
+export interface HarborSkill {
+  id: string;
+  workspaceId: string;
+  name: string;
+  description: string;
+  source: SkillSource;
+  /** 导入/编辑时保存的 SKILL.md 正文快照；Run 只消费这份显式配置。 */
+  instruction: string;
+  deviceId: string | null;
+  sourcePath: string | null;
+  /** runtime 来源可执行的 Runtime；manual 默认 claude + codex。 */
+  runtimes: BackendKind[];
+  createdAt: number;
+  updatedAt: number;
   archivedAt: number | null;
 }
 
 export interface Conversation {
   id: string;
+  workspaceId: string;
   kind: ConversationKind;
   title: string | null;
-  agentId: string;
+  /** Issue 的当前实现 Assignee；Issue 可为空，Chat 始终有值。 */
+  agentId: string | null;
+  description: string | null;
+  priority: IssuePriority;
   status: ConversationStatus;
+  /** 当前会话唯一的代码执行目标；非代码会话可为空。 */
+  repositoryId: string | null;
   worktreePath: string | null;
+  /** worktree 属于哪个物理 mount，防止跨设备/仓库误复用。 */
+  worktreeMountId: string | null;
   /** 最新一轮的 claude session id，resume 用 */
   claudeSessionId: string | null;
   origin: Origin;
   originRef: string | null;
   createdAt: number;
   updatedAt: number;
+}
+
+/** 首期只提供人工确认适配器；后续 Codebase/GitHub 在这里扩展，不改变 Delivery policy。 */
+export type DeliveryProviderKind = "manual";
+export type DeliveryReviewStatus = "pending" | "approved";
+export type DeliveryCheckStatus = "unknown" | "pending" | "passed" | "failed";
+export const DELIVERY_CHECK_STATUSES: DeliveryCheckStatus[] = ["unknown", "pending", "passed", "failed"];
+export type DeliveryMergeStatus = "open" | "merged";
+export type DeliveryDeploymentStatus = "not_required" | "pending" | "running" | "succeeded" | "failed";
+/** 只读派生状态；调用方更新正交事实，不能直接写这个字段。 */
+export type DeliveryStatus =
+  | "awaiting_change"
+  | "review_pending"
+  | "checks_pending"
+  | "blocked"
+  | "merge_ready"
+  | "merged"
+  | "deploying"
+  | "succeeded"
+  | "failed";
+
+/** Issue 的主代码交付记录。当前与 Issue 是 0..1，非代码 Issue 可以没有。 */
+export interface Delivery {
+  id: string;
+  conversationId: string;
+  provider: DeliveryProviderKind;
+  changeUrl: string | null;
+  externalId: string | null;
+  headBranch: string | null;
+  baseBranch: string | null;
+  reviewStatus: DeliveryReviewStatus;
+  checkStatus: DeliveryCheckStatus;
+  mergeStatus: DeliveryMergeStatus;
+  deploymentStatus: DeliveryDeploymentStatus;
+  /** 根据四组事实派生，不在 DB 单独存储。 */
+  status: DeliveryStatus;
+  reviewApprovedAt: number | null;
+  mergedAt: number | null;
+  deployedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DeliveryEvent {
+  deliveryId: string;
+  kind: string;
+  data: unknown;
+  actor: "human" | "system" | "provider";
+  ts: number;
 }
 
 export interface RunCost {
@@ -79,11 +224,17 @@ export interface RunCost {
 
 export interface Run {
   id: string;
+  workspaceId: string;
   conversationId: string;
   /** 快照，不 FK 约束（agent 可归档） */
   agentId: string;
   deviceId: string;
+  repositoryId: string | null;
+  repositoryMountId: string | null;
+  /** 下发时快照；worktree ready 后更新为实际 worktree 路径。 */
+  executionRoot: string | null;
   prompt: string;
+  purpose: RunPurpose;
   status: RunStatus;
   claudeSessionId: string | null;
   error: string | null;
@@ -130,8 +281,11 @@ export type AutomationMode = "new_issue" | "append";
 
 export interface Automation {
   id: string;
+  workspaceId: string;
   name: string;
   agentId: string;
+  /** new_issue 的默认执行仓库；append 模式继承目标 Conversation。 */
+  repositoryId: string | null;
   cron: string;
   prompt: string;
   mode: AutomationMode;
@@ -178,7 +332,8 @@ export interface RunSpec {
   backend: BackendKind;
   model: string | null;
   prompt: string;
-  workdir: string;
+  /** Repository 在目标 Device 上的 checkout；非代码 Run 可为空。 */
+  repositoryRoot: string | null;
   permission: PermissionPolicy;
   systemPrompt: string | null;
   /** 上一轮 claude_session_id，多轮续接 */
@@ -232,8 +387,8 @@ export type ServerMsg =
       updatedInput?: unknown;
       message?: string;
     }
-  // issue → done/canceled 后触发（默认保留分支删目录）；workdir 是 git 上下文
-  | { type: "worktree_cleanup"; conversationId: string; workdir: string; worktreePath: string };
+  // issue → done/canceled 后触发（默认保留分支删目录）；repositoryRoot 是 git 上下文
+  | { type: "worktree_cleanup"; conversationId: string; repositoryRoot: string; worktreePath: string };
 
 // ── SSE 帧（GET /api/runs/:id/events） ──────────────────
 
@@ -250,6 +405,8 @@ export const HEARTBEAT_INTERVAL_MS = 30_000;
 export const OFFLINE_AFTER_MS = 90_000;
 export const DEFAULT_PORT = 7777;
 export const DEFAULT_DEVICE_CONCURRENCY = 2;
+/** 旧库与未显式选择 Workspace 的 CLI/API 都落到这里。 */
+export const DEFAULT_WORKSPACE_ID = "ws_personal";
 /** claude CLI 原生 tier 别名——不在 endpoints.yaml 也放行（agent create model 校验） */
 export const NATIVE_TIER_ALIASES = ["opus", "sonnet", "haiku"];
 /** 审批悬空上限：pending 超时标 expired 并回 deny（防 claude 进程无限挂） */

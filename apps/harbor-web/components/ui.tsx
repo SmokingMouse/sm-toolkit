@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 
 const STATUS_BADGE: Record<string, string> = {
   backlog: "border-zinc-200 bg-zinc-100 text-backlog",
+  todo: "border-zinc-300 bg-zinc-50 text-zinc-700",
   doing: "border-blue-200 bg-blue-50 text-doing",
   review: "border-amber-200 bg-amber-50 text-review",
   done: "border-emerald-200 bg-emerald-50 text-done",
@@ -20,6 +21,7 @@ const STATUS_BADGE: Record<string, string> = {
 };
 
 const STATUS_DOT: Record<string, string> = {
+  todo: "bg-zinc-500",
   doing: "bg-doing",
   open: "bg-doing",
   running: "bg-doing",
@@ -115,14 +117,14 @@ export function Modal({
 }
 
 export const btnPrimary =
-  "inline-flex min-h-9 items-center justify-center rounded-lg bg-accent px-3.5 py-2 text-sm font-semibold text-white shadow-[0_1px_2px_rgba(5,100,87,.18)] hover:bg-accent-strong hover:shadow-[0_5px_15px_rgba(5,100,87,.18)] active:translate-y-px disabled:cursor-not-allowed disabled:opacity-40";
+  "inline-flex min-h-10 items-center justify-center rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white shadow-[0_1px_2px_rgba(5,100,87,.18)] hover:bg-accent-strong hover:shadow-[0_5px_15px_rgba(5,100,87,.18)] active:translate-y-px disabled:cursor-not-allowed disabled:opacity-40";
 export const btnGhost =
-  "inline-flex min-h-9 items-center justify-center rounded-lg border border-line bg-panel px-3.5 py-2 text-sm font-medium text-ink shadow-[0_1px_1px_rgba(20,35,30,.03)] hover:border-zinc-300 hover:bg-white disabled:cursor-not-allowed disabled:opacity-40";
+  "inline-flex min-h-10 items-center justify-center rounded-xl border border-line bg-panel px-4 py-2 text-sm font-medium text-ink shadow-[0_1px_1px_rgba(20,35,30,.03)] hover:border-zinc-300 hover:bg-white disabled:cursor-not-allowed disabled:opacity-40";
 export const btnDanger =
-  "inline-flex min-h-9 items-center justify-center rounded-lg border border-red-200 bg-red-50 px-3.5 py-2 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-40";
+  "inline-flex min-h-10 items-center justify-center rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-40";
 export const inputCls =
-  "w-full min-h-10 rounded-lg border border-line bg-white/85 px-3 py-2 text-sm text-ink shadow-[inset_0_1px_1px_rgba(20,35,30,.025)] outline-none placeholder:text-zinc-400 hover:border-zinc-300 focus:border-accent focus:ring-3 focus:ring-accent/10 disabled:bg-bg disabled:text-dim";
-export const labelCls = "mb-1.5 mt-3 block text-[11px] font-semibold uppercase tracking-[0.08em] text-dim first:mt-0";
+  "w-full min-h-11 rounded-xl border border-line bg-white/90 px-3.5 py-2.5 text-sm text-ink shadow-[inset_0_1px_1px_rgba(20,35,30,.025)] outline-none placeholder:text-zinc-400 hover:border-zinc-300 focus:border-accent focus:ring-3 focus:ring-accent/10 disabled:bg-bg disabled:text-dim";
+export const labelCls = "mb-2 mt-4 block text-xs font-medium text-ink/70 first:mt-0";
 
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (

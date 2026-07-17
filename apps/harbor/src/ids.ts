@@ -12,6 +12,11 @@ const PREFIXES = {
   run: "r",
   automation: "auto",
   approval: "ap",
+  skill: "sk",
+  delivery: "del",
+  workspace: "ws",
+  repository: "repo",
+  repositoryMount: "mount",
 } as const;
 
 export function newId(kind: keyof typeof PREFIXES): string {

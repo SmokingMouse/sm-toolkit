@@ -8,11 +8,12 @@
  */
 
 import type { Cost } from "@sm/agent";
-import type { Conversation, HarborAgent, Run, RunSpec, ServerMsg } from "../protocol.js";
+import type { Conversation, HarborAgent, HarborSkill, Run, RunPurpose, RunSpec, ServerMsg } from "../protocol.js";
 import type { HarborStore } from "./store.js";
 import type { RunBus } from "./bus.js";
 import { transitionConversation } from "./statemachine.js";
 import { renderRunPrompt } from "./prompt-wrapper.js";
+import { DeliveryService } from "./delivery.js";
 
 /** 传输面（由 ws DeviceHub 实现）——注入接口避免 scheduler ↔ ws 循环依赖 */
 export interface DeviceTransport {
@@ -24,23 +25,87 @@ export class RunCoordinator {
   /** run 终态 hook（main 注入）：审批过期清理 / 飞书结果回报都挂这里 */
   onRunFinished?: (run: Run, conv: Conversation | null) => void;
 
+  private readonly deliveries: DeliveryService;
+
   constructor(
     private store: HarborStore,
     private bus: RunBus,
     private transport: DeviceTransport,
     private concurrency: number,
-  ) {}
+    deliveries?: DeliveryService,
+  ) {
+    this.deliveries = deliveries ?? new DeliveryService(store);
+  }
 
   /** 入队并尝试即时下发（REST/飞书/automation 共用）。同 conversation 串行——防 resume 分叉 */
-  enqueueRun(conv: Conversation, agent: HarborAgent, prompt: string): Run {
+  enqueueRun(conv: Conversation, agent: HarborAgent, prompt: string, purpose: RunPurpose = "implementation"): Run {
+    if (conv.workspaceId !== agent.workspaceId) {
+      throw new Error(`Agent "${agent.name}" 不属于当前 Workspace，不能跨作用域执行`);
+    }
     const active = this.store.activeRunForConversation(conv.id);
     if (active) {
       throw new Error(
         `conversation 已有进行中的 run（${active.id}，${active.status}）——同一会话串行执行，等它结束或先取消`,
       );
     }
+    if (purpose === "triage" && conv.kind !== "issue_draft") {
+      throw new Error("triage run 只能用于 AI Issue 草稿");
+    }
+    if (conv.kind === "issue_draft" && purpose !== "triage") {
+      throw new Error("AI Issue 草稿只允许 triage run");
+    }
+    const repositoryId = conv.repositoryId ?? agent.defaultRepositoryId;
+    const repository = repositoryId ? this.store.getRepository(repositoryId) : null;
+    if (repository?.archivedAt) {
+      throw new Error(`Repository "${repository.name}" 已归档，不能启动新的 Run`);
+    }
+    const mount = repositoryId ? this.store.getRepositoryMountForDevice(repositoryId, agent.deviceId) : null;
+    if (repositoryId && !mount) {
+      throw new Error(
+        `Repository "${repository?.name ?? repositoryId}" 没有挂载到 Agent 设备；请先在 Repositories 配置该 Device 的本地路径`,
+      );
+    }
+    const effectiveIsolation = purpose === "triage" ? "none" : agent.isolation;
+    if (effectiveIsolation === "worktree" && !mount) {
+      throw new Error(`Agent "${agent.name}" 使用 Git worktree 隔离，但当前任务没有 Repository mount`);
+    }
+    if (conv.worktreePath && conv.worktreeMountId !== mount?.id) {
+      throw new Error("当前 Issue 已有 worktree，只能继续使用创建该 worktree 的 Repository mount");
+    }
+    if (!conv.repositoryId && repositoryId) {
+      this.store.setConversationRepository(conv.id, repositoryId, Date.now());
+      conv = this.store.getConversation(conv.id)!;
+    }
+    if (conv.kind === "issue") {
+      if (conv.status === "done" || conv.status === "canceled") {
+        throw new Error(`issue 已是 ${conv.status}，不能继续执行`);
+      }
+      if (purpose === "review" || purpose === "verification") {
+        if (conv.status !== "review") throw new Error(`${purpose} run 只能在 review 阶段启动`);
+        // worktreeMountId 闸保证 Reviewer 看到 implementation 的真实 checkout。
+      } else {
+        const now = Date.now();
+        // 新实现会改变 commit 集合，旧人工验收与 CI 证据必须失效；已合并交付在这里硬拒绝。
+        this.deliveries.prepareImplementation(conv, now);
+        if (conv.agentId !== agent.id) this.store.setConversationAssignee(conv.id, agent.id, now);
+        const fresh = this.store.getConversation(conv.id)!;
+        if (fresh.status !== "todo" && fresh.status !== "doing") {
+          transitionConversation(this.store, fresh, "todo", "system", now);
+        }
+      }
+    }
     const run = this.store.createRun(
-      { conversationId: conv.id, agentId: agent.id, deviceId: agent.deviceId, prompt },
+      {
+        workspaceId: conv.workspaceId,
+        conversationId: conv.id,
+        agentId: agent.id,
+        deviceId: agent.deviceId,
+        repositoryId: repositoryId ?? null,
+        repositoryMountId: mount?.id ?? null,
+        executionRoot: conv.worktreePath ?? mount?.path ?? null,
+        prompt,
+        purpose,
+      },
       Date.now(),
     );
     this.pump(agent.deviceId);
@@ -54,6 +119,16 @@ export class RunCoordinator {
     if (run.status === "queued") {
       this.store.finishRun(runId, "canceled", { claudeSessionId: null, cost: null, error: null }, Date.now());
       const finished = this.store.getRun(runId)!;
+      const conv = this.store.getConversation(run.conversationId);
+      if (
+        conv?.kind === "issue" &&
+        run.purpose === "implementation" &&
+        conv.status !== "done" &&
+        conv.status !== "canceled" &&
+        conv.status !== "todo"
+      ) {
+        transitionConversation(this.store, conv, "todo", "system", Date.now());
+      }
       this.bus.emitDone(finished);
       this.onRunFinished?.(finished, this.store.getConversation(run.conversationId));
       return finished;
@@ -91,18 +166,22 @@ export class RunCoordinator {
         model: agent.model,
         // runs.prompt 保留原文；只在 dispatch 瞬间按来源包裹结构化上下文。
         prompt: renderRunPrompt(this.store, { run, conversation: conv, agent }),
-        workdir: agent.workdir,
-        permission: agent.permission,
-        systemPrompt: agent.instruction,
-        resume: conv.claudeSessionId,
+        repositoryRoot: run.executionRoot,
+        // AI draft 只允许读取仓库做分诊，不能在 Issue 尚未确认时改文件或创建 worktree。
+        permission: run.purpose === "triage" ? "readonly" : agent.permission,
+        systemPrompt: composeAgentSystemPrompt(agent.instruction, this.store.listSkillsForAgent(agent.id)),
+        resume:
+          (run.purpose === "implementation" || run.purpose === "triage") && conv.agentId === agent.id
+            ? conv.claudeSessionId
+            : null,
         conversationId: conv.id,
-        isolation: agent.isolation,
-        worktreePath: conv.worktreePath,
+        isolation: run.purpose === "triage" ? "none" : agent.isolation,
+        worktreePath: run.purpose === "triage" ? null : conv.worktreePath,
       };
       const sent = this.transport.send(deviceId, { type: "run_start", runId: run.id, spec });
       if (!sent) return; // 连接实际不可用，留在队列等下次上线
       this.store.markRunRunning(run.id, now);
-      if (conv.kind === "issue" && conv.status !== "doing") {
+      if (conv.kind === "issue" && run.purpose === "implementation" && conv.status !== "doing") {
         transitionConversation(this.store, conv, "doing", "system", now);
       }
     }
@@ -137,15 +216,19 @@ export class RunCoordinator {
 
     const conv = this.store.getConversation(run.conversationId);
     if (conv) {
-      if (msg.claudeSessionId) {
+      if (
+        msg.claudeSessionId &&
+        (run.purpose === "implementation" || run.purpose === "triage") &&
+        conv.agentId === run.agentId
+      ) {
         this.store.setConversationClaudeSessionId(conv.id, msg.claudeSessionId, now);
       }
-      if (conv.kind === "issue") {
-        // succeeded → review（待人验收）；failed/canceled → 回 backlog（等人重试/继续）。
+      if (conv.kind === "issue" && run.purpose === "implementation") {
+        // implementation succeeded → review；failed/canceled → todo（已完成分诊，等待修复/重试）。
         // 人在 run 期间已把 issue 关了（done/canceled）→ 尊重人工终态，不自动拉回。
         const fresh = this.store.getConversation(conv.id)!;
         if (fresh.status !== "done" && fresh.status !== "canceled") {
-          transitionConversation(this.store, fresh, msg.status === "succeeded" ? "review" : "backlog", "system", now);
+          transitionConversation(this.store, fresh, msg.status === "succeeded" ? "review" : "todo", "system", now);
         }
       }
     }
@@ -157,24 +240,26 @@ export class RunCoordinator {
   }
 
   /** worktree 回填（daemon 首跑创建后回报） */
-  onWorktreeReady(conversationId: string, path: string): void {
+  onWorktreeReady(runId: string, conversationId: string, path: string): void {
+    const run = this.store.getRun(runId);
     const conv = this.store.getConversation(conversationId);
-    if (!conv) return;
+    if (!conv || !run) return;
     if (conv.worktreePath !== path) {
-      this.store.setConversationWorktreePath(conversationId, path, Date.now());
+      this.store.setConversationWorktreePath(conversationId, path, run.repositoryMountId, Date.now());
+      this.store.setRunExecutionRoot(runId, path);
       console.log(`[coordinator] worktree 就绪：${conversationId} → ${path}`);
     }
   }
 
   /** issue 终结后的 worktree 收尾（保留分支删目录）。设备离线时静默跳过——重连对账补发 */
   requestWorktreeCleanup(conv: Conversation): void {
-    if (!conv.worktreePath) return;
-    const agent = this.store.getAgent(conv.agentId);
-    if (!agent) return;
-    const sent = this.transport.send(agent.deviceId, {
+    if (!conv.worktreePath || !conv.worktreeMountId) return;
+    const mount = this.store.getRepositoryMount(conv.worktreeMountId);
+    if (!mount) return;
+    const sent = this.transport.send(mount.deviceId, {
       type: "worktree_cleanup",
       conversationId: conv.id,
-      workdir: agent.workdir,
+      repositoryRoot: mount.path,
       worktreePath: conv.worktreePath,
     });
     if (!sent) {
@@ -186,7 +271,7 @@ export class RunCoordinator {
     const conv = this.store.getConversation(conversationId);
     if (!conv) return;
     if (ok) {
-      this.store.setConversationWorktreePath(conversationId, null, Date.now());
+      this.store.setConversationWorktreePath(conversationId, null, null, Date.now());
       console.log(`[coordinator] worktree 已清理：${conversationId}`);
     } else {
       // 保留 worktree_path（目录还在是事实），fail loudly；daemon 重连时会再试一次
@@ -216,7 +301,7 @@ export class RunCoordinator {
       );
       const conv = this.store.getConversation(run.conversationId);
       if (conv && conv.kind === "issue") {
-        transitionConversation(this.store, conv, "backlog", "system", now);
+        transitionConversation(this.store, conv, "todo", "system", now);
       }
       const finished = this.store.getRun(run.id)!;
       this.bus.emitDone(finished);
@@ -228,4 +313,28 @@ export class RunCoordinator {
     }
     this.pump(deviceId);
   }
+}
+
+/**
+ * Skill 是 Agent instruction 的可复用补充。统一在 server dispatch 时合成，
+ * Claude 走 --system-prompt，Codex 由 Backend inline 到用户请求之前，两种 Runtime 都真实生效。
+ */
+export function composeAgentSystemPrompt(
+  instruction: string | null,
+  skills: HarborSkill[],
+): string | null {
+  const sections: string[] = [];
+  if (instruction?.trim()) sections.push(instruction.trim());
+  if (skills.length > 0) {
+    sections.push([
+      "# Harbor configured skills",
+      "Apply the following workspace Skills whenever the task matches. Treat each Skill as system-level operating guidance.",
+      ...skills.map((skill) => [
+        `## Skill: ${skill.name}`,
+        skill.description ? `Description: ${skill.description}` : "",
+        skill.instruction.trim(),
+      ].filter(Boolean).join("\n\n")),
+    ].join("\n\n"));
+  }
+  return sections.length > 0 ? sections.join("\n\n---\n\n") : null;
 }

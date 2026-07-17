@@ -8,11 +8,13 @@ import {
   listAgents,
   listAutomations,
   listConversations,
+  listRepositories,
   setAutomationEnabled,
   type AutomationLogRow,
   type AutomationWithAgent,
   type ConversationWithAgent,
   type HarborAgent,
+  type RepositoryWithMounts,
 } from "../../lib/api";
 import { ago, usePoll } from "../../lib/hooks";
 import { useToast } from "../../components/toast";
@@ -21,6 +23,7 @@ import { btnGhost, btnPrimary, Empty, Field, inputCls, Modal, ModalFooter, PageH
 export default function AutomationsPage() {
   const autos = usePoll(listAutomations, 10_000);
   const agents = usePoll(listAgents, 30_000);
+  const repositories = usePoll(listRepositories, 30_000);
   const [creating, setCreating] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
 
@@ -63,6 +66,7 @@ export default function AutomationsPage() {
       {creating && (
         <NewAutomationModal
           agents={agents.data ?? []}
+          repositories={repositories.data ?? []}
           onClose={() => setCreating(false)}
           onCreated={() => {
             setCreating(false);
@@ -172,16 +176,23 @@ function AutomationRow({
 
 function NewAutomationModal({
   agents,
+  repositories,
   onClose,
   onCreated,
 }: {
   agents: HarborAgent[];
+  repositories: RepositoryWithMounts[];
   onClose: () => void;
   onCreated: () => void;
 }) {
   const toast = useToast();
   const [name, setName] = useState("");
   const [agent, setAgent] = useState(agents[0]?.name ?? "");
+  const selectedAgent = agents.find((candidate) => candidate.name === agent);
+  const availableRepositories = selectedAgent
+    ? repositories.filter((candidate) => candidate.mounts.some((mount) => mount.deviceId === selectedAgent.deviceId))
+    : repositories;
+  const [repository, setRepository] = useState(selectedAgent?.defaultRepositoryId ?? "");
   const [cron, setCron] = useState("");
   const [prompt, setPrompt] = useState("");
   const [mode, setMode] = useState<"new_issue" | "append">("new_issue");
@@ -189,6 +200,15 @@ function NewAutomationModal({
   const [notifyChat, setNotifyChat] = useState("");
   const [busy, setBusy] = useState(false);
   const [convs, setConvs] = useState<ConversationWithAgent[]>([]);
+
+  useEffect(() => {
+    setRepository((current) => {
+      if (current && availableRepositories.some((candidate) => candidate.id === current)) return current;
+      return selectedAgent?.defaultRepositoryId && availableRepositories.some((candidate) => candidate.id === selectedAgent.defaultRepositoryId)
+        ? selectedAgent.defaultRepositoryId
+        : "";
+    });
+  }, [selectedAgent?.id, selectedAgent?.defaultRepositoryId, repositories]);
 
   // append 模式才需要 target 会话下拉
   useEffect(() => {
@@ -206,6 +226,7 @@ function NewAutomationModal({
         cron: cron.trim(),
         prompt: prompt.trim(),
         mode,
+        repository: mode === "new_issue" ? repository || undefined : undefined,
         target: mode === "append" ? target : undefined,
         notifyChat: notifyChat.trim() || undefined,
       });
@@ -232,6 +253,14 @@ function NewAutomationModal({
           ))}
         </select>
       </Field>
+      {mode === "new_issue" && (
+        <Field label="repository（可空；每次新 Issue 的执行仓库）">
+          <select className={inputCls} value={repository} onChange={(e) => setRepository(e.target.value)}>
+            <option value="">No repository</option>
+            {availableRepositories.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+        </Field>
+      )}
       <Field label="cron（5 段：分 时 日 月 周，server 本机时区）">
         <input
           className={`${inputCls} font-mono`}

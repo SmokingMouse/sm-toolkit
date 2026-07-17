@@ -24,6 +24,7 @@ interface HarborFileConfig {
   server_url?: string;
   token?: string;
   device_name?: string;
+  workspace?: string;
   feishu?: {
     app_id?: string;
     app_secret?: string;
@@ -68,6 +69,11 @@ export function token(): string {
 
 export function deviceName(): string {
   return process.env.HARBOR_DEVICE_NAME ?? fileConfig().device_name ?? hostname();
+}
+
+/** CLI 默认作用域；可用 --workspace 在单次命令覆盖。 */
+export function workspace(): string | undefined {
+  return process.env.HARBOR_WORKSPACE ?? fileConfig().workspace;
 }
 
 export interface FeishuConfig {

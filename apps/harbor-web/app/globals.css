@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "highlight.js/styles/github.css";
 
 @theme {
   --color-bg: #f3f5f2;
@@ -47,6 +48,25 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+select:not([multiple]) {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236d7973' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 10 5 5 5-5'/%3E%3C/svg%3E");
+  background-position: right 0.8rem center;
+  background-repeat: no-repeat;
+  background-size: 0.9rem;
+  padding-right: 2.5rem !important;
+}
+
+select optgroup {
+  color: var(--color-dim);
+  font-weight: 700;
+}
+
+select option {
+  color: var(--color-ink);
+  font-weight: 400;
 }
 
 button,
@@ -106,4 +126,137 @@ button:not(:disabled) {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ── assistant 正文 Markdown（components/markdown.tsx） ─────────────── */
+
+.md {
+  overflow-wrap: break-word;
+}
+
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md p,
+.md ul,
+.md ol,
+.md blockquote,
+.md pre,
+.md .md-table,
+.md hr {
+  margin: 0.6em 0;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  margin: 1em 0 0.45em;
+  font-weight: 650;
+  line-height: 1.35;
+  color: var(--color-ink);
+}
+.md h1 { font-size: 1.25em; }
+.md h2 { font-size: 1.15em; }
+.md h3 { font-size: 1.05em; }
+.md h4,
+.md h5,
+.md h6 { font-size: 1em; }
+
+.md ul,
+.md ol {
+  padding-left: 1.35em;
+}
+.md ul { list-style: disc; }
+.md ol { list-style: decimal; }
+.md li + li {
+  margin-top: 0.2em;
+}
+.md li > ul,
+.md li > ol {
+  margin: 0.2em 0;
+}
+/* GFM task list */
+.md li:has(> input[type="checkbox"]) {
+  list-style: none;
+  margin-left: -1.35em;
+}
+.md input[type="checkbox"] {
+  margin-right: 0.4em;
+  accent-color: var(--color-accent);
+}
+
+.md a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md a:hover {
+  color: var(--color-accent-strong);
+}
+
+.md strong { font-weight: 650; }
+
+.md blockquote {
+  border-left: 3px solid var(--color-line);
+  padding-left: 0.9em;
+  color: var(--color-dim);
+}
+
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--color-line);
+}
+
+/* 行内 code：浅色 pill */
+.md :not(pre) > code {
+  border: 1px solid color-mix(in srgb, var(--color-line) 80%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--color-bg) 72%, white);
+  padding: 0.1em 0.35em;
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+}
+
+/* 代码块：浅色底 + 细边，hljs 高亮交给 github 主题 */
+.md pre {
+  overflow-x: auto;
+  border: 1px solid color-mix(in srgb, var(--color-line) 88%, transparent);
+  border-radius: 10px;
+  background: #f7f9f7;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  line-height: 1.55;
+}
+.md pre code.hljs,
+.md pre code {
+  background: transparent;
+  padding: 0;
+  border: 0;
+  font-size: inherit;
+}
+
+.md .md-table {
+  overflow-x: auto;
+}
+.md table {
+  border-collapse: collapse;
+  font-size: 0.92em;
+}
+.md th,
+.md td {
+  border: 1px solid var(--color-line);
+  padding: 0.35em 0.7em;
+  text-align: left;
+}
+.md th {
+  background: color-mix(in srgb, var(--color-bg) 70%, white);
+  font-weight: 650;
 }

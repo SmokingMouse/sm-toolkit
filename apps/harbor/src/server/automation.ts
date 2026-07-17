@@ -84,6 +84,13 @@ export class AutomationService {
       console.warn(`[automation] ${auto.name} 触发失败：agent 不可用`);
       return;
     }
+    if (agent.workspaceId !== auto.workspaceId) {
+      this.store.appendAutomationLog(
+        { automationId: id, kind: "missed", note: "agent 与 automation 不在同一 Workspace，未触发" },
+        now,
+      );
+      return;
+    }
 
     let conv: Conversation;
     if (auto.mode === "append") {
@@ -100,9 +107,12 @@ export class AutomationService {
     } else {
       conv = this.store.createConversation(
         {
+          workspaceId: auto.workspaceId,
           kind: "issue",
           title: `[auto] ${auto.name} ${new Date(now).toLocaleString("sv-SE")}`,
+          description: auto.prompt,
           agentId: agent.id,
+          repositoryId: auto.repositoryId,
           origin: "automation",
           originRef: auto.id,
         },
@@ -110,7 +120,7 @@ export class AutomationService {
       );
     }
 
-    const run = this.coordinator.enqueueRun(conv, agent, auto.prompt);
+    const run = this.coordinator.enqueueRun(conv, agent, auto.prompt, "implementation");
     this.store.markAutomationFired(id, now);
     this.store.appendAutomationLog({ automationId: id, kind: "fired", runId: run.id }, now);
     console.log(`[automation] fired：${auto.name} → run ${run.id}（conv ${conv.id}）`);

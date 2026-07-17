@@ -12,12 +12,22 @@ import type {
   BackendKind,
   Conversation,
   ConversationStatus,
+  Delivery,
+  DeliveryCheckStatus,
+  DeliveryEvent,
+  DeliveryStatus,
   Device,
   HarborAgent,
+  HarborRepository,
+  HarborSkill,
+  HarborWorkspace,
+  IssuePriority,
+  ModelRouteCapability,
   PromptSource,
   PromptWrapperConfig,
   Run,
   RunStreamFrame,
+  RepositoryMount,
   UsageRow,
 } from "../../harbor/src/protocol";
 
@@ -29,34 +39,54 @@ export type {
   BackendKind,
   Conversation,
   ConversationStatus,
+  Delivery,
+  DeliveryCheckStatus,
+  DeliveryEvent,
+  DeliveryStatus,
   Device,
   HarborAgent,
+  HarborRepository,
+  HarborSkill,
+  HarborWorkspace,
+  IssuePriority,
+  ModelRouteCapability,
   PromptSource,
   PromptWrapperConfig,
   Run,
   RunStreamFrame,
+  RepositoryMount,
   UsageRow,
 };
 
 /** = protocol.ISSUE_STATUSES（运行时值不能 import type，本地复制） */
-export const ISSUE_STATUSES = ["backlog", "doing", "review", "done", "canceled"] as const;
+export const ISSUE_STATUSES = ["backlog", "todo", "doing", "review", "done", "canceled"] as const;
+export const BOARD_STATUSES = ["backlog", "todo", "doing", "review", "done"] as const;
+export const ISSUE_PRIORITIES = ["none", "low", "medium", "high", "urgent"] as const;
 /** = protocol.NATIVE_TIER_ALIASES */
 export const NATIVE_TIER_ALIASES = ["opus", "sonnet", "haiku"];
 export const PERMISSIONS = ["readonly", "auto-edit", "full", "default"] as const;
 
-export type ConversationWithAgent = Conversation & { agentName: string };
+export type ConversationWithAgent = Conversation & { agentName: string | null; latestRun: Run | null };
 export type AutomationWithAgent = Automation & { agentName: string };
 export type RunWithResult = Run & { resultText: string | null };
+export type SkillWithAgents = HarborSkill & { agents: { id: string; name: string }[] };
+export type RepositoryWithMounts = HarborRepository & {
+  mounts: (RepositoryMount & { deviceName: string })[];
+};
 export interface ConversationDetail {
   conversation: Conversation;
   agent: HarborAgent | null;
+  repository: HarborRepository | null;
   runs: RunWithResult[];
   statusLog: { fromStatus: string | null; toStatus: string; actor: string; ts: number }[];
+  delivery: Delivery | null;
+  deliveryEvents: DeliveryEvent[];
 }
 
 // ── token（localStorage） ───────────────────────────────
 
 const TOKEN_KEY = "harbor_token";
+const WORKSPACE_KEY = "harbor_workspace";
 
 export function getToken(): string {
   if (typeof window === "undefined") return "";
@@ -65,6 +95,15 @@ export function getToken(): string {
 
 export function setToken(t: string): void {
   localStorage.setItem(TOKEN_KEY, t);
+}
+
+export function getActiveWorkspace(): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem(WORKSPACE_KEY) ?? "";
+}
+
+export function setActiveWorkspace(id: string): void {
+  localStorage.setItem(WORKSPACE_KEY, id);
 }
 
 // ── fetch 封装 ──────────────────────────────────────────
@@ -85,6 +124,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
       method,
       headers: {
         Authorization: `Bearer ${getToken()}`,
+        ...(getActiveWorkspace() ? { "X-Harbor-Workspace": getActiveWorkspace() } : {}),
         ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -113,10 +153,41 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 
 export const listDevices = () => req<Device[]>("GET", "/api/devices");
 
+export const listWorkspaces = () => req<HarborWorkspace[]>("GET", "/api/workspaces");
+export const createWorkspace = (body: { name: string; slug?: string; description?: string }) =>
+  req<HarborWorkspace>("POST", "/api/workspaces", body);
+export const updateWorkspace = (id: string, body: Record<string, unknown>) =>
+  req<HarborWorkspace>("PATCH", `/api/workspaces/${encodeURIComponent(id)}`, body);
+
+export const listRepositories = () => req<RepositoryWithMounts[]>("GET", "/api/repositories");
+export const createRepository = (body: {
+  name: string;
+  remoteUrl?: string;
+  defaultBranch?: string;
+  device?: string;
+  path?: string;
+}) => req<RepositoryWithMounts>("POST", "/api/repositories", body);
+export const updateRepository = (id: string, body: Record<string, unknown>) =>
+  req<RepositoryWithMounts>("PATCH", `/api/repositories/${encodeURIComponent(id)}`, body);
+export const setRepositoryMount = (id: string, body: { device: string; path: string }) =>
+  req<RepositoryWithMounts>("POST", `/api/repositories/${encodeURIComponent(id)}/mounts`, body);
+export const deleteRepositoryMount = (repositoryId: string, mountId: string) =>
+  req<{ ok: boolean }>("DELETE", `/api/repositories/${encodeURIComponent(repositoryId)}/mounts/${encodeURIComponent(mountId)}`);
+
 export const listAgents = () => req<HarborAgent[]>("GET", "/api/agents");
 export const createAgent = (body: Record<string, unknown>) => req<HarborAgent>("POST", "/api/agents", body);
 export const setAgentArchived = (id: string, archived: boolean) =>
   req<HarborAgent>("PATCH", `/api/agents/${encodeURIComponent(id)}`, { archived });
+export const setAgentSkills = (id: string, skills: string[]) =>
+  req<HarborAgent>("PATCH", `/api/agents/${encodeURIComponent(id)}`, { skills });
+
+export const listSkills = () => req<SkillWithAgents[]>("GET", "/api/skills");
+export const createSkill = (body: { name: string; description?: string; instruction: string }) =>
+  req<SkillWithAgents>("POST", "/api/skills", body);
+export const importRuntimeSkills = (body: { device: string; paths: string[] }) =>
+  req<{ imported: SkillWithAgents[] }>("POST", "/api/skills/import", body);
+export const updateSkill = (id: string, body: { name?: string; description?: string; instruction?: string; archived?: boolean }) =>
+  req<SkillWithAgents>("PATCH", `/api/skills/${encodeURIComponent(id)}`, body);
 
 export const listConversations = (q: { kind?: "chat" | "issue"; status?: ConversationStatus }) => {
   const params = new URLSearchParams();
@@ -127,16 +198,52 @@ export const listConversations = (q: { kind?: "chat" | "issue"; status?: Convers
 };
 export const createConversation = (body: {
   kind: "chat" | "issue";
-  agent: string;
+  agent?: string;
   title?: string;
+  description?: string;
+  priority?: IssuePriority;
+  repository?: string;
   origin?: string;
+  originRef?: string;
 }) => req<Conversation>("POST", "/api/conversations", body);
+export const createIssueDraft = (body: { request: string; agent: string; priority: IssuePriority; repository?: string }) =>
+  req<{ conversation: Conversation; run: Run }>("POST", "/api/issue-drafts", body);
+export const publishIssueDraft = (
+  id: string,
+  body: { title: string; description: string; priority: IssuePriority; status: "backlog" | "todo" },
+) => req<Conversation>("POST", `/api/issue-drafts/${encodeURIComponent(id)}/publish`, body);
 export const getConversation = (id: string) =>
   req<ConversationDetail>("GET", `/api/conversations/${encodeURIComponent(id)}`);
 export const setConversationStatus = (id: string, status: ConversationStatus) =>
   req<Conversation>("PATCH", `/api/conversations/${encodeURIComponent(id)}`, { status });
-export const createRun = (conversationId: string, prompt: string) =>
-  req<Run>("POST", `/api/conversations/${encodeURIComponent(conversationId)}/runs`, { prompt });
+export const updateConversation = (id: string, body: Record<string, unknown>) =>
+  req<Conversation>("PATCH", `/api/conversations/${encodeURIComponent(id)}`, body);
+export const createRun = (conversationId: string, prompt: string, options?: { agent?: string; purpose?: string }) =>
+  req<Run>("POST", `/api/conversations/${encodeURIComponent(conversationId)}/runs`, { prompt, ...options });
+export const dispatchIssue = (id: string, body: { agent?: string; prompt?: string }) =>
+  req<Run>("POST", `/api/conversations/${encodeURIComponent(id)}/dispatch`, body);
+export const requestIssueChanges = (id: string, body: { feedback: string; agent?: string }) =>
+  req<Run>("POST", `/api/conversations/${encodeURIComponent(id)}/request-changes`, body);
+export const reviewIssue = (id: string, body: { agent: string; prompt?: string }) =>
+  req<Run>("POST", `/api/conversations/${encodeURIComponent(id)}/review`, body);
+export const approveIssue = (id: string) =>
+  req<Conversation>("POST", `/api/conversations/${encodeURIComponent(id)}/approve`);
+export const createDelivery = (
+  id: string,
+  body: { changeUrl: string; externalId?: string; headBranch?: string; baseBranch?: string; deploymentRequired: boolean },
+) => req<Delivery>("POST", `/api/conversations/${encodeURIComponent(id)}/delivery`, { provider: "manual", ...body });
+export const updateDelivery = (
+  id: string,
+  body: { changeUrl?: string; externalId?: string; headBranch?: string; baseBranch?: string; checkStatus?: DeliveryCheckStatus },
+) => req<Delivery>("PATCH", `/api/deliveries/${encodeURIComponent(id)}`, body);
+export const mergeDelivery = (id: string) =>
+  req<Delivery>("POST", `/api/deliveries/${encodeURIComponent(id)}/merge`, { confirmed: true });
+export const startDeliveryDeployment = (id: string) =>
+  req<Delivery>("POST", `/api/deliveries/${encodeURIComponent(id)}/deploy`, { confirmed: true });
+export const finishDeliveryDeployment = (id: string, status: "succeeded" | "failed") =>
+  req<Delivery>("POST", `/api/deliveries/${encodeURIComponent(id)}/deployment-result`, { status });
+export const cancelIssue = (id: string) =>
+  req<Conversation>("POST", `/api/conversations/${encodeURIComponent(id)}/cancel`);
 export const cancelRun = (runId: string) =>
   req<Run>("POST", `/api/runs/${encodeURIComponent(runId)}/cancel`);
 
@@ -175,7 +282,10 @@ export const resetPromptWrapper = (source: PromptSource) =>
 
 export async function* watchRun(runId: string, signal?: AbortSignal): AsyncGenerator<RunStreamFrame> {
   const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/events`, {
-    headers: { Authorization: `Bearer ${getToken()}` },
+    headers: {
+      Authorization: `Bearer ${getToken()}`,
+      ...(getActiveWorkspace() ? { "X-Harbor-Workspace": getActiveWorkspace() } : {}),
+    },
     signal,
   });
   if (!res.ok) {

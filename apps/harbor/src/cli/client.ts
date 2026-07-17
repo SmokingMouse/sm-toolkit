@@ -11,6 +11,9 @@ import type {
   ConversationStatus,
   Device,
   HarborAgent,
+  HarborRepository,
+  HarborWorkspace,
+  RepositoryMount,
   Run,
   RunStreamFrame,
   UsageRow,
@@ -20,6 +23,7 @@ export class HarborClient {
   constructor(
     private base: string,
     private tok: string,
+    private workspace?: string,
   ) {}
 
   private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -29,6 +33,7 @@ export class HarborClient {
         method,
         headers: {
           Authorization: `Bearer ${this.tok}`,
+          ...(this.workspace ? { "X-Harbor-Workspace": this.workspace } : {}),
           ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
         },
         body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -50,6 +55,26 @@ export class HarborClient {
     return this.req("GET", "/api/devices");
   }
 
+  workspaces(): Promise<HarborWorkspace[]> {
+    return this.req("GET", "/api/workspaces");
+  }
+
+  createWorkspace(body: Record<string, unknown>): Promise<HarborWorkspace> {
+    return this.req("POST", "/api/workspaces", body);
+  }
+
+  repositories(): Promise<(HarborRepository & { mounts: (RepositoryMount & { deviceName: string })[] })[]> {
+    return this.req("GET", "/api/repositories");
+  }
+
+  createRepository(body: Record<string, unknown>): Promise<HarborRepository> {
+    return this.req("POST", "/api/repositories", body);
+  }
+
+  mountRepository(id: string, body: Record<string, unknown>): Promise<HarborRepository> {
+    return this.req("POST", `/api/repositories/${encodeURIComponent(id)}/mounts`, body);
+  }
+
   agents(): Promise<HarborAgent[]> {
     return this.req("GET", "/api/agents");
   }
@@ -58,7 +83,7 @@ export class HarborClient {
     return this.req("POST", "/api/agents", body);
   }
 
-  conversations(q: { kind?: string; status?: string }): Promise<(Conversation & { agentName: string })[]> {
+  conversations(q: { kind?: string; status?: string }): Promise<(Conversation & { agentName: string | null })[]> {
     const params = new URLSearchParams();
     if (q.kind) params.set("kind", q.kind);
     if (q.status) params.set("status", q.status);
@@ -78,8 +103,32 @@ export class HarborClient {
     return this.req("PATCH", `/api/conversations/${encodeURIComponent(id)}`, { status });
   }
 
-  createRun(conversationId: string, prompt: string): Promise<Run> {
-    return this.req("POST", `/api/conversations/${encodeURIComponent(conversationId)}/runs`, { prompt });
+  updateConversation(id: string, body: Record<string, unknown>): Promise<Conversation> {
+    return this.req("PATCH", `/api/conversations/${encodeURIComponent(id)}`, body);
+  }
+
+  createRun(conversationId: string, prompt: string, options?: { agent?: string; purpose?: string }): Promise<Run> {
+    return this.req("POST", `/api/conversations/${encodeURIComponent(conversationId)}/runs`, { prompt, ...options });
+  }
+
+  dispatchIssue(id: string, agent?: string, prompt?: string): Promise<Run> {
+    return this.req("POST", `/api/conversations/${encodeURIComponent(id)}/dispatch`, { agent, prompt });
+  }
+
+  requestChanges(id: string, feedback: string, agent?: string): Promise<Run> {
+    return this.req("POST", `/api/conversations/${encodeURIComponent(id)}/request-changes`, { feedback, agent });
+  }
+
+  reviewIssue(id: string, agent: string, prompt?: string): Promise<Run> {
+    return this.req("POST", `/api/conversations/${encodeURIComponent(id)}/review`, { agent, prompt });
+  }
+
+  approveIssue(id: string): Promise<Conversation> {
+    return this.req("POST", `/api/conversations/${encodeURIComponent(id)}/approve`);
+  }
+
+  cancelIssue(id: string): Promise<Conversation> {
+    return this.req("POST", `/api/conversations/${encodeURIComponent(id)}/cancel`);
   }
 
   getRun(id: string): Promise<Run> {
@@ -128,7 +177,10 @@ export class HarborClient {
   /** SSE：手写解析（data: 行 + \n\n 分帧），done 帧后 server 关流、生成器自然结束 */
   async *watchRun(runId: string): AsyncGenerator<RunStreamFrame> {
     const res = await fetch(`${this.base}/api/runs/${encodeURIComponent(runId)}/events`, {
-      headers: { Authorization: `Bearer ${this.tok}` },
+      headers: {
+        Authorization: `Bearer ${this.tok}`,
+        ...(this.workspace ? { "X-Harbor-Workspace": this.workspace } : {}),
+      },
     });
     if (!res.ok) {
       let msg = res.statusText;
