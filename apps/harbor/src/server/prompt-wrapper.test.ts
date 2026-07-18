@@ -49,10 +49,12 @@ function fixtures(
     createdAt: 1,
     archivedAt: null,
   };
-  const run: Run = {
-    id: "run_1",
-    workspaceId: "ws_personal",
-    conversationId: conversation.id,
+    const run: Run = {
+      id: "run_1",
+      workspaceId: "ws_personal",
+      sourceType: kind === "chat" ? "chat" : "issue",
+      sourceId: conversation.id,
+      conversationId: conversation.id,
     agentId: agent.id,
     deviceId: agent.deviceId,
     repositoryId: "repository_1",
@@ -61,7 +63,9 @@ function fixtures(
     prompt: "Implement the missing page",
     purpose: "implementation",
     promptEvent,
-    triggerRef: null,
+      triggerRef: null,
+      triggerContext: {},
+      concurrencyKey: null,
     status: "queued",
     claudeSessionId: null,
     error: null,
@@ -74,15 +78,15 @@ function fixtures(
 }
 
 describe("prompt blocks", () => {
-  test("latest migration exposes eight Mew-style blocks and composes issue context + assignment", () => {
+  test("latest migration exposes Mew-style blocks and composes issue context + assignment", () => {
     const db = openDb(":memory:");
     const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version;
-    expect(version).toBe(11);
+    expect(version).toBe(12);
     const store = new HarborStore(db);
     const input = fixtures();
     const rendered = renderRunPrompt(store, input);
 
-    expect(listPromptBlockConfigs(store, "ws_personal")).toHaveLength(8);
+    expect(listPromptBlockConfigs(store, "ws_personal")).toHaveLength(9);
     expect(rendered).toContain("Issue Reference");
     expect(rendered).toContain("Assignment");
     expect(rendered).toContain("Implement the missing page");

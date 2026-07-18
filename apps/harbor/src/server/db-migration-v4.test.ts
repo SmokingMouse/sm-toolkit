@@ -7,7 +7,7 @@ import { openDb } from "./db.js";
 import { renderRunPrompt } from "./prompt-wrapper.js";
 import { HarborStore } from "./store.js";
 
-test("legacy database migrates through v11 without losing conversations, runs, or prompts", () => {
+test("legacy database migrates through latest schema without losing conversations, runs, or prompts", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v4-"));
   const path = join(dir, "legacy.db");
   try {
@@ -50,6 +50,9 @@ test("legacy database migrates through v11 without losing conversations, runs, o
         target_conversation_id TEXT, notify_chat_id TEXT, enabled INTEGER NOT NULL DEFAULT 1,
         last_fired_at INTEGER
       );
+      CREATE TABLE automation_log (
+        automation_id TEXT NOT NULL, kind TEXT NOT NULL, ts INTEGER NOT NULL, run_id TEXT, note TEXT
+      );
       CREATE TABLE prompt_templates (
         source TEXT PRIMARY KEY CHECK (source IN ('issue','chat','automation')),
         enabled INTEGER NOT NULL DEFAULT 1,
@@ -66,17 +69,19 @@ test("legacy database migrates through v11 without losing conversations, runs, o
     legacy.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(11);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(12);
     expect(
       migrated.query<{ agent_id: string | null; description: string | null; priority: string; status: string }, []>(
         "SELECT agent_id, description, priority, status FROM conversations WHERE id = 'conversation_1'",
       ).get(),
     ).toEqual({ agent_id: "agent_1", description: null, priority: "medium", status: "review" });
     expect(
-      migrated.query<{ purpose: string; prompt: string; prompt_event: string; trigger_ref: string | null }, []>(
-        "SELECT purpose, prompt, prompt_event, trigger_ref FROM runs WHERE id = 'run_1'",
+      migrated.query<{ source_type: string; source_id: string; purpose: string; prompt: string; prompt_event: string; trigger_ref: string | null }, []>(
+        "SELECT source_type, source_id, purpose, prompt, prompt_event, trigger_ref FROM runs WHERE id = 'run_1'",
       ).get(),
     ).toEqual({
+      source_type: "issue",
+      source_id: "conversation_1",
       purpose: "implementation",
       prompt: "legacy prompt",
       prompt_event: "event.issue.message_created",
@@ -129,8 +134,10 @@ test("legacy database migrates through v11 without losing conversations, runs, o
     );
     migrated.run(
       `INSERT INTO runs
-       (id, conversation_id, agent_id, device_id, prompt, purpose, status, queued_at)
-       VALUES ('triage_1', 'draft_1', 'agent_1', 'device_1', 'triage me', 'triage', 'queued', 10)`,
+       (id, workspace_id, source_type, source_id, conversation_id, agent_id, device_id,
+        prompt, purpose, prompt_event, status, queued_at)
+       VALUES ('triage_1', 'ws_personal', 'issue', 'draft_1', 'draft_1', 'agent_1', 'device_1',
+        'triage me', 'triage', 'event.issue.message_created', 'queued', 10)`,
     );
     expect(migrated.query<{ kind: string }, []>("SELECT kind FROM conversations WHERE id = 'draft_1'").get()).toEqual({ kind: "issue_draft" });
     expect(migrated.query<{ purpose: string }, []>("SELECT purpose FROM runs WHERE id = 'triage_1'").get()).toEqual({ purpose: "triage" });
@@ -143,7 +150,7 @@ test("legacy database migrates through v11 without losing conversations, runs, o
   }
 });
 
-test("v11 upgrades an already-running v9 database and preserves unbound Agents", () => {
+test("latest schema upgrades an already-running v9 database and preserves unbound Agents", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v9-"));
   const path = join(dir, "v9.db");
   try {
@@ -184,6 +191,9 @@ test("v11 upgrades an already-running v9 database and preserves unbound Agents",
         target_conversation_id TEXT, notify_chat_id TEXT, enabled INTEGER NOT NULL DEFAULT 1,
         last_fired_at INTEGER
       );
+      CREATE TABLE automation_log (
+        automation_id TEXT NOT NULL, kind TEXT NOT NULL, ts INTEGER NOT NULL, run_id TEXT, note TEXT
+      );
       CREATE TABLE runs (
         id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id), conversation_id TEXT NOT NULL,
         agent_id TEXT NOT NULL, device_id TEXT NOT NULL, repository_id TEXT REFERENCES repositories(id),
@@ -213,7 +223,7 @@ test("v11 upgrades an already-running v9 database and preserves unbound Agents",
     v9.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(11);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(12);
     const agent = migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM agents WHERE id = 'agent_1'").get();
     expect(agent?.repository_id).toStartWith("repo_unconfigured_");
     expect(migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM conversations WHERE id = 'conversation_1'").get()).toEqual(agent);

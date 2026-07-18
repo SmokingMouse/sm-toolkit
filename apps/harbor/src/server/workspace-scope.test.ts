@@ -242,7 +242,7 @@ describe("Repository mount execution snapshots", () => {
     const coordinator = new RunCoordinator(store, new RunBus(), { isOnline: () => false, send: () => true }, 1);
     const service = new AutomationService(store, coordinator);
 
-    (service as unknown as { fire: (id: string) => void }).fire(automation.id);
+    (service as unknown as { fire: (id: string) => void }).fire(automation.triggers[0]!.id);
 
     const conversation = store.listConversations({ workspaceId: "ws_personal" }).find((item) => item.originRef === automation.id);
     expect(conversation?.repositoryId).toBe(nextRepository.id);

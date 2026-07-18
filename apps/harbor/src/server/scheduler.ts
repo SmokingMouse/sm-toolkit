@@ -9,6 +9,7 @@
 
 import type { Cost } from "@sm/agent";
 import type {
+  Automation,
   Conversation,
   HarborAgent,
   HarborSkill,
@@ -54,12 +55,17 @@ export class RunCoordinator {
     purpose: RunPurpose = "implementation",
     promptEvent?: PromptEventBlockKey,
     triggerRef?: string | null,
+    options: {
+      triggerContext?: Record<string, unknown>;
+      concurrencyKey?: string | null;
+      allowQueuedBehindConversation?: boolean;
+    } = {},
   ): Run {
     if (conv.workspaceId !== agent.workspaceId) {
       throw new Error(`Agent "${agent.name}" 不属于当前 Workspace，不能跨作用域执行`);
     }
     const active = this.store.activeRunForConversation(conv.id);
-    if (active) {
+    if (active && !options.allowQueuedBehindConversation) {
       throw new Error(
         `conversation 已有进行中的 run（${active.id}，${active.status}）——同一会话串行执行，等它结束或先取消`,
       );
@@ -130,9 +136,53 @@ export class RunCoordinator {
         purpose,
         promptEvent: event,
         triggerRef: triggerRef ?? conv.originRef,
+        triggerContext: options.triggerContext,
+        concurrencyKey: options.concurrencyKey,
       },
       Date.now(),
     );
+    this.pump(agent.deviceId);
+    return this.store.getRun(run.id)!;
+  }
+
+  /** Mew 式 Automation 直跑：source=automation，不创建伪 Issue/Chat。 */
+  enqueueAutomationRun(
+    automation: Automation,
+    agent: HarborAgent,
+    prompt: string,
+    promptEvent: PromptEventBlockKey,
+    triggerContext: Record<string, unknown>,
+  ): Run {
+    if (agent.workspaceId !== automation.workspaceId) {
+      throw new Error("agent 与 automation 不在同一 Workspace，不能执行");
+    }
+    if (agent.archivedAt) throw new Error("agent 已归档，不能执行");
+    if (agent.isolation === "worktree") {
+      throw new Error("Automation 直跑当前要求 Agent isolation=none；需要 worktree 时请选择 Chat/Issue 输出");
+    }
+    const repository = this.store.getRepository(agent.repositoryId);
+    if (!repository || repository.archivedAt) throw new Error("Automation Agent 的 Repository 不存在或已归档");
+    const mount = this.store.getRepositoryMountForDevice(repository.id, agent.deviceId);
+    if (!mount) {
+      throw new Error(`Repository "${repository.name}" 没有挂载到 Agent 设备`);
+    }
+    const run = this.store.createRun({
+      workspaceId: automation.workspaceId,
+      sourceType: "automation",
+      sourceId: automation.id,
+      conversationId: null,
+      agentId: agent.id,
+      deviceId: agent.deviceId,
+      repositoryId: repository.id,
+      repositoryMountId: mount.id,
+      executionRoot: mount.path,
+      prompt,
+      purpose: "implementation",
+      promptEvent,
+      triggerRef: automation.id,
+      triggerContext,
+      concurrencyKey: `automation:${automation.id}`,
+    }, Date.now());
     this.pump(agent.deviceId);
     return this.store.getRun(run.id)!;
   }
@@ -144,7 +194,7 @@ export class RunCoordinator {
     if (run.status === "queued") {
       this.store.finishRun(runId, "canceled", { claudeSessionId: null, cost: null, error: null }, Date.now());
       const finished = this.store.getRun(runId)!;
-      const conv = this.store.getConversation(run.conversationId);
+      const conv = run.conversationId ? this.store.getConversation(run.conversationId) : null;
       if (
         conv?.kind === "issue" &&
         run.purpose === "implementation" &&
@@ -155,7 +205,7 @@ export class RunCoordinator {
         transitionConversation(this.store, conv, "todo", "system", Date.now());
       }
       this.bus.emitDone(finished);
-      this.onRunFinished?.(finished, this.store.getConversation(run.conversationId));
+      this.onRunFinished?.(finished, run.conversationId ? this.store.getConversation(run.conversationId) : null);
       return finished;
     }
     if (run.status === "running") {
@@ -174,12 +224,12 @@ export class RunCoordinator {
       const now = Date.now();
 
       const agent = this.store.getAgent(run.agentId);
-      const conv = this.store.getConversation(run.conversationId);
-      if (!agent || !conv) {
+      const conv = run.conversationId ? this.store.getConversation(run.conversationId) : null;
+      if (!agent || (!conv && run.sourceType !== "automation")) {
         this.store.finishRun(
           run.id,
           "failed",
-          { claudeSessionId: null, cost: null, error: "agent 或 conversation 已不存在，无法下发" },
+          { claudeSessionId: null, cost: null, error: "agent 或 Run source 已不存在，无法下发" },
           now,
         );
         this.bus.emitDone(this.store.getRun(run.id)!);
@@ -196,17 +246,17 @@ export class RunCoordinator {
         permission: run.purpose === "triage" ? "readonly" : agent.permission,
         systemPrompt: composeAgentSystemPrompt(agent.instruction, this.store.listSkillsForAgent(agent.id)),
         resume:
-          (run.purpose === "implementation" || run.purpose === "triage") && conv.agentId === agent.id
+          conv && (run.purpose === "implementation" || run.purpose === "triage") && conv.agentId === agent.id
             ? conv.claudeSessionId
             : null,
-        conversationId: conv.id,
+        conversationId: conv?.id ?? null,
         isolation: run.purpose === "triage" ? "none" : agent.isolation,
-        worktreePath: run.purpose === "triage" ? null : conv.worktreePath,
+        worktreePath: run.purpose === "triage" ? null : conv?.worktreePath ?? null,
       };
       const sent = this.transport.send(deviceId, { type: "run_start", runId: run.id, spec });
       if (!sent) return; // 连接实际不可用，留在队列等下次上线
       this.store.markRunRunning(run.id, now);
-      if (conv.kind === "issue" && run.purpose === "implementation" && conv.status !== "doing") {
+      if (conv?.kind === "issue" && run.purpose === "implementation" && conv.status !== "doing") {
         transitionConversation(this.store, conv, "doing", "system", now);
       }
     }
@@ -239,7 +289,7 @@ export class RunCoordinator {
       now,
     );
 
-    const conv = this.store.getConversation(run.conversationId);
+    const conv = run.conversationId ? this.store.getConversation(run.conversationId) : null;
     if (conv) {
       if (
         msg.claudeSessionId &&
@@ -260,7 +310,7 @@ export class RunCoordinator {
 
     const finished = this.store.getRun(msg.runId)!;
     this.bus.emitDone(finished);
-    this.onRunFinished?.(finished, this.store.getConversation(run.conversationId));
+    this.onRunFinished?.(finished, run.conversationId ? this.store.getConversation(run.conversationId) : null);
     this.pump(run.deviceId);
   }
 
@@ -324,13 +374,13 @@ export class RunCoordinator {
         },
         now,
       );
-      const conv = this.store.getConversation(run.conversationId);
+      const conv = run.conversationId ? this.store.getConversation(run.conversationId) : null;
       if (conv && conv.kind === "issue") {
         transitionConversation(this.store, conv, "todo", "system", now);
       }
       const finished = this.store.getRun(run.id)!;
       this.bus.emitDone(finished);
-      this.onRunFinished?.(finished, this.store.getConversation(run.conversationId));
+      this.onRunFinished?.(finished, run.conversationId ? this.store.getConversation(run.conversationId) : null);
     }
     // 设备离线期间人工终结的 issue：worktree 收尾消息已丢，这里补发
     for (const { conversation } of this.store.listWorktreeCleanupsForDevice(deviceId)) {

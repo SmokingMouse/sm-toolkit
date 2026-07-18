@@ -91,6 +91,7 @@ export class Executor {
       let effectiveDir = spec.repositoryRoot;
       if (spec.isolation === "worktree") {
         if (!spec.repositoryRoot) throw new Error("worktree isolation 需要 Repository mount");
+        if (!spec.conversationId) throw new Error("worktree isolation 需要 Issue/Chat Conversation source");
         effectiveDir = ensureWorktree(spec.repositoryRoot, spec.conversationId, spec.worktreePath);
         if (effectiveDir !== spec.worktreePath) {
           this.send({ type: "worktree_ready", runId, conversationId: spec.conversationId, path: effectiveDir });

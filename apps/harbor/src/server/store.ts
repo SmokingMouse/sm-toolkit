@@ -12,6 +12,11 @@ import type {
   Automation,
   AutomationLogRow,
   AutomationMode,
+  AutomationOutputMode,
+  AutomationOverlapMode,
+  AutomationTrigger,
+  AutomationTriggerType,
+  AutomationWebhookFilter,
   BackendKind,
   Conversation,
   ConversationKind,
@@ -38,6 +43,7 @@ import type {
   Run,
   RunEventRow,
   RunPurpose,
+  RunSourceType,
   RunStatus,
   RepositoryMount,
   SkillSource,
@@ -138,7 +144,9 @@ interface DeliveryEventRow {
 interface RunRow {
   id: string;
   workspace_id: string;
-  conversation_id: string;
+  source_type: string;
+  source_id: string;
+  conversation_id: string | null;
   agent_id: string;
   device_id: string;
   repository_id: string | null;
@@ -148,6 +156,8 @@ interface RunRow {
   purpose: string;
   prompt_event: string;
   trigger_ref: string | null;
+  trigger_context: string;
+  concurrency_key: string | null;
   status: string;
   claude_session_id: string | null;
   error: string | null;
@@ -187,13 +197,30 @@ interface AutomationRow {
   name: string;
   agent_id: string;
   repository_id: string | null;
-  cron: string;
   prompt: string;
-  mode: string;
+  output_mode: string;
+  overlap_mode: string;
   target_conversation_id: string | null;
   notify_chat_id: string | null;
   enabled: number;
   last_fired_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface AutomationTriggerRow {
+  id: string;
+  automation_id: string;
+  type: string;
+  enabled: number;
+  cron: string | null;
+  provider: string | null;
+  events: string;
+  filters: string;
+  secret_hash: string | null;
+  last_fired_at: number | null;
+  created_at: number;
+  updated_at: number;
 }
 
 interface PromptBlockRow {
@@ -399,6 +426,8 @@ function toRun(r: RunRow): Run {
   return {
     id: r.id,
     workspaceId: r.workspace_id,
+    sourceType: r.source_type as RunSourceType,
+    sourceId: r.source_id,
     conversationId: r.conversation_id,
     agentId: r.agent_id,
     deviceId: r.device_id,
@@ -409,6 +438,8 @@ function toRun(r: RunRow): Run {
     purpose: r.purpose as RunPurpose,
     promptEvent: r.prompt_event as PromptEventBlockKey,
     triggerRef: r.trigger_ref,
+    triggerContext: parseJsonRecord(r.trigger_context),
+    concurrencyKey: r.concurrency_key,
     status: r.status as RunStatus,
     claudeSessionId: r.claude_session_id,
     error: r.error,
@@ -444,21 +475,64 @@ function toApproval(r: ApprovalRow): Approval {
   };
 }
 
-function toAutomation(r: AutomationRow): Automation {
+function toAutomationTrigger(r: AutomationTriggerRow): AutomationTrigger {
+  return {
+    id: r.id,
+    automationId: r.automation_id,
+    type: r.type as AutomationTriggerType,
+    enabled: r.enabled === 1,
+    cron: r.cron,
+    provider: r.provider,
+    events: parseJsonArray<string>(r.events),
+    filters: parseJsonArray<AutomationWebhookFilter>(r.filters),
+    webhookPath: r.type === "webhook" ? `/hooks/automations/${r.id}` : null,
+    lastFiredAt: r.last_fired_at,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+function toAutomation(r: AutomationRow, triggers: AutomationTrigger[]): Automation {
+  const outputMode = r.output_mode as AutomationOutputMode;
   return {
     id: r.id,
     workspaceId: r.workspace_id,
     name: r.name,
     agentId: r.agent_id,
     repositoryId: r.repository_id,
-    cron: r.cron,
     prompt: r.prompt,
-    mode: r.mode as AutomationMode,
+    outputMode,
+    overlapMode: r.overlap_mode as AutomationOverlapMode,
     targetConversationId: r.target_conversation_id,
     notifyChatId: r.notify_chat_id,
     enabled: r.enabled === 1,
     lastFiredAt: r.last_fired_at,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    triggers,
+    cron: triggers.find((trigger) => trigger.type === "schedule")?.cron ?? null,
+    mode: outputMode === "append" ? "append" : "new_issue",
   };
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function parseJsonArray<T>(value: string): T[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed as T[] : [];
+  } catch {
+    return [];
+  }
 }
 
 // ── Store ───────────────────────────────────────────────
@@ -1306,7 +1380,9 @@ export class HarborStore {
   createRun(
     r: {
       workspaceId?: string;
-      conversationId: string;
+      sourceType?: RunSourceType;
+      sourceId?: string;
+      conversationId?: string | null;
       agentId: string;
       deviceId: string;
       repositoryId?: string | null;
@@ -1316,21 +1392,35 @@ export class HarborStore {
       purpose?: RunPurpose;
       promptEvent: PromptEventBlockKey;
       triggerRef?: string | null;
+      triggerContext?: Record<string, unknown>;
+      concurrencyKey?: string | null;
     },
     now: number,
   ): Run {
     const id = newId("run");
-    const conversation = this.getConversation(r.conversationId);
+    const conversation = r.conversationId ? this.getConversation(r.conversationId) : null;
     const workspaceId = r.workspaceId ?? conversation?.workspaceId ?? DEFAULT_WORKSPACE_ID;
+    const sourceType = r.sourceType ?? (conversation?.kind === "chat" ? "chat" : "issue");
+    const sourceId = r.sourceId ?? conversation?.id;
+    if (!sourceId) throw new Error("Run sourceId 不能为空");
+    if (sourceType === "automation" && r.conversationId) {
+      throw new Error("Automation-source Run 不能绑定 Conversation");
+    }
+    if (sourceType !== "automation" && !conversation) {
+      throw new Error(`${sourceType}-source Run 必须绑定 Conversation`);
+    }
     this.db.run(
       `INSERT INTO runs
-       (id, workspace_id, conversation_id, agent_id, device_id, repository_id, repository_mount_id, execution_root,
-        prompt, purpose, prompt_event, trigger_ref, status, queued_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'queued',?)`,
+       (id, workspace_id, source_type, source_id, conversation_id, agent_id, device_id, repository_id,
+        repository_mount_id, execution_root, prompt, purpose, prompt_event, trigger_ref, trigger_context,
+        concurrency_key, status, queued_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?)`,
       [
         id,
         workspaceId,
-        r.conversationId,
+        sourceType,
+        sourceId,
+        r.conversationId ?? null,
         r.agentId,
         r.deviceId,
         r.repositoryId ?? null,
@@ -1340,10 +1430,14 @@ export class HarborStore {
         r.purpose ?? "implementation",
         r.promptEvent,
         r.triggerRef ?? null,
+        JSON.stringify(r.triggerContext ?? {}),
+        r.concurrencyKey ?? null,
         now,
       ],
     );
-    this.db.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, r.conversationId]);
+    if (r.conversationId) {
+      this.db.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, r.conversationId]);
+    }
     return this.getRun(id)!;
   }
 
@@ -1367,6 +1461,15 @@ export class HarborStore {
       .map(toRun);
   }
 
+  listRunsBySource(sourceType: RunSourceType, sourceId: string): Run[] {
+    return this.db
+      .query<RunRow, [string, string]>(
+        "SELECT * FROM runs WHERE source_type = ? AND source_id = ? ORDER BY queued_at",
+      )
+      .all(sourceType, sourceId)
+      .map(toRun);
+  }
+
   latestRunForConversation(conversationId: string): Run | null {
     const r = this.db
       .query<RunRow, [string]>("SELECT * FROM runs WHERE conversation_id = ? ORDER BY queued_at DESC LIMIT 1")
@@ -1378,7 +1481,15 @@ export class HarborStore {
   oldestQueuedForDevice(deviceId: string): Run | null {
     const r = this.db
       .query<RunRow, [string]>(
-        "SELECT * FROM runs WHERE device_id = ? AND status = 'queued' ORDER BY queued_at LIMIT 1",
+        `SELECT queued.* FROM runs queued
+         WHERE queued.device_id = ? AND queued.status = 'queued'
+           AND (
+             queued.concurrency_key IS NULL OR NOT EXISTS (
+               SELECT 1 FROM runs running
+               WHERE running.status = 'running' AND running.concurrency_key = queued.concurrency_key
+             )
+           )
+         ORDER BY queued.queued_at LIMIT 1`,
       )
       .get(deviceId);
     return r ? toRun(r) : null;
@@ -1407,6 +1518,15 @@ export class HarborStore {
         "SELECT * FROM runs WHERE conversation_id = ? AND status IN ('queued','running') LIMIT 1",
       )
       .get(conversationId);
+    return r ? toRun(r) : null;
+  }
+
+  activeRunForTriggerRef(triggerRef: string): Run | null {
+    const r = this.db
+      .query<RunRow, [string]>(
+        "SELECT * FROM runs WHERE trigger_ref = ? AND status IN ('queued','running') ORDER BY queued_at LIMIT 1",
+      )
+      .get(triggerRef);
     return r ? toRun(r) : null;
   }
 
@@ -1586,38 +1706,58 @@ export class HarborStore {
       name: string;
       agentId: string;
       repositoryId?: string | null;
-      cron: string;
       prompt: string;
-      mode: AutomationMode;
+      outputMode?: AutomationOutputMode;
+      overlapMode?: AutomationOverlapMode;
+      /** 旧调用兼容：new_issue → issue。 */
+      mode?: AutomationMode;
+      /** 旧调用兼容：自动创建一个 schedule Trigger。 */
+      cron?: string;
+      triggers?: {
+        type: AutomationTriggerType;
+        cron?: string | null;
+        provider?: string | null;
+        events?: string[];
+        filters?: AutomationWebhookFilter[];
+        secretHash?: string | null;
+      }[];
       targetConversationId?: string | null;
       notifyChatId?: string | null;
     },
-    _now: number,
+    now: number,
   ): Automation {
     const id = newId("automation");
-    this.db.run(
-      `INSERT INTO automations
-       (id, workspace_id, name, agent_id, repository_id, cron, prompt, mode, target_conversation_id, notify_chat_id, enabled)
-       VALUES (?,?,?,?,?,?,?,?,?,?,1)`,
-      [
-        id,
-        a.workspaceId ?? DEFAULT_WORKSPACE_ID,
-        a.name,
-        a.agentId,
-        a.repositoryId ?? null,
-        a.cron,
-        a.prompt,
-        a.mode,
-        a.targetConversationId ?? null,
-        a.notifyChatId ?? null,
-      ],
-    );
+    const outputMode = a.outputMode ?? (a.mode === "append" ? "append" : "issue");
+    const triggers = a.triggers ?? (a.cron ? [{ type: "schedule" as const, cron: a.cron }] : []);
+    this.db.transaction(() => {
+      this.db.run(
+        `INSERT INTO automations
+         (id, workspace_id, name, agent_id, repository_id, prompt, output_mode, overlap_mode,
+          target_conversation_id, notify_chat_id, enabled, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?)`,
+        [
+          id,
+          a.workspaceId ?? DEFAULT_WORKSPACE_ID,
+          a.name,
+          a.agentId,
+          a.repositoryId ?? null,
+          a.prompt,
+          outputMode,
+          a.overlapMode ?? "skip",
+          a.targetConversationId ?? null,
+          a.notifyChatId ?? null,
+          now,
+          now,
+        ],
+      );
+      for (const trigger of triggers) this.insertAutomationTrigger(id, trigger, now);
+    })();
     return this.getAutomation(id)!;
   }
 
   getAutomation(id: string): Automation | null {
     const r = this.db.query<AutomationRow, [string]>("SELECT * FROM automations WHERE id = ?").get(id);
-    return r ? toAutomation(r) : null;
+    return r ? toAutomation(r, this.listAutomationTriggers(id)) : null;
   }
 
   resolveAutomationPrefix(prefix: string, workspaceId?: string): Automation | null {
@@ -1629,52 +1769,182 @@ export class HarborStore {
         "SELECT * FROM automations WHERE id LIKE ? || '%' OR name = ? LIMIT 2",
       ).all(prefix, prefix);
     if (rows.length > 1) throw new Error(`automation "${prefix}" 有多个匹配，请给更长前缀或用完整 id`);
-    return rows[0] ? toAutomation(rows[0]) : null;
+    return rows[0] ? toAutomation(rows[0], this.listAutomationTriggers(rows[0].id)) : null;
   }
 
   listAutomations(workspaceId?: string): Automation[] {
-    if (!workspaceId) return this.db.query<AutomationRow, []>("SELECT * FROM automations ORDER BY name").all().map(toAutomation);
-    return this.db
+    const rows = !workspaceId
+      ? this.db.query<AutomationRow, []>("SELECT * FROM automations ORDER BY name").all()
+      : this.db
       .query<AutomationRow, [string]>("SELECT * FROM automations WHERE workspace_id = ? ORDER BY name")
-      .all(workspaceId)
-      .map(toAutomation);
+      .all(workspaceId);
+    return rows.map((row) => toAutomation(row, this.listAutomationTriggers(row.id)));
   }
 
   setAutomationEnabled(id: string, enabled: boolean): void {
-    this.db.run("UPDATE automations SET enabled = ? WHERE id = ?", [enabled ? 1 : 0, id]);
+    this.db.run("UPDATE automations SET enabled = ?, updated_at = ? WHERE id = ?", [enabled ? 1 : 0, Date.now(), id]);
   }
 
   deleteAutomation(id: string): void {
-    this.db.run("DELETE FROM automations WHERE id = ?", [id]);
+    this.db.transaction(() => {
+      this.db.run("DELETE FROM automation_log WHERE automation_id = ?", [id]);
+      this.db.run("DELETE FROM automations WHERE id = ?", [id]);
+    })();
   }
 
   markAutomationFired(id: string, now: number): void {
-    this.db.run("UPDATE automations SET last_fired_at = ? WHERE id = ?", [now, id]);
+    this.db.run("UPDATE automations SET last_fired_at = ?, updated_at = ? WHERE id = ?", [now, now, id]);
   }
 
-  appendAutomationLog(l: { automationId: string; kind: "fired" | "missed"; runId?: string | null; note?: string | null }, now: number): void {
-    this.db.run("INSERT INTO automation_log (automation_id, kind, ts, run_id, note) VALUES (?,?,?,?,?)", [
+  appendAutomationLog(
+    l: {
+      automationId: string;
+      kind: AutomationLogRow["kind"];
+      runId?: string | null;
+      triggerId?: string | null;
+      eventId?: string | null;
+      note?: string | null;
+    },
+    now: number,
+  ): void {
+    this.db.run(
+      `INSERT INTO automation_log
+       (automation_id, kind, ts, run_id, trigger_id, event_id, note) VALUES (?,?,?,?,?,?,?)`, [
       l.automationId,
       l.kind,
       now,
       l.runId ?? null,
+      l.triggerId ?? null,
+      l.eventId ?? null,
       l.note ?? null,
     ]);
   }
 
   listAutomationLog(automationId: string, limit = 50): AutomationLogRow[] {
     return this.db
-      .query<{ automation_id: string; kind: string; ts: number; run_id: string | null; note: string | null }, [string, number]>(
+      .query<{
+        automation_id: string;
+        kind: string;
+        ts: number;
+        run_id: string | null;
+        trigger_id: string | null;
+        event_id: string | null;
+        note: string | null;
+      }, [string, number]>(
         "SELECT * FROM automation_log WHERE automation_id = ? ORDER BY ts DESC LIMIT ?",
       )
       .all(automationId, limit)
       .map((r) => ({
         automationId: r.automation_id,
-        kind: r.kind as "fired" | "missed",
+        kind: r.kind as AutomationLogRow["kind"],
         ts: r.ts,
         runId: r.run_id,
+        triggerId: r.trigger_id,
+        eventId: r.event_id,
         note: r.note,
       }));
+  }
+
+  createAutomationTrigger(
+    automationId: string,
+    input: {
+      type: AutomationTriggerType;
+      cron?: string | null;
+      provider?: string | null;
+      events?: string[];
+      filters?: AutomationWebhookFilter[];
+      secretHash?: string | null;
+    },
+    now: number,
+  ): AutomationTrigger {
+    const id = this.insertAutomationTrigger(automationId, input, now);
+    return this.getAutomationTrigger(id)!;
+  }
+
+  private insertAutomationTrigger(
+    automationId: string,
+    input: {
+      type: AutomationTriggerType;
+      cron?: string | null;
+      provider?: string | null;
+      events?: string[];
+      filters?: AutomationWebhookFilter[];
+      secretHash?: string | null;
+    },
+    now: number,
+  ): string {
+    const id = newId("automationTrigger");
+    this.db.run(
+      `INSERT INTO automation_triggers
+       (id, automation_id, type, cron, provider, events, filters, secret_hash, last_fired_at, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,NULL,?,?)`,
+      [
+        id,
+        automationId,
+        input.type,
+        input.type === "schedule" ? input.cron ?? null : null,
+        input.type === "webhook" ? input.provider ?? "generic" : null,
+        JSON.stringify(input.events ?? []),
+        JSON.stringify(input.filters ?? []),
+        input.type === "webhook" ? input.secretHash ?? null : null,
+        now,
+        now,
+      ],
+    );
+    return id;
+  }
+
+  getAutomationTrigger(id: string): AutomationTrigger | null {
+    const row = this.db
+      .query<AutomationTriggerRow, [string]>("SELECT * FROM automation_triggers WHERE id = ?")
+      .get(id);
+    return row ? toAutomationTrigger(row) : null;
+  }
+
+  getAutomationTriggerSecretHash(id: string): string | null {
+    const row = this.db
+      .query<{ secret_hash: string | null }, [string]>(
+        "SELECT secret_hash FROM automation_triggers WHERE id = ? AND type = 'webhook'",
+      )
+      .get(id);
+    return row?.secret_hash ?? null;
+  }
+
+  listAutomationTriggers(automationId: string): AutomationTrigger[] {
+    return this.db
+      .query<AutomationTriggerRow, [string]>(
+        "SELECT * FROM automation_triggers WHERE automation_id = ? ORDER BY created_at, id",
+      )
+      .all(automationId)
+      .map(toAutomationTrigger);
+  }
+
+  setAutomationTriggerEnabled(id: string, enabled: boolean, now: number): void {
+    this.db.run("UPDATE automation_triggers SET enabled = ?, updated_at = ? WHERE id = ?", [enabled ? 1 : 0, now, id]);
+  }
+
+  markAutomationTriggerFired(id: string, now: number): void {
+    this.db.run("UPDATE automation_triggers SET last_fired_at = ?, updated_at = ? WHERE id = ?", [now, now, id]);
+  }
+
+  deleteAutomationTrigger(id: string): void {
+    this.db.run("DELETE FROM automation_triggers WHERE id = ?", [id]);
+  }
+
+  /** deliveryId 在同一 webhook Trigger 下只接收一次；true 表示本次首次登记。 */
+  recordAutomationWebhookDelivery(triggerId: string, deliveryId: string, now: number): boolean {
+    const result = this.db.run(
+      `INSERT OR IGNORE INTO automation_webhook_deliveries (trigger_id, delivery_id, received_at)
+       VALUES (?,?,?)`,
+      [triggerId, deliveryId, now],
+    );
+    return result.changes === 1;
+  }
+
+  hasAutomationWebhookDelivery(triggerId: string, deliveryId: string): boolean {
+    return Boolean(this.db.query<{ ok: number }, [string, string]>(
+      "SELECT 1 AS ok FROM automation_webhook_deliveries WHERE trigger_id = ? AND delivery_id = ?",
+    ).get(triggerId, deliveryId));
   }
 
   // ---- chat_bindings（飞书群 → 默认 agent） ----

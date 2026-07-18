@@ -257,7 +257,7 @@ export const decideApproval = (id: string, behavior: "allow" | "deny") =>
 
 export const listAutomations = () => req<AutomationWithAgent[]>("GET", "/api/automations");
 export const createAutomation = (body: Record<string, unknown>) =>
-  req<Automation>("POST", "/api/automations", body);
+  req<Automation & { webhookSecret?: string }>("POST", "/api/automations", body);
 export const setAutomationEnabled = (id: string, enabled: boolean) =>
   req<Automation>("PATCH", `/api/automations/${encodeURIComponent(id)}`, { enabled });
 export const runAutomation = (id: string) =>

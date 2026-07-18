@@ -11,6 +11,7 @@ const PREFIXES = {
   conversation: "c",
   run: "r",
   automation: "auto",
+  automationTrigger: "trg",
   approval: "ap",
   skill: "sk",
   delivery: "del",

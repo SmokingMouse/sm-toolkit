@@ -556,6 +556,166 @@ const MIGRATIONS: string[] = [
   DROP TABLE workspace_prompt_templates;
   DROP TABLE prompt_templates;
   `,
+  // v12 —— Mew parity P0：Run Source 一等化 + Automation Trigger/Output/Overlap
+  `
+  CREATE TABLE runs_v12 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    source_type TEXT NOT NULL CHECK (source_type IN ('issue','chat','automation')),
+    source_id TEXT NOT NULL,
+    conversation_id TEXT REFERENCES conversations(id),
+    agent_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    repository_id TEXT REFERENCES repositories(id),
+    repository_mount_id TEXT REFERENCES repository_mounts(id),
+    execution_root TEXT,
+    prompt TEXT NOT NULL,
+    purpose TEXT NOT NULL DEFAULT 'implementation' CHECK (purpose IN ('implementation','triage','review','verification')),
+    prompt_event TEXT NOT NULL CHECK (prompt_event IN (
+      'event.issue.assigned','event.issue.mentioned','event.issue.message_created',
+      'event.chat.message_created','event.automation.schedule','event.automation.manual','event.automation.webhook'
+    )),
+    trigger_ref TEXT,
+    trigger_context TEXT NOT NULL DEFAULT '{}',
+    concurrency_key TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    claude_session_id TEXT,
+    error TEXT,
+    cost_usd REAL,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cached_tokens INTEGER,
+    queued_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    CHECK (
+      (source_type = 'automation' AND conversation_id IS NULL) OR
+      (source_type IN ('issue','chat') AND conversation_id IS NOT NULL AND source_id = conversation_id)
+    )
+  );
+  INSERT INTO runs_v12
+    (id, workspace_id, source_type, source_id, conversation_id, agent_id, device_id,
+     repository_id, repository_mount_id, execution_root, prompt, purpose, prompt_event, trigger_ref,
+     trigger_context, concurrency_key, status, claude_session_id, error, cost_usd, input_tokens,
+     output_tokens, cached_tokens, queued_at, started_at, finished_at)
+    SELECT r.id, r.workspace_id,
+      CASE WHEN c.kind = 'chat' THEN 'chat' ELSE 'issue' END,
+      r.conversation_id, r.conversation_id, r.agent_id, r.device_id,
+      r.repository_id, r.repository_mount_id, r.execution_root, r.prompt, r.purpose, r.prompt_event,
+      r.trigger_ref, '{}', NULL, r.status, r.claude_session_id, r.error, r.cost_usd, r.input_tokens,
+      r.output_tokens, r.cached_tokens, r.queued_at, r.started_at, r.finished_at
+    FROM runs r JOIN conversations c ON c.id = r.conversation_id;
+  DROP TABLE runs;
+  ALTER TABLE runs_v12 RENAME TO runs;
+  CREATE INDEX idx_runs_device_status ON runs(device_id, status);
+  CREATE INDEX idx_runs_conversation ON runs(conversation_id);
+  CREATE INDEX idx_runs_workspace ON runs(workspace_id, queued_at);
+  CREATE INDEX idx_runs_source ON runs(source_type, source_id, queued_at);
+  CREATE INDEX idx_runs_trigger_ref ON runs(trigger_ref, status, queued_at);
+  CREATE INDEX idx_runs_concurrency ON runs(concurrency_key, status, queued_at);
+
+  CREATE TABLE automation_legacy_crons_v12 (
+    automation_id TEXT PRIMARY KEY, cron TEXT NOT NULL, last_fired_at INTEGER
+  );
+  INSERT INTO automation_legacy_crons_v12 SELECT id, cron, last_fired_at FROM automations;
+
+  CREATE TABLE automations_v12 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    name TEXT NOT NULL,
+    agent_id TEXT NOT NULL REFERENCES agents(id),
+    repository_id TEXT REFERENCES repositories(id),
+    prompt TEXT NOT NULL,
+    output_mode TEXT NOT NULL DEFAULT 'run' CHECK (output_mode IN ('run','chat','issue','append')),
+    overlap_mode TEXT NOT NULL DEFAULT 'skip' CHECK (overlap_mode IN ('skip','queue')),
+    target_conversation_id TEXT REFERENCES conversations(id),
+    notify_chat_id TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_fired_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, name),
+    CHECK ((output_mode = 'append' AND target_conversation_id IS NOT NULL) OR output_mode <> 'append')
+  );
+  INSERT INTO automations_v12
+    (id, workspace_id, name, agent_id, repository_id, prompt, output_mode, overlap_mode,
+     target_conversation_id, notify_chat_id, enabled, last_fired_at, created_at, updated_at)
+    SELECT id, workspace_id, name, agent_id, repository_id, prompt,
+      CASE mode WHEN 'new_issue' THEN 'issue' ELSE 'append' END,
+      'skip', target_conversation_id, notify_chat_id, enabled, last_fired_at,
+      COALESCE(last_fired_at, CAST(strftime('%s','now') AS INTEGER) * 1000),
+      COALESCE(last_fired_at, CAST(strftime('%s','now') AS INTEGER) * 1000)
+    FROM automations;
+  DROP TABLE automations;
+  ALTER TABLE automations_v12 RENAME TO automations;
+  CREATE INDEX idx_automations_workspace ON automations(workspace_id, name);
+
+  CREATE TABLE automation_triggers (
+    id TEXT PRIMARY KEY,
+    automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+    type TEXT NOT NULL CHECK (type IN ('schedule','webhook')),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    cron TEXT,
+    provider TEXT,
+    events TEXT NOT NULL DEFAULT '[]',
+    filters TEXT NOT NULL DEFAULT '[]',
+    secret_hash TEXT,
+    last_fired_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK (
+      (type = 'schedule' AND cron IS NOT NULL AND secret_hash IS NULL) OR
+      (type = 'webhook' AND cron IS NULL AND secret_hash IS NOT NULL)
+    )
+  );
+  INSERT INTO automation_triggers
+    (id, automation_id, type, enabled, cron, events, filters, last_fired_at, created_at, updated_at)
+    SELECT 'trigger_' || automation_id, automation_id, 'schedule', 1, cron, '[]', '[]', last_fired_at,
+      COALESCE(last_fired_at, CAST(strftime('%s','now') AS INTEGER) * 1000),
+      COALESCE(last_fired_at, CAST(strftime('%s','now') AS INTEGER) * 1000)
+    FROM automation_legacy_crons_v12;
+  DROP TABLE automation_legacy_crons_v12;
+  CREATE INDEX idx_automation_triggers_automation ON automation_triggers(automation_id, type);
+
+  CREATE TABLE automation_webhook_deliveries (
+    trigger_id TEXT NOT NULL REFERENCES automation_triggers(id) ON DELETE CASCADE,
+    delivery_id TEXT NOT NULL,
+    received_at INTEGER NOT NULL,
+    PRIMARY KEY (trigger_id, delivery_id)
+  );
+  CREATE INDEX idx_automation_webhook_deliveries_ts ON automation_webhook_deliveries(received_at);
+
+  CREATE TABLE automation_log_v12 (
+    automation_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('fired','missed','skipped','rejected')),
+    ts INTEGER NOT NULL,
+    run_id TEXT,
+    trigger_id TEXT,
+    event_id TEXT,
+    note TEXT
+  );
+  INSERT INTO automation_log_v12 (automation_id, kind, ts, run_id, note)
+    SELECT automation_id, kind, ts, run_id, note FROM automation_log;
+  DROP TABLE automation_log;
+  ALTER TABLE automation_log_v12 RENAME TO automation_log;
+  CREATE INDEX idx_automation_log ON automation_log(automation_id, ts);
+
+  CREATE TABLE workspace_prompt_blocks_v12 (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    block_key TEXT NOT NULL CHECK (block_key IN (
+      'session.issue.context','event.issue.assigned','event.issue.mentioned','event.issue.message_created',
+      'session.chat.context','event.chat.message_created',
+      'event.automation.schedule','event.automation.manual','event.automation.webhook'
+    )),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    template TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, block_key)
+  );
+  INSERT INTO workspace_prompt_blocks_v12 SELECT * FROM workspace_prompt_blocks;
+  DROP TABLE workspace_prompt_blocks;
+  ALTER TABLE workspace_prompt_blocks_v12 RENAME TO workspace_prompt_blocks;
+  `,
 ];
 
 function normalizeLegacyRepositoryNames(db: Database): void {
@@ -591,7 +751,7 @@ export function openDb(path: string): Database {
   let version = row?.user_version ?? 0;
   while (version < MIGRATIONS.length) {
     const sql = MIGRATIONS[version]!;
-    const rebuildsReferencedTables = version === 8 || version === 9;
+    const rebuildsReferencedTables = version === 8 || version === 9 || version === 11;
     if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = OFF;");
     try {
       db.transaction(() => {

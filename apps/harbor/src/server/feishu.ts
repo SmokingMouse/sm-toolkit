@@ -254,7 +254,36 @@ export class FeishuEntry implements ApprovalSink {
   }
 
   private async notifyRunDoneAsync(run: Run, conv: Conversation | null): Promise<void> {
-    if (!conv) return;
+    if (!conv) {
+      if (run.sourceType !== "automation") return;
+      const automation = this.store.getAutomation(run.sourceId);
+      const text = run.status === "succeeded"
+        ? this.store.getRunResultText(run.id) ?? "（完成，无文本输出）"
+        : run.status === "canceled"
+          ? `⊘ automation run \`${run.id}\` 已取消`
+          : `automation run \`${run.id}\` 失败：${run.error ?? "（无 error 信息）"}`;
+      if (automation?.notifyChatId) {
+        if (this.config.allowedChats.includes(automation.notifyChatId)) {
+          if (run.status === "failed") {
+            await this.channel.sendToChat(automation.notifyChatId, { type: "error", message: text });
+          } else {
+            await this.channel.sendToChat(automation.notifyChatId, {
+              type: "result",
+              text,
+              metadata: `automation ${automation.name} · run ${run.id}`,
+            });
+          }
+        } else {
+          console.warn(
+            `[feishu] automation "${automation.name}" 的播报群 ${automation.notifyChatId} 不在白名单，已拦（allowed_chats 配置）`,
+          );
+        }
+      }
+      if (run.status === "failed" && this.config.adminUserId) {
+        await this.channel.send(this.config.adminUserId, { type: "error", message: text });
+      }
+      return;
+    }
     const content = this.runDoneContent(run, conv);
 
     if (conv.origin === "feishu") {
@@ -467,7 +496,7 @@ export class FeishuEntry implements ApprovalSink {
 
   private convOfRun(runId: string): Conversation | null {
     const run = this.store.getRun(runId);
-    return run ? this.store.getConversation(run.conversationId) : null;
+    return run?.conversationId ? this.store.getConversation(run.conversationId) : null;
   }
 
   /** 回话题（内存锚点）→ 退化为直发群（server 重启后锚点丢失） */

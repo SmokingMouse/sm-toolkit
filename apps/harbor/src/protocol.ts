@@ -34,7 +34,8 @@ export type PromptEventBlockKey =
   | "event.issue.message_created"
   | "event.chat.message_created"
   | "event.automation.schedule"
-  | "event.automation.manual";
+  | "event.automation.manual"
+  | "event.automation.webhook";
 export type PromptBlockKey = PromptContextBlockKey | PromptEventBlockKey;
 
 /** daemon 从本机 Runtime 配置目录发现、可同步进 Workspace 的 Skill。 */
@@ -235,7 +236,11 @@ export interface RunCost {
 export interface Run {
   id: string;
   workspaceId: string;
-  conversationId: string;
+  /** Run 的一等来源。Issue/Chat 指向 Conversation；Automation 直跑不伪造 Conversation。 */
+  sourceType: RunSourceType;
+  sourceId: string;
+  /** 仅 sourceType=issue/chat 时有值；保留独立字段方便既有 Conversation 查询。 */
+  conversationId: string | null;
   /** 快照，不 FK 约束（agent 可归档） */
   agentId: string;
   deviceId: string;
@@ -249,6 +254,10 @@ export interface Run {
   promptEvent: PromptEventBlockKey;
   /** 触发对象引用（如 Automation ID）；append 到既有会话时不能从 Conversation 反推。 */
   triggerRef: string | null;
+  /** webhook/schedule/manual 的规范化触发上下文；执行时快照，不从外部事件事后重建。 */
+  triggerContext: Record<string, unknown>;
+  /** 非空时同 key 的 Run 串行；Automation overlap=queue 用它防并发启动。 */
+  concurrencyKey: string | null;
   status: RunStatus;
   claudeSessionId: string | null;
   error: string | null;
@@ -291,6 +300,38 @@ export interface Approval {
   createdAt: number;
 }
 
+export type RunSourceType = "issue" | "chat" | "automation";
+export type AutomationOutputMode = "run" | "chat" | "issue" | "append";
+export type AutomationOverlapMode = "skip" | "queue";
+export type AutomationTriggerType = "schedule" | "webhook";
+export type AutomationWebhookScalar = string | number | boolean | null;
+
+/** webhook filter 同一 Trigger 内按 OR 语义匹配；path 使用点号读取 JSON 字段。 */
+export interface AutomationWebhookFilter {
+  path: string;
+  equals: AutomationWebhookScalar;
+}
+
+export interface AutomationTrigger {
+  id: string;
+  automationId: string;
+  type: AutomationTriggerType;
+  enabled: boolean;
+  /** type=schedule 时必填。 */
+  cron: string | null;
+  /** type=webhook 时标记来源适配器；首期 generic/codebase 共用规范化入口。 */
+  provider: string | null;
+  /** 空数组接受任意事件；非空时匹配规范化 eventType。 */
+  events: string[];
+  filters: AutomationWebhookFilter[];
+  /** 仅创建/轮换时返回明文；持久化对象永不包含 secret。 */
+  webhookPath: string | null;
+  lastFiredAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 旧 CLI/API create body 的兼容输入；领域对象使用 AutomationOutputMode。 */
 export type AutomationMode = "new_issue" | "append";
 
 export interface Automation {
@@ -300,22 +341,31 @@ export interface Automation {
   agentId: string;
   /** 兼容/审计快照；不是配置项，触发时以 Agent 当前 Repository 为准。 */
   repositoryId: string | null;
-  cron: string;
   prompt: string;
-  mode: AutomationMode;
-  /** mode=append 时必填：追加到的固定 conversation */
+  outputMode: AutomationOutputMode;
+  overlapMode: AutomationOverlapMode;
+  /** outputMode=append 时必填：追加到的固定 conversation */
   targetConversationId: string | null;
   /** 完成播报的飞书群（须在 server 白名单内才真正发送） */
   notifyChatId: string | null;
   enabled: boolean;
   lastFiredAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+  triggers: AutomationTrigger[];
+  /** 旧客户端展示兼容；等于首个 schedule Trigger 的 cron。 */
+  cron: string | null;
+  /** 旧客户端展示兼容；issue 映射为 new_issue。 */
+  mode: AutomationMode;
 }
 
 export interface AutomationLogRow {
   automationId: string;
-  kind: "fired" | "missed";
+  kind: "fired" | "missed" | "skipped" | "rejected";
   ts: number;
   runId: string | null;
+  triggerId: string | null;
+  eventId: string | null;
   note: string | null;
 }
 
@@ -362,8 +412,8 @@ export interface RunSpec {
   systemPrompt: string | null;
   /** 上一轮 claude_session_id，多轮续接 */
   resume: string | null;
-  /** 所属 conversation（worktree 按 issue 粒度建，daemon 需要 id 派生路径/分支名） */
-  conversationId: string;
+  /** 所属 conversation；Automation 直跑为 null，且当前只允许 isolation=none。 */
+  conversationId: string | null;
   isolation: IsolationKind;
   /** issue 已有 worktree 则复用（conversations.worktree_path 回填值）；null = daemon 首跑时创建 */
   worktreePath: string | null;
