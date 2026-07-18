@@ -59,7 +59,9 @@ Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、A
 - **Decision**：产品层固定为 Orchestrator / Developer / Reviewer 三个 LLM Agent。`issue.review_ready / delivery.merge_ready` 由 event Automation 派 Reviewer；`delivery.merged` 仍可用于通知/验证，但自动发布不再接受 Automation Run 成功作为部署事实，而由管理员 target + 独立 host worker 消费 exact merged revision。
 - **Done**：合并 Agent Run-scoped Issue/Delivery/Review capability、event Trigger/boot replay 与 Local launchd durable queue/fencing/recovery；删除 LLM deployment completion 路径；canonical schema 固定为 v19（v16 Agent team，v17–v19 deployment phases），并覆盖历史 self-hosting fork、无 target running 与 legacy automatic recovery。
 - **Verified**：root typecheck ✓；全量 **329 tests / 1569 assertions** ✓；所有 workspace production build 与 Next 12 个静态页面 ✓；`git diff --check` ✓。
-- **Next**：提交/合并并将生产 DB 从 v15 安全迁到 v19，配置三类 Agent 与 auto-review Automation；GitHub token、Device push credential 与可信 deployment target 仍需管理员 bootstrap。
+- **Deployed**：merge commit `bbbd310` 已 fast-forward 到 main 与生产 `codex/harbor-self-hosting`；17777 launchd server 重启为 PID 97006。真实 DB 从 v15 迁到 v19：`integrity_check=ok`、foreign key violations=0、maintenance gate 为空、Device 已重连；迁移前在线 backup 为 `/private/tmp/harbor-preview/.harbor/backups/harbor-pre-v19-agent-team-20260719-053900.db`（SHA-256 `1624e4d01e93273ba7e755d8945b91e7c9b357f00b4bd33a3784136699bf4c7f`）。
+- **Configured**：`Harbor Orchestrator`=`ag_3t4ngin2vb`、`Harbor Developer`=`ag_2r0j9hzcpv`、`Harbor Reviewer`=`ag_3sfc63u7jc`；`Auto review and merge`=`auto_25x8ye0rrm` 以 `source + review + queue` 消费 sm-toolkit 的 `issue.review_ready / delivery.merge_ready`。
+- **Boundary / Next**：生产当前没有 GitHub token、Device push credential 或 deployment target；auto-review 已启用，但真 PR 与 merge→deploy host job 会 fail loudly/保持未完成，不能伪造上线。下一步按 ADR 用 0600 管理员 YAML、可信 baseline manifest 与隔离 service 完成一次性 target bootstrap。
 
 ### 2026-07-19 — Harbor 事件驱动 Agent team
 - **Decision**：三类业务 Agent 保持最小权限；Automation 新增 Harbor `event` Trigger、动态 `source` output 与持久化 purpose，不用 cron 扫描状态。Agent 不拿 owner token，只消费 Run-scoped Issue/Delivery/Review capability；高权限部署改由下述确定性 host worker 承担。完整边界见 ADR。
