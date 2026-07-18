@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-Harbor P4.15「Mew Prompt workflows」已完成：Workspace 级 Prompt 配置从三类整块 wrapper 拆成 `session context + event trigger` 两段式 pipeline，Run 持久化 Assigned / Mentioned / New message / Schedule / Manual 触发原因；Workspace / Repository scope 与单仓库执行约束保持不变。下一步用真实双机 checkout 验证跨 Device mount，并接真实 Codebase/GitHub Provider；P5 时间性验证仍等待真飞书 / automation 7 天 / dogfood 一周。
+Harbor 的 Mew 个人部署 parity 已完成：Codebase SCM/Delivery、外部 Issue/MR ingress、Agent 多仓与执行配置、Skill bundle/import/sync、Workspace RBAC、Lark 群绑定/附件/多 Bot，以及 Issue owner/labels/messages/follow-up 已形成闭环。下一步只做真实环境验收：安装并登录 `bitscli codebase`、真双机 checkout、真飞书群、automation 7 天与真实负载一周。
 
 ## Goals
 
@@ -24,10 +24,12 @@ Harbor P4.15「Mew Prompt workflows」已完成：Workspace 级 Prompt 配置从
 - [x] @sm/channel-feishu：飞书 Channel 适配（从 SelfAgent 移植，薄实现）
 - [x] 根级 `bun run setup` 引导流程（配模型 + 注册 SDK + 注册全局命令 + 按需装 app）
 - [x] agent-gateway 统一配置源（已迁移——见 2026-07-11 session；agent-gateway 独立仓库整体退役，能力拍平进 @sm/agent）
-- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 主方案 `progress/harbor.md`。P1–P4.15 已完成（Mew 对标、模型路由、敏捷闭环、AI draft、Skill、Delivery control plane、Workspace/Repository scope 与 event-aware Prompt pipeline）。产品机制层只剩真实 SCM/CD Provider；P5 时间性验证仍需真双机 Tailscale、真飞书群、automation 7 天与真实负载一周
+- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 主方案 `progress/harbor.md`。个人部署范围内的产品机制已完整实现：敏捷闭环、AI draft、Delivery、Automation、Workspace RBAC、Agent 多仓/执行配置、Skill bundle、Codebase SCM、Lark Integration 与 event-aware Prompt pipeline。仅剩 P5 真实环境/时间性验证：Codebase 账号、双机 Tailscale、真飞书群、automation 7 天与真实负载一周
 
 ## Verified Facts
 
+- **Harbor 的 Mew parity 边界是“确定性 control plane + 可替换外部适配器”**（2026-07-19 实测）：Codebase webhook/refresh/CLI 输出先归一化成 SCM events，再投影 Issue/Delivery；Agent 只能用短期、单 Run token 创建同 Workspace backlog follow-up，不能绕过 review/check/merge policy。Workspace RBAC、private Agent、env redaction、Lark binding 和多 Bot ownership 都由 server 判定，外部消息本身不构成权限。
+- **Skill 与 Agent 配置已经是可执行资源，而非展示字段**（2026-07-19 实测）：Skill 保存 group、多文件 bundle、dependencies/hash/source 并支持 runtime/Codebase/GitHub/ZIP import 与 auto-sync；Agent 的 concurrency/visibility/env/setup/多 Repository 在 scheduler/daemon 真正生效，env 不进入 prompt/run event，setup 按配置 hash 缓存。
 - **Harbor Prompt 配置是 Workspace 级两段式 pipeline**（2026-07-17 实测）：Issue / Chat 在 dispatch 时组合稳定 `session context` 与本次 `event trigger`；Automation 只选 schedule/manual event。Run 持久化 `promptEvent` 与 `triggerRef`，不从可变 Conversation 事后猜触发来源；event block 停用时透传原始请求，旧 wrapper 无损迁移且不会重复拼接。
 - **Repository 的唯一产品配置源是 Agent**（2026-07-17 实测）：Workspace 只隔离 Agents / Skills / Conversations / Automations / prompt settings / Usage，不配置仓库地址；每个 Agent 必须绑定一个 Repository，且该 Repository 在 Agent Device 上必须有 checkout mount。Issue / Chat / AI draft / Automation 拒绝任务级 override，指派时继承 Agent Repository；Run 冻结 repository / mount / execution root，Review Agent 必须绑定实现仓库。
 - **Issue Done 与 Agent 自报完成解耦**（2026-07-17 实测）：代码 Issue 建立 Delivery 后，人工验收只更新 `review_status`，不会直接 Done；只有 CI passed + merged，且无需部署或 deployment succeeded，control plane 才以 system actor 推进 Done 并清理 worktree。新 implementation 或 MR/branch 引用变化都会使未合并 Delivery 的人工验收和 CI 证据失效；merged 后在原 Issue 返工会被调度层拒绝。
@@ -46,6 +48,13 @@ Harbor P4.15「Mew Prompt workflows」已完成：Workspace 级 Prompt 配置从
 - **Next**：Issue 交人工验收；lockfile 双轨问题待决策。
 
 ## Session Log
+
+### 2026-07-19 — Harbor Mew parity complete
+- **Decision**：完整复刻以个人部署可用能力为边界，不伪造 Mew 的 ByteDance SSO、公司通讯录或云端 managed runtime。Harbor 保持确定性 control plane；SCM/Lark/Agent action 只提供事实与受控动作，不能成为绕过状态机和交付 policy 的权限通道。
+- **Done**：SQLite v13/v14；Codebase Delivery + webhook/refresh/外部 Issue/MR 双向同步；Workspace Members/token/RBAC；Agent concurrency/private/env/setup/多仓；Skill group/bundle/dependency/hash/import/auto-sync；Lark binding/mention/thread/附件/global+custom Bot；Issue creator/owner/labels/messages/source 与受控 follow-up；完整 Settings/Agents/Skills/Issues 管理面。
+- **Verified**：根 `bun test` 108 tests / 574 assertions、根 typecheck、全部 workspace production build、`git diff --check` 全过；隔离 DB 的真实浏览器走通 Member/Label、Issue owner+label、Agent config、Skill import、Device→Agent，1440px/390px 无 page error。
+- **Environment boundary**：当前机器没有 `bitscli`，Codebase Provider 已用 fake runner 覆盖 MR/review/check/merge 与安全参数，但真实账号 smoke 必须安装 `@byted/bits-cli` 并完成 `bitscli codebase auth login` 后执行。
+- **Next**：完成 Codebase 真账号、真双机、真飞书与时间性 dogfood；产品机制不再继续扩张。
 
 ### 2026-07-17 — P4.15 Mew Prompt workflows
 - **Evidence**：只读实测 Mew Prompts 页面与线上 bundle，确认 8 个可见 block：Issue context/assigned/mentioned/message、Chat context/message、Automation schedule/manual；另有当前 Harbor 尚无入口的隐藏 webhook block。
