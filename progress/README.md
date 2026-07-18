@@ -58,7 +58,8 @@ Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery 与
 - **Decision**：在隔离 integration worktree 做双父 merge；canonical schema 保留 parity v12–v14，并用 v15 汇合 GitHub Delivery。`openDb` 对历史 self-hosting v12/v13 额外按 `automation_triggers` 结构识别 lineage，先补跑 parity v12/v13，再统一进入 v14/v15。
 - **Done**：合并 GitHub + Codebase + manual Delivery providers、Device 迁移 + Agent 多仓配置、Codex worktree gitdir + 多 Repository checkout、GitHub/Codebase 前端入口与全部 parity 控制面；新增 fork v13 数据库回归夹具并保留 Delivery/audit 数据。
 - **Verified**：root typecheck、全部 workspace production build、Next BUILD_ID、全量 215 tests / 1015 assertions、`git diff --check` ✓。
-- **Next**：fast-forward `codex/harbor-self-hosting`，重启 17777 launchd server 并验证 v15 migration 与健康响应。
+- **Deployed**：`codex/harbor-self-hosting` 已 fast-forward 到 `8f26d9b` 并重启 17777 launchd server（PID 64442）。真实历史 fork DB 从 v13 收敛到 v15：`integrity_check=ok`、`automation_triggers` 已补齐、foreign key violations=0；迁移前在线 backup 为 `/private/tmp/harbor-preview/.harbor/backups/harbor-pre-v15-20260719.db`。UI 与 Workspaces/Devices/Agents/Skills/Automations/Members/Lark/Prompt Blocks 只读 smoke 均为 200，Device 已重连。
+- **Next**：仅剩 GitHub/Codebase 真账号、真双机、真飞书与时间性 dogfood；产品机制不再扩张。
 
 ### 2026-07-18 — Harbor worktree Agent 自举与 daemon PATH
 - **Root cause**：linked worktree 的真实 index/objects/refs 位于 Repository common gitdir，Codex workspace-write 只覆盖 checkout；同时 service 使用绝对 bun ProgramArguments，却原样继承一个可能不含 bun dirname 的 PATH。
