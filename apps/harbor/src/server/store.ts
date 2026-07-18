@@ -116,6 +116,8 @@ interface DeliveryRow {
   external_id: string | null;
   head_branch: string | null;
   base_branch: string | null;
+  latest_head_sha: string | null;
+  approved_head_sha: string | null;
   review_status: string;
   check_status: string;
   merge_status: string;
@@ -123,6 +125,7 @@ interface DeliveryRow {
   review_approved_at: number | null;
   merged_at: number | null;
   deployed_at: number | null;
+  revision: number;
   created_at: number;
   updated_at: number;
 }
@@ -343,12 +346,17 @@ function toConversation(r: ConversationRow): Conversation {
 
 function deliveryStatus(r: DeliveryRow): DeliveryStatus {
   if (r.merge_status === "merged") {
+    // GitHub sync 可以发现 Harbor 外部已经合并的 PR；仍需补齐 Harbor 自己的人工验收与 CI 闸。
+    if (r.review_status !== "approved") return "review_pending";
+    if (r.check_status === "failed") return "blocked";
+    if (r.check_status !== "passed") return "checks_pending";
     if (r.deployment_status === "failed") return "failed";
     if (r.deployment_status === "running") return "deploying";
     if (r.deployment_status === "pending") return "merged";
     return "succeeded";
   }
   if (!r.change_url) return "awaiting_change";
+  if (r.merge_status === "closed") return "blocked";
   if (r.check_status === "failed") return "blocked";
   if (r.review_status !== "approved") return "review_pending";
   if (r.check_status !== "passed") return "checks_pending";
@@ -364,6 +372,8 @@ function toDelivery(r: DeliveryRow): Delivery {
     externalId: r.external_id,
     headBranch: r.head_branch,
     baseBranch: r.base_branch,
+    latestHeadSha: r.latest_head_sha,
+    approvedHeadSha: r.approved_head_sha,
     reviewStatus: r.review_status as DeliveryReviewStatus,
     checkStatus: r.check_status as DeliveryCheckStatus,
     mergeStatus: r.merge_status as DeliveryMergeStatus,
@@ -372,6 +382,7 @@ function toDelivery(r: DeliveryRow): Delivery {
     reviewApprovedAt: r.review_approved_at,
     mergedAt: r.merged_at,
     deployedAt: r.deployed_at,
+    revision: r.revision,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -1175,14 +1186,15 @@ export class HarborStore {
       headBranch?: string | null;
       baseBranch?: string | null;
       deploymentRequired?: boolean;
+      checkStatus?: DeliveryCheckStatus;
     },
     now: number,
   ): Delivery {
     const id = newId("delivery");
     this.db.run(
       `INSERT INTO deliveries
-       (id, conversation_id, provider, change_url, external_id, head_branch, base_branch, deployment_status, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?, ?,?,?)`,
+       (id, conversation_id, provider, change_url, external_id, head_branch, base_branch, check_status, deployment_status, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?, ?,?,?)`,
       [
         id,
         input.conversationId,
@@ -1191,6 +1203,7 @@ export class HarborStore {
         input.externalId ?? null,
         input.headBranch ?? null,
         input.baseBranch ?? null,
+        input.checkStatus ?? "unknown",
         input.deploymentRequired ? "pending" : "not_required",
         now,
         now,
@@ -1214,7 +1227,13 @@ export class HarborStore {
 
   updateDeliveryMetadata(
     id: string,
-    patch: { changeUrl?: string | null; externalId?: string | null; headBranch?: string | null; baseBranch?: string | null },
+    patch: {
+      changeUrl?: string | null;
+      externalId?: string | null;
+      headBranch?: string | null;
+      baseBranch?: string | null;
+      latestHeadSha?: string | null;
+    },
     now: number,
   ): void {
     const sets: string[] = [];
@@ -1224,6 +1243,7 @@ export class HarborStore {
       ["externalId", "external_id"],
       ["headBranch", "head_branch"],
       ["baseBranch", "base_branch"],
+      ["latestHeadSha", "latest_head_sha"],
     ];
     for (const [key, column] of fields) {
       if (!(key in patch)) continue;
@@ -1231,7 +1251,7 @@ export class HarborStore {
       params.push(patch[key] ?? null);
     }
     if (sets.length === 0) return;
-    sets.push("updated_at = ?");
+    sets.push("updated_at = ?", "revision = revision + 1");
     params.push(now, id);
     this.db.run(`UPDATE deliveries SET ${sets.join(", ")} WHERE id = ?`, params);
     this.touchDeliveryConversation(id, now);
@@ -1245,6 +1265,7 @@ export class HarborStore {
       mergeStatus?: DeliveryMergeStatus;
       deploymentStatus?: DeliveryDeploymentStatus;
       reviewApprovedAt?: number | null;
+      approvedHeadSha?: string | null;
       mergedAt?: number | null;
       deployedAt?: number | null;
     },
@@ -1258,6 +1279,7 @@ export class HarborStore {
       ["mergeStatus", "merge_status"],
       ["deploymentStatus", "deployment_status"],
       ["reviewApprovedAt", "review_approved_at"],
+      ["approvedHeadSha", "approved_head_sha"],
       ["mergedAt", "merged_at"],
       ["deployedAt", "deployed_at"],
     ];
@@ -1267,10 +1289,76 @@ export class HarborStore {
       params.push(patch[key] ?? null);
     }
     if (sets.length === 0) return;
-    sets.push("updated_at = ?");
+    sets.push("updated_at = ?", "revision = revision + 1");
     params.push(now, id);
     this.db.run(`UPDATE deliveries SET ${sets.join(", ")} WHERE id = ?`, params);
     this.touchDeliveryConversation(id, now);
+  }
+
+  /**
+   * Provider HTTP 返回后只在证据版本未变化时原子落库，并把对应 audit event 放进同一事务。
+   * 这防止 implementation/request-changes 在 HTTP 等待期间失效证据后，旧结果仍覆盖新状态。
+   */
+  compareAndSetDelivery(
+    id: string,
+    expectedRevision: number,
+    patch: {
+      changeUrl?: string | null;
+      externalId?: string | null;
+      headBranch?: string | null;
+      baseBranch?: string | null;
+      latestHeadSha?: string | null;
+      approvedHeadSha?: string | null;
+      reviewStatus?: DeliveryReviewStatus;
+      checkStatus?: DeliveryCheckStatus;
+      mergeStatus?: DeliveryMergeStatus;
+      deploymentStatus?: DeliveryDeploymentStatus;
+      reviewApprovedAt?: number | null;
+      mergedAt?: number | null;
+      deployedAt?: number | null;
+    },
+    events: { kind: string; data: unknown; actor: DeliveryEvent["actor"] }[],
+    now: number,
+  ): boolean {
+    const columns: [keyof typeof patch, string][] = [
+      ["changeUrl", "change_url"],
+      ["externalId", "external_id"],
+      ["headBranch", "head_branch"],
+      ["baseBranch", "base_branch"],
+      ["latestHeadSha", "latest_head_sha"],
+      ["approvedHeadSha", "approved_head_sha"],
+      ["reviewStatus", "review_status"],
+      ["checkStatus", "check_status"],
+      ["mergeStatus", "merge_status"],
+      ["deploymentStatus", "deployment_status"],
+      ["reviewApprovedAt", "review_approved_at"],
+      ["mergedAt", "merged_at"],
+      ["deployedAt", "deployed_at"],
+    ];
+    const sets: string[] = [];
+    const params: (string | number | null)[] = [];
+    for (const [key, column] of columns) {
+      if (!(key in patch)) continue;
+      sets.push(`${column} = ?`);
+      params.push(patch[key] ?? null);
+    }
+    if (sets.length === 0) return true;
+    return this.db.transaction(() => {
+      const updated = this.db.run(
+        `UPDATE deliveries SET ${sets.join(", ")}, updated_at = ?, revision = revision + 1
+         WHERE id = ? AND revision = ?`,
+        [...params, now, id, expectedRevision],
+      );
+      if (updated.changes !== 1) return false;
+      for (const event of events) {
+        this.db.run(
+          "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
+          [id, event.kind, JSON.stringify(event.data ?? {}), event.actor, now],
+        );
+      }
+      this.touchDeliveryConversation(id, now);
+      return true;
+    })();
   }
 
   appendDeliveryEvent(
@@ -1288,7 +1376,7 @@ export class HarborStore {
 
   listDeliveryEvents(deliveryId: string): DeliveryEvent[] {
     return this.db
-      .query<DeliveryEventRow, [string]>("SELECT * FROM delivery_events WHERE delivery_id = ? ORDER BY ts")
+      .query<DeliveryEventRow, [string]>("SELECT * FROM delivery_events WHERE delivery_id = ? ORDER BY ts, rowid")
       .all(deliveryId)
       .map(toDeliveryEvent);
   }

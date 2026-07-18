@@ -1,13 +1,15 @@
 /**
  * Delivery control plane：policy 决定“能不能做”，Provider 只决定“怎么对外执行/确认”。
- * 首期 manual provider 不伪装调用外部平台，所有高风险动作都要求显式 confirmed。
+ * manual provider 不伪装调用外部平台；GitHub provider 只接受 server 配置和外部 API 事实。
  */
 
 import type {
   Conversation,
   Delivery,
   DeliveryCheckStatus,
+  DeliveryMergeStatus,
   DeliveryProviderKind,
+  HarborRepository,
 } from "../protocol.js";
 import type { HarborStore } from "./store.js";
 
@@ -20,11 +22,48 @@ export interface DeliveryProviderResult {
   data?: unknown;
 }
 
+export interface DeliveryProviderContext {
+  conversation: Conversation;
+  repository: HarborRepository | null;
+}
+
+export interface DeliveryChangeInput {
+  changeUrl?: string | null;
+  externalId?: string | null;
+  headBranch?: string | null;
+  baseBranch?: string | null;
+  deploymentRequired?: boolean;
+  checkStatus?: DeliveryCheckStatus;
+}
+
+export interface DeliveryProviderSyncResult extends DeliveryProviderResult {
+  metadata: {
+    changeUrl: string;
+    externalId: string;
+    headBranch: string;
+    baseBranch: string;
+    latestHeadSha: string;
+  };
+  checkStatus: DeliveryCheckStatus;
+  mergeStatus: DeliveryMergeStatus;
+  mergedAt: number | null;
+}
+
 export interface DeliveryProvider {
   readonly kind: DeliveryProviderKind;
   readonly mode: "confirmation" | "automatic";
-  merge(delivery: Delivery, input: DeliveryProviderAction): Promise<DeliveryProviderResult>;
-  startDeployment(delivery: Delivery, input: DeliveryProviderAction): Promise<DeliveryProviderResult>;
+  prepareChange?(context: DeliveryProviderContext, input: DeliveryChangeInput): DeliveryChangeInput;
+  sync?(delivery: Delivery, context: DeliveryProviderContext): Promise<DeliveryProviderSyncResult>;
+  merge(
+    delivery: Delivery,
+    input: DeliveryProviderAction,
+    context: DeliveryProviderContext,
+  ): Promise<DeliveryProviderResult>;
+  startDeployment?(
+    delivery: Delivery,
+    input: DeliveryProviderAction,
+    context: DeliveryProviderContext,
+  ): Promise<DeliveryProviderResult>;
 }
 
 /**
@@ -35,12 +74,20 @@ export class ManualDeliveryProvider implements DeliveryProvider {
   readonly kind = "manual" as const;
   readonly mode = "confirmation" as const;
 
-  async merge(_delivery: Delivery, input: DeliveryProviderAction): Promise<DeliveryProviderResult> {
+  async merge(
+    _delivery: Delivery,
+    input: DeliveryProviderAction,
+    _context: DeliveryProviderContext,
+  ): Promise<DeliveryProviderResult> {
     if (input.confirmed !== true) throw new Error("manual provider 需要 confirmed=true 才能记录已合并事实");
     return { message: "人工确认变更已在外部 SCM 合并" };
   }
 
-  async startDeployment(_delivery: Delivery, input: DeliveryProviderAction): Promise<DeliveryProviderResult> {
+  async startDeployment(
+    _delivery: Delivery,
+    input: DeliveryProviderAction,
+    _context: DeliveryProviderContext,
+  ): Promise<DeliveryProviderResult> {
     if (input.confirmed !== true) throw new Error("manual provider 需要 confirmed=true 才能记录部署已开始");
     return { message: "人工确认外部部署已开始" };
   }
@@ -48,12 +95,15 @@ export class ManualDeliveryProvider implements DeliveryProvider {
 
 export class DeliveryService {
   private readonly providers: Map<DeliveryProviderKind, DeliveryProvider>;
+  private readonly externalActionTails = new Map<string, Promise<void>>();
 
   constructor(
     private readonly store: HarborStore,
-    providers: DeliveryProvider[] = [new ManualDeliveryProvider()],
+    providers: DeliveryProvider[] = [],
   ) {
-    this.providers = new Map(providers.map((provider) => [provider.kind, provider]));
+    this.providers = new Map(
+      [new ManualDeliveryProvider(), ...providers].map((provider) => [provider.kind, provider]),
+    );
   }
 
   create(
@@ -73,27 +123,34 @@ export class DeliveryService {
     }
     if (this.store.activeRunForConversation(conv.id)) throw new Error("仍有 Run 进行中，不能创建 Delivery");
     if (this.store.getDeliveryForConversation(conv.id)) throw new Error("当前 Issue 已有 Delivery");
-    const provider = input.provider ?? "manual";
-    if (!this.providers.has(provider)) throw new Error(`delivery provider "${provider}" 尚未配置`);
-    if (provider === "manual" && !input.changeUrl?.trim()) {
+    const providerKind = input.provider ?? "manual";
+    const provider = this.configuredProvider(providerKind);
+    if (providerKind === "manual" && !input.changeUrl?.trim()) {
       throw new Error("manual provider 需要填写 MR/PR URL");
     }
+    const changeInput: DeliveryChangeInput = input;
+    const prepared: DeliveryChangeInput = provider.prepareChange?.(this.context(conv), changeInput) ?? changeInput;
     const delivery = this.store.createDelivery(
       {
         conversationId: conv.id,
-        provider,
-        changeUrl: clean(input.changeUrl),
-        externalId: clean(input.externalId),
-        headBranch: clean(input.headBranch),
-        baseBranch: clean(input.baseBranch),
-        deploymentRequired: input.deploymentRequired ?? false,
+        provider: providerKind,
+        changeUrl: clean(prepared.changeUrl),
+        externalId: clean(prepared.externalId),
+        headBranch: clean(prepared.headBranch),
+        baseBranch: clean(prepared.baseBranch),
+        checkStatus: prepared.checkStatus,
+        deploymentRequired: prepared.deploymentRequired ?? false,
       },
       now,
     );
     this.store.appendDeliveryEvent(
       delivery.id,
       "created",
-      { provider, deploymentRequired: input.deploymentRequired ?? false, changeUrl: delivery.changeUrl },
+      {
+        provider: providerKind,
+        deploymentRequired: prepared.deploymentRequired ?? false,
+        changeUrl: delivery.changeUrl,
+      },
       "human",
       now,
     );
@@ -112,6 +169,9 @@ export class DeliveryService {
     now = Date.now(),
   ): Delivery {
     if (delivery.mergeStatus === "merged") throw new Error("已合并的 Delivery 不能再修改变更或 CI 事实");
+    if (delivery.provider !== "manual") {
+      throw new Error("GitHub Delivery 的 PR、branch 与 CI 事实只能通过 Sync from GitHub 更新");
+    }
     if (delivery.provider === "manual" && input.changeUrl !== undefined && !clean(input.changeUrl)) {
       throw new Error("manual provider 需要保留 MR/PR URL");
     }
@@ -131,7 +191,12 @@ export class DeliveryService {
       // MR/branch 指向变了，旧人工验收必然失效；CI 若未随请求给新结果则回到 pending。
       this.store.updateDeliveryState(
         delivery.id,
-        { reviewStatus: "pending", reviewApprovedAt: null, checkStatus: input.checkStatus ?? "pending" },
+        {
+          reviewStatus: "pending",
+          reviewApprovedAt: null,
+          approvedHeadSha: null,
+          checkStatus: input.checkStatus ?? "pending",
+        },
         now,
       );
       this.store.appendDeliveryEvent(delivery.id, "change_updated", metadata, "human", now);
@@ -151,12 +216,104 @@ export class DeliveryService {
 
   approve(delivery: Delivery, conv: Conversation, now = Date.now()): Delivery {
     this.assertReviewIdle(conv);
-    if (!delivery.changeUrl) throw new Error("Delivery 尚未关联 MR/PR，不能验收");
-    if (delivery.mergeStatus === "merged") throw new Error("Delivery 已合并，无需重复验收");
-    if (delivery.reviewStatus === "approved") return delivery;
-    this.store.updateDeliveryState(delivery.id, { reviewStatus: "approved", reviewApprovedAt: now }, now);
-    this.store.appendDeliveryEvent(delivery.id, "review_approved", {}, "human", now);
-    return this.store.getDelivery(delivery.id)!;
+    const current = this.store.getDelivery(delivery.id);
+    if (!current) throw new Error(`Delivery "${delivery.id}" 不存在`);
+    if (!current.changeUrl) throw new Error("Delivery 尚未关联 MR/PR，不能验收");
+    if (current.provider === "manual" && current.mergeStatus === "merged") {
+      throw new Error("Delivery 已合并，无需重复验收");
+    }
+    if (current.provider === "github" && !current.latestHeadSha) {
+      throw new Error("GitHub Delivery 尚未同步 head SHA；请先 Sync from GitHub 再验收");
+    }
+    const approvedHeadSha = current.provider === "github" ? current.latestHeadSha : null;
+    if (current.reviewStatus === "approved" && current.approvedHeadSha === approvedHeadSha) return current;
+    this.store.updateDeliveryState(
+      current.id,
+      { reviewStatus: "approved", reviewApprovedAt: now, approvedHeadSha },
+      now,
+    );
+    this.store.appendDeliveryEvent(
+      current.id,
+      "review_approved",
+      current.provider === "github" ? { headSha: approvedHeadSha } : {},
+      "human",
+      now,
+    );
+    return this.store.getDelivery(current.id)!;
+  }
+
+  async sync(
+    delivery: Delivery,
+    _conv: Conversation,
+    now = Date.now(),
+  ): Promise<Delivery> {
+    return this.runExternalAction(delivery.id, async () => {
+      const current = this.requireDelivery(delivery.id);
+      const conv = this.requireConversation(current);
+      this.assertReviewIdle(conv);
+      const provider = this.provider(current);
+      if (!provider.sync) throw new Error(`delivery provider "${current.provider}" 不支持外部同步`);
+      const result = await provider.sync(current, this.context(conv));
+
+      const metadata = changedMetadata(current, result.metadata);
+      const headChanged = current.latestHeadSha !== null && result.metadata.latestHeadSha !== current.latestHeadSha;
+      const nextMergeStatus = current.mergeStatus === "merged" ? "merged" : result.mergeStatus;
+      const nextMergedAt = nextMergeStatus === "merged"
+        ? result.mergedAt ?? current.mergedAt ?? now
+        : null;
+      const patch: Parameters<HarborStore["compareAndSetDelivery"]>[2] = { ...metadata };
+      if (result.checkStatus !== current.checkStatus) patch.checkStatus = result.checkStatus;
+      if (nextMergeStatus !== current.mergeStatus) patch.mergeStatus = nextMergeStatus;
+      if (nextMergedAt !== current.mergedAt) patch.mergedAt = nextMergedAt;
+      if (headChanged) {
+        // 旧 checks 先随旧 head 失效；本次 result.checkStatus 是同一 sync 对新 head 重建的新证据。
+        patch.reviewStatus = "pending";
+        patch.reviewApprovedAt = null;
+        patch.approvedHeadSha = null;
+      }
+      if (Object.keys(patch).length === 0) {
+        if (this.requireDelivery(current.id).revision !== current.revision) {
+          throw new Error("Delivery 证据在 GitHub sync 期间已变化；旧响应已丢弃，请重新 Sync from GitHub");
+        }
+        return current;
+      }
+
+      const events = [
+        ...(headChanged ? [{
+          kind: "evidence_invalidated",
+          data: {
+            reason: "github_head_changed",
+            fromHeadSha: current.latestHeadSha,
+            toHeadSha: result.metadata.latestHeadSha,
+            invalidated: ["human_review", "checks"],
+            checksReplacedBySync: true,
+          },
+          actor: "provider" as const,
+        }] : []),
+        {
+          kind: "synced",
+          data: {
+            message: result.message,
+            from: {
+              headSha: current.latestHeadSha,
+              checkStatus: current.checkStatus,
+              mergeStatus: current.mergeStatus,
+            },
+            to: {
+              headSha: result.metadata.latestHeadSha,
+              checkStatus: result.checkStatus,
+              mergeStatus: nextMergeStatus,
+            },
+            data: result.data,
+          },
+          actor: "provider" as const,
+        },
+      ];
+      if (!this.store.compareAndSetDelivery(current.id, current.revision, patch, events, now)) {
+        throw new Error("Delivery 证据在 GitHub sync 期间已变化；旧响应已丢弃，请重新 Sync from GitHub");
+      }
+      return this.requireDelivery(current.id);
+    });
   }
 
   /** 新一轮实现会让旧审批和 CI 证据失效；merged 后禁止在原 Issue 上继续返工。 */
@@ -166,10 +323,9 @@ export class DeliveryService {
     if (delivery.mergeStatus === "merged") {
       throw new Error("Delivery 已合并，不能在原 Issue 上继续修改；请创建修复 Issue 或走回滚流程");
     }
-    if (delivery.reviewStatus === "pending" && delivery.checkStatus === "pending") return delivery;
     this.store.updateDeliveryState(
       delivery.id,
-      { reviewStatus: "pending", reviewApprovedAt: null, checkStatus: "pending" },
+      { reviewStatus: "pending", reviewApprovedAt: null, approvedHeadSha: null, checkStatus: "pending" },
       now,
     );
     this.store.appendDeliveryEvent(
@@ -184,19 +340,42 @@ export class DeliveryService {
 
   async merge(
     delivery: Delivery,
-    conv: Conversation,
+    _conv: Conversation,
     input: DeliveryProviderAction,
     now = Date.now(),
   ): Promise<Delivery> {
-    this.assertReviewIdle(conv);
-    if (delivery.mergeStatus === "merged") return delivery;
-    if (!delivery.changeUrl) throw new Error("Delivery 尚未关联 MR/PR");
-    if (delivery.reviewStatus !== "approved") throw new Error("人工验收尚未通过，不能合并");
-    if (delivery.checkStatus !== "passed") throw new Error("CI checks 尚未通过，不能合并");
-    const result = await this.provider(delivery).merge(delivery, input);
-    this.store.updateDeliveryState(delivery.id, { mergeStatus: "merged", mergedAt: now }, now);
-    this.store.appendDeliveryEvent(delivery.id, "merged", { message: result.message, data: result.data }, "provider", now);
-    return this.store.getDelivery(delivery.id)!;
+    return this.runExternalAction(delivery.id, async () => {
+      const current = this.requireDelivery(delivery.id);
+      const conv = this.requireConversation(current);
+      this.assertReviewIdle(conv);
+      if (current.mergeStatus === "merged") return current;
+      if (current.mergeStatus !== "open") throw new Error("PR 已关闭且未合并；重新打开并 Sync 后才能合并");
+      if (!current.changeUrl) throw new Error("Delivery 尚未关联 MR/PR");
+      if (current.reviewStatus !== "approved") throw new Error("人工验收尚未通过，不能合并");
+      if (current.checkStatus !== "passed") throw new Error("CI checks 尚未通过，不能合并");
+      if (current.provider === "github") {
+        if (!current.latestHeadSha) throw new Error("GitHub head SHA 尚未同步，不能合并");
+        if (current.approvedHeadSha !== current.latestHeadSha) {
+          throw new Error("人工验收对应的 GitHub head SHA 已过期；请 Sync 后重新验收");
+        }
+      }
+      const result = await this.provider(current).merge(current, input, this.context(conv));
+      const committed = this.store.compareAndSetDelivery(
+        current.id,
+        current.revision,
+        { mergeStatus: "merged", mergedAt: now },
+        [{ kind: "merged", data: { message: result.message, data: result.data }, actor: "provider" }],
+        now,
+      );
+      if (!committed) {
+        const latest = this.requireDelivery(current.id);
+        if (latest.mergeStatus === "merged") return latest;
+        throw new Error(
+          "GitHub merge 返回期间 Delivery 证据已变化；未写入 merged，请 Sync from GitHub 核对外部结果后重新验收",
+        );
+      }
+      return this.requireDelivery(current.id);
+    });
   }
 
   async startDeployment(
@@ -211,7 +390,11 @@ export class DeliveryService {
     if (delivery.deploymentStatus !== "pending" && delivery.deploymentStatus !== "failed") {
       throw new Error(`当前部署状态为 ${delivery.deploymentStatus}，不能重新开始`);
     }
-    const result = await this.provider(delivery).startDeployment(delivery, input);
+    const provider = this.provider(delivery);
+    if (!provider.startDeployment) {
+      throw new Error(`delivery provider "${delivery.provider}" 不支持启动 deployment`);
+    }
+    const result = await provider.startDeployment(delivery, input, this.context(conv));
     this.store.updateDeliveryState(delivery.id, { deploymentStatus: "running", deployedAt: null }, now);
     this.store.appendDeliveryEvent(
       delivery.id,
@@ -240,9 +423,48 @@ export class DeliveryService {
   }
 
   private provider(delivery: Delivery): DeliveryProvider {
-    const provider = this.providers.get(delivery.provider);
-    if (!provider) throw new Error(`delivery provider "${delivery.provider}" 尚未配置`);
-    return provider;
+    return this.configuredProvider(delivery.provider);
+  }
+
+  private configuredProvider(kind: DeliveryProviderKind): DeliveryProvider {
+    const provider = this.providers.get(kind);
+    if (provider) return provider;
+    if (kind === "github") {
+      throw new Error(
+        "GitHub Delivery provider 未配置：请在 harbor-server 设置 HARBOR_GITHUB_TOKEN（或 ~/.harbor.yaml github.token）；manual provider 仍可用",
+      );
+    }
+    throw new Error(`delivery provider "${kind}" 尚未配置`);
+  }
+
+  private context(conv: Conversation): DeliveryProviderContext {
+    return {
+      conversation: conv,
+      repository: conv.repositoryId ? this.store.getRepository(conv.repositoryId) : null,
+    };
+  }
+
+  private requireDelivery(id: string): Delivery {
+    const delivery = this.store.getDelivery(id);
+    if (!delivery) throw new Error(`Delivery "${id}" 不存在`);
+    return delivery;
+  }
+
+  private requireConversation(delivery: Delivery): Conversation {
+    const conv = this.store.getConversation(delivery.conversationId);
+    if (!conv) throw new Error(`Delivery "${delivery.id}" 的 Issue 不存在`);
+    return conv;
+  }
+
+  /** 同一 Delivery 的 sync/merge 按调用顺序执行，避免旧 HTTP 响应乱序落库。 */
+  private runExternalAction<T>(deliveryId: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.externalActionTails.get(deliveryId) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(action);
+    const tail = run.then(() => undefined, () => undefined);
+    this.externalActionTails.set(deliveryId, tail);
+    return run.finally(() => {
+      if (this.externalActionTails.get(deliveryId) === tail) this.externalActionTails.delete(deliveryId);
+    });
   }
 
   private assertReviewIdle(conv: Conversation): void {
@@ -254,4 +476,15 @@ export class DeliveryService {
 function clean(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
+}
+
+function changedMetadata(
+  delivery: Delivery,
+  metadata: DeliveryProviderSyncResult["metadata"],
+): Partial<DeliveryProviderSyncResult["metadata"]> {
+  const changed: Partial<DeliveryProviderSyncResult["metadata"]> = {};
+  for (const key of ["changeUrl", "externalId", "headBranch", "baseBranch", "latestHeadSha"] as const) {
+    if (metadata[key] !== delivery[key]) changed[key] = metadata[key];
+  }
+  return changed;
 }

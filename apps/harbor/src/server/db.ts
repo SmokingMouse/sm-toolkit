@@ -556,6 +556,49 @@ const MIGRATIONS: string[] = [
   DROP TABLE workspace_prompt_templates;
   DROP TABLE prompt_templates;
   `,
+  // v12 —— GitHub sync 需要诚实表示 closed-but-unmerged PR；其余 Delivery 事实无损保留
+  `
+  CREATE TABLE deliveries_v12 (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id),
+    provider TEXT NOT NULL,
+    change_url TEXT,
+    external_id TEXT,
+    head_branch TEXT,
+    base_branch TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending' CHECK (review_status IN ('pending','approved')),
+    check_status TEXT NOT NULL DEFAULT 'unknown' CHECK (check_status IN ('unknown','pending','passed','failed')),
+    merge_status TEXT NOT NULL DEFAULT 'open' CHECK (merge_status IN ('open','closed','merged')),
+    deployment_status TEXT NOT NULL DEFAULT 'not_required' CHECK (deployment_status IN ('not_required','pending','running','succeeded','failed')),
+    review_approved_at INTEGER,
+    merged_at INTEGER,
+    deployed_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  INSERT INTO deliveries_v12
+    (id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+     review_status, check_status, merge_status, deployment_status, review_approved_at,
+     merged_at, deployed_at, created_at, updated_at)
+    SELECT id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+           review_status, check_status, merge_status, deployment_status, review_approved_at,
+           merged_at, deployed_at, created_at, updated_at
+    FROM deliveries;
+  DROP TABLE deliveries;
+  ALTER TABLE deliveries_v12 RENAME TO deliveries;
+  CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
+  `,
+  // v13 —— GitHub approval 绑定 head SHA；revision 防异步外部动作覆盖期间发生的证据变更
+  `
+  ALTER TABLE deliveries ADD COLUMN latest_head_sha TEXT;
+  ALTER TABLE deliveries ADD COLUMN approved_head_sha TEXT;
+  ALTER TABLE deliveries ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
+
+  -- 旧 GitHub approval/check 没有 head SHA 归属，不能安全沿用；manual 事实不受影响。
+  UPDATE deliveries
+    SET review_status = 'pending', review_approved_at = NULL, check_status = 'pending'
+    WHERE provider = 'github';
+  `,
 ];
 
 function normalizeLegacyRepositoryNames(db: Database): void {
@@ -591,7 +634,7 @@ export function openDb(path: string): Database {
   let version = row?.user_version ?? 0;
   while (version < MIGRATIONS.length) {
     const sql = MIGRATIONS[version]!;
-    const rebuildsReferencedTables = version === 8 || version === 9;
+    const rebuildsReferencedTables = version === 8 || version === 9 || version === 11;
     if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = OFF;");
     try {
       db.transaction(() => {

@@ -922,6 +922,13 @@ export function buildRest(
     return c.json(store.getDelivery(fresh.id));
   });
 
+  app.post("/api/deliveries/:id/sync", async (c) => {
+    const { delivery, conversation: conv } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
+    const fresh = await deliveryAction(() => deliveries.sync(delivery, conv));
+    finalizeDelivery(fresh);
+    return c.json(store.getDelivery(fresh.id));
+  });
+
   app.post("/api/deliveries/:id/deploy", async (c) => {
     const { delivery, conversation: conv } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
     const b = (await c.req.json()) as { confirmed?: boolean };
@@ -944,7 +951,8 @@ export function buildRest(
     const delivery = store.getDeliveryForConversation(conv.id);
     if (delivery) {
       try {
-        deliveries.approve(delivery, conv);
+        const fresh = deliveries.approve(delivery, conv);
+        finalizeDelivery(fresh);
       } catch (error) {
         bad(error instanceof Error ? error.message : String(error));
       }

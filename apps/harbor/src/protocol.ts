@@ -176,12 +176,12 @@ export interface Conversation {
   updatedAt: number;
 }
 
-/** 首期只提供人工确认适配器；后续 Codebase/GitHub 在这里扩展，不改变 Delivery policy。 */
-export type DeliveryProviderKind = "manual";
+/** Delivery policy 与外部 SCM 适配分离；manual 始终作为无 API 系统的诚实 fallback。 */
+export type DeliveryProviderKind = "manual" | "github";
 export type DeliveryReviewStatus = "pending" | "approved";
 export type DeliveryCheckStatus = "unknown" | "pending" | "passed" | "failed";
 export const DELIVERY_CHECK_STATUSES: DeliveryCheckStatus[] = ["unknown", "pending", "passed", "failed"];
-export type DeliveryMergeStatus = "open" | "merged";
+export type DeliveryMergeStatus = "open" | "closed" | "merged";
 export type DeliveryDeploymentStatus = "not_required" | "pending" | "running" | "succeeded" | "failed";
 /** 只读派生状态；调用方更新正交事实，不能直接写这个字段。 */
 export type DeliveryStatus =
@@ -204,6 +204,10 @@ export interface Delivery {
   externalId: string | null;
   headBranch: string | null;
   baseBranch: string | null;
+  /** 最近一次成功 Provider sync 观察到的 GitHub PR head SHA。 */
+  latestHeadSha: string | null;
+  /** 人工验收实际审查的 head SHA；manual provider 不使用。 */
+  approvedHeadSha: string | null;
   reviewStatus: DeliveryReviewStatus;
   checkStatus: DeliveryCheckStatus;
   mergeStatus: DeliveryMergeStatus;
@@ -213,6 +217,8 @@ export interface Delivery {
   reviewApprovedAt: number | null;
   mergedAt: number | null;
   deployedAt: number | null;
+  /** 异步 Provider 动作完成时的 compare-and-set 版本。 */
+  revision: number;
   createdAt: number;
   updatedAt: number;
 }

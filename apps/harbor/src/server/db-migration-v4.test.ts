@@ -4,10 +4,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "./db.js";
+import { DeliveryService } from "./delivery.js";
 import { renderRunPrompt } from "./prompt-wrapper.js";
 import { HarborStore } from "./store.js";
 
-test("legacy database migrates through v11 without losing conversations, runs, or prompts", () => {
+test("legacy v3 database migrates through v13 without losing conversations, runs, or prompts", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v4-"));
   const path = join(dir, "legacy.db");
   try {
@@ -66,7 +67,7 @@ test("legacy database migrates through v11 without losing conversations, runs, o
     legacy.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(11);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(13);
     expect(
       migrated.query<{ agent_id: string | null; description: string | null; priority: string; status: string }, []>(
         "SELECT agent_id, description, priority, status FROM conversations WHERE id = 'conversation_1'",
@@ -143,7 +144,7 @@ test("legacy database migrates through v11 without losing conversations, runs, o
   }
 });
 
-test("v11 upgrades an already-running v9 database and preserves unbound Agents", () => {
+test("v13 upgrades an already-running v9 database and preserves Agent, Delivery, and event data", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v9-"));
   const path = join(dir, "v9.db");
   try {
@@ -192,6 +193,22 @@ test("v11 upgrades an already-running v9 database and preserves unbound Agents",
         claude_session_id TEXT, error TEXT, cost_usd REAL, input_tokens INTEGER, output_tokens INTEGER,
         cached_tokens INTEGER, queued_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER
       );
+      CREATE TABLE deliveries (
+        id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id),
+        provider TEXT NOT NULL, change_url TEXT, external_id TEXT, head_branch TEXT, base_branch TEXT,
+        review_status TEXT NOT NULL DEFAULT 'pending' CHECK (review_status IN ('pending','approved')),
+        check_status TEXT NOT NULL DEFAULT 'unknown' CHECK (check_status IN ('unknown','pending','passed','failed')),
+        merge_status TEXT NOT NULL DEFAULT 'open' CHECK (merge_status IN ('open','merged')),
+        deployment_status TEXT NOT NULL DEFAULT 'not_required' CHECK (deployment_status IN ('not_required','pending','running','succeeded','failed')),
+        review_approved_at INTEGER, merged_at INTEGER, deployed_at INTEGER,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
+      CREATE TABLE delivery_events (
+        delivery_id TEXT NOT NULL REFERENCES deliveries(id), kind TEXT NOT NULL,
+        data TEXT NOT NULL DEFAULT '{}', actor TEXT NOT NULL, ts INTEGER NOT NULL
+      );
+      CREATE INDEX idx_delivery_events ON delivery_events(delivery_id, ts);
       CREATE TABLE prompt_templates (
         source TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1,
         template TEXT NOT NULL, updated_at INTEGER NOT NULL
@@ -207,13 +224,21 @@ test("v11 upgrades an already-running v9 database and preserves unbound Agents",
       INSERT INTO agents VALUES ('agent_1', 'ws_personal', 'unbound', NULL, 'device_1', 'claude', NULL, 'auto-edit', NULL, 'none', NULL, 2, NULL);
       INSERT INTO conversations VALUES ('conversation_1', 'ws_personal', 'issue', 'Keep me', 'agent_1', NULL, 'medium', 'backlog', NULL, NULL, NULL, NULL, 'web', NULL, 3, 3);
       INSERT INTO automations VALUES ('automation_1', 'ws_personal', 'nightly', 'agent_1', NULL, '0 0 * * *', 'Run', 'new_issue', NULL, NULL, 1, NULL);
+      INSERT INTO deliveries
+        (id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+         review_status, check_status, merge_status, deployment_status, review_approved_at,
+         merged_at, deployed_at, created_at, updated_at)
+        VALUES
+        ('delivery_v9', 'conversation_1', 'manual', 'https://example.test/mr/9', 'MR-9', 'feature', 'main',
+         'approved', 'passed', 'open', 'not_required', 4, NULL, NULL, 4, 4);
+      INSERT INTO delivery_events VALUES ('delivery_v9', 'review_approved', '{"source":"v9"}', 'human', 4);
       INSERT INTO workspace_prompt_templates VALUES ('ws_personal', 'issue', 1, 'Legacy={{prompt}}', 4);
       PRAGMA user_version = 9;
     `);
     v9.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(11);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(13);
     const agent = migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM agents WHERE id = 'agent_1'").get();
     expect(agent?.repository_id).toStartWith("repo_unconfigured_");
     expect(migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM conversations WHERE id = 'conversation_1'").get()).toEqual(agent);
@@ -226,6 +251,192 @@ test("v11 upgrades an already-running v9 database and preserves unbound Agents",
         "SELECT template FROM workspace_prompt_blocks WHERE workspace_id = 'ws_personal' AND block_key = 'session.issue.context'",
       ).get(),
     ).toEqual({ template: "Legacy={{prompt}}" });
+    expect(
+      migrated.query<{
+        provider: string;
+        review_status: string;
+        check_status: string;
+        latest_head_sha: string | null;
+        approved_head_sha: string | null;
+        revision: number;
+      }, []>(
+        "SELECT provider, review_status, check_status, latest_head_sha, approved_head_sha, revision FROM deliveries WHERE id = 'delivery_v9'",
+      ).get(),
+    ).toEqual({
+      provider: "manual",
+      review_status: "approved",
+      check_status: "passed",
+      latest_head_sha: null,
+      approved_head_sha: null,
+      revision: 0,
+    });
+    expect(migrated.query<{ kind: string }, []>("SELECT kind FROM delivery_events WHERE delivery_id = 'delivery_v9'").all()).toEqual([
+      { kind: "review_approved" },
+    ]);
+    expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
+    migrated.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("v13 preserves v11 Delivery rows and audit events while adding closed PR state and SHA evidence", () => {
+  const dir = mkdtempSync(join(tmpdir(), "harbor-v11-delivery-"));
+  const path = join(dir, "v11.db");
+  try {
+    const current = openDb(path);
+    const store = new HarborStore(current);
+    const device = store.upsertDevice("worker", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
+    const repository = store.createRepository(
+      { workspaceId: store.defaultWorkspace().id, name: "repo", remoteUrl: "https://github.com/acme/repo.git" },
+      2,
+    );
+    store.setRepositoryMount(repository.id, device.id, "/repo", 3);
+    const agent = store.createAgent(
+      { name: "builder", deviceId: device.id, backend: "claude", repositoryId: repository.id },
+      4,
+    );
+    const issue = store.createConversation({ kind: "issue", title: "Keep delivery", agentId: agent.id, origin: "web" }, 5);
+    store.setConversationStatus(issue.id, "review", 6);
+    const delivery = new DeliveryService(store).create(
+      store.getConversation(issue.id)!,
+      { changeUrl: "https://github.com/acme/repo/pull/1" },
+      7,
+    );
+
+    current.exec("PRAGMA foreign_keys = OFF;");
+    current.exec(`
+      CREATE TABLE deliveries_v11 (
+        id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id),
+        provider TEXT NOT NULL, change_url TEXT, external_id TEXT, head_branch TEXT, base_branch TEXT,
+        review_status TEXT NOT NULL DEFAULT 'pending' CHECK (review_status IN ('pending','approved')),
+        check_status TEXT NOT NULL DEFAULT 'unknown' CHECK (check_status IN ('unknown','pending','passed','failed')),
+        merge_status TEXT NOT NULL DEFAULT 'open' CHECK (merge_status IN ('open','merged')),
+        deployment_status TEXT NOT NULL DEFAULT 'not_required' CHECK (deployment_status IN ('not_required','pending','running','succeeded','failed')),
+        review_approved_at INTEGER, merged_at INTEGER, deployed_at INTEGER,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      INSERT INTO deliveries_v11
+        (id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+         review_status, check_status, merge_status, deployment_status, review_approved_at,
+         merged_at, deployed_at, created_at, updated_at)
+        SELECT id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+               review_status, check_status, merge_status, deployment_status, review_approved_at,
+               merged_at, deployed_at, created_at, updated_at
+        FROM deliveries;
+      DROP TABLE deliveries;
+      ALTER TABLE deliveries_v11 RENAME TO deliveries;
+      CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
+      PRAGMA user_version = 11;
+    `);
+    current.close();
+
+    const migrated = openDb(path);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(13);
+    expect(migrated.query<{ provider: string; change_url: string }, [string]>("SELECT provider, change_url FROM deliveries WHERE id = ?").get(delivery.id)).toEqual({
+      provider: "manual",
+      change_url: "https://github.com/acme/repo/pull/1",
+    });
+    expect(migrated.query<{ kind: string }, [string]>("SELECT kind FROM delivery_events WHERE delivery_id = ?").all(delivery.id)).toEqual([{ kind: "created" }]);
+    expect(
+      migrated.query<{ latest_head_sha: string | null; approved_head_sha: string | null; revision: number }, [string]>(
+        "SELECT latest_head_sha, approved_head_sha, revision FROM deliveries WHERE id = ?",
+      ).get(delivery.id),
+    ).toEqual({ latest_head_sha: null, approved_head_sha: null, revision: 0 });
+    migrated.run("UPDATE deliveries SET merge_status = 'closed' WHERE id = ?", [delivery.id]);
+    expect(migrated.query<{ merge_status: string }, [string]>("SELECT merge_status FROM deliveries WHERE id = ?").get(delivery.id)).toEqual({ merge_status: "closed" });
+    expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
+    migrated.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("v13 invalidates unbound GitHub evidence from v12 while preserving Delivery and event data", () => {
+  const dir = mkdtempSync(join(tmpdir(), "harbor-v12-delivery-"));
+  const path = join(dir, "v12.db");
+  try {
+    const current = openDb(path);
+    const store = new HarborStore(current);
+    const device = store.upsertDevice("worker", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
+    const repository = store.createRepository(
+      { workspaceId: store.defaultWorkspace().id, name: "repo", remoteUrl: "https://github.com/acme/repo.git" },
+      2,
+    );
+    store.setRepositoryMount(repository.id, device.id, "/repo", 3);
+    const agent = store.createAgent(
+      { name: "builder", deviceId: device.id, backend: "claude", repositoryId: repository.id },
+      4,
+    );
+    const issue = store.createConversation({ kind: "issue", title: "Keep v12 delivery", agentId: agent.id, origin: "web" }, 5);
+    store.setConversationStatus(issue.id, "review", 6);
+    const delivery = new DeliveryService(store).create(
+      store.getConversation(issue.id)!,
+      { changeUrl: "https://github.com/acme/repo/pull/12" },
+      7,
+    );
+    current.run(
+      `UPDATE deliveries
+       SET provider = 'github', review_status = 'approved', check_status = 'passed', review_approved_at = 8
+       WHERE id = ?`,
+      [delivery.id],
+    );
+
+    current.exec("PRAGMA foreign_keys = OFF;");
+    current.exec(`
+      CREATE TABLE deliveries_v12_fixture (
+        id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id),
+        provider TEXT NOT NULL, change_url TEXT, external_id TEXT, head_branch TEXT, base_branch TEXT,
+        review_status TEXT NOT NULL DEFAULT 'pending' CHECK (review_status IN ('pending','approved')),
+        check_status TEXT NOT NULL DEFAULT 'unknown' CHECK (check_status IN ('unknown','pending','passed','failed')),
+        merge_status TEXT NOT NULL DEFAULT 'open' CHECK (merge_status IN ('open','closed','merged')),
+        deployment_status TEXT NOT NULL DEFAULT 'not_required' CHECK (deployment_status IN ('not_required','pending','running','succeeded','failed')),
+        review_approved_at INTEGER, merged_at INTEGER, deployed_at INTEGER,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      INSERT INTO deliveries_v12_fixture
+        (id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+         review_status, check_status, merge_status, deployment_status, review_approved_at,
+         merged_at, deployed_at, created_at, updated_at)
+        SELECT id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+               review_status, check_status, merge_status, deployment_status, review_approved_at,
+               merged_at, deployed_at, created_at, updated_at
+        FROM deliveries;
+      DROP TABLE deliveries;
+      ALTER TABLE deliveries_v12_fixture RENAME TO deliveries;
+      CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
+      PRAGMA user_version = 12;
+    `);
+    current.close();
+
+    const migrated = openDb(path);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(13);
+    expect(
+      migrated.query<{
+        provider: string;
+        review_status: string;
+        check_status: string;
+        review_approved_at: number | null;
+        latest_head_sha: string | null;
+        approved_head_sha: string | null;
+        revision: number;
+      }, [string]>(
+        `SELECT provider, review_status, check_status, review_approved_at,
+                latest_head_sha, approved_head_sha, revision
+         FROM deliveries WHERE id = ?`,
+      ).get(delivery.id),
+    ).toEqual({
+      provider: "github",
+      review_status: "pending",
+      check_status: "pending",
+      review_approved_at: null,
+      latest_head_sha: null,
+      approved_head_sha: null,
+      revision: 0,
+    });
+    expect(migrated.query<{ kind: string }, [string]>("SELECT kind FROM delivery_events WHERE delivery_id = ?").all(delivery.id)).toEqual([
+      { kind: "created" },
+    ]);
     expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
     migrated.close();
   } finally {

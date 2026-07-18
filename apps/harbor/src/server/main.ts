@@ -16,7 +16,8 @@ import { AutomationService } from "./automation.js";
 import { FeishuEntry } from "./feishu.js";
 import { buildRest } from "./rest.js";
 import { DeliveryService } from "./delivery.js";
-import { feishuConfig, token } from "../config.js";
+import { GitHubDeliveryProvider, GitHubRestClient } from "./github-delivery.js";
+import { feishuConfig, githubConfig, token } from "../config.js";
 import { DEFAULT_DEVICE_CONCURRENCY, DEFAULT_PORT, RUN_EVENTS_RETENTION_MS } from "../protocol.js";
 
 const authToken = token();
@@ -28,7 +29,16 @@ const db = openDb(dbPath);
 const store = new HarborStore(db);
 const bus = new RunBus();
 const hub = new DeviceHub(store, authToken);
-const deliveries = new DeliveryService(store);
+const gc = githubConfig();
+const deliveries = new DeliveryService(
+  store,
+  gc ? [new GitHubDeliveryProvider(new GitHubRestClient(gc.token))] : [],
+);
+if (!gc) {
+  console.log(
+    "[harbor-server] GitHub Delivery 未配置（HARBOR_GITHUB_TOKEN 或 ~/.harbor.yaml github.token），manual provider 仍可用",
+  );
+}
 const coordinator = new RunCoordinator(store, bus, hub, concurrency, deliveries);
 const approvals = new ApprovalService(store, bus, hub);
 const automations = new AutomationService(store, coordinator);

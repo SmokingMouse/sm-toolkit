@@ -21,6 +21,7 @@ import {
   requestIssueChanges,
   reviewIssue,
   mergeDelivery,
+  syncDelivery,
   startDeliveryDeployment,
   updateConversation,
   updateDelivery,
@@ -29,6 +30,7 @@ import {
   type Delivery,
   type DeliveryCheckStatus,
   type DeliveryEvent,
+  type DeliveryProviderKind,
   type HarborAgent,
   type IssuePriority,
   type Run,
@@ -572,20 +574,34 @@ function IssueDrawer({ id, agents, onlineDeviceIds, initialAction, onInitialActi
   const approve = async () => {
     setBusy(true);
     try {
-      await approveIssue(id);
-      toast(delivery ? "实现已验收；通过 CI 后即可合并" : "非代码 Issue 已完成", "success");
+      const approved = await approveIssue(id);
+      toast(approved.status === "done" ? "Issue 交付已完成" : delivery ? "实现已验收；通过 CI 后即可合并" : "非代码 Issue 已完成", "success");
       refresh();
     }
     catch (e) { toast(e instanceof Error ? e.message : String(e), "error"); }
     finally { setBusy(false); }
   };
 
-  const setupDelivery = async (input: { changeUrl: string; deploymentRequired: boolean }) => {
+  const setupDelivery = async (input: { provider: DeliveryProviderKind; changeUrl: string; deploymentRequired: boolean }) => {
     setBusy(true);
     try {
       await createDelivery(id, input);
       setDeliverySetup(false);
-      toast("Delivery 已建立；请同步 CI 结果并完成验收", "success");
+      toast(input.provider === "github" ? "GitHub Delivery 已建立；请同步 PR / CI" : "Delivery 已建立；请同步 CI 结果并完成验收", "success");
+      refresh();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const syncFromGitHub = async () => {
+    if (!delivery) return;
+    setBusy(true);
+    try {
+      const synced = await syncDelivery(delivery.id);
+      toast(`GitHub 已同步：checks ${synced.checkStatus} · PR ${synced.mergeStatus}`, synced.checkStatus === "failed" || synced.mergeStatus === "closed" ? "error" : "success");
       refresh();
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), "error");
@@ -609,11 +625,15 @@ function IssueDrawer({ id, agents, onlineDeviceIds, initialAction, onInitialActi
   };
 
   const confirmDeliveryMerge = async () => {
-    if (!delivery || !confirm("确认该 MR / PR 已在外部 SCM 合并？Harbor 只记录事实，不会替你调用平台。")) return;
+    if (!delivery) return;
+    const prompt = delivery.provider === "github"
+      ? "确认由 Harbor 调用 GitHub 合并该 PR？仍会再次校验人工验收与 CI checks。"
+      : "确认该 MR / PR 已在外部 SCM 合并？Harbor 只记录事实，不会替你调用平台。";
+    if (!confirm(prompt)) return;
     setBusy(true);
     try {
       await mergeDelivery(delivery.id);
-      toast(delivery.deploymentStatus === "not_required" ? "已记录合并，Issue 交付完成" : "已记录合并，等待部署", "success");
+      toast(delivery.provider === "github" ? "GitHub PR 已合并" : delivery.deploymentStatus === "not_required" ? "已记录合并，Issue 交付完成" : "已记录合并，等待部署", "success");
       refresh();
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), "error");
@@ -699,6 +719,7 @@ function IssueDrawer({ id, agents, onlineDeviceIds, initialAction, onInitialActi
                   onSetup={() => setDeliverySetup(true)}
                   onApprove={approve}
                   onChecks={setDeliveryChecks}
+                  onSync={syncFromGitHub}
                   onMerge={confirmDeliveryMerge}
                   onDeploy={startDeployment}
                   onDeploymentResult={finishDeployment}
@@ -759,6 +780,7 @@ function IssueDrawer({ id, agents, onlineDeviceIds, initialAction, onInitialActi
               onSetup={() => setDeliverySetup(true)}
               onApprove={approve}
               onChecks={setDeliveryChecks}
+              onSync={syncFromGitHub}
               onMerge={confirmDeliveryMerge}
               onDeploy={startDeployment}
               onDeploymentResult={finishDeployment}
@@ -799,6 +821,7 @@ function DeliveryCard({
   onSetup,
   onApprove,
   onChecks,
+  onSync,
   onMerge,
   onDeploy,
   onDeploymentResult,
@@ -810,6 +833,7 @@ function DeliveryCard({
   onSetup: () => void;
   onApprove: () => void;
   onChecks: (status: DeliveryCheckStatus) => void;
+  onSync: () => void;
   onMerge: () => void;
   onDeploy: () => void;
   onDeploymentResult: (status: "succeeded" | "failed") => void;
@@ -839,7 +863,9 @@ function DeliveryCard({
     );
   }
 
-  const meta = DELIVERY_STATUS[delivery.status];
+  const meta = delivery.mergeStatus === "closed"
+    ? { label: "PR closed", note: "PR 已关闭且未合并", tone: "bg-red-50 text-red-700" }
+    : DELIVERY_STATUS[delivery.status];
   const reviewDone = delivery.reviewStatus === "approved";
   const checksDone = delivery.checkStatus === "passed";
   const mergeDone = delivery.mergeStatus === "merged";
@@ -856,7 +882,7 @@ function DeliveryCard({
       <div className="flex items-start justify-between gap-3 border-b border-line/70 px-4 py-3">
         <div>
           <div className="text-[9px] font-bold uppercase tracking-[0.16em] text-dim">Delivery lane</div>
-          <div className="mt-1 text-sm font-semibold text-ink">Manual handoff</div>
+          <div className="mt-1 text-sm font-semibold text-ink">{delivery.provider === "github" ? "GitHub pull request" : "Manual handoff"}</div>
         </div>
         <span className={`rounded-full px-2 py-1 text-[9px] font-bold ${meta.tone}`}>{meta.label}</span>
       </div>
@@ -874,18 +900,23 @@ function DeliveryCard({
           <DeliveryFact label="Human review" value={reviewDone ? "Approved" : "Pending"} ok={reviewDone} />
           <div className="flex min-h-10 items-center justify-between gap-3 py-1">
             <span className="text-[10px] text-dim">CI checks</span>
-            {delivery.mergeStatus === "open" ? <select className="h-8 max-w-[126px] rounded-lg border border-transparent bg-bg pl-2 text-[10px] font-semibold hover:border-line" value={delivery.checkStatus} disabled={disabled} onChange={(event) => onChecks(event.target.value as DeliveryCheckStatus)}><option value="unknown">Unknown</option><option value="pending">Pending</option><option value="passed">Passed</option><option value="failed">Failed</option></select> : <span className={`text-[10px] font-semibold ${checksDone ? "text-done" : "text-canceled"}`}>{delivery.checkStatus}</span>}
+            {delivery.provider === "manual" && delivery.mergeStatus === "open" ? <select className="h-8 max-w-[126px] rounded-lg border border-transparent bg-bg pl-2 text-[10px] font-semibold hover:border-line" value={delivery.checkStatus} disabled={disabled} onChange={(event) => onChecks(event.target.value as DeliveryCheckStatus)}><option value="unknown">Unknown</option><option value="pending">Pending</option><option value="passed">Passed</option><option value="failed">Failed</option></select> : <span className={`text-[10px] font-semibold ${checksDone ? "text-done" : delivery.checkStatus === "failed" ? "text-canceled" : "text-ink/65"}`}>{delivery.checkStatus}</span>}
           </div>
-          <DeliveryFact label="Merge" value={mergeDone ? "Merged" : "Open"} ok={mergeDone} />
+          <DeliveryFact label="Merge" value={mergeDone ? "Merged" : delivery.mergeStatus === "closed" ? "Closed" : "Open"} ok={mergeDone} />
           <DeliveryFact label="Deploy" value={delivery.deploymentStatus.replace("_", " ")} ok={deployDone && mergeDone} />
         </div>
 
-        <p className="mt-3 rounded-lg bg-bg px-3 py-2 text-[10px] leading-4 text-dim"><span className="font-semibold text-ink/70">Manual provider</span> · {meta.note}。按钮只记录外部事实，不会调用 SCM/CD。</p>
+        {delivery.provider === "github" ? (
+          <p className="mt-3 rounded-lg bg-bg px-3 py-2 text-[10px] leading-4 text-dim"><span className="font-semibold text-ink/70">GitHub provider</span> · PR / checks 以 GitHub sync 为准；merge 仍受人工验收与 CI 闸控制。</p>
+        ) : (
+          <p className="mt-3 rounded-lg bg-bg px-3 py-2 text-[10px] leading-4 text-dim"><span className="font-semibold text-ink/70">Manual provider</span> · {meta.note}。按钮只记录外部事实，不会调用 SCM/CD。</p>
+        )}
 
         {issueStatus === "review" && (
           <div className="mt-3 grid gap-2">
+            {delivery.provider === "github" && <button className={btnGhost} disabled={disabled} onClick={onSync}>Sync from GitHub</button>}
             {!reviewDone && <button className={btnPrimary} disabled={disabled} onClick={onApprove}>Approve implementation</button>}
-            {delivery.status === "merge_ready" && <button className={btnPrimary} disabled={disabled} onClick={onMerge}>Confirm externally merged</button>}
+            {delivery.status === "merge_ready" && <button className={btnPrimary} disabled={disabled} onClick={onMerge}>{delivery.provider === "github" ? "Merge on GitHub" : "Confirm externally merged"}</button>}
             {(delivery.status === "merged" || delivery.status === "failed") && <button className={delivery.status === "failed" ? btnDanger : btnPrimary} disabled={disabled} onClick={onDeploy}>{delivery.status === "failed" ? "Record deploy retry" : "Record deploy started"}</button>}
             {delivery.status === "deploying" && <div className="grid grid-cols-2 gap-2"><button className={btnPrimary} disabled={disabled} onClick={() => onDeploymentResult("succeeded")}>Succeeded</button><button className={btnDanger} disabled={disabled} onClick={() => onDeploymentResult("failed")}>Failed</button></div>}
           </div>
@@ -911,21 +942,23 @@ function deliveryLinkLabel(value: string | null): string {
   }
 }
 
-function DeliverySetupModal({ busy, onClose, onSubmit }: { busy: boolean; onClose: () => void; onSubmit: (input: { changeUrl: string; deploymentRequired: boolean }) => void }) {
+function DeliverySetupModal({ busy, onClose, onSubmit }: { busy: boolean; onClose: () => void; onSubmit: (input: { provider: DeliveryProviderKind; changeUrl: string; deploymentRequired: boolean }) => void }) {
+  const [provider, setProvider] = useState<DeliveryProviderKind>("manual");
   const [changeUrl, setChangeUrl] = useState("");
   const [deploymentRequired, setDeploymentRequired] = useState(true);
   return (
     <Modal title="Set up delivery" onClose={onClose}>
       <div className="mb-5 rounded-xl border border-line bg-bg/65 p-4">
-        <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-dim">Manual provider</div>
-        <p className="mt-1.5 text-xs leading-5 text-ink/70">先把交付事实纳入 Harbor。当前不会自动创建或合并 MR，也不会主动触发部署。</p>
+        <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-dim">{provider === "github" ? "GitHub provider" : "Manual provider"}</div>
+        <p className="mt-1.5 text-xs leading-5 text-ink/70">{provider === "github" ? "同步已有 GitHub PR 与 checks，并在 Harbor policy 通过后受控合并。server 必须配置 HARBOR_GITHUB_TOKEN；不会自动创建 PR 或触发部署。" : "先把交付事实纳入 Harbor。当前不会自动创建或合并 MR，也不会主动触发部署。"}</p>
       </div>
-      <Field label="MR / PR URL"><input autoFocus className={inputCls} value={changeUrl} onChange={(event) => setChangeUrl(event.target.value)} placeholder="https://github.com/org/repo/pull/123" /></Field>
+      <Field label="Provider"><select autoFocus className={inputCls} value={provider} onChange={(event) => { const next = event.target.value as DeliveryProviderKind; setProvider(next); if (next === "github") setDeploymentRequired(false); }}><option value="manual">Manual</option><option value="github">GitHub</option></select></Field>
+      <Field label="MR / PR URL"><input className={inputCls} value={changeUrl} onChange={(event) => setChangeUrl(event.target.value)} placeholder="https://github.com/org/repo/pull/123" /></Field>
       <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-line p-4 hover:bg-bg/60">
-        <input className="mt-0.5 h-4 w-4 accent-accent" type="checkbox" checked={deploymentRequired} onChange={(event) => setDeploymentRequired(event.target.checked)} />
-        <span><span className="block text-xs font-semibold text-ink">Merge 后需要部署</span><span className="mt-1 block text-[11px] leading-5 text-dim">开启后，部署成功才会把 Issue 推进 Done；关闭则合并即完成。</span></span>
+        <input className="mt-0.5 h-4 w-4 accent-accent" type="checkbox" checked={deploymentRequired} disabled={provider === "github"} onChange={(event) => setDeploymentRequired(event.target.checked)} />
+        <span><span className="block text-xs font-semibold text-ink">Merge 后需要部署</span><span className="mt-1 block text-[11px] leading-5 text-dim">{provider === "github" ? "本 Issue 不实现 GitHub Actions deployment；GitHub provider 固定为无需部署。" : "开启后，部署成功才会把 Issue 推进 Done；关闭则合并即完成。"}</span></span>
       </label>
-      <ModalFooter><button className={btnGhost} onClick={onClose}>取消</button><button className={btnPrimary} disabled={busy || !changeUrl.trim()} onClick={() => onSubmit({ changeUrl: changeUrl.trim(), deploymentRequired })}>{busy ? "Creating…" : "Create delivery"}</button></ModalFooter>
+      <ModalFooter><button className={btnGhost} onClick={onClose}>取消</button><button className={btnPrimary} disabled={busy || !changeUrl.trim()} onClick={() => onSubmit({ provider, changeUrl: changeUrl.trim(), deploymentRequired })}>{busy ? "Creating…" : "Create delivery"}</button></ModalFooter>
     </Modal>
   );
 }

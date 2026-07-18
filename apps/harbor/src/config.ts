@@ -12,6 +12,8 @@
  *     admin_user_id: ou_xxx             # 唯一有权指挥 bot 的人（send-gate ACL）
  *     bot_name: Harbor
  *     allowed_chats: []                 # automation 播报白名单群，默认空 = 不播报
+ *   github:                            # server-only Delivery provider；缺省 = 仅 manual 可用
+ *     token: github_pat_xxx
  */
 
 import { readFileSync, existsSync } from "node:fs";
@@ -31,6 +33,9 @@ interface HarborFileConfig {
     admin_user_id?: string;
     bot_name?: string;
     allowed_chats?: string[];
+  };
+  github?: {
+    token?: string;
   };
 }
 
@@ -99,4 +104,15 @@ export function feishuConfig(): FeishuConfig | null {
     botName: f.bot_name ?? "Harbor",
     allowedChats: f.allowed_chats ?? [],
   };
+}
+
+export interface GitHubConfig {
+  token: string;
+}
+
+/** GitHub Delivery 凭证只从 server 配置读取；不全时返回 null，让 manual provider 独立启动。 */
+export function githubConfig(): GitHubConfig | null {
+  const configured = process.env.HARBOR_GITHUB_TOKEN ?? fileConfig().github?.token;
+  const githubToken = configured?.trim();
+  return githubToken ? { token: githubToken } : null;
 }
