@@ -14,8 +14,20 @@
  *   DM：anchor=chatId（滚动会话，agent 前缀=开新会话、裸文本=续最新）。
  */
 
-import type { Channel, Content, IncomingAction, IncomingMessage } from "@sm/agent";
-import type { Approval, Conversation, HarborAgent, Run } from "../protocol.js";
+import type {
+  Channel,
+  Content,
+  IncomingAction,
+  IncomingMessage,
+} from "@sm/agent";
+import type {
+  Approval,
+  Conversation,
+  HarborAgent,
+  LarkWorkspaceBinding,
+  Run,
+  RunAttachment,
+} from "../protocol.js";
 import type { FeishuConfig } from "../config.js";
 import type { HarborStore } from "./store.js";
 import type { RunCoordinator } from "./scheduler.js";
@@ -25,16 +37,38 @@ import { transitionConversation } from "./statemachine.js";
 /** FeishuChannel 的能力面（Channel + 群发送）。抽接口是为了 e2e 可用 mock 替身 */
 export interface FeishuPort extends Channel {
   sendToChat(chatId: string, content: Content): Promise<string | null>;
+  downloadResource?(
+    messageId: string,
+    resource: NonNullable<IncomingMessage["resources"]>[number],
+  ): Promise<RunAttachment>;
 }
 
 const HELP = [
-  { command: "<workspace/agent> <指令>", description: "派新 issue 给该 agent（agent 名全局唯一时可省 workspace/）" },
-  { command: "（话题内回复）<指令>", description: "续该 issue 多轮（resume 上下文）" },
-  { command: "/chat <workspace/agent> <指令>", description: "临时对话（不留 issue）" },
-  { command: "/bind <workspace/agent>", description: "绑定本群默认 agent（此后裸指令直接派活）" },
+  {
+    command: "<workspace/agent> <指令>",
+    description: "派新 issue 给该 agent（agent 名全局唯一时可省 workspace/）",
+  },
+  {
+    command: "（话题内回复）<指令>",
+    description: "续该 issue 多轮（resume 上下文）",
+  },
+  {
+    command: "/chat <workspace/agent> <指令>",
+    description: "临时对话（不留 issue）",
+  },
+  {
+    command: "/bind <workspace/agent>",
+    description: "绑定本群默认 agent（此后裸指令直接派活）",
+  },
   { command: "/status", description: "（话题内）看 issue 状态与 run 流水" },
-  { command: "/review <agent名> [要求]", description: "（Review 中）派独立 Reviewer Agent" },
-  { command: "/done · /cancel", description: "（话题内）人工验收 / 取消 issue" },
+  {
+    command: "/review <agent名> [要求]",
+    description: "（Review 中）派独立 Reviewer Agent",
+  },
+  {
+    command: "/done · /cancel",
+    description: "（话题内）人工验收 / 取消 issue",
+  },
   { command: "/agents", description: "列出可用 agent" },
   { command: "/help", description: "本帮助" },
 ];
@@ -51,6 +85,10 @@ export class FeishuEntry implements ApprovalSink {
     private approvals: ApprovalService,
     private config: FeishuConfig,
     private channel: FeishuPort,
+    private scope: {
+      botMode: LarkWorkspaceBinding["botMode"];
+      workspaceId?: string;
+    } = { botMode: "global" },
   ) {}
 
   async start(): Promise<void> {
@@ -65,16 +103,36 @@ export class FeishuEntry implements ApprovalSink {
   // ── 消息路由 ──────────────────────────────────────────
 
   async handleMessage(msg: IncomingMessage): Promise<void> {
-    const text = msg.text.trim();
+    const text = this.messageText(msg);
     if (!text) return;
+    const binding =
+      msg.chatType === "group"
+        ? this.store.getLarkWorkspaceBinding(msg.chatId)
+        : null;
+    if (binding && !this.ownsBinding(binding)) return;
+    const conv = this.resolveConversation(msg);
 
-    // ACL：仅 admin 可指挥（场景①的回复也只对 admin 发）
-    if (this.config.adminUserId && msg.senderId !== this.config.adminUserId) {
-      await this.channel.reply(msg.id, { type: "error", message: "仅管理员可使用 Harbor bot。" });
+    // Mew 边界：DM 不是执行入口；绑定群成员可以触发 Agent，但不会因此获得 Workspace/API 权限。
+    if (msg.chatType === "dm") {
+      if (this.isAdmin(msg))
+        await this.respond(msg, {
+          type: "result",
+          text: "私聊不作为 Agent 执行入口；请在已绑定的 Workspace 群中发起。",
+        });
       return;
     }
-
-    const conv = this.resolveConversation(msg);
+    if (!binding?.enabled) {
+      if (!msg.mentionedBot && !text.startsWith("/bind")) return;
+      if (!this.isAdmin(msg)) {
+        await this.respond(msg, {
+          type: "error",
+          message: "该群尚未绑定 Harbor Workspace；请联系管理员。",
+        });
+        return;
+      }
+    } else if (binding.listenMode === "mention" && !msg.mentionedBot && !conv) {
+      return;
+    }
     if (conv) this.replyAnchors.set(conv.id, msg.id);
 
     try {
@@ -88,52 +146,88 @@ export class FeishuEntry implements ApprovalSink {
         return;
       }
       // 未映射 → `<agent> <prompt>` 或绑定的默认 agent
-      const parsed = this.parseAgentPrefix(text) ?? this.boundAgent(msg.chatId, text);
+      const parsed =
+        this.parseAgentPrefix(text, binding?.workspaceId) ??
+        this.boundAgent(msg.chatId, text);
       if (!parsed) {
-        await this.channel.reply(msg.id, {
+        await this.respond(msg, {
           type: "error",
-          message: "未识别 agent。用 `<agent名> <指令>` 派活，`/agents` 看可用列表，或 `/bind <agent名>` 绑定本群默认。",
+          message:
+            "未识别 agent。用 `<agent名> <指令>` 派活，`/agents` 看可用列表，或 `/bind <agent名>` 绑定本群默认。",
         });
         return;
       }
-      await this.createAndDispatch(msg, parsed.agent, parsed.prompt, "issue");
+      await this.createAndDispatch(msg, parsed.agent, parsed.prompt, "chat");
     } catch (e) {
-      await this.channel.reply(msg.id, {
+      await this.respond(msg, {
         type: "error",
         message: e instanceof Error ? e.message : String(e),
       });
     }
   }
 
-  private async handleCommand(msg: IncomingMessage, conv: Conversation | null, text: string): Promise<void> {
+  private async handleCommand(
+    msg: IncomingMessage,
+    conv: Conversation | null,
+    text: string,
+  ): Promise<void> {
     const [cmd, ...rest] = text.split(/\s+/);
     const restText = rest.join(" ");
 
     switch ((cmd ?? "").toLowerCase()) {
       case "/help":
       case "/帮助":
-        await this.channel.reply(msg.id, { type: "help", commands: HELP });
+        await this.respond(msg, { type: "help", commands: HELP }, conv);
         return;
 
       case "/agents": {
-        const agents = this.store.listAgents();
-        const devices = new Map(this.store.listDevices(new Set()).map((d) => [d.id, d.name]));
-        const workspaces = new Map(this.store.listWorkspaces().map((workspace) => [workspace.id, workspace.slug]));
+        const binding = this.store.getLarkWorkspaceBinding(msg.chatId);
+        const agents = this.store.listAgents(
+          false,
+          binding?.workspaceId ?? this.scope.workspaceId,
+        );
+        const devices = new Map(
+          this.store.listDevices(new Set()).map((d) => [d.id, d.name]),
+        );
+        const workspaces = new Map(
+          this.store
+            .listWorkspaces()
+            .map((workspace) => [workspace.id, workspace.slug]),
+        );
         const lines = agents.length
           ? agents.map(
               (a) =>
                 `**${workspaces.get(a.workspaceId) ?? a.workspaceId}/${a.name}** @ ${devices.get(a.deviceId) ?? a.deviceId} · ${a.backend}/${a.model ?? "默认"} · ${a.permission}${a.isolation === "worktree" ? " · worktree" : ""}`,
             )
           : ["（还没有 agent，先在 CLI 上 `harbor agent create`）"];
-        await this.channel.reply(msg.id, { type: "result", text: lines.join("\n") });
+        await this.respond(
+          msg,
+          { type: "result", text: lines.join("\n") },
+          conv,
+        );
         return;
       }
 
       case "/bind": {
-        const agent = this.resolveAgentRef(restText);
-        if (!agent) throw new Error(`agent "${restText}" 不存在（/agents 查看）`);
-        this.store.setChatBinding(msg.chatId, agent.id, Date.now());
-        await this.channel.reply(msg.id, {
+        if (!this.isAdmin(msg)) throw new Error("只有 Harbor 管理员可以绑定群");
+        const agent = this.resolveAgentRef(restText, this.scope.workspaceId);
+        if (!agent)
+          throw new Error(`agent "${restText}" 不存在（/agents 查看）`);
+        if (
+          this.scope.workspaceId &&
+          agent.workspaceId !== this.scope.workspaceId
+        )
+          throw new Error("Custom Bot 只能绑定其配置的 Workspace");
+        this.store.upsertLarkWorkspaceBinding(
+          {
+            workspaceId: agent.workspaceId,
+            chatId: msg.chatId,
+            defaultAgentId: agent.id,
+            botMode: this.scope.botMode,
+          },
+          Date.now(),
+        );
+        await this.respond(msg, {
           type: "result",
           text: `✓ 本群默认 agent 已绑定为 **${agent.name}**，裸指令将直接派给它。`,
         });
@@ -142,44 +236,78 @@ export class FeishuEntry implements ApprovalSink {
 
       case "/chat":
       case "/issue": {
-        const kind = cmd!.toLowerCase() === "/chat" ? ("chat" as const) : ("issue" as const);
-        const parsed = this.parseAgentPrefix(restText) ?? this.boundAgent(msg.chatId, restText);
-        if (!parsed) throw new Error("用法：`" + cmd + " <agent名> <指令>`（或先 /bind 绑定默认 agent）");
+        const kind =
+          cmd!.toLowerCase() === "/chat"
+            ? ("chat" as const)
+            : ("issue" as const);
+        const binding = this.store.getLarkWorkspaceBinding(msg.chatId);
+        const parsed =
+          this.parseAgentPrefix(restText, binding?.workspaceId) ??
+          this.boundAgent(msg.chatId, restText);
+        if (!parsed)
+          throw new Error(
+            "用法：`" + cmd + " <agent名> <指令>`（或先 /bind 绑定默认 agent）",
+          );
         await this.createAndDispatch(msg, parsed.agent, parsed.prompt, kind);
         return;
       }
 
       case "/status": {
-        if (!conv) throw new Error("本话题未关联 conversation（在派过活的话题里用 /status）");
+        if (!conv)
+          throw new Error(
+            "本话题未关联 conversation（在派过活的话题里用 /status）",
+          );
         const runs = this.store.listRunsByConversation(conv.id);
         const agent = conv.agentId ? this.store.getAgent(conv.agentId) : null;
         const lines = [
           `**${conv.title ?? "(无标题)"}**`,
           `\`${conv.id}\` · ${conv.kind} · **${conv.status}** · agent=${agent?.name ?? "?"}`,
           ...runs.slice(-5).map((r) => {
-            const cost = r.cost?.usd != null ? ` · $${r.cost.usd.toFixed(4)}` : "";
+            const cost =
+              r.cost?.usd != null ? ` · $${r.cost.usd.toFixed(4)}` : "";
             return `· \`${r.id}\` ${r.status}${cost}${r.error ? ` — ${r.error.slice(0, 80)}` : ""}`;
           }),
         ];
-        await this.channel.reply(msg.id, { type: "result", text: lines.join("\n") });
+        await this.respond(
+          msg,
+          { type: "result", text: lines.join("\n") },
+          conv,
+        );
         return;
       }
 
       case "/done":
       case "/cancel": {
+        if (!this.isAdmin(msg))
+          throw new Error("只有 Harbor 管理员可以完成或取消 Issue");
         if (!conv) throw new Error("本话题未关联 conversation");
         if (conv.kind !== "issue") throw new Error("chat 会话没有状态可转换");
-        const to = cmd!.toLowerCase() === "/done" ? ("done" as const) : ("canceled" as const);
-        if (to === "done" && conv.status !== "review") throw new Error("只有 Review 中的 Issue 可以验收完成");
+        const to =
+          cmd!.toLowerCase() === "/done"
+            ? ("done" as const)
+            : ("canceled" as const);
+        if (to === "done" && conv.status !== "review")
+          throw new Error("只有 Review 中的 Issue 可以验收完成");
         const active = this.store.activeRunForConversation(conv.id);
-        if (to === "done" && active) throw new Error("仍有 Run 进行中，不能完成验收");
+        if (to === "done" && active)
+          throw new Error("仍有 Run 进行中，不能完成验收");
         if (to === "canceled") {
           if (active) this.coordinator.cancelRun(active.id);
         }
-        transitionConversation(this.store, this.store.getConversation(conv.id)!, to, "human", Date.now());
+        transitionConversation(
+          this.store,
+          this.store.getConversation(conv.id)!,
+          to,
+          "human",
+          Date.now(),
+        );
         const fresh = this.store.getConversation(conv.id)!;
         this.coordinator.requestWorktreeCleanup(fresh);
-        await this.channel.reply(msg.id, { type: "result", text: `✓ issue ${conv.id} → **${to}**` });
+        await this.respond(
+          msg,
+          { type: "result", text: `✓ issue ${conv.id} → **${to}**` },
+          conv,
+        );
         return;
       }
 
@@ -188,23 +316,35 @@ export class FeishuEntry implements ApprovalSink {
           throw new Error("/review 只能在 Review 阶段使用");
         }
         const [agentName, ...promptParts] = rest;
-        const reviewer = agentName ? this.resolveAgentRef(agentName, conv.workspaceId) : null;
+        const reviewer = agentName
+          ? this.resolveAgentRef(agentName, conv.workspaceId)
+          : null;
         if (!reviewer) throw new Error("用法：/review <agent名> [审查要求]");
-        if (reviewer.archivedAt) throw new Error(`Reviewer Agent "${reviewer.name}" 已归档`);
+        if (reviewer.archivedAt)
+          throw new Error(`Reviewer Agent "${reviewer.name}" 已归档`);
         const prompt =
           promptParts.join(" ").trim() ||
           "请独立审查本 Issue 的实现、代码改动和测试证据，给出阻塞问题与改进建议；不要直接宣告 Issue 完成。";
-        const run = this.coordinator.enqueueRun(conv, reviewer, prompt, "review");
-        const ackId = await this.channel.reply(msg.id, {
-          type: "result",
-          text: `⏳ 已派给 Reviewer **${reviewer.name}**（run \`${run.id}\`，Issue 保持 Review）`,
-        });
+        const run = this.coordinator.enqueueRun(
+          conv,
+          reviewer,
+          prompt,
+          "review",
+        );
+        const ackId = await this.respond(
+          msg,
+          {
+            type: "result",
+            text: `⏳ 已派给 Reviewer **${reviewer.name}**（run \`${run.id}\`，Issue 保持 Review）`,
+          },
+          conv,
+        );
         if (ackId) this.ackCards.set(run.id, ackId);
         return;
       }
 
       default:
-        await this.channel.reply(msg.id, { type: "help", commands: HELP });
+        await this.respond(msg, { type: "help", commands: HELP }, conv);
     }
   }
 
@@ -229,19 +369,77 @@ export class FeishuEntry implements ApprovalSink {
       },
       Date.now(),
     );
+    this.store.appendConversationMessage(
+      conv.id,
+      {
+        authorType: "external",
+        authorId: msg.senderId,
+        authorName: msg.senderName ?? msg.senderId,
+        body: prompt,
+        externalId: msg.id,
+      },
+      Date.now(),
+    );
     this.replyAnchors.set(conv.id, msg.id);
     await this.dispatchRun(msg, conv, prompt);
   }
 
-  private async dispatchRun(msg: IncomingMessage, conv: Conversation, prompt: string): Promise<void> {
+  private async dispatchRun(
+    msg: IncomingMessage,
+    conv: Conversation,
+    prompt: string,
+  ): Promise<void> {
     const agent = conv.agentId ? this.store.getAgent(conv.agentId) : null;
     if (!agent) throw new Error("Issue 尚未指派 Agent");
-    const run = this.coordinator.enqueueRun(conv, agent, prompt, "implementation");
-    const ackId = await this.channel.reply(msg.id, {
-      type: "result",
-      text: `⏳ 已派给 **${agent.name}**（run \`${run.id}\`${conv.kind === "issue" ? ` · issue \`${conv.id}\`` : ""}）`,
-      metadata: run.status === "queued" ? "排队中（设备离线或并发已满也不丢）" : undefined,
-    });
+    if (
+      !this.store
+        .listConversationMessages(conv.id)
+        .some((message) => message.externalId === msg.id)
+    ) {
+      this.store.appendConversationMessage(
+        conv.id,
+        {
+          authorType: "external",
+          authorId: msg.senderId,
+          authorName: msg.senderName ?? msg.senderId,
+          body: prompt,
+          externalId: msg.id,
+        },
+        Date.now(),
+      );
+    }
+    const purpose =
+      conv.kind === "issue" && conv.status === "review"
+        ? "review"
+        : "implementation";
+    const event =
+      conv.kind === "chat"
+        ? "event.chat.message_created"
+        : msg.mentionedBot
+          ? "event.issue.mentioned"
+          : "event.issue.message_created";
+    const attachments = await this.downloadAttachments(msg);
+    const run = this.coordinator.enqueueRun(
+      conv,
+      agent,
+      prompt,
+      purpose,
+      event,
+      msg.id,
+      { attachments },
+    );
+    const ackId = await this.respond(
+      msg,
+      {
+        type: "result",
+        text: `⏳ 已派给 **${agent.name}**（run \`${run.id}\`${conv.kind === "issue" ? ` · issue \`${conv.id}\`` : ""}）`,
+        metadata:
+          run.status === "queued"
+            ? "排队中（设备离线或并发已满也不丢）"
+            : undefined,
+      },
+      conv,
+    );
     if (ackId) this.ackCards.set(run.id, ackId);
   }
 
@@ -249,23 +447,44 @@ export class FeishuEntry implements ApprovalSink {
 
   notifyRunDone(run: Run, conv: Conversation | null): void {
     void this.notifyRunDoneAsync(run, conv).catch((e) =>
-      console.error("[feishu] 结果回报失败：", e instanceof Error ? e.message : e),
+      console.error(
+        "[feishu] 结果回报失败：",
+        e instanceof Error ? e.message : e,
+      ),
     );
   }
 
-  private async notifyRunDoneAsync(run: Run, conv: Conversation | null): Promise<void> {
+  private async notifyRunDoneAsync(
+    run: Run,
+    conv: Conversation | null,
+  ): Promise<void> {
     if (!conv) {
       if (run.sourceType !== "automation") return;
       const automation = this.store.getAutomation(run.sourceId);
-      const text = run.status === "succeeded"
-        ? this.store.getRunResultText(run.id) ?? "（完成，无文本输出）"
-        : run.status === "canceled"
-          ? `⊘ automation run \`${run.id}\` 已取消`
-          : `automation run \`${run.id}\` 失败：${run.error ?? "（无 error 信息）"}`;
+      const notifyBinding = automation?.notifyChatId
+        ? this.store.getLarkWorkspaceBinding(automation.notifyChatId)
+        : null;
+      // 多 Bot profile 会同时收到 coordinator hook；只有绑定所属 Bot 负责群播报，
+      // 没有群绑定的 automation 则由 global Bot 负责，避免重复消息和重复告警。
+      if (
+        notifyBinding
+          ? !this.ownsBinding(notifyBinding)
+          : this.scope.botMode !== "global"
+      )
+        return;
+      const text =
+        run.status === "succeeded"
+          ? (this.store.getRunResultText(run.id) ?? "（完成，无文本输出）")
+          : run.status === "canceled"
+            ? `⊘ automation run \`${run.id}\` 已取消`
+            : `automation run \`${run.id}\` 失败：${run.error ?? "（无 error 信息）"}`;
       if (automation?.notifyChatId) {
         if (this.config.allowedChats.includes(automation.notifyChatId)) {
           if (run.status === "failed") {
-            await this.channel.sendToChat(automation.notifyChatId, { type: "error", message: text });
+            await this.channel.sendToChat(automation.notifyChatId, {
+              type: "error",
+              message: text,
+            });
           } else {
             await this.channel.sendToChat(automation.notifyChatId, {
               type: "result",
@@ -280,10 +499,15 @@ export class FeishuEntry implements ApprovalSink {
         }
       }
       if (run.status === "failed" && this.config.adminUserId) {
-        await this.channel.send(this.config.adminUserId, { type: "error", message: text });
+        await this.channel.send(this.config.adminUserId, {
+          type: "error",
+          message: text,
+        });
       }
       return;
     }
+    if (conv.origin === "feishu" && !this.ownsConversation(conv)) return;
+    if (conv.origin !== "feishu" && this.scope.botMode !== "global") return;
     const content = this.runDoneContent(run, conv);
 
     if (conv.origin === "feishu") {
@@ -323,16 +547,28 @@ export class FeishuEntry implements ApprovalSink {
 
   private runDoneContent(run: Run, conv: Conversation): Content {
     if (run.status === "succeeded") {
-      const text = this.store.getRunResultText(run.id) ?? "（完成，无文本输出）";
+      const text =
+        this.store.getRunResultText(run.id) ?? "（完成，无文本输出）";
       const parts: string[] = [];
-      if (run.startedAt && run.finishedAt) parts.push(`${((run.finishedAt - run.startedAt) / 1000).toFixed(1)}s`);
+      if (run.startedAt && run.finishedAt)
+        parts.push(`${((run.finishedAt - run.startedAt) / 1000).toFixed(1)}s`);
       if (run.cost?.usd != null) parts.push(`$${run.cost.usd.toFixed(4)}`);
-      if (conv.kind === "issue") parts.push(`issue → ${this.store.getConversation(conv.id)?.status ?? "?"}`);
+      if (conv.kind === "issue")
+        parts.push(
+          `issue → ${this.store.getConversation(conv.id)?.status ?? "?"}`,
+        );
       parts.push(`run ${run.id}`);
       return { type: "result", text, metadata: parts.join(" · ") };
     }
     if (run.status === "canceled") {
-      return { type: "result", text: `⊘ run \`${run.id}\` 已取消`, metadata: conv.kind === "issue" ? `issue → ${this.store.getConversation(conv.id)?.status}` : undefined };
+      return {
+        type: "result",
+        text: `⊘ run \`${run.id}\` 已取消`,
+        metadata:
+          conv.kind === "issue"
+            ? `issue → ${this.store.getConversation(conv.id)?.status}`
+            : undefined,
+      };
     }
     return {
       type: "error",
@@ -342,13 +578,25 @@ export class FeishuEntry implements ApprovalSink {
 
   // ── 审批卡片（ApprovalSink） ──────────────────────────
 
-  onApprovalCreated(approval: Approval, _run: Run, conv: Conversation | null): void {
+  onApprovalCreated(
+    approval: Approval,
+    _run: Run,
+    conv: Conversation | null,
+  ): void {
     void this.sendApprovalCard(approval, conv).catch((e) =>
-      console.error("[feishu] 审批卡片发送失败：", e instanceof Error ? e.message : e),
+      console.error(
+        "[feishu] 审批卡片发送失败：",
+        e instanceof Error ? e.message : e,
+      ),
     );
   }
 
-  private async sendApprovalCard(approval: Approval, conv: Conversation | null): Promise<void> {
+  private async sendApprovalCard(
+    approval: Approval,
+    conv: Conversation | null,
+  ): Promise<void> {
+    if (conv?.origin === "feishu" && !this.ownsConversation(conv)) return;
+    if (conv?.origin !== "feishu" && this.scope.botMode !== "global") return;
     const content = this.approvalContent(approval, conv);
     let messageId: string | null = null;
     if (conv?.origin === "feishu") {
@@ -374,14 +622,25 @@ export class FeishuEntry implements ApprovalSink {
     const conv = this.convOfRun(approval.runId);
     void this.channel
       .update(messageId, this.approvalContent(approval, conv))
-      .catch((e) => console.error("[feishu] 审批卡片更新失败：", e instanceof Error ? e.message : e));
+      .catch((e) =>
+        console.error(
+          "[feishu] 审批卡片更新失败：",
+          e instanceof Error ? e.message : e,
+        ),
+      );
   }
 
-  private approvalContent(approval: Approval, conv: Conversation | null): Content {
+  private approvalContent(
+    approval: Approval,
+    conv: Conversation | null,
+  ): Content {
     // Review Run 的执行者不等于 Issue Assignee；审批卡必须展示真正触发工具的 Agent。
     const run = this.store.getRun(approval.runId);
     const agent = run ? this.store.getAgent(run.agentId) : null;
-    const inputPreview = JSON.stringify(approval.input ?? {}, null, 2).slice(0, 800);
+    const inputPreview = JSON.stringify(approval.input ?? {}, null, 2).slice(
+      0,
+      800,
+    );
     const decidedNote =
       approval.status === "allowed" || approval.status === "denied"
         ? `by ${approval.decidedBy ?? "?"}`
@@ -401,12 +660,20 @@ export class FeishuEntry implements ApprovalSink {
               {
                 label: "批准",
                 style: "primary",
-                value: JSON.stringify({ cmd: "harbor_tool_approval", id: approval.id, behavior: "allow" }),
+                value: JSON.stringify({
+                  cmd: "harbor_tool_approval",
+                  id: approval.id,
+                  behavior: "allow",
+                }),
               },
               {
                 label: "拒绝",
                 style: "danger",
-                value: JSON.stringify({ cmd: "harbor_tool_approval", id: approval.id, behavior: "deny" }),
+                value: JSON.stringify({
+                  cmd: "harbor_tool_approval",
+                  id: approval.id,
+                  behavior: "deny",
+                }),
               },
             ]
           : [],
@@ -419,17 +686,26 @@ export class FeishuEntry implements ApprovalSink {
     let value: { cmd?: string; id?: string; behavior?: string };
     try {
       const parsed = JSON.parse(action.value) as unknown;
-      value = (typeof parsed === "string" ? JSON.parse(parsed) : parsed) as typeof value;
+      value = (
+        typeof parsed === "string" ? JSON.parse(parsed) : parsed
+      ) as typeof value;
     } catch {
       return;
     }
     if (value.cmd !== "harbor_tool_approval" || !value.id) return;
-    if (this.config.adminUserId && action.operatorId !== this.config.adminUserId) {
+    if (
+      this.config.adminUserId &&
+      action.operatorId !== this.config.adminUserId
+    ) {
       console.warn(`[feishu] 非 admin 点击审批卡片被拒：${action.operatorId}`);
       return;
     }
     // decide 幂等（重复点击/CLI 竞态返回既有决议），卡片更新走 onApprovalDecided sink
-    this.approvals.decide(value.id, value.behavior === "allow" ? "allow" : "deny", "feishu");
+    this.approvals.decide(
+      value.id,
+      value.behavior === "allow" ? "allow" : "deny",
+      "feishu",
+    );
   }
 
   // ── 内部 ──────────────────────────────────────────────
@@ -443,31 +719,52 @@ export class FeishuEntry implements ApprovalSink {
   }
 
   private resolveConversation(msg: IncomingMessage): Conversation | null {
+    if (msg.replyToMessageId) {
+      const linked = this.store.getConversationForLarkMessage(
+        msg.replyToMessageId,
+      );
+      if (linked) return linked;
+    }
     const anchor = this.anchorOf(msg, false);
-    const conv = this.store.getConversationByOrigin("feishu", `${msg.chatId}|${anchor}`);
+    const conv = this.store.getConversationByOrigin(
+      "feishu",
+      `${msg.chatId}|${anchor}`,
+    );
     if (conv) return conv;
     // DM 话题内回复 → 回退滚动会话锚
     if (msg.chatType === "dm" && anchor !== msg.chatId) {
-      return this.store.getConversationByOrigin("feishu", `${msg.chatId}|${msg.chatId}`);
+      return this.store.getConversationByOrigin(
+        "feishu",
+        `${msg.chatId}|${msg.chatId}`,
+      );
     }
     return null;
   }
 
-  private parseAgentPrefix(text: string): { agent: HarborAgent; prompt: string } | null {
+  private parseAgentPrefix(
+    text: string,
+    workspaceId?: string,
+  ): { agent: HarborAgent; prompt: string } | null {
     const m = /^(\S+)\s+([\s\S]+)$/.exec(text.trim());
     if (!m) return null;
-    const agent = this.resolveAgentRef(m[1]!);
+    const agent = this.resolveAgentRef(m[1]!, workspaceId);
     if (!agent || agent.archivedAt) return null;
     return { agent, prompt: m[2]! };
   }
 
-  private resolveAgentRef(ref: string, workspaceId?: string): HarborAgent | null {
+  private resolveAgentRef(
+    ref: string,
+    workspaceId?: string,
+  ): HarborAgent | null {
     if (workspaceId) {
       const separator = ref.indexOf("/");
       if (separator > 0) {
         const workspace = this.store.resolveWorkspace(ref.slice(0, separator));
         if (!workspace || workspace.id !== workspaceId) return null;
-        return this.store.getAgentByNameInWorkspace(workspaceId, ref.slice(separator + 1));
+        return this.store.getAgentByNameInWorkspace(
+          workspaceId,
+          ref.slice(separator + 1),
+        );
       }
       const direct = this.store.getAgent(ref);
       if (direct && direct.workspaceId === workspaceId) return direct;
@@ -477,40 +774,128 @@ export class FeishuEntry implements ApprovalSink {
     if (separator > 0) {
       const workspace = this.store.resolveWorkspace(ref.slice(0, separator));
       if (!workspace || workspace.archivedAt) return null;
-      return this.store.getAgentByNameInWorkspace(workspace.id, ref.slice(separator + 1));
+      return this.store.getAgentByNameInWorkspace(
+        workspace.id,
+        ref.slice(separator + 1),
+      );
     }
     try {
       return this.store.getAgent(ref) ?? this.store.getAgentByName(ref);
     } catch {
-      throw new Error(`agent "${ref}" 存在于多个 Workspace，请使用 <workspace/agent>（/agents 查看）`);
+      throw new Error(
+        `agent "${ref}" 存在于多个 Workspace，请使用 <workspace/agent>（/agents 查看）`,
+      );
     }
   }
 
-  private boundAgent(chatId: string, text: string): { agent: HarborAgent; prompt: string } | null {
-    const agentId = this.store.getChatBinding(chatId);
-    if (!agentId) return null;
-    const agent = this.store.getAgent(agentId);
+  private boundAgent(
+    chatId: string,
+    text: string,
+  ): { agent: HarborAgent; prompt: string } | null {
+    const binding = this.store.getLarkWorkspaceBinding(chatId);
+    if (!binding?.enabled) return null;
+    const agent = this.store.getAgent(binding.defaultAgentId);
     if (!agent || agent.archivedAt) return null;
     return { agent, prompt: text.trim() };
   }
 
   private convOfRun(runId: string): Conversation | null {
     const run = this.store.getRun(runId);
-    return run?.conversationId ? this.store.getConversation(run.conversationId) : null;
+    return run?.conversationId
+      ? this.store.getConversation(run.conversationId)
+      : null;
   }
 
   /** 回话题（内存锚点）→ 退化为直发群（server 重启后锚点丢失） */
-  private async replyToConversation(conv: Conversation, content: Content): Promise<string | null> {
+  private async replyToConversation(
+    conv: Conversation,
+    content: Content,
+  ): Promise<string | null> {
+    const chatId = conv.originRef?.split("|")[0];
+    const binding = chatId ? this.store.getLarkWorkspaceBinding(chatId) : null;
+    if (chatId && binding?.responseMode === "message") {
+      const messageId = await this.channel.sendToChat(chatId, content);
+      if (messageId) this.store.linkLarkMessage(messageId, conv.id, Date.now());
+      return messageId;
+    }
     const anchor = this.replyAnchors.get(conv.id);
     if (anchor) {
       try {
-        return await this.channel.reply(anchor, content);
+        const messageId = await this.channel.reply(anchor, content);
+        if (messageId)
+          this.store.linkLarkMessage(messageId, conv.id, Date.now());
+        return messageId;
       } catch {
         // 锚点消息不可回复（被删等）→ 落到 sendToChat
       }
     }
-    const chatId = conv.originRef?.split("|")[0];
     if (!chatId) return null;
-    return this.channel.sendToChat(chatId, content);
+    const messageId = await this.channel.sendToChat(chatId, content);
+    if (messageId) this.store.linkLarkMessage(messageId, conv.id, Date.now());
+    return messageId;
+  }
+
+  private isAdmin(msg: IncomingMessage): boolean {
+    return !this.config.adminUserId || msg.senderId === this.config.adminUserId;
+  }
+
+  private ownsBinding(binding: LarkWorkspaceBinding): boolean {
+    return (
+      binding.botMode === this.scope.botMode &&
+      (!this.scope.workspaceId ||
+        binding.workspaceId === this.scope.workspaceId)
+    );
+  }
+
+  private ownsConversation(conv: Conversation): boolean {
+    const chatId = conv.originRef?.split("|")[0];
+    const binding = chatId ? this.store.getLarkWorkspaceBinding(chatId) : null;
+    return !!binding && this.ownsBinding(binding);
+  }
+
+  private messageText(msg: IncomingMessage): string {
+    const text = msg.text.trim();
+    const resources = msg.resources ?? [];
+    if (!resources.length) return text;
+    const lines = resources.map(
+      (resource) =>
+        `- ${resource.type}: ${resource.fileName ?? resource.fileKey} (Lark file_key=${resource.fileKey})`,
+    );
+    return `${text}\n\n## Lark attachments\n${lines.join("\n")}`.trim();
+  }
+
+  private async downloadAttachments(
+    msg: IncomingMessage,
+  ): Promise<RunAttachment[]> {
+    const resources = (msg.resources ?? [])
+      .filter((resource) => resource.type !== "sticker")
+      .slice(0, 8);
+    if (!resources.length || !this.channel.downloadResource) return [];
+    const attachments: RunAttachment[] = [];
+    let totalBytes = 0;
+    for (const resource of resources) {
+      const attachment = await this.channel.downloadResource(msg.id, resource);
+      const bytes = Buffer.byteLength(attachment.dataBase64, "base64");
+      totalBytes += bytes;
+      if (totalBytes > 20 * 1024 * 1024)
+        throw new Error("单条消息附件总量超过 Harbor 20MB 上限");
+      attachments.push(attachment);
+    }
+    return attachments;
+  }
+
+  private async respond(
+    msg: IncomingMessage,
+    content: Content,
+    conv?: Conversation | null,
+  ): Promise<string | null> {
+    const binding = this.store.getLarkWorkspaceBinding(msg.chatId);
+    const messageId =
+      binding?.responseMode === "message"
+        ? await this.channel.sendToChat(msg.chatId, content)
+        : await this.channel.reply(msg.id, content);
+    if (messageId && conv)
+      this.store.linkLarkMessage(messageId, conv.id, Date.now());
+    return messageId;
   }
 }

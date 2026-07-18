@@ -69,7 +69,7 @@ test("legacy database migrates through latest schema without losing conversation
     legacy.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(12);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(14);
     expect(
       migrated.query<{ agent_id: string | null; description: string | null; priority: string; status: string }, []>(
         "SELECT agent_id, description, priority, status FROM conversations WHERE id = 'conversation_1'",
@@ -223,7 +223,7 @@ test("latest schema upgrades an already-running v9 database and preserves unboun
     v9.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(12);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(14);
     const agent = migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM agents WHERE id = 'agent_1'").get();
     expect(agent?.repository_id).toStartWith("repo_unconfigured_");
     expect(migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM conversations WHERE id = 'conversation_1'").get()).toEqual(agent);

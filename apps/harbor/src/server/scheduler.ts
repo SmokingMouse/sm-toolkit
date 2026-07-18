@@ -8,6 +8,7 @@
  */
 
 import type { Cost } from "@sm/agent";
+import { createHash, randomBytes } from "node:crypto";
 import type {
   Automation,
   Conversation,
@@ -15,6 +16,7 @@ import type {
   HarborSkill,
   PromptEventBlockKey,
   Run,
+  RunAttachment,
   RunPurpose,
   RunSpec,
   ServerMsg,
@@ -59,6 +61,7 @@ export class RunCoordinator {
       triggerContext?: Record<string, unknown>;
       concurrencyKey?: string | null;
       allowQueuedBehindConversation?: boolean;
+      attachments?: RunAttachment[];
     } = {},
   ): Run {
     if (conv.workspaceId !== agent.workspaceId) {
@@ -77,10 +80,12 @@ export class RunCoordinator {
       throw new Error("AI Issue 草稿只允许 triage run");
     }
     const reviewing = purpose === "review" || purpose === "verification";
-    const repositoryId = reviewing ? conv.repositoryId : agent.repositoryId;
+    const repositoryId = conv.repositoryId && agent.repositoryIds.includes(conv.repositoryId)
+      ? conv.repositoryId
+      : agent.repositoryId;
     if (!repositoryId) throw new Error("当前任务尚未确定 Repository");
-    if (reviewing && agent.repositoryId !== repositoryId) {
-      throw new Error(`Reviewer Agent 必须绑定实现仓库；当前 Agent 绑定的是其他 Repository`);
+    if (reviewing && !agent.repositoryIds.includes(repositoryId)) {
+      throw new Error(`Reviewer Agent 必须能看到实现仓库；当前 Agent 未绑定该 Repository`);
     }
     const repository = this.store.getRepository(repositoryId);
     if (repository?.archivedAt) {
@@ -138,6 +143,7 @@ export class RunCoordinator {
         triggerRef: triggerRef ?? conv.originRef,
         triggerContext: options.triggerContext,
         concurrencyKey: options.concurrencyKey,
+        attachments: options.attachments,
       },
       Date.now(),
     );
@@ -236,15 +242,29 @@ export class RunCoordinator {
         continue;
       }
 
+      const actionToken = `harbor_run_${randomBytes(24).toString("base64url")}`;
+      this.store.revokeRunActionTokens(run.id, now);
+      this.store.createRunActionToken(
+        run.id,
+        createHash("sha256").update(actionToken).digest("hex"),
+        now + 2 * 60 * 60 * 1000,
+        now,
+      );
       const spec: RunSpec = {
         backend: agent.backend,
         model: agent.model,
         // runs.prompt 保留原文；只在 dispatch 瞬间按来源包裹结构化上下文。
         prompt: renderRunPrompt(this.store, { run, conversation: conv, agent }),
         repositoryRoot: run.executionRoot,
+        additionalRepositoryRoots: agent.repositoryIds
+          .filter((repositoryId) => repositoryId !== run.repositoryId)
+          .map((repositoryId) => this.store.getRepositoryMountForDevice(repositoryId, agent.deviceId)?.path)
+          .filter((path): path is string => !!path),
         // AI draft 只允许读取仓库做分诊，不能在 Issue 尚未确认时改文件或创建 worktree。
         permission: run.purpose === "triage" ? "readonly" : agent.permission,
-        systemPrompt: composeAgentSystemPrompt(agent.instruction, this.store.listSkillsForAgent(agent.id)),
+        systemPrompt: withAgentActionGuidance(
+          composeAgentSystemPrompt(agent.instruction, this.store.listSkillsForAgent(agent.id)),
+        ),
         resume:
           conv && (run.purpose === "implementation" || run.purpose === "triage") && conv.agentId === agent.id
             ? conv.claudeSessionId
@@ -252,9 +272,19 @@ export class RunCoordinator {
         conversationId: conv?.id ?? null,
         isolation: run.purpose === "triage" ? "none" : agent.isolation,
         worktreePath: run.purpose === "triage" ? null : conv?.worktreePath ?? null,
+        envOverrides: agent.environment,
+        setupScript: run.purpose === "triage" ? null : agent.setupScript,
+        setupKey: agent.setupScript
+          ? createHash("sha256").update(`${agent.id}\0${agent.setupScript}`).digest("hex")
+          : null,
+        attachments: this.store.listRunAttachments(run.id),
+        agentActionToken: actionToken,
       };
       const sent = this.transport.send(deviceId, { type: "run_start", runId: run.id, spec });
-      if (!sent) return; // 连接实际不可用，留在队列等下次上线
+      if (!sent) {
+        this.store.revokeRunActionTokens(run.id, Date.now());
+        return; // 连接实际不可用，留在队列等下次上线
+      }
       this.store.markRunRunning(run.id, now);
       if (conv?.kind === "issue" && run.purpose === "implementation" && conv.status !== "doing") {
         transitionConversation(this.store, conv, "doing", "system", now);
@@ -288,6 +318,7 @@ export class RunCoordinator {
       { claudeSessionId: msg.claudeSessionId, cost: msg.cost, error: msg.error ?? null },
       now,
     );
+    this.store.revokeRunActionTokens(msg.runId, now);
 
     const conv = run.conversationId ? this.store.getConversation(run.conversationId) : null;
     if (conv) {
@@ -374,6 +405,7 @@ export class RunCoordinator {
         },
         now,
       );
+      this.store.revokeRunActionTokens(run.id, now);
       const conv = run.conversationId ? this.store.getConversation(run.conversationId) : null;
       if (conv && conv.kind === "issue") {
         transitionConversation(this.store, conv, "todo", "system", now);
@@ -388,6 +420,17 @@ export class RunCoordinator {
     }
     this.pump(deviceId);
   }
+}
+
+const AGENT_ACTION_GUIDANCE = `# Harbor control-plane actions
+
+Harbor owns lifecycle state. Do not mutate the current Issue status from the shell.
+If you discover independent follow-up work that should be tracked separately, you may create a backlog Issue by POSTing JSON to $HARBOR_AGENT_ACTION_URL with Authorization: Bearer $HARBOR_AGENT_ACTION_TOKEN.
+Body: {"title":"...","description":"...","priority":"none|low|medium|high|urgent","assignee":"unassigned|self","labels":["existing-label"]}.
+Use this only for genuinely separate work, never for progress reporting. Never print, log, persist, or include the action token in output.`;
+
+function withAgentActionGuidance(systemPrompt: string | null): string {
+  return [systemPrompt?.trim(), AGENT_ACTION_GUIDANCE].filter(Boolean).join("\n\n---\n\n");
 }
 
 /**

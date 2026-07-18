@@ -12,6 +12,10 @@
  *     admin_user_id: ou_xxx             # 唯一有权指挥 bot 的人（send-gate ACL）
  *     bot_name: Harbor
  *     allowed_chats: []                 # automation 播报白名单群，默认空 = 不播报
+ *     custom_bots:                      # optional：Workspace 专属 Bot（key = workspace id/slug）
+ *       ws_personal:
+ *         app_id: cli_custom
+ *         app_secret: xxx
  */
 
 import { readFileSync, existsSync } from "node:fs";
@@ -31,6 +35,19 @@ interface HarborFileConfig {
     admin_user_id?: string;
     bot_name?: string;
     allowed_chats?: string[];
+    custom_bots?: Record<
+      string,
+      {
+        app_id?: string;
+        app_secret?: string;
+        admin_user_id?: string;
+        bot_name?: string;
+        allowed_chats?: string[];
+      }
+    >;
+  };
+  codebase?: {
+    webhook_secret?: string;
   };
 }
 
@@ -39,13 +56,17 @@ let _file: HarborFileConfig | null = null;
 function fileConfig(): HarborFileConfig {
   if (_file) return _file;
   const p = resolve(process.env.HOME ?? "~", ".harbor.yaml");
-  _file = existsSync(p) ? ((parseYaml(readFileSync(p, "utf-8")) as HarborFileConfig) ?? {}) : {};
+  _file = existsSync(p)
+    ? ((parseYaml(readFileSync(p, "utf-8")) as HarborFileConfig) ?? {})
+    : {};
   return _file;
 }
 
 export function serverUrl(): string {
   return (
-    process.env.HARBOR_SERVER_URL ?? fileConfig().server_url ?? `http://127.0.0.1:${DEFAULT_PORT}`
+    process.env.HARBOR_SERVER_URL ??
+    fileConfig().server_url ??
+    `http://127.0.0.1:${DEFAULT_PORT}`
   );
 }
 
@@ -68,7 +89,9 @@ export function token(): string {
 }
 
 export function deviceName(): string {
-  return process.env.HARBOR_DEVICE_NAME ?? fileConfig().device_name ?? hostname();
+  return (
+    process.env.HARBOR_DEVICE_NAME ?? fileConfig().device_name ?? hostname()
+  );
 }
 
 /** CLI 默认作用域；可用 --workspace 在单次命令覆盖。 */
@@ -99,4 +122,47 @@ export function feishuConfig(): FeishuConfig | null {
     botName: f.bot_name ?? "Harbor",
     allowedChats: f.allowed_chats ?? [],
   };
+}
+
+export interface FeishuBotProfile {
+  mode: "global" | "custom";
+  workspaceKey: string | null;
+  config: FeishuConfig;
+}
+
+/** 一个 global Bot + N 个 Workspace custom Bot；secret 只从 server 配置读取，不进数据库/REST。 */
+export function feishuBotProfiles(): FeishuBotProfile[] {
+  const profiles: FeishuBotProfile[] = [];
+  const global = feishuConfig();
+  if (global)
+    profiles.push({ mode: "global", workspaceKey: null, config: global });
+  for (const [workspaceKey, value] of Object.entries(
+    fileConfig().feishu?.custom_bots ?? {},
+  )) {
+    if (!value.app_id || !value.app_secret) continue;
+    profiles.push({
+      mode: "custom",
+      workspaceKey,
+      config: {
+        appId: value.app_id,
+        appSecret: value.app_secret,
+        adminUserId: value.admin_user_id ?? "",
+        botName: value.bot_name ?? "Harbor",
+        allowedChats: value.allowed_chats ?? [],
+      },
+    });
+  }
+  return profiles;
+}
+
+export interface CodebaseConfig {
+  /** Codebase webhook 独立 secret；不复用高权限 HARBOR_TOKEN。 */
+  webhookSecret: string;
+}
+
+export function codebaseConfig(): CodebaseConfig | null {
+  const value =
+    process.env.HARBOR_CODEBASE_WEBHOOK_SECRET ??
+    fileConfig().codebase?.webhook_secret;
+  return value ? { webhookSecret: value } : null;
 }
