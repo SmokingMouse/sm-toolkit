@@ -25,14 +25,18 @@
  *       current_symlink_path: /Users/me/.harbor/deploy/current
  *       sqlite_path: /Users/me/.harbor/harbor.db
  *       state_path: /Users/me/.harbor/deploy/state
+ *       source: { remote: origin, url: https://github.com/me/harbor.git, allowed_refs: [refs/remotes/origin/main] }
  *       command_timeout_ms: 1800000
  *       steps: { install: [[bun, install, --frozen-lockfile]], build: [[bun, run, build]], test: [[bun, test]] }
- *       launchd: { label: com.example.harbor, domain: gui/501, plist_path: /Users/me/Library/LaunchAgents/com.example.harbor.plist, template_path: /Users/me/.harbor/deploy/harbor.plist.tpl }
- *       health: { url: http://127.0.0.1:7777/api/health, headers: { Authorization: Bearer xxx }, timeout_ms: 30000, interval_ms: 500 }
+ *       services:
+ *         - { id: server, role: server, label: com.example.harbor.server, domain: gui/501, plist_path: /Users/me/Library/LaunchAgents/com.example.harbor.server.plist, template_path: /Users/me/.harbor/deploy/server.plist.tpl, template_sha256: <64 hex> }
+ *         - { id: daemon, role: daemon, label: com.example.harbor.daemon, domain: gui/501, plist_path: /Users/me/Library/LaunchAgents/com.example.harbor.daemon.plist, template_path: /Users/me/.harbor/deploy/daemon.plist.tpl, template_sha256: <64 hex> }
+ *       # secret value 只由 worker 从 env 解析；server 只读取这个非敏感 reference。
+ *       health: { url: http://127.0.0.1:7777/api/health, headers: { Authorization: { env: HARBOR_DEPLOY_HEALTH_AUTH } }, timeout_ms: 30000, interval_ms: 500 }
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync, existsSync, lstatSync, type Stats } from "node:fs";
+import { readFileSync, existsSync, lstatSync, realpathSync, type Stats } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -44,6 +48,7 @@ interface HarborFileConfig {
   device_name?: string;
   workspace?: string;
   database_path?: string;
+  deployment_maintenance_path?: string;
   feishu?: {
     app_id?: string;
     app_secret?: string;
@@ -104,6 +109,17 @@ export function databasePath(): string {
   return process.env.HARBOR_DB ?? fileConfig().database_path ?? resolve(process.env.HOME ?? "~", ".harbor/harbor.db");
 }
 
+/** 这台 Harbor host 的稳定全局 maintenance sentinel；不得依赖任何 target state_path。 */
+export function deploymentMaintenancePath(): string {
+  const configured = process.env.HARBOR_DEPLOYMENT_MAINTENANCE_PATH
+    ?? fileConfig().deployment_maintenance_path
+    ?? resolve(process.env.HOME ?? "~", ".harbor/deployment/maintenance.json");
+  if (!isAbsolute(configured) || resolve(configured) !== configured || dirname(configured) === configured) {
+    throw new Error("deployment maintenance path 必须是非根目录下的 canonical 绝对路径");
+  }
+  return configured;
+}
+
 export interface FeishuConfig {
   appId: string;
   appSecret: string;
@@ -140,6 +156,23 @@ export function githubConfig(): GitHubConfig | null {
   return githubToken ? { token: githubToken } : null;
 }
 
+export type DeploymentServiceRole = "server" | "daemon";
+
+export interface DeploymentServiceConfig {
+  id: string;
+  role: DeploymentServiceRole;
+  label: string;
+  domain: string;
+  plistPath: string;
+  templatePath: string;
+  /** 管理员冻结的 template 内容 hash；worker 每次启动/执行均复验。 */
+  templateSha256: string;
+}
+
+export interface SecretReference {
+  env: string;
+}
+
 export interface LocalLaunchdDeploymentTargetConfig {
   id: string;
   name: string;
@@ -150,23 +183,37 @@ export interface LocalLaunchdDeploymentTargetConfig {
   currentSymlinkPath: string;
   sqlitePath: string;
   statePath: string;
+  source: { remote: string; remoteUrl: string; allowedRefs: string[] };
   steps: { install: string[][]; build: string[][]; test: string[][] };
   environment: Record<string, string>;
-  launchd: { label: string; domain: string; plistPath: string; templatePath: string };
-  health: { url: string; headers: Record<string, string>; timeoutMs: number; intervalMs: number };
+  services: DeploymentServiceConfig[];
+  health: {
+    url: string;
+    headerRefs: Record<string, SecretReference>;
+    /** 仅进程内存在；fingerprint/DB/REST/audit 不得使用。 */
+    headers: Record<string, string>;
+    timeoutMs: number;
+    intervalMs: number;
+  };
   commandTimeoutMs: number;
   /** 只覆盖非敏感 topology；用于拒绝 server/worker 配置漂移。 */
   fingerprint: string;
+  /** release manifest 的非敏感 contract hash；与 build policy fingerprint 分离。 */
+  manifestHash: string;
 }
 
 export type DeploymentTargetConfig = LocalLaunchdDeploymentTargetConfig;
 
 /** 纯 parser 供测试注入；不会读取真实 HOME。 */
-export function parseDeploymentTargets(value: unknown): DeploymentTargetConfig[] {
+export function parseDeploymentTargets(
+  value: unknown,
+  secretEnvironment: Record<string, string | undefined> = {},
+  options: { resolveSecrets?: boolean; maintenancePath?: string } = {},
+): DeploymentTargetConfig[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) throw new Error("deployment_targets 必须是数组");
   const seen = new Set<string>();
-  return value.map((item, index) => {
+  const parsed = value.map((item, index) => {
     const raw = record(item, `deployment_targets[${index}]`);
     const id = requiredString(raw.id, `deployment_targets[${index}].id`);
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)) {
@@ -177,8 +224,8 @@ export function parseDeploymentTargets(value: unknown): DeploymentTargetConfig[]
     if (raw.provider !== "local-launchd") {
       throw new Error(`deployment target "${id}" provider 只支持 local-launchd`);
     }
-    const launchd = record(raw.launchd, `deployment target "${id}" launchd`);
     const health = record(raw.health, `deployment target "${id}" health`);
+    const source = record(raw.source, `deployment target "${id}" source`);
     const steps = raw.steps === undefined ? {} : record(raw.steps, `deployment target "${id}" steps`);
     const environment = raw.environment === undefined
       ? {}
@@ -190,12 +237,20 @@ export function parseDeploymentTargets(value: unknown): DeploymentTargetConfig[]
           if (typeof candidate !== "string") throw new Error(`deployment target "${id}" environment.${key} 必须是字符串`);
           return [key, candidate];
         }));
-    const healthHeaders = health.headers === undefined
+    const healthHeaderRefs = health.headers === undefined
       ? {}
       : Object.fromEntries(Object.entries(record(health.headers, `deployment target "${id}" health.headers`)).map(([key, candidate]) => {
-          if (typeof candidate !== "string") throw new Error(`deployment target "${id}" health.headers.${key} 必须是字符串`);
-          return [key, candidate];
+          if (!/^[A-Za-z0-9-]{1,128}$/.test(key)) throw new Error(`deployment target "${id}" health header name 无效`);
+          const reference = record(candidate, `deployment target "${id}" health.headers.${key}`);
+          const env = requiredString(reference.env, `deployment target "${id}" health.headers.${key}.env`);
+          if (!/^[A-Z_][A-Z0-9_]*$/.test(env)) throw new Error(`deployment target "${id}" health secret env reference 无效`);
+          const secret = secretEnvironment[env];
+          if (options.resolveSecrets !== false && !secret) throw new Error(`deployment target "${id}" health secret env ${env} 未配置`);
+          return [key, { env } satisfies SecretReference];
         }));
+    const healthHeaders = options.resolveSecrets === false
+      ? {}
+      : Object.fromEntries(Object.entries(healthHeaderRefs).map(([key, reference]) => [key, secretEnvironment[reference.env]!]));
     const absolute = (key: string, candidate: unknown) => {
       const path = requiredString(candidate, `deployment target "${id}" ${key}`);
       if (!isAbsolute(path)) throw new Error(`deployment target "${id}" ${key} 必须是绝对路径`);
@@ -220,82 +275,218 @@ export function parseDeploymentTargets(value: unknown): DeploymentTargetConfig[]
     const currentSymlinkPath = absolute("current_symlink_path", raw.current_symlink_path);
     const sqlitePath = absolute("sqlite_path", raw.sqlite_path);
     const statePath = absolute("state_path", raw.state_path);
-    const plistPath = absolute("launchd.plist_path", launchd.plist_path);
-    const templatePath = absolute("launchd.template_path", launchd.template_path);
-    assertDeploymentPathsDisjoint(id, {
-      repositoryPath, releasesPath, currentSymlinkPath, sqlitePath, statePath, plistPath, templatePath,
+    if (!Array.isArray(raw.services) || raw.services.length < 2) {
+      throw new Error(`deployment target "${id}" services 必须显式包含 server + daemon`);
+    }
+    const serviceIds = new Set<string>();
+    const serviceLabels = new Set<string>();
+    const services = raw.services.map((candidate, serviceIndex): DeploymentServiceConfig => {
+      const service = record(candidate, `deployment target "${id}" services[${serviceIndex}]`);
+      const serviceId = requiredString(service.id, `deployment target "${id}" services[${serviceIndex}].id`);
+      if (!/^[a-z][a-z0-9_-]{0,31}$/.test(serviceId) || serviceIds.has(serviceId)) throw new Error(`deployment target "${id}" service id 无效或重复`);
+      serviceIds.add(serviceId);
+      const role = requiredString(service.role, `deployment target "${id}" services[${serviceIndex}].role`);
+      if (role !== "server" && role !== "daemon") throw new Error(`deployment target "${id}" service role 只支持 server/daemon`);
+      const label = requiredString(service.label, `deployment target "${id}" services[${serviceIndex}].label`);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(label)) throw new Error(`deployment target "${id}" service label 格式不正确`);
+      const domain = requiredString(service.domain, `deployment target "${id}" services[${serviceIndex}].domain`);
+      if (!/^gui\/\d+$/.test(domain)) throw new Error(`deployment target "${id}" service domain 只支持 gui/<uid>`);
+      const labelIdentity = `${domain}/${label}`;
+      if (serviceLabels.has(labelIdentity)) throw new Error(`deployment target "${id}" service label 重复`);
+      serviceLabels.add(labelIdentity);
+      const templateSha256 = requiredString(service.template_sha256, `deployment target "${id}" services[${serviceIndex}].template_sha256`).toLowerCase();
+      if (!/^[a-f0-9]{64}$/.test(templateSha256)) throw new Error(`deployment target "${id}" service template_sha256 无效`);
+      return {
+        id: serviceId,
+        role,
+        label,
+        domain,
+        plistPath: absolute(`services[${serviceIndex}].plist_path`, service.plist_path),
+        templatePath: absolute(`services[${serviceIndex}].template_path`, service.template_path),
+        templateSha256,
+      };
     });
-    const label = requiredString(launchd.label, `deployment target "${id}" launchd.label`);
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(label)) throw new Error(`deployment target "${id}" launchd.label 格式不正确`);
-    const domain = requiredString(launchd.domain, `deployment target "${id}" launchd.domain`);
-    if (!/^gui\/\d+$/.test(domain)) throw new Error(`deployment target "${id}" launchd.domain 只支持 gui/<uid>`);
+    if (services.filter((service) => service.role === "server").length !== 1 || !services.some((service) => service.role === "daemon")) {
+      throw new Error(`deployment target "${id}" services 必须恰有一个 server 且至少一个 daemon`);
+    }
+    assertDeploymentPathsDisjoint(id, {
+      repositoryPath, releasesPath, currentSymlinkPath, sqlitePath, statePath,
+      ...Object.fromEntries(services.flatMap((service) => [
+        [`${service.id}.plistPath`, service.plistPath],
+        [`${service.id}.templatePath`, service.templatePath],
+      ])),
+    });
     const parsedSteps = {
       install: argvList(steps.install, `deployment target "${id}" steps.install`),
       build: argvList(steps.build, `deployment target "${id}" steps.build`),
       test: argvList(steps.test, `deployment target "${id}" steps.test`),
     };
-    const configuredSecrets = [...Object.values(environment), ...Object.values(healthHeaders)].filter(Boolean);
-    for (const argv of [...parsedSteps.install, ...parsedSteps.build, ...parsedSteps.test]) {
-      if (argv.some((arg) => configuredSecrets.some((secret) => arg.includes(secret)))) {
-        throw new Error(`deployment target "${id}" step argv 禁止包含 environment/health header secret；请通过显式非敏感 env 传递`);
+    const configuredSecrets = Object.values(healthHeaders).filter(Boolean);
+    for (const [key, environmentValue] of Object.entries(environment)) {
+      if (credentialLike(environmentValue) || configuredSecrets.some((secret) => environmentValue.includes(secret))) {
+        throw new Error(`deployment target "${id}" environment.${key} 禁止包含 credential-like value 或配置 secret`);
       }
     }
-    const topology = {
-      id,
-      provider: "local-launchd",
+    for (const argv of [...parsedSteps.install, ...parsedSteps.build, ...parsedSteps.test]) {
+      if (argv.some((arg) => credentialLike(arg) || configuredSecrets.some((secret) => arg.includes(secret)))) {
+        throw new Error(`deployment target "${id}" step argv 禁止包含 credential-like 参数或配置 secret`);
+      }
+    }
+    const remote = requiredString(source.remote, `deployment target "${id}" source.remote`);
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(remote)) throw new Error(`deployment target "${id}" source.remote 无效`);
+    const remoteUrl = requiredString(source.url, `deployment target "${id}" source.url`);
+    if (credentialLike(remoteUrl)) throw new Error(`deployment target "${id}" source.url 禁止 userinfo/credential`);
+    if (!Array.isArray(source.allowed_refs) || source.allowed_refs.length === 0) throw new Error(`deployment target "${id}" source.allowed_refs 必须非空`);
+    const allowedRefs = source.allowed_refs.map((ref, refIndex) => {
+      const parsed = requiredString(ref, `deployment target "${id}" source.allowed_refs[${refIndex}]`);
+      if (!/^refs\/(heads|remotes)\/[A-Za-z0-9._\/-]+$/.test(parsed) || parsed.includes("..")) throw new Error(`deployment target "${id}" allowed ref 无效`);
+      return parsed;
+    }).sort();
+    const healthTimeoutMs = positiveInt(health.timeout_ms, 30_000, `deployment target "${id}" health.timeout_ms`);
+    const healthIntervalMs = positiveInt(health.interval_ms, 500, `deployment target "${id}" health.interval_ms`);
+    const commandTimeoutMs = positiveInt(raw.command_timeout_ms, 30 * 60_000, `deployment target "${id}" command_timeout_ms`);
+    const manifest = {
+      version: 1,
+      targetId: id,
       repositoryId: requiredString(raw.repository_id, `deployment target "${id}" repository_id`),
-      repositoryPath,
-      releasesPath,
-      currentSymlinkPath,
-      sqlitePath,
-      statePath,
-      steps: parsedSteps,
-      environmentKeys: Object.keys(environment).sort(),
-      launchd: { label, domain, plistPath, templatePath },
-      healthHeaderKeys: Object.keys(healthHeaders).sort(),
+      source: { remote, remoteUrl, allowedRefs },
+      services: services.map((service) => ({ ...service })),
+      health: { url: healthUrl.toString(), timeoutMs: healthTimeoutMs, intervalMs: healthIntervalMs, headerRefs: healthHeaderRefs },
+      paths: { repositoryPath, releasesPath, currentSymlinkPath, sqlitePath, statePath },
     };
+    const topology = {
+      ...manifest,
+      provider: "local-launchd" as const,
+      steps: parsedSteps,
+      environment: Object.fromEntries(Object.entries(environment).sort(([left], [right]) => left.localeCompare(right))),
+      commandTimeoutMs,
+    };
+    const repositoryId = manifest.repositoryId;
     return {
       id,
       name: optionalString(raw.name) ?? id,
       provider: "local-launchd" as const,
-      repositoryId: topology.repositoryId,
+      repositoryId,
       repositoryPath,
       releasesPath,
       currentSymlinkPath,
       sqlitePath,
       statePath,
+      source: { remote, remoteUrl, allowedRefs },
       steps: parsedSteps,
       environment,
-      launchd: {
-        label,
-        domain,
-        plistPath,
-        templatePath,
-      },
+      services,
       health: {
         url: healthUrl.toString(),
+        headerRefs: healthHeaderRefs,
         headers: healthHeaders,
-        timeoutMs: positiveInt(health.timeout_ms, 30_000, `deployment target "${id}" health.timeout_ms`),
-        intervalMs: positiveInt(health.interval_ms, 500, `deployment target "${id}" health.interval_ms`),
+        timeoutMs: healthTimeoutMs,
+        intervalMs: healthIntervalMs,
       },
-      commandTimeoutMs: positiveInt(raw.command_timeout_ms, 30 * 60_000, `deployment target "${id}" command_timeout_ms`),
+      commandTimeoutMs,
       fingerprint: createHash("sha256").update(JSON.stringify(topology)).digest("hex"),
+      manifestHash: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"),
     };
   });
+  assertDeploymentTargetsDisjoint(parsed);
+  if (options.maintenancePath) assertMaintenancePathDisjoint(parsed, options.maintenancePath);
+  return parsed;
 }
 
-/** env JSON 优先；缺省读取 yaml。返回新对象，调用方不得持久化完整配置。 */
-export function deploymentTargets(): DeploymentTargetConfig[] {
+/** env JSON 优先；缺省读取 yaml。server 必须 resolveSecrets=false，secret value 只存在 worker 内存。 */
+export function deploymentTargets(options: { resolveSecrets?: boolean } = {}): DeploymentTargetConfig[] {
   const configured = process.env.HARBOR_DEPLOYMENT_TARGETS_JSON;
   if (configured !== undefined) {
     try {
-      return parseDeploymentTargets(JSON.parse(configured));
+      return parseDeploymentTargets(JSON.parse(configured), process.env, {
+        resolveSecrets: options.resolveSecrets,
+        maintenancePath: deploymentMaintenancePath(),
+      });
     } catch (error) {
       if (error instanceof SyntaxError) throw new Error("HARBOR_DEPLOYMENT_TARGETS_JSON 不是合法 JSON");
       throw error;
     }
   }
-  return parseDeploymentTargets(fileConfig().deployment_targets);
+  return parseDeploymentTargets(fileConfig().deployment_targets, process.env, {
+    resolveSecrets: options.resolveSecrets,
+    maintenancePath: deploymentMaintenancePath(),
+  });
+}
+
+function assertMaintenancePathDisjoint(targets: DeploymentTargetConfig[], maintenancePath: string): void {
+  if (!isAbsolute(maintenancePath) || resolve(maintenancePath) !== maintenancePath) {
+    throw new Error("deployment maintenance path 必须是 canonical 绝对路径");
+  }
+  for (const target of targets) {
+    const paths = [target.repositoryPath, target.releasesPath, target.currentSymlinkPath, target.sqlitePath, target.statePath,
+      ...target.services.flatMap((service) => [service.plistPath, service.templatePath])];
+    if (paths.some((path) => pathsConflict(path, maintenancePath))) {
+      throw new Error(`deployment target "${target.id}" host path 与稳定 maintenance sentinel 冲突或互相包含`);
+    }
+  }
+}
+
+function assertDeploymentTargetsDisjoint(targets: DeploymentTargetConfig[]): void {
+  for (let leftIndex = 0; leftIndex < targets.length; leftIndex++) {
+    for (let rightIndex = leftIndex + 1; rightIndex < targets.length; rightIndex++) {
+      const left = targets[leftIndex]!;
+      const right = targets[rightIndex]!;
+      const leftPaths = [left.repositoryPath, left.releasesPath, left.currentSymlinkPath, left.sqlitePath, left.statePath,
+        ...left.services.flatMap((service) => [service.plistPath, service.templatePath])];
+      const rightPaths = [right.repositoryPath, right.releasesPath, right.currentSymlinkPath, right.sqlitePath, right.statePath,
+        ...right.services.flatMap((service) => [service.plistPath, service.templatePath])];
+      if (leftPaths.some((a) => rightPaths.some((b) => pathsConflict(a, b)))) {
+        throw new Error(`deployment targets "${left.id}"/"${right.id}" 的 host paths 冲突或互相包含`);
+      }
+      if (left.services.some((a) => right.services.some((b) => launchdIdentitiesConflict(a, b)))) {
+        throw new Error(`deployment targets "${left.id}"/"${right.id}" 的 launchd label 冲突或互相包含`);
+      }
+      if (urlsConflict(left.health.url, right.health.url)) {
+        throw new Error(`deployment targets "${left.id}"/"${right.id}" 的 health endpoint 冲突`);
+      }
+    }
+  }
+}
+
+function launchdIdentitiesConflict(
+  left: Pick<DeploymentServiceConfig, "domain" | "label">,
+  right: Pick<DeploymentServiceConfig, "domain" | "label">,
+): boolean {
+  if (left.domain !== right.domain) return false;
+  return left.label === right.label || left.label.startsWith(`${right.label}.`) || right.label.startsWith(`${left.label}.`);
+}
+
+function pathsConflict(left: string, right: string): boolean {
+  if (left === right) return true;
+  const leftRelative = relative(left, right);
+  const rightRelative = relative(right, left);
+  return (!!leftRelative && !leftRelative.startsWith("..") && !isAbsolute(leftRelative))
+    || (!!rightRelative && !rightRelative.startsWith("..") && !isAbsolute(rightRelative));
+}
+
+function urlsConflict(left: string, right: string): boolean {
+  const a = new URL(left);
+  const b = new URL(right);
+  if (a.origin !== b.origin) return false;
+  const normalize = (value: string) => value.replace(/\/+$/, "") || "/";
+  const aPath = normalize(a.pathname);
+  const bPath = normalize(b.pathname);
+  return aPath === bPath || aPath.startsWith(`${bPath}/`) || bPath.startsWith(`${aPath}/`);
+}
+
+function credentialLike(value: string): boolean {
+  return /(?:authorization\s*[:=]|\b(?:bearer|basic)\s+\S+|(?:token|password|secret|credential)\s*[:=]\s*\S+)/i.test(value)
+    || /(?:^|[-_])(?:authorization|auth|token|password|passwd|secret|credential)(?:$|[-_:=])/i.test(value)
+    || /^(?:bearer|basic)$/i.test(value.trim())
+    || /^[a-z][a-z0-9+.-]*:\/\/[^/@\s]+@/i.test(value);
+}
+
+/** launchd plist template 必须恰有一个 Label；重复 Label 也视为不可信。 */
+export function exactLaunchdTemplateLabel(value: string): string | null {
+  const labels = [...value.matchAll(/<key>\s*Label\s*<\/key>\s*<string>\s*([^<]+?)\s*<\/string>/gi)]
+    .map((match) => match[1]?.trim())
+    .filter((label): label is string => !!label);
+  return labels.length === 1 ? labels[0]! : null;
 }
 
 /** deploy worker 每次进程启动都必须复验 YAML 本身，不能复用 setup 时的旧结论。 */
@@ -303,7 +494,10 @@ export function validateDeploymentWorkerConfigFile(
   path = resolve(process.env.HOME ?? "~", ".harbor.yaml"),
   expectedUid = process.getuid?.(),
 ): void {
-  if (process.env.HARBOR_DEPLOYMENT_TARGETS_JSON !== undefined) return;
+  if (!isAbsolute(path) || resolve(path) !== path) throw new Error(`deploy worker 配置 ${path} 必须是 canonical 绝对路径`);
+  // env可以提供target，但只要YAML存在，database/sentinel等其余worker配置仍可能
+  // 从该文件读取，因此每次进程启动都必须复验；只有文件确实不存在且target完全来自env才跳过。
+  if (!existsSync(path) && process.env.HARBOR_DEPLOYMENT_TARGETS_JSON !== undefined) return;
   let metadata: Stats;
   try {
     metadata = lstatSync(path);
@@ -311,6 +505,14 @@ export function validateDeploymentWorkerConfigFile(
     throw new Error(`deploy worker 配置 ${path} 无法读取：${error instanceof Error ? error.message : String(error)}`);
   }
   assertPrivateConfigMetadata(metadata, expectedUid, path);
+  if (realpathSync(path) !== path) throw new Error(`deploy worker 配置 ${path} 不能包含 symlink component`);
+  const parent = dirname(path);
+  const parentMetadata = lstatSync(parent);
+  if (parentMetadata.isSymbolicLink() || !parentMetadata.isDirectory()
+    || (expectedUid !== undefined && parentMetadata.uid !== expectedUid)
+    || realpathSync(parent) !== parent) {
+    throw new Error(`deploy worker 配置父目录 ${parent} 必须是当前 uid 拥有的 canonical non-symlink directory`);
+  }
 }
 
 export function assertPrivateConfigMetadata(

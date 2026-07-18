@@ -16,6 +16,7 @@ import type {
   DeliveryCheckStatus,
   DeliveryEvent,
   DeliveryProviderKind,
+  DeploymentJobView,
   DeploymentTargetDescriptor,
   DeliveryStatus,
   Device,
@@ -46,6 +47,7 @@ export type {
   DeliveryCheckStatus,
   DeliveryEvent,
   DeliveryProviderKind,
+  DeploymentJobView,
   DeploymentTargetDescriptor,
   DeliveryStatus,
   Device,
@@ -86,6 +88,7 @@ export interface ConversationDetail {
   runs: RunWithResult[];
   statusLog: { fromStatus: string | null; toStatus: string; actor: string; ts: number }[];
   delivery: Delivery | null;
+  deploymentJob: DeploymentJobView | null;
   deliveryEvents: DeliveryEvent[];
 }
 

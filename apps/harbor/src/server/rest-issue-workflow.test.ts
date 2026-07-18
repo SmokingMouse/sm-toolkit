@@ -250,6 +250,7 @@ test("Deployment targets expose only safe descriptors and REST rejects request-s
   const deliveries = new DeliveryService(store, [], [{
     id: "local-target", name: "Local Target", provider: "local-launchd", repositoryId: repository.id,
     fingerprint: "c".repeat(64),
+    manifestHash: "d".repeat(64),
   }]);
   const coordinator = new RunCoordinator(store, new RunBus(), { isOnline: () => false, send: () => false }, 2, deliveries);
   const app = buildRest(

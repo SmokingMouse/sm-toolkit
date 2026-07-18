@@ -70,6 +70,7 @@ export interface DeliveryProvider {
 export interface DeploymentTargetRegistration extends DeploymentTargetDescriptor {
   repositoryId: string;
   fingerprint: string;
+  manifestHash: string;
 }
 
 /**
@@ -475,7 +476,14 @@ export class DeliveryService {
       }
       return this.requireDelivery(delivery.id);
     }
-    this.store.enqueueDeploymentJob(delivery.id, delivery.deploymentTargetId, delivery.mergedRevision, target.fingerprint, now);
+    this.store.enqueueDeploymentJob(
+      delivery.id,
+      delivery.deploymentTargetId,
+      delivery.mergedRevision,
+      target.fingerprint,
+      target.manifestHash,
+      now,
+    );
     return this.requireDelivery(delivery.id);
   }
 

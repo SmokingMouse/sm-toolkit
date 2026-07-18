@@ -21,6 +21,9 @@ import type {
   DeliveryDeploymentStatus,
   DeliveryEvent,
   DeploymentJob,
+  DeploymentJobView,
+  DeploymentFailureKind,
+  DeploymentFence,
   DeploymentJobStatus,
   DeploymentMaintenanceGate,
   DeploymentMaintenancePhase,
@@ -50,6 +53,7 @@ import type {
 import { DEFAULT_WORKSPACE_ID } from "../protocol.js";
 import type { PermissionPolicy } from "@sm/agent";
 import { newId } from "../ids.js";
+import { redactStructured } from "../deployment-worker/redaction.js";
 
 // ── 行类型（SQLite 返回形状） ───────────────────────────
 
@@ -147,17 +151,25 @@ interface DeploymentJobRow {
   target_id: string;
   revision: string;
   target_fingerprint: string;
+  target_manifest_hash: string;
   status: string;
   attempt: number;
+  fence_epoch: number | null;
+  fence_nonce: string | null;
   lease_token: string | null;
   lease_expires_at: number | null;
   checkpoint: string;
   log: string | null;
   error: string | null;
+  failure_kind: string | null;
   rollback_complete: number | null;
   rollback_attempt: number | null;
   baseline_revision: string | null;
-  new_service_pid: number | null;
+  baseline_fingerprint: string | null;
+  baseline_manifest_hash: string | null;
+  baseline_health_fingerprint: string | null;
+  database_backup_created: number;
+  new_service_pids: string;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
@@ -165,15 +177,23 @@ interface DeploymentJobRow {
 }
 
 interface DeploymentMaintenanceRow {
+  lock_id: number;
+  fence_epoch: number;
+  fence_nonce: string;
   target_id: string;
   job_id: string;
   delivery_id: string;
   generation: number;
   revision: string;
   target_fingerprint: string;
+  target_manifest_hash: string;
   rollback_attempt: number;
   baseline_revision: string;
+  baseline_fingerprint: string;
+  baseline_manifest_hash: string;
+  baseline_health_fingerprint: string;
   expected_revision: string;
+  expected_fingerprint: string;
   phase: string;
   created_at: number;
   updated_at: number;
@@ -451,17 +471,25 @@ function toDeploymentJob(r: DeploymentJobRow): DeploymentJob {
     targetId: r.target_id,
     revision: r.revision,
     targetFingerprint: r.target_fingerprint,
+    targetManifestHash: r.target_manifest_hash,
     status: r.status as DeploymentJobStatus,
     attempt: r.attempt,
+    fenceEpoch: r.fence_epoch,
+    fenceNonce: r.fence_nonce,
     leaseToken: r.lease_token,
     leaseExpiresAt: r.lease_expires_at,
     checkpoint: r.checkpoint,
     log: r.log,
     error: r.error,
+    failureKind: r.failure_kind as DeploymentFailureKind | null,
     rollbackComplete: r.rollback_complete === null ? null : r.rollback_complete === 1,
     rollbackAttempt: r.rollback_attempt,
     baselineRevision: r.baseline_revision,
-    newServicePid: r.new_service_pid,
+    baselineFingerprint: r.baseline_fingerprint,
+    baselineManifestHash: r.baseline_manifest_hash,
+    baselineHealthFingerprint: r.baseline_health_fingerprint,
+    databaseBackupCreated: r.database_backup_created === 1,
+    newServicePids: parsePidMap(r.new_service_pids),
     createdAt: r.created_at,
     startedAt: r.started_at,
     finishedAt: r.finished_at,
@@ -471,16 +499,23 @@ function toDeploymentJob(r: DeploymentJobRow): DeploymentJob {
 
 function toDeploymentMaintenance(r: DeploymentMaintenanceRow): DeploymentMaintenanceGate {
   return {
-    version: 1,
+    version: 2,
+    fenceEpoch: r.fence_epoch,
+    fenceNonce: r.fence_nonce,
     targetId: r.target_id,
     jobId: r.job_id,
     deliveryId: r.delivery_id,
     generation: r.generation,
     revision: r.revision,
     targetFingerprint: r.target_fingerprint,
+    targetManifestHash: r.target_manifest_hash,
     rollbackAttempt: r.rollback_attempt,
     baselineRevision: r.baseline_revision,
+    baselineFingerprint: r.baseline_fingerprint,
+    baselineManifestHash: r.baseline_manifest_hash,
+    baselineHealthFingerprint: r.baseline_health_fingerprint,
     expectedRevision: r.expected_revision,
+    expectedFingerprint: r.expected_fingerprint,
     phase: r.phase as DeploymentMaintenancePhase,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -494,8 +529,46 @@ function sameMaintenanceIdentity(left: DeploymentMaintenanceGate, right: Deploym
     && left.generation === right.generation
     && left.revision === right.revision
     && left.targetFingerprint === right.targetFingerprint
+    && left.targetManifestHash === right.targetManifestHash
+    && left.fenceEpoch === right.fenceEpoch
+    && left.fenceNonce === right.fenceNonce
     && left.rollbackAttempt === right.rollbackAttempt
-    && left.baselineRevision === right.baselineRevision;
+    && left.baselineRevision === right.baselineRevision
+    && left.baselineFingerprint === right.baselineFingerprint
+    && left.baselineManifestHash === right.baselineManifestHash
+    && left.baselineHealthFingerprint === right.baselineHealthFingerprint;
+}
+
+function sameRollbackIdentity(left: DeploymentMaintenanceGate, right: DeploymentMaintenanceGate): boolean {
+  return left.targetId === right.targetId
+    && left.jobId === right.jobId
+    && left.deliveryId === right.deliveryId
+    && left.generation === right.generation
+    && left.revision === right.revision
+    && left.targetFingerprint === right.targetFingerprint
+    && left.targetManifestHash === right.targetManifestHash
+    && left.rollbackAttempt === right.rollbackAttempt
+    && left.baselineRevision === right.baselineRevision
+    && left.baselineFingerprint === right.baselineFingerprint
+    && left.baselineManifestHash === right.baselineManifestHash
+    && left.baselineHealthFingerprint === right.baselineHealthFingerprint;
+}
+
+function sameMaintenanceState(left: DeploymentMaintenanceGate, right: DeploymentMaintenanceGate): boolean {
+  return sameMaintenanceIdentity(left, right)
+    && left.expectedRevision === right.expectedRevision
+    && left.expectedFingerprint === right.expectedFingerprint
+    && left.phase === right.phase;
+}
+
+function parsePidMap(value: string): Record<string, number> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, number] => Number.isInteger(entry[1]) && entry[1] > 0));
+  } catch {
+    return {};
+  }
 }
 
 function toDeliveryEvent(r: DeliveryEventRow): DeliveryEvent {
@@ -784,7 +857,7 @@ export class HarborStore {
       .query<DeviceRow, [string]>("SELECT * FROM devices WHERE name = ?")
       .get(name);
     if (existing) {
-      this.db.run(
+      const jobChanged = this.db.run(
         "UPDATE devices SET token_hash = ?, capabilities = ?, last_seen_at = ? WHERE id = ?",
         [tokenHash, JSON.stringify(capabilities), now, existing.id],
       );
@@ -1547,10 +1620,12 @@ export class HarborStore {
     targetId: string,
     revision: string,
     targetFingerprint: string,
+    targetManifestHash: string,
     now: number,
   ): { job: DeploymentJob; created: boolean } {
     if (!/^[a-f0-9]{40,64}$/i.test(revision)) throw new Error("deployment revision 必须是完整十六进制 commit id");
     if (!/^[a-f0-9]{64}$/.test(targetFingerprint)) throw new Error("deployment target fingerprint 无效");
+    if (!/^[a-f0-9]{64}$/.test(targetManifestHash)) throw new Error("deployment target manifest hash 无效");
     return this.db.transaction(() => {
       const delivery = this.db.query<DeliveryRow, [string]>("SELECT * FROM deliveries WHERE id = ?").get(deliveryId);
       if (!delivery) throw new Error(`Delivery "${deliveryId}" 不存在`);
@@ -1562,7 +1637,8 @@ export class HarborStore {
         const active = delivery.active_deployment_job_id
           ? this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(delivery.active_deployment_job_id)
           : null;
-        if (active && active.target_id === targetId && active.revision === revision && active.target_fingerprint === targetFingerprint) {
+        if (active && active.target_id === targetId && active.revision === revision
+          && active.target_fingerprint === targetFingerprint && active.target_manifest_hash === targetManifestHash) {
           return { job: toDeploymentJob(active), created: false };
         }
         throw new Error("Delivery 已有 active deployment job，不能重复 enqueue");
@@ -1578,9 +1654,10 @@ export class HarborStore {
       const id = newId("deploymentJob");
       this.db.run(
         `INSERT INTO deployment_jobs
-         (id, delivery_id, generation, target_id, revision, target_fingerprint, status, attempt, checkpoint, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,'queued',0,'queued',?,?)`,
-        [id, deliveryId, generation, targetId, revision.toLowerCase(), targetFingerprint, now, now],
+         (id, delivery_id, generation, target_id, revision, target_fingerprint, target_manifest_hash,
+          status, attempt, checkpoint, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,'queued',0,'queued',?,?)`,
+        [id, deliveryId, generation, targetId, revision.toLowerCase(), targetFingerprint, targetManifestHash, now, now],
       );
       this.db.run(
         `UPDATE deliveries
@@ -1592,7 +1669,7 @@ export class HarborStore {
       );
       this.db.run(
         "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
-        [deliveryId, "deployment_enqueued", JSON.stringify({ jobId: id, targetId, targetFingerprint, generation, revision: revision.toLowerCase() }), "system", now],
+        [deliveryId, "deployment_enqueued", JSON.stringify({ jobId: id, targetId, targetFingerprint, targetManifestHash, generation, revision: revision.toLowerCase() }), "system", now],
       );
       this.touchDeliveryConversation(deliveryId, now);
       return { job: toDeploymentJob(this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id)!), created: true };
@@ -1604,6 +1681,30 @@ export class HarborStore {
     return row ? toDeploymentJob(row) : null;
   }
 
+  getDeploymentJobView(id: string): DeploymentJobView | null {
+    const job = this.getDeploymentJob(id);
+    if (!job) return null;
+    return {
+      id: job.id,
+      generation: job.generation,
+      targetId: job.targetId,
+      revision: job.revision,
+      status: job.status,
+      attempt: job.attempt,
+      checkpoint: job.checkpoint,
+      log: job.log?.slice(0, 32_000) ?? null,
+      error: job.error?.slice(0, 4_000) ?? null,
+      failureKind: job.failureKind,
+      rollbackComplete: job.rollbackComplete,
+      fenceEpoch: job.fenceEpoch,
+      recoveryRequired: job.status === "needs_recovery",
+      createdAt: job.createdAt,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt,
+      updatedAt: job.updatedAt,
+    };
+  }
+
   listDeploymentJobs(deliveryId: string): DeploymentJob[] {
     return this.db
       .query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE delivery_id = ? ORDER BY generation")
@@ -1612,10 +1713,10 @@ export class HarborStore {
   }
 
   /** queued 或 lease 已过期的 running job 才能领取；新 token fencing 旧 worker。 */
-  claimDeploymentJob(targets: { id: string; fingerprint: string }[], now: number, leaseMs: number): DeploymentJob | null {
+  claimDeploymentJob(targets: { id: string; fingerprint: string; manifestHash: string }[], now: number, leaseMs: number): DeploymentJob | null {
     if (targets.length === 0) return null;
     return this.db.transaction(() => {
-      const targetPredicate = targets.map(() => "(j.target_id = ? AND j.target_fingerprint = ?)").join(" OR ");
+      const targetPredicate = targets.map(() => "(j.target_id = ? AND j.target_fingerprint = ? AND j.target_manifest_hash = ?)").join(" OR ");
       const row = this.db
         .query<DeploymentJobRow, (string | number)[]>(
           `SELECT j.* FROM deployment_jobs j JOIN deliveries d ON d.id = j.delivery_id
@@ -1628,17 +1729,26 @@ export class HarborStore {
              AND d.merge_status = 'merged' AND d.review_status = 'approved' AND d.check_status = 'passed'
            ORDER BY j.created_at, j.generation LIMIT 1`,
         )
-        .get(...targets.flatMap((target) => [target.id, target.fingerprint]), now);
+        .get(...targets.flatMap((target) => [target.id, target.fingerprint, target.manifestHash]), now);
       if (!row) return null;
       const leaseToken = newId("deploymentLease");
+      const fenceNonce = newId("deploymentLease");
+      this.db.run("UPDATE deployment_host_fence SET epoch = epoch + 1 WHERE lock_id = 1");
+      const fenceEpoch = this.db.query<{ epoch: number }, []>("SELECT epoch FROM deployment_host_fence WHERE lock_id = 1").get()!.epoch;
       const updated = this.db.run(
         `UPDATE deployment_jobs
          SET status = 'running', attempt = attempt + 1, lease_token = ?, lease_expires_at = ?,
+             fence_epoch = ?, fence_nonce = ?,
              started_at = COALESCE(started_at, ?), updated_at = ?
          WHERE id = ? AND (status = 'queued' OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?))`,
-        [leaseToken, now + leaseMs, now, now, row.id, now],
+        [leaseToken, now + leaseMs, fenceEpoch, fenceNonce, now, now, row.id, now],
       );
       if (updated.changes !== 1) return null;
+      this.db.run(
+        `UPDATE deployment_maintenance SET fence_epoch = ?, fence_nonce = ?, updated_at = ?
+         WHERE lock_id = 1 AND job_id = ?`,
+        [fenceEpoch, fenceNonce, now, row.id],
+      );
       const claimed = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(row.id)!;
       const deliveryUpdated = this.db.run(
         `UPDATE deliveries SET deployment_status = 'running', deployment_error = NULL, updated_at = ?, revision = revision + 1
@@ -1655,50 +1765,160 @@ export class HarborStore {
     })();
   }
 
-  renewDeploymentJob(id: string, leaseToken: string, now: number, leaseMs: number): boolean {
-    return this.db.run(
-      `UPDATE deployment_jobs SET lease_expires_at = ?, updated_at = ?
-       WHERE id = ? AND status IN ('running','recovering') AND lease_token = ?`,
-      [now + leaseMs, now, id, leaseToken],
-    ).changes === 1;
+  /** 配置删除/漂移不能让 queued job 永久饥饿；maintenance 中的漂移则必须管理员恢复。 */
+  failDeploymentConfigDrift(
+    targets: { id: string; fingerprint: string; manifestHash: string }[],
+    now: number,
+  ): number {
+    const configured = new Map(targets.map((target) => [target.id, target]));
+    return this.db.transaction(() => {
+      let changed = 0;
+      const rows = this.db.query<DeploymentJobRow, []>(
+        "SELECT * FROM deployment_jobs WHERE status IN ('queued','running')",
+      ).all();
+      for (const row of rows) {
+        const target = configured.get(row.target_id);
+        if (target && target.fingerprint === row.target_fingerprint && target.manifestHash === row.target_manifest_hash) continue;
+        const gate = this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE job_id = ?").get(row.id);
+        const status = gate ? "needs_recovery" : "failed";
+        const failureKind = gate ? "rollback_incomplete" : "config_drift";
+        const error = gate
+          ? "deployment target config drifted while host maintenance is active; administrator recovery required"
+          : "deployment target config drifted or was removed before cutover";
+        this.db.run(
+          `UPDATE deployment_jobs SET status = ?, failure_kind = ?, error = ?, rollback_complete = ?,
+             checkpoint = ?, lease_token = NULL, lease_expires_at = NULL, finished_at = ?, updated_at = ? WHERE id = ?`,
+          [status, failureKind, error, gate ? 0 : 1, gate ? "rollback_incomplete" : "failed", now, now, row.id],
+        );
+        this.db.run(
+          `UPDATE deliveries SET deployment_status = ?, deployment_error = ?, updated_at = ?, revision = revision + 1
+           WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ?`,
+          [status, error, now, row.delivery_id, row.id, row.generation, row.revision],
+        );
+        if (gate) this.db.run("UPDATE deployment_maintenance SET phase = 'needs_recovery', updated_at = ? WHERE job_id = ?", [now, row.id]);
+        changed++;
+      }
+      return changed;
+    })();
+  }
+
+  renewDeploymentJob(id: string, fence: DeploymentFence, now: number, leaseMs: number): boolean {
+    return this.db.transaction(() => {
+      const job = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id);
+      if (!job || !(job.status === "running" || job.status === "recovering")
+        || job.lease_token !== fence.leaseToken || job.fence_epoch !== fence.fenceEpoch || job.fence_nonce !== fence.fenceNonce) return false;
+      if (job.status === "running") {
+        const active = this.db.query<{
+          active_deployment_job_id: string | null; deployment_generation: number; deployment_revision: string | null;
+          deployment_status: string; merge_status: string; review_status: string; check_status: string;
+        }, [string]>(
+          `SELECT active_deployment_job_id, deployment_generation, deployment_revision, deployment_status,
+                  merge_status, review_status, check_status FROM deliveries WHERE id = ?`,
+        ).get(job.delivery_id);
+        const current = active?.active_deployment_job_id === job.id
+          && active.deployment_generation === job.generation && active.deployment_revision === job.revision
+          && (active.deployment_status === "queued" || active.deployment_status === "running")
+          && active.merge_status === "merged" && active.review_status === "approved" && active.check_status === "passed";
+        if (!current) {
+          const gate = this.db.query<DeploymentMaintenanceRow, [string]>(
+            "SELECT * FROM deployment_maintenance WHERE job_id = ?",
+          ).get(id);
+          const needsRecovery = !!gate;
+          this.db.run(
+            `UPDATE deployment_jobs SET status = ?, failure_kind = ?, rollback_complete = ?, checkpoint = ?,
+               error = ?, lease_token = NULL, lease_expires_at = NULL, finished_at = ?, updated_at = ?
+             WHERE id = ? AND lease_token = ? AND fence_epoch = ? AND fence_nonce = ?`,
+            [needsRecovery ? "needs_recovery" : "failed", needsRecovery ? "rollback_incomplete" : "deployment_failed",
+              needsRecovery ? 0 : 1, needsRecovery ? "rollback_incomplete" : "failed",
+              needsRecovery
+                ? "active Delivery generation/revision changed during cutover; administrator recovery required"
+                : "deployment job is no longer the active Delivery generation/revision",
+              now, now, id, fence.leaseToken, fence.fenceEpoch, fence.fenceNonce],
+          );
+          if (gate) this.db.run(
+            "UPDATE deployment_maintenance SET phase = 'needs_recovery', updated_at = ? WHERE job_id = ? AND fence_epoch = ? AND fence_nonce = ?",
+            [now, id, fence.fenceEpoch, fence.fenceNonce],
+          );
+          return false;
+        }
+      }
+      return this.db.run(
+        `UPDATE deployment_jobs SET lease_expires_at = ?, updated_at = ?
+         WHERE id = ? AND status IN ('running','recovering') AND lease_token = ? AND fence_epoch = ? AND fence_nonce = ?`,
+        [now + leaseMs, now, id, fence.leaseToken, fence.fenceEpoch, fence.fenceNonce],
+      ).changes === 1;
+    })();
   }
 
   updateDeploymentCheckpoint(
     id: string,
-    leaseToken: string,
+    fence: DeploymentFence,
     checkpoint: string,
     now: number,
-    metadata: { newServicePid?: number | null } = {},
+    metadata: { newServicePids?: Record<string, number>; databaseBackupCreated?: boolean; log?: string } = {},
   ): boolean {
+    const safeLog = Object.hasOwn(metadata, "log") ? redactStructured(metadata.log ?? "").slice(0, 32_000) : null;
     return this.db.run(
       `UPDATE deployment_jobs SET checkpoint = ?,
-         new_service_pid = CASE WHEN ? = 1 THEN ? ELSE new_service_pid END,
+         new_service_pids = CASE WHEN ? = 1 THEN ? ELSE new_service_pids END,
+         database_backup_created = CASE WHEN ? = 1 THEN ? ELSE database_backup_created END,
+         log = CASE WHEN ? = 1 THEN ? ELSE log END,
          updated_at = ?
-       WHERE id = ? AND status IN ('running','recovering') AND lease_token = ?`,
-      [checkpoint, Object.hasOwn(metadata, "newServicePid") ? 1 : 0, metadata.newServicePid ?? null, now, id, leaseToken],
+       WHERE id = ? AND status IN ('running','recovering') AND lease_token = ? AND fence_epoch = ? AND fence_nonce = ?`,
+      [checkpoint, Object.hasOwn(metadata, "newServicePids") ? 1 : 0, JSON.stringify(metadata.newServicePids ?? {}),
+        Object.hasOwn(metadata, "databaseBackupCreated") ? 1 : 0, metadata.databaseBackupCreated ? 1 : 0,
+        Object.hasOwn(metadata, "log") ? 1 : 0, safeLog, now,
+        id, fence.leaseToken, fence.fenceEpoch, fence.fenceNonce],
     ).changes === 1;
   }
 
   getDeploymentMaintenance(targetId?: string): DeploymentMaintenanceGate | null {
-    const row = targetId
-      ? this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE target_id = ?").get(targetId)
-      : this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM deployment_maintenance ORDER BY created_at LIMIT 1").get();
+    const row = this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM deployment_maintenance WHERE lock_id = 1").get();
+    if (targetId && row?.target_id !== targetId) return null;
     return row ? toDeploymentMaintenance(row) : null;
   }
 
   listDeploymentMaintenance(): DeploymentMaintenanceGate[] {
-    return this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM deployment_maintenance ORDER BY created_at").all().map(toDeploymentMaintenance);
+    return this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM deployment_maintenance WHERE lock_id = 1").all().map(toDeploymentMaintenance);
+  }
+
+  assertDeploymentFence(id: string, fence: DeploymentFence): boolean {
+    return !!this.db.query<{ id: string }, [string, string, number, string]>(
+      `SELECT id FROM deployment_jobs WHERE id = ? AND status IN ('running','recovering')
+       AND lease_token = ? AND fence_epoch = ? AND fence_nonce = ?`,
+    ).get(id, fence.leaseToken, fence.fenceEpoch, fence.fenceNonce);
+  }
+
+  assertDeploymentReleaseFence(gate: DeploymentMaintenanceGate): boolean {
+    const maintenanceRow = this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM deployment_maintenance WHERE lock_id = 1").get();
+    if (!maintenanceRow || !sameMaintenanceState(toDeploymentMaintenance(maintenanceRow), gate) || gate.phase !== "releasing") return false;
+    const job = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(gate.jobId);
+    const delivery = this.db.query<DeliveryRow, [string]>("SELECT * FROM deliveries WHERE id = ?").get(gate.deliveryId);
+    if (!job || !delivery) return false;
+    if (job.status === "failed" && job.rollback_complete === 1) return true;
+    return job.status === "succeeded" && delivery.active_deployment_job_id === job.id
+      && delivery.deployment_generation === job.generation && delivery.deployment_revision === job.revision
+      && delivery.deployment_status === "running";
   }
 
   activateDeploymentMaintenance(
     id: string,
-    leaseToken: string,
-    input: { rollbackAttempt: number; baselineRevision: string },
+    fence: DeploymentFence,
+    input: {
+      rollbackAttempt: number;
+      baselineRevision: string;
+      baselineFingerprint: string;
+      baselineManifestHash: string;
+      baselineHealthFingerprint: string;
+    },
     now: number,
   ): DeploymentMaintenanceGate {
     return this.db.transaction(() => {
       const job = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id);
-      if (!job || !(["running", "recovering"] as string[]).includes(job.status) || job.lease_token !== leaseToken) throw new Error("deployment job lease 已失效");
+      if (!job || !(["running", "recovering"] as string[]).includes(job.status)
+        || job.lease_token !== fence.leaseToken || job.fence_epoch !== fence.fenceEpoch || job.fence_nonce !== fence.fenceNonce) {
+        throw new Error("deployment job fence 已失效");
+      }
       if (!/^[a-f0-9]{40,64}$/i.test(input.baselineRevision)) throw new Error("baseline revision 不是完整 commit id");
       const delivery = this.db.query<DeliveryRow, [string]>("SELECT * FROM deliveries WHERE id = ?").get(job.delivery_id);
       if (!delivery || delivery.active_deployment_job_id !== job.id
@@ -1710,115 +1930,218 @@ export class HarborStore {
       if (job.rollback_attempt !== null && job.rollback_attempt !== input.rollbackAttempt) {
         throw new Error("deployment rollback anchor 已冻结，不能被新 attempt 覆盖");
       }
-      const existing = this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE target_id = ?").get(job.target_id);
-      if (existing && (existing.job_id !== job.id || existing.generation !== job.generation || existing.revision !== job.revision || existing.target_fingerprint !== job.target_fingerprint)) {
-        throw new Error(`deployment target "${job.target_id}" 已被另一个 maintenance gate 占用`);
+      if (job.rollback_attempt === null && input.rollbackAttempt !== job.attempt) {
+        throw new Error("deployment rollback attempt 必须等于首次进入 maintenance 的当前 attempt");
       }
-      this.db.run(
+      if (job.rollback_attempt !== null && (
+        job.baseline_revision !== input.baselineRevision.toLowerCase()
+        || job.baseline_fingerprint !== input.baselineFingerprint
+        || job.baseline_manifest_hash !== input.baselineManifestHash
+        || job.baseline_health_fingerprint !== input.baselineHealthFingerprint
+      )) {
+        throw new Error("deployment rollback baseline identity 已冻结，不能被同 attempt 改写");
+      }
+      for (const [label, hash] of Object.entries({
+        baselineFingerprint: input.baselineFingerprint,
+        baselineManifestHash: input.baselineManifestHash,
+        baselineHealthFingerprint: input.baselineHealthFingerprint,
+      })) {
+        if (!/^[a-f0-9]{64}$/.test(hash)) throw new Error(`${label} 无效`);
+      }
+      const existing = this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM deployment_maintenance WHERE lock_id = 1").get();
+      if (existing && (existing.job_id !== job.id || existing.fence_epoch !== fence.fenceEpoch || existing.fence_nonce !== fence.fenceNonce)) {
+        throw new Error("Harbor host 已被另一个 target/job maintenance gate 占用");
+      }
+      const gateChanged = this.db.run(
         `INSERT INTO deployment_maintenance
-         (target_id, job_id, delivery_id, generation, revision, target_fingerprint, rollback_attempt,
-          baseline_revision, expected_revision, phase, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,'deploying',?,?)
-         ON CONFLICT(target_id) DO UPDATE SET updated_at = excluded.updated_at`,
-        [job.target_id, job.id, job.delivery_id, job.generation, job.revision, job.target_fingerprint,
-          input.rollbackAttempt, input.baselineRevision.toLowerCase(), job.revision, now, now],
+         (lock_id, fence_epoch, fence_nonce, target_id, job_id, delivery_id, generation, revision,
+          target_fingerprint, target_manifest_hash, rollback_attempt, baseline_revision, baseline_fingerprint,
+          baseline_manifest_hash, baseline_health_fingerprint, expected_revision, expected_fingerprint, phase, created_at, updated_at)
+         VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'deploying',?,?)
+         ON CONFLICT(lock_id) DO UPDATE SET updated_at = excluded.updated_at`,
+        [fence.fenceEpoch, fence.fenceNonce, job.target_id, job.id, job.delivery_id, job.generation, job.revision,
+          job.target_fingerprint, job.target_manifest_hash, input.rollbackAttempt, input.baselineRevision.toLowerCase(),
+          input.baselineFingerprint, input.baselineManifestHash, input.baselineHealthFingerprint,
+          job.revision, job.target_fingerprint, now, now],
       );
-      this.db.run(
-        `UPDATE deployment_jobs SET rollback_attempt = ?, baseline_revision = ?, checkpoint = 'maintenance', updated_at = ?
-         WHERE id = ? AND status IN ('running','recovering') AND lease_token = ?`,
-        [input.rollbackAttempt, input.baselineRevision.toLowerCase(), now, id, leaseToken],
+      if (gateChanged.changes !== 1) throw new Error("deployment maintenance gate CAS 失败");
+      const jobChanged = this.db.run(
+        `UPDATE deployment_jobs SET rollback_attempt = ?, baseline_revision = ?, baseline_fingerprint = ?,
+           baseline_manifest_hash = ?, baseline_health_fingerprint = ?, checkpoint = 'maintenance', updated_at = ?
+         WHERE id = ? AND status IN ('running','recovering') AND lease_token = ? AND fence_epoch = ? AND fence_nonce = ?`,
+        [input.rollbackAttempt, input.baselineRevision.toLowerCase(), input.baselineFingerprint,
+          input.baselineManifestHash, input.baselineHealthFingerprint, now, id,
+          fence.leaseToken, fence.fenceEpoch, fence.fenceNonce],
       );
-      return toDeploymentMaintenance(this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE target_id = ?").get(job.target_id)!);
+      if (jobChanged.changes !== 1) throw new Error("deployment rollback anchor job CAS 失败");
+      return toDeploymentMaintenance(this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM deployment_maintenance WHERE lock_id = 1").get()!);
     })();
   }
 
   updateDeploymentMaintenance(
     id: string,
-    leaseToken: string,
+    fence: DeploymentFence,
     phase: DeploymentMaintenancePhase,
     expectedRevision: string,
+    expectedFingerprint: string,
     now: number,
-    metadata: { checkpoint?: string; newServicePid?: number | null } = {},
+    metadata: { checkpoint?: string; newServicePids?: Record<string, number>; log?: string } = {},
   ): DeploymentMaintenanceGate {
     return this.db.transaction(() => {
       const job = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id);
-      if (!job || !(["running", "recovering"] as string[]).includes(job.status) || job.lease_token !== leaseToken) throw new Error("deployment job lease 已失效");
+      if (!job || !(["running", "recovering"] as string[]).includes(job.status)
+        || job.lease_token !== fence.leaseToken || job.fence_epoch !== fence.fenceEpoch || job.fence_nonce !== fence.fenceNonce) {
+        throw new Error("deployment job fence 已失效");
+      }
       const changed = this.db.run(
-        `UPDATE deployment_maintenance SET phase = ?, expected_revision = ?, updated_at = ?
-         WHERE job_id = ? AND generation = ? AND revision = ? AND target_fingerprint = ?`,
-        [phase, expectedRevision.toLowerCase(), now, job.id, job.generation, job.revision, job.target_fingerprint],
+        `UPDATE deployment_maintenance SET phase = ?, expected_revision = ?, expected_fingerprint = ?, updated_at = ?
+         WHERE lock_id = 1 AND job_id = ? AND generation = ? AND revision = ? AND target_fingerprint = ?
+           AND fence_epoch = ? AND fence_nonce = ?`,
+        [phase, expectedRevision.toLowerCase(), expectedFingerprint, now, job.id, job.generation, job.revision, job.target_fingerprint,
+          fence.fenceEpoch, fence.fenceNonce],
       );
       if (changed.changes !== 1) throw new Error("maintenance gate 缺失或与当前 job identity 不一致");
-      this.db.run(
+      const jobChanged = this.db.run(
         `UPDATE deployment_jobs SET checkpoint = COALESCE(?, checkpoint),
-           new_service_pid = CASE WHEN ? = 1 THEN ? ELSE new_service_pid END, updated_at = ?
-         WHERE id = ? AND status IN ('running','recovering') AND lease_token = ?`,
-        [metadata.checkpoint ?? null, Object.hasOwn(metadata, "newServicePid") ? 1 : 0,
-          metadata.newServicePid ?? null, now, id, leaseToken],
+           new_service_pids = CASE WHEN ? = 1 THEN ? ELSE new_service_pids END,
+           log = CASE WHEN ? = 1 THEN ? ELSE log END, updated_at = ?
+         WHERE id = ? AND status IN ('running','recovering') AND lease_token = ? AND fence_epoch = ? AND fence_nonce = ?`,
+        [metadata.checkpoint ?? null, Object.hasOwn(metadata, "newServicePids") ? 1 : 0,
+          JSON.stringify(metadata.newServicePids ?? {}), Object.hasOwn(metadata, "log") ? 1 : 0,
+          Object.hasOwn(metadata, "log") ? redactStructured(metadata.log ?? "").slice(0, 32_000) : null, now, id,
+          fence.leaseToken, fence.fenceEpoch, fence.fenceNonce],
       );
+      if (jobChanged.changes !== 1) throw new Error("maintenance checkpoint job CAS 失败");
       return toDeploymentMaintenance(this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE job_id = ?").get(id)!);
     })();
   }
 
-  /** SQLite restore 可能回退 lease/checkpoint；只凭冻结 gate identity 恢复 maintenance phase，不接受调用方改 job/revision。 */
-  restoreDeploymentMaintenance(gate: DeploymentMaintenanceGate, phase: DeploymentMaintenancePhase, expectedRevision: string, now: number): DeploymentMaintenanceGate {
+  /** SQLite restore 后只允许 host sentinel 的冻结 identity/epoch 重建 DB gate，epoch 永不回退。 */
+  restoreDeploymentMaintenance(
+    gate: DeploymentMaintenanceGate,
+    fence: DeploymentFence,
+    phase: DeploymentMaintenancePhase,
+    expectedRevision: string,
+    expectedFingerprint: string,
+    now: number,
+  ): DeploymentMaintenanceGate {
     return this.db.transaction(() => {
-      const row = this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE target_id = ?").get(gate.targetId);
-      if (!row || !sameMaintenanceIdentity(toDeploymentMaintenance(row), gate)) throw new Error("restored DB maintenance identity 不匹配");
+      if (gate.fenceEpoch !== fence.fenceEpoch || gate.fenceNonce !== fence.fenceNonce) throw new Error("host sentinel/fence identity 不匹配");
+      const highWater = this.db.query<{ epoch: number }, []>("SELECT epoch FROM deployment_host_fence WHERE lock_id = 1").get()?.epoch ?? 0;
+      if (highWater > gate.fenceEpoch) throw new Error("restored DB fence 高于 host sentinel；拒绝回退 epoch");
+      this.db.run("UPDATE deployment_host_fence SET epoch = ? WHERE lock_id = 1", [gate.fenceEpoch]);
+      const row = this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM deployment_maintenance WHERE lock_id = 1").get();
+      if (row) {
+        const restoredGate = toDeploymentMaintenance(row);
+        if (!sameRollbackIdentity(restoredGate, gate) || restoredGate.fenceEpoch > gate.fenceEpoch
+          || (restoredGate.fenceEpoch === gate.fenceEpoch && restoredGate.fenceNonce !== gate.fenceNonce)) {
+          throw new Error("restored DB maintenance rollback identity/fence 不匹配");
+        }
+      }
       const delivery = this.db.query<DeliveryRow, [string]>("SELECT * FROM deliveries WHERE id = ?").get(gate.deliveryId);
       if (!delivery || delivery.active_deployment_job_id !== gate.jobId || delivery.deployment_generation !== gate.generation || delivery.deployment_revision !== gate.revision) {
         throw new Error("restored DB 的 active Delivery generation/revision 不匹配");
       }
       this.db.run(
-        "UPDATE deployment_maintenance SET phase = ?, expected_revision = ?, updated_at = ? WHERE target_id = ?",
-        [phase, expectedRevision.toLowerCase(), now, gate.targetId],
+        `INSERT INTO deployment_maintenance
+         (lock_id, fence_epoch, fence_nonce, target_id, job_id, delivery_id, generation, revision,
+          target_fingerprint, target_manifest_hash, rollback_attempt, baseline_revision, baseline_fingerprint,
+          baseline_manifest_hash, baseline_health_fingerprint, expected_revision, expected_fingerprint, phase, created_at, updated_at)
+         VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(lock_id) DO UPDATE SET fence_epoch = excluded.fence_epoch, fence_nonce = excluded.fence_nonce,
+           target_id = excluded.target_id, job_id = excluded.job_id, delivery_id = excluded.delivery_id,
+           generation = excluded.generation, revision = excluded.revision,
+           target_fingerprint = excluded.target_fingerprint, target_manifest_hash = excluded.target_manifest_hash,
+           rollback_attempt = excluded.rollback_attempt, baseline_revision = excluded.baseline_revision,
+           baseline_fingerprint = excluded.baseline_fingerprint, baseline_manifest_hash = excluded.baseline_manifest_hash,
+           baseline_health_fingerprint = excluded.baseline_health_fingerprint,
+           created_at = excluded.created_at, phase = excluded.phase,
+           expected_revision = excluded.expected_revision, expected_fingerprint = excluded.expected_fingerprint,
+           updated_at = excluded.updated_at`,
+        [gate.fenceEpoch, gate.fenceNonce, gate.targetId, gate.jobId, gate.deliveryId, gate.generation, gate.revision,
+          gate.targetFingerprint, gate.targetManifestHash, gate.rollbackAttempt, gate.baselineRevision,
+          gate.baselineFingerprint, gate.baselineManifestHash, gate.baselineHealthFingerprint,
+          expectedRevision.toLowerCase(), expectedFingerprint, phase, gate.createdAt, now],
       );
-      return toDeploymentMaintenance(this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE target_id = ?").get(gate.targetId)!);
+      const jobChanged = this.db.run(
+        `UPDATE deployment_jobs SET status = 'recovering', lease_token = ?, fence_epoch = ?, fence_nonce = ?,
+           rollback_attempt = ?, baseline_revision = ?, baseline_fingerprint = ?, baseline_manifest_hash = ?,
+           baseline_health_fingerprint = ?, database_backup_created = 1, checkpoint = 'rolling_back', updated_at = ?
+         WHERE id = ? AND generation = ? AND revision = ?`,
+        [fence.leaseToken, fence.fenceEpoch, fence.fenceNonce, gate.rollbackAttempt, gate.baselineRevision,
+          gate.baselineFingerprint, gate.baselineManifestHash, gate.baselineHealthFingerprint,
+          now, gate.jobId, gate.generation, gate.revision],
+      );
+      if (jobChanged.changes !== 1) throw new Error("restored DB deployment job identity 不匹配");
+      return toDeploymentMaintenance(this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM deployment_maintenance WHERE lock_id = 1").get()!);
     })();
   }
 
-  claimDeploymentRecovery(id: string, targetId: string, targetFingerprint: string, now: number, leaseMs: number): DeploymentJob {
+  claimDeploymentRecovery(
+    id: string,
+    targetId: string,
+    targetFingerprint: string,
+    targetManifestHash: string,
+    now: number,
+    leaseMs: number,
+  ): DeploymentJob {
     return this.db.transaction(() => {
       const row = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id);
-      if (!row || row.target_id !== targetId || row.target_fingerprint !== targetFingerprint) throw new Error("recovery job/target fingerprint 不匹配");
-      if (row.rollback_attempt === null || !row.baseline_revision) throw new Error("recovery job 缺少原始 rollback anchor，不能自动恢复");
+      if (!row || row.target_id !== targetId || row.target_fingerprint !== targetFingerprint
+        || row.target_manifest_hash !== targetManifestHash) throw new Error("recovery job/target identity 不匹配");
+      if (row.failure_kind === "legacy_ack_required") throw new Error("legacy deployment 必须先由管理员 ack/bootstrap，不能执行普通 recovery");
+      if (row.rollback_attempt === null || !row.baseline_revision || !row.baseline_fingerprint
+        || !row.baseline_manifest_hash || !row.baseline_health_fingerprint) {
+        throw new Error("recovery job 缺少原始 rollback anchor，不能自动恢复");
+      }
       const reclaimable = row.status === "needs_recovery" || (row.status === "recovering" && row.lease_expires_at !== null && row.lease_expires_at <= now);
       if (!reclaimable) throw new Error(`deployment job 状态 ${row.status} 不能进入管理员 recovery`);
       const gate = this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE job_id = ?").get(id);
       if (!gate || gate.target_fingerprint !== targetFingerprint || gate.rollback_attempt !== row.rollback_attempt) throw new Error("recovery maintenance gate/rollback anchor 不匹配");
       const leaseToken = newId("deploymentLease");
+      const fenceNonce = newId("deploymentLease");
+      this.db.run("UPDATE deployment_host_fence SET epoch = epoch + 1 WHERE lock_id = 1");
+      const fenceEpoch = this.db.query<{ epoch: number }, []>("SELECT epoch FROM deployment_host_fence WHERE lock_id = 1").get()!.epoch;
       this.db.run(
-        `UPDATE deployment_jobs SET status = 'recovering', attempt = attempt + 1, lease_token = ?, lease_expires_at = ?, updated_at = ?
+        `UPDATE deployment_jobs SET status = 'recovering', attempt = attempt + 1, lease_token = ?, lease_expires_at = ?,
+           fence_epoch = ?, fence_nonce = ?, updated_at = ?
          WHERE id = ?`,
-        [leaseToken, now + leaseMs, now, id],
+        [leaseToken, now + leaseMs, fenceEpoch, fenceNonce, now, id],
       );
+      const gateChanged = this.db.run(
+        `UPDATE deployment_maintenance SET fence_epoch = ?, fence_nonce = ?, phase = 'rolling_back', updated_at = ?
+         WHERE lock_id = 1 AND job_id = ? AND target_fingerprint = ? AND target_manifest_hash = ?`,
+        [fenceEpoch, fenceNonce, now, id, targetFingerprint, targetManifestHash],
+      );
+      if (gateChanged.changes !== 1) throw new Error("recovery global maintenance gate/rollback anchor 不匹配");
       return toDeploymentJob(this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id)!);
     })();
   }
 
   completeDeploymentJob(
     id: string,
-    leaseToken: string,
-    result: { status: "succeeded" | "failed" | "needs_recovery"; log: string; error?: string | null; rollbackComplete: boolean },
+    fence: DeploymentFence,
+    result: { status: "succeeded" | "failed" | "needs_recovery"; log: string; error?: string | null; failureKind?: DeploymentFailureKind | null; rollbackComplete: boolean },
     now: number,
   ): { job: DeploymentJob; applied: boolean; duplicate: boolean } {
-    return this.finishDeploymentJob(id, result, now, { leaseToken });
+    return this.finishDeploymentJob(id, result, now, { fence });
   }
 
   /** rollback restore 后 lease 可能来自 backup；只允许冻结 maintenance identity 完成，供 host worker/recovery CLI 使用。 */
   completeRecoveredDeploymentJob(
     gate: DeploymentMaintenanceGate,
-    result: { status: "failed" | "needs_recovery"; log: string; error?: string | null; rollbackComplete: boolean },
+    fence: DeploymentFence,
+    result: { status: "failed" | "needs_recovery"; log: string; error?: string | null; failureKind?: DeploymentFailureKind | null; rollbackComplete: boolean },
     now: number,
   ): { job: DeploymentJob; applied: boolean; duplicate: boolean } {
-    return this.finishDeploymentJob(gate.jobId, result, now, { gate });
+    return this.finishDeploymentJob(gate.jobId, result, now, { gate, fence });
   }
 
   private finishDeploymentJob(
     id: string,
-    result: { status: "succeeded" | "failed" | "needs_recovery"; log: string; error?: string | null; rollbackComplete: boolean },
+    result: { status: "succeeded" | "failed" | "needs_recovery"; log: string; error?: string | null; failureKind?: DeploymentFailureKind | null; rollbackComplete: boolean },
     now: number,
-    proof: { leaseToken?: string; gate?: DeploymentMaintenanceGate },
+    proof: { fence: DeploymentFence; gate?: DeploymentMaintenanceGate },
   ): { job: DeploymentJob; applied: boolean; duplicate: boolean } {
     return this.db.transaction(() => {
       const row = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id);
@@ -1835,17 +2158,24 @@ export class HarborStore {
       const maintenanceRow = this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE job_id = ?").get(id);
       const maintenance = maintenanceRow ? toDeploymentMaintenance(maintenanceRow) : null;
       if (proof.gate) {
-        if (!maintenance || !sameMaintenanceIdentity(maintenance, proof.gate)) throw new Error("recovery completion 的 maintenance identity 不匹配");
+        if (!maintenance || !sameMaintenanceState(maintenance, proof.gate)) throw new Error("recovery completion 的 maintenance state/fence 不匹配");
         if (!(["running", "recovering", "needs_recovery"] as string[]).includes(row.status)) throw new Error(`deployment job 状态 ${row.status} 不能 recovery complete`);
-      } else if (row.status !== "running" || row.lease_token !== proof.leaseToken) {
-        throw new Error("deployment job lease 已失效；旧 worker 结果已拒绝");
+      }
+      if (row.lease_token !== proof.fence.leaseToken || row.fence_epoch !== proof.fence.fenceEpoch || row.fence_nonce !== proof.fence.fenceNonce) {
+        throw new Error("deployment job fence 已失效；旧 worker 结果已拒绝");
       }
       if (result.status === "succeeded") {
-        if (!maintenance || maintenance.phase !== "healthy" || maintenance.expectedRevision !== row.revision) {
+        if (!maintenance || maintenance.phase !== "healthy" || maintenance.expectedRevision !== row.revision
+          || maintenance.expectedFingerprint !== row.target_fingerprint) {
           throw new Error("deployment success 缺少 exact revision healthy maintenance proof");
         }
       }
-      const safeLog = result.log.slice(0, 32_000);
+      if (result.status === "failed" && result.rollbackComplete && maintenance
+        && (maintenance.phase !== "rolling_back" || maintenance.expectedRevision !== maintenance.baselineRevision
+          || maintenance.expectedFingerprint !== maintenance.baselineFingerprint)) {
+        throw new Error("deployment failure 声称 rollbackComplete 但缺少 exact baseline maintenance proof");
+      }
+      const safeLog = redactStructured(result.log).slice(0, 32_000);
       const active = this.db.query<{
         active_deployment_job_id: string | null; deployment_generation: number; deployment_revision: string | null;
       }, [string]>(
@@ -1858,7 +2188,7 @@ export class HarborStore {
       if (maintenance && !isActive && !verifiedStaleRecovery) {
         const staleError = "stale deployment result reached a cutover maintenance gate; administrator recovery required";
         this.db.run(
-          `UPDATE deployment_jobs SET status = 'needs_recovery', log = ?, error = ?, rollback_complete = 0,
+          `UPDATE deployment_jobs SET status = 'needs_recovery', log = ?, error = ?, failure_kind = 'rollback_incomplete', rollback_complete = 0,
              checkpoint = 'rollback_incomplete', lease_token = NULL, lease_expires_at = NULL, finished_at = ?, updated_at = ?
            WHERE id = ?`,
           [safeLog, staleError, now, now, row.id],
@@ -1875,29 +2205,42 @@ export class HarborStore {
         const fresh = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id)!;
         return { job: toDeploymentJob(fresh), applied: false, duplicate: false };
       }
-      const safeError = (result.error ?? (result.status === "needs_recovery" ? "rollback incomplete; host administrator recovery required" : null))?.slice(0, 4_000) ?? null;
+      const safeError = redactStructured(
+        result.error ?? (result.status === "needs_recovery" ? "rollback incomplete; host administrator recovery required" : ""),
+      ).slice(0, 4_000) || null;
       const checkpoint = result.status === "succeeded" ? "healthy" : result.status === "needs_recovery" ? "rollback_incomplete" : "failed";
+      const failureKind = result.status === "succeeded" ? null
+        : result.failureKind ?? (result.status === "needs_recovery" ? "rollback_incomplete" : "deployment_failed");
       this.db.run(
         `UPDATE deployment_jobs
-         SET status = ?, log = ?, error = ?, rollback_complete = ?, checkpoint = ?,
+         SET status = ?, log = ?, error = ?, failure_kind = ?, rollback_complete = ?, checkpoint = ?,
              lease_token = NULL, lease_expires_at = NULL, finished_at = ?, updated_at = ?
          WHERE id = ?`,
-        [result.status, safeLog, safeError, result.rollbackComplete ? 1 : 0, checkpoint, now, now, id],
+        [result.status, safeLog, safeError, failureKind, result.rollbackComplete ? 1 : 0, checkpoint, now, now, id],
       );
-      const applied = this.db.run(
-        `UPDATE deliveries
-         SET deployment_status = ?, deployed_at = ?, deployment_error = ?, updated_at = ?, revision = revision + 1
-         WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ?`,
-        [result.status, result.status === "succeeded" ? now : null, safeError, now,
-          row.delivery_id, row.id, row.generation, row.revision],
-      ).changes === 1;
-      if (result.status === "needs_recovery" && maintenance) {
-        this.db.run(
-          "UPDATE deployment_maintenance SET phase = 'needs_recovery', updated_at = ? WHERE job_id = ?",
-          [now, row.id],
+      if (maintenance) {
+        const gateChanged = this.db.run(
+          "UPDATE deployment_maintenance SET phase = ?, updated_at = ? WHERE lock_id = 1 AND job_id = ? AND fence_epoch = ? AND fence_nonce = ?",
+          [result.status === "needs_recovery" ? "needs_recovery" : "releasing", now, row.id,
+            proof.fence.fenceEpoch, proof.fence.fenceNonce],
         );
-      } else if (maintenance) {
-        this.db.run("DELETE FROM deployment_maintenance WHERE job_id = ?", [row.id]);
+        if (gateChanged.changes !== 1) throw new Error("terminal maintenance phase CAS 失败");
+      }
+      let applied = false;
+      if (!maintenance || result.status === "needs_recovery") {
+        applied = this.db.run(
+          `UPDATE deliveries
+           SET deployment_status = ?, deployed_at = ?, deployment_error = ?, updated_at = ?, revision = revision + 1
+           WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ?`,
+          [result.status, result.status === "succeeded" ? now : null, safeError, now,
+            row.delivery_id, row.id, row.generation, row.revision],
+        ).changes === 1;
+      } else {
+        this.db.run(
+          `UPDATE deliveries SET deployment_status = 'running', deployment_error = NULL, updated_at = ?, revision = revision + 1
+           WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ?`,
+          [now, row.delivery_id, row.id, row.generation, row.revision],
+        );
       }
       if (applied) {
         this.db.run(
@@ -1932,6 +2275,90 @@ export class HarborStore {
       }
       const fresh = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id)!;
       return { job: toDeploymentJob(fresh), applied, duplicate: false };
+    })();
+  }
+
+  /** host sentinel 已清除并确认、daemon 已 bootstrap 后，最后 CAS 删除 DB gate 并发布 Delivery 终态。 */
+  releaseDeploymentMaintenance(gate: DeploymentMaintenanceGate, now: number): { job: DeploymentJob; applied: boolean } {
+    return this.db.transaction(() => {
+      const row = this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM deployment_maintenance WHERE lock_id = 1").get();
+      if (!row || !sameMaintenanceState(toDeploymentMaintenance(row), gate) || gate.phase !== "releasing") {
+        throw new Error("release maintenance gate/fence identity 不匹配");
+      }
+      const jobRow = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(gate.jobId);
+      if (!jobRow || !(jobRow.status === "succeeded" || (jobRow.status === "failed" && jobRow.rollback_complete === 1))) {
+        throw new Error("release maintenance 缺少 terminal + rollback proof");
+      }
+      const error = jobRow.error;
+      const applied = this.db.run(
+        `UPDATE deliveries SET deployment_status = ?, deployed_at = ?, deployment_error = ?, updated_at = ?, revision = revision + 1
+         WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ?`,
+        [jobRow.status, jobRow.status === "succeeded" ? now : null, error, now,
+          jobRow.delivery_id, jobRow.id, jobRow.generation, jobRow.revision],
+      ).changes === 1;
+      if (!applied && jobRow.status === "succeeded") {
+        throw new Error("release maintenance 的 active Delivery generation/revision CAS 失败");
+      }
+      const deleted = this.db.run(
+        "DELETE FROM deployment_maintenance WHERE lock_id = 1 AND job_id = ? AND fence_epoch = ? AND fence_nonce = ? AND phase = 'releasing'",
+        [gate.jobId, gate.fenceEpoch, gate.fenceNonce],
+      );
+      if (deleted.changes !== 1) throw new Error("release maintenance CAS 失败");
+      this.touchDeliveryConversation(jobRow.delivery_id, now);
+      return { job: toDeploymentJob(jobRow), applied };
+    })();
+  }
+
+  failDeploymentRelease(gate: DeploymentMaintenanceGate, error: string, now: number): DeploymentJob {
+    return this.db.transaction(() => {
+      const row = this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM deployment_maintenance WHERE lock_id = 1").get();
+      if (!row || !sameMaintenanceState(toDeploymentMaintenance(row), gate) || gate.phase !== "releasing") {
+        throw new Error("release failure gate/fence identity 不匹配");
+      }
+      const safeError = redactStructured(error).slice(0, 4_000);
+      this.db.run(
+        `UPDATE deployment_jobs SET status = 'needs_recovery', failure_kind = 'rollback_incomplete',
+           rollback_complete = 0, checkpoint = 'rollback_incomplete', error = ?, updated_at = ? WHERE id = ?`,
+        [safeError, now, gate.jobId],
+      );
+      this.db.run("UPDATE deployment_maintenance SET phase = 'needs_recovery', updated_at = ? WHERE lock_id = 1", [now]);
+      this.db.run(
+        `UPDATE deliveries SET deployment_status = 'needs_recovery', deployment_error = ?, updated_at = ?, revision = revision + 1
+         WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ?`,
+        [safeError, now, gate.deliveryId, gate.jobId, gate.generation, gate.revision],
+      );
+      return toDeploymentJob(this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(gate.jobId)!);
+    })();
+  }
+
+  /** v14/v15 无可信 anchor 的唯一解锁路径；仅记录人工处置，不声称 deploy/recovery 成功。 */
+  acknowledgeLegacyDeployment(id: string, verifiedBaselineRevision: string, now: number): DeploymentJob {
+    if (!/^[a-f0-9]{40,64}$/i.test(verifiedBaselineRevision)) throw new Error("legacy ack 必须提供已人工验证的 exact baseline revision");
+    return this.db.transaction(() => {
+      const row = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id);
+      if (!row || row.status !== "needs_recovery" || row.failure_kind !== "legacy_ack_required") {
+        throw new Error("deployment job 不需要 legacy ack");
+      }
+      this.db.run("DELETE FROM deployment_maintenance WHERE lock_id = 1 AND job_id = ?", [id]);
+      this.db.run(
+        `UPDATE deployment_jobs SET status = 'failed', failure_kind = 'bootstrap_required',
+           error = 'legacy deployment acknowledged; trusted baseline bootstrap required before retry',
+           rollback_complete = 1, baseline_revision = ?, checkpoint = 'failed', finished_at = ?, updated_at = ? WHERE id = ?`,
+        [verifiedBaselineRevision.toLowerCase(), now, now, id],
+      );
+      this.db.run(
+        `UPDATE deliveries SET deployment_status = 'failed',
+           deployment_error = 'trusted baseline bootstrap required before retry', updated_at = ?, revision = revision + 1
+         WHERE id = ? AND active_deployment_job_id = ?`,
+        [now, row.delivery_id, id],
+      );
+      this.db.run(
+        "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
+        [row.delivery_id, "deployment_legacy_acknowledged", JSON.stringify({
+          jobId: id, verifiedBaselineRevision: verifiedBaselineRevision.toLowerCase(), outcome: "failed_bootstrap_required",
+        }), "human", now],
+      );
+      return toDeploymentJob(this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id)!);
     })();
   }
 

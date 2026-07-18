@@ -14,6 +14,7 @@ import {
   hostClock,
 } from "./runtime.js";
 import { HostMaintenanceSentinel } from "./maintenance.js";
+import { redactStructured, targetSensitiveValues } from "./redaction.js";
 
 validateDeploymentWorkerConfigFile();
 const targets = deploymentTargets();
@@ -35,8 +36,8 @@ const worker = new DeploymentWorker(new EphemeralDeploymentJobStore(dbPath), tar
 console.log(`[harbor-deploy-worker] started targets=${targets.map((target) => target.id).join(",")}`);
 while (true) {
   try {
-    const worked = await worker.runOnce();
-    if (!worked) await hostClock.sleep(500);
+    const result = await worker.runOnce();
+    if (!result.worked) await hostClock.sleep(500);
   } catch (error) {
     console.error(`[harbor-deploy-worker] ${safeWorkerError(error, targets)}`);
     await hostClock.sleep(1_000);
@@ -44,13 +45,6 @@ while (true) {
 }
 
 function safeWorkerError(error: unknown, configured: typeof targets): string {
-  let value = error instanceof Error ? error.message : String(error);
-  const sensitive = configured.flatMap((target) => [
-    target.repositoryPath, target.releasesPath, target.currentSymlinkPath, target.sqlitePath, target.statePath,
-    target.launchd.plistPath, target.launchd.templatePath, target.health.url,
-    ...Object.values(target.environment),
-    ...Object.values(target.health.headers).flatMap((header) => [header, header.replace(/^Bearer\s+/i, "")]),
-  ]).filter(Boolean).sort((left, right) => right.length - left.length);
-  for (const secret of sensitive) value = value.replaceAll(secret, "[redacted]");
-  return value.slice(0, 4_000);
+  const value = error instanceof Error ? error.message : String(error);
+  return redactStructured(value, configured.flatMap(targetSensitiveValues)).slice(0, 4_000);
 }

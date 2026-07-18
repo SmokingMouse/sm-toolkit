@@ -32,6 +32,7 @@ import {
   type DeliveryCheckStatus,
   type DeliveryEvent,
   type DeliveryProviderKind,
+  type DeploymentJobView,
   type DeploymentTargetDescriptor,
   type HarborAgent,
   type IssuePriority,
@@ -485,6 +486,7 @@ function IssueDrawer({ id, agents, onlineDeviceIds, initialAction, onInitialActi
   const runs = detail.data?.runs ?? [];
   const delivery = detail.data?.delivery ?? null;
   const deliveryEvents = detail.data?.deliveryEvents ?? [];
+  const deploymentJob = detail.data?.deploymentJob ?? null;
   const activeRun = [...runs].reverse().find((r) => r.status === "queued" || r.status === "running");
   const threadRuns = runs.filter((run) => run.purpose !== "triage");
   const repositoryLocked = !!conv?.worktreePath || conv?.status === "review";
@@ -729,6 +731,7 @@ function IssueDrawer({ id, agents, onlineDeviceIds, initialAction, onInitialActi
                 <DeliveryCard
                   issueStatus={conv.status}
                   delivery={delivery}
+                  deploymentJob={deploymentJob}
                   events={deliveryEvents}
                   disabled={busy || !!activeRun}
                   onSetup={() => setDeliverySetup(true)}
@@ -790,6 +793,7 @@ function IssueDrawer({ id, agents, onlineDeviceIds, initialAction, onInitialActi
             <DeliveryCard
               issueStatus={conv.status}
               delivery={delivery}
+              deploymentJob={deploymentJob}
               events={deliveryEvents}
               disabled={busy || !!activeRun}
               onSetup={() => setDeliverySetup(true)}
@@ -831,6 +835,7 @@ function PropertyRow({ label, children }: { label: string; children: ReactNode }
 function DeliveryCard({
   issueStatus,
   delivery,
+  deploymentJob,
   events,
   disabled,
   onSetup,
@@ -843,6 +848,7 @@ function DeliveryCard({
 }: {
   issueStatus: ConversationStatus;
   delivery: Delivery | null;
+  deploymentJob: DeploymentJobView | null;
   events: DeliveryEvent[];
   disabled: boolean;
   onSetup: () => void;
@@ -925,6 +931,7 @@ function DeliveryCard({
         </div>
 
         {delivery.deploymentError && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[10px] leading-4 text-red-700">{delivery.deploymentError}</p>}
+        {deploymentJob && <DeploymentJobPanel job={deploymentJob} />}
 
         {delivery.provider === "github" ? (
           <p className="mt-3 rounded-lg bg-bg px-3 py-2 text-[10px] leading-4 text-dim"><span className="font-semibold text-ink/70">GitHub provider</span> · PR / checks 以 GitHub sync 为准；merge 仍受人工验收与 CI 闸控制。</p>
@@ -938,7 +945,7 @@ function DeliveryCard({
             {!reviewDone && <button className={btnPrimary} disabled={disabled} onClick={onApprove}>Approve implementation</button>}
             {delivery.status === "merge_ready" && <button className={btnPrimary} disabled={disabled} onClick={onMerge}>{delivery.provider === "github" ? "Merge on GitHub" : "Confirm externally merged"}</button>}
             {(delivery.status === "merged" || (delivery.status === "failed" && delivery.deploymentStatus !== "needs_recovery")) && <button className={delivery.status === "failed" ? btnDanger : btnPrimary} disabled={disabled} onClick={onDeploy}>{delivery.deploymentTargetId ? "Retry deployment" : delivery.status === "failed" ? "Record deploy retry" : "Record deploy started"}</button>}
-            {delivery.deploymentStatus === "needs_recovery" && <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[10px] leading-4 text-red-700">普通 Retry 已禁用。Host 管理员需执行 <span className="break-all font-mono">harbor deploy-worker recover {delivery.activeDeploymentJobId ?? "<job-id>"} --target {delivery.deploymentTargetId ?? "<target-id>"} --confirm {delivery.activeDeploymentJobId ?? "<job-id>"}</span>；只有旧 baseline 的 revision、launchd label/PID 与 health 全部验证后才会恢复为可重试状态。</p>}
+            {delivery.deploymentStatus === "needs_recovery" && <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[10px] leading-4 text-red-700">普通 Retry 已禁用。Host 管理员需执行 <span className="break-all font-mono">{deploymentJob?.failureKind === "legacy_ack_required" ? `harbor deploy-worker acknowledge ${delivery.activeDeploymentJobId ?? "<job-id>"} --baseline-revision <verified-baseline-sha> --confirm ${delivery.activeDeploymentJobId ?? "<job-id>"}` : `harbor deploy-worker recover ${delivery.activeDeploymentJobId ?? "<job-id>"} --target ${delivery.deploymentTargetId ?? "<target-id>"} --confirm ${delivery.activeDeploymentJobId ?? "<job-id>"}`}</span>；只有明确的 baseline 验证或 legacy 人工处置后才会解锁。</p>}
             {delivery.status === "deploying" && !delivery.deploymentTargetId && <div className="grid grid-cols-2 gap-2"><button className={btnPrimary} disabled={disabled} onClick={() => onDeploymentResult("succeeded")}>Succeeded</button><button className={btnDanger} disabled={disabled} onClick={() => onDeploymentResult("failed")}>Failed</button></div>}
           </div>
         )}
@@ -951,6 +958,24 @@ function DeliveryCard({
 
 function DeliveryFact({ label, value, ok }: { label: string; value: string; ok: boolean }) {
   return <div className="flex min-h-10 items-center justify-between gap-3 py-1"><span className="text-[10px] text-dim">{label}</span><span className={`text-[10px] font-semibold capitalize ${ok ? "text-done" : "text-ink/65"}`}>{value}</span></div>;
+}
+
+function DeploymentJobPanel({ job }: { job: DeploymentJobView }) {
+  return (
+    <details className="mt-3 rounded-xl border border-line bg-bg/55 p-3" open={job.status === "running" || job.status === "recovering" || job.status === "needs_recovery"}>
+      <summary className="cursor-pointer select-none text-[9px] font-bold uppercase tracking-[0.12em] text-dim">
+        Deployment job · {job.checkpoint.replaceAll("_", " ")}
+      </summary>
+      <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-[9px]">
+        <span className="text-dim">Attempt</span><span className="text-right font-mono text-ink/75">{job.attempt}</span>
+        <span className="text-dim">Generation</span><span className="text-right font-mono text-ink/75">{job.generation}</span>
+        <span className="text-dim">Fence epoch</span><span className="text-right font-mono text-ink/75">{job.fenceEpoch ?? "—"}</span>
+        <span className="text-dim">Recovery</span><span className={`text-right font-semibold ${job.recoveryRequired ? "text-canceled" : "text-ink/65"}`}>{job.recoveryRequired ? "Required" : job.rollbackComplete === true ? "Safe" : "—"}</span>
+      </div>
+      {job.error && <p className="mt-3 break-words text-[9px] leading-4 text-red-700">{job.failureKind ? `${job.failureKind}: ` : ""}{job.error}</p>}
+      {job.log && <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-zinc-950 p-2 font-mono text-[8px] leading-4 text-zinc-200">{job.log}</pre>}
+    </details>
+  );
 }
 
 function deliveryLinkLabel(value: string | null): string {

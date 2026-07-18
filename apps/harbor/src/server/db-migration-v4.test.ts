@@ -1,14 +1,31 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openDb } from "./db.js";
+import { openDb, openDeploymentDb } from "./db.js";
 import { DeliveryService } from "./delivery.js";
 import { renderRunPrompt } from "./prompt-wrapper.js";
 import { HarborStore } from "./store.js";
 
-test("legacy v3 database migrates through v15 without losing conversations, runs, or prompts", () => {
+test("deployment worker refuses an old schema without creating or migrating it", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "harbor-worker-schema-")));
+  const path = join(dir, "legacy.db");
+  try {
+    const legacy = new Database(path, { create: true });
+    legacy.exec("PRAGMA user_version = 13");
+    legacy.close();
+    chmodSync(path, 0o600);
+    expect(() => openDeploymentDb(path)).toThrow("拒绝 schema v13");
+    const verify = new Database(path, { readonly: true });
+    expect(verify.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(13);
+    verify.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy v3 database migrates through v16 without losing conversations, runs, or prompts", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v4-"));
   const path = join(dir, "legacy.db");
   try {
@@ -67,7 +84,7 @@ test("legacy v3 database migrates through v15 without losing conversations, runs
     legacy.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16);
     expect(
       migrated.query<{ agent_id: string | null; description: string | null; priority: string; status: string }, []>(
         "SELECT agent_id, description, priority, status FROM conversations WHERE id = 'conversation_1'",
@@ -144,7 +161,7 @@ test("legacy v3 database migrates through v15 without losing conversations, runs
   }
 });
 
-test("v15 upgrades an already-running v9 database and preserves Agent, Delivery, and event data", () => {
+test("v16 upgrades an already-running v9 database and preserves Agent, Delivery, and event data", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v9-"));
   const path = join(dir, "v9.db");
   try {
@@ -238,7 +255,7 @@ test("v15 upgrades an already-running v9 database and preserves Agent, Delivery,
     v9.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16);
     const agent = migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM agents WHERE id = 'agent_1'").get();
     expect(agent?.repository_id).toStartWith("repo_unconfigured_");
     expect(migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM conversations WHERE id = 'conversation_1'").get()).toEqual(agent);
@@ -280,7 +297,7 @@ test("v15 upgrades an already-running v9 database and preserves Agent, Delivery,
   }
 });
 
-test("v15 preserves v11 Delivery rows and audit events while adding deployment recovery fields", () => {
+test("v16 preserves v11 Delivery rows and audit events while adding deployment recovery fields", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v11-delivery-"));
   const path = join(dir, "v11.db");
   try {
@@ -333,7 +350,7 @@ test("v15 preserves v11 Delivery rows and audit events while adding deployment r
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16);
     expect(migrated.query<{ provider: string; change_url: string }, [string]>("SELECT provider, change_url FROM deliveries WHERE id = ?").get(delivery.id)).toEqual({
       provider: "manual",
       change_url: "https://github.com/acme/repo/pull/1",
@@ -353,7 +370,7 @@ test("v15 preserves v11 Delivery rows and audit events while adding deployment r
   }
 });
 
-test("v15 invalidates unbound GitHub evidence from v12 while preserving Delivery and event data", () => {
+test("v16 invalidates unbound GitHub evidence from v12 while preserving Delivery and event data", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v12-delivery-"));
   const path = join(dir, "v12.db");
   try {
@@ -412,7 +429,7 @@ test("v15 invalidates unbound GitHub evidence from v12 while preserving Delivery
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16);
     expect(
       migrated.query<{
         provider: string;
@@ -446,7 +463,7 @@ test("v15 invalidates unbound GitHub evidence from v12 while preserving Delivery
   }
 });
 
-test("v15 upgrades a v13 database without losing Delivery facts or audit", () => {
+test("v16 preserves a legitimate v13 manual no-target running deployment", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v13-delivery-"));
   const path = join(dir, "v13.db");
   try {
@@ -462,6 +479,13 @@ test("v15 upgrades a v13 database without losing Delivery facts or audit", () =>
       changeUrl: "https://example.test/mr/13", deploymentRequired: true,
     }, 7);
     store.updateDeliveryState(delivery.id, { reviewStatus: "approved", checkStatus: "passed", reviewApprovedAt: 8 }, 8);
+    current.run("UPDATE deliveries SET deployment_status = 'running' WHERE id = ?", [delivery.id]);
+    const githubIssue = store.createConversation({ kind: "issue", title: "v13 github", agentId: agent.id, origin: "web" }, 9);
+    store.setConversationStatus(githubIssue.id, "review", 10);
+    const githubDelivery = new DeliveryService(store).create(store.getConversation(githubIssue.id)!, {
+      changeUrl: "https://github.com/example/repo/pull/13", deploymentRequired: true,
+    }, 11);
+    current.run("UPDATE deliveries SET provider = 'github', deployment_status = 'running' WHERE id = ?", [githubDelivery.id]);
     current.exec("PRAGMA foreign_keys = OFF;");
     current.exec(`
       DROP TABLE deployment_jobs;
@@ -486,7 +510,7 @@ test("v15 upgrades a v13 database without losing Delivery facts or audit", () =>
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16);
     expect(migrated.query<{
       provider: string; review_status: string; check_status: string; deployment_status: string;
       review_approved_at: number; revision: number; deployment_target_id: null; deployment_generation: number;
@@ -494,8 +518,15 @@ test("v15 upgrades a v13 database without losing Delivery facts or audit", () =>
       `SELECT provider, review_status, check_status, deployment_status, review_approved_at, revision,
               deployment_target_id, deployment_generation FROM deliveries WHERE id = ?`,
     ).get(delivery.id)).toEqual({
-      provider: "manual", review_status: "approved", check_status: "passed", deployment_status: "pending",
+      provider: "manual", review_status: "approved", check_status: "passed", deployment_status: "running",
       review_approved_at: 8, revision: 1, deployment_target_id: null, deployment_generation: 0,
+    });
+    expect(migrated.query<{
+      provider: string; deployment_status: string; deployment_target_id: null; active_deployment_job_id: null;
+    }, [string]>(
+      "SELECT provider, deployment_status, deployment_target_id, active_deployment_job_id FROM deliveries WHERE id = ?",
+    ).get(githubDelivery.id)).toEqual({
+      provider: "github", deployment_status: "running", deployment_target_id: null, active_deployment_job_id: null,
     });
     expect(migrated.query<{ kind: string }, [string]>("SELECT kind FROM delivery_events WHERE delivery_id = ?").all(delivery.id)).toEqual([{ kind: "created" }]);
     expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
@@ -505,7 +536,7 @@ test("v15 upgrades a v13 database without losing Delivery facts or audit", () =>
   }
 });
 
-test("v15 fail-closes an active v14 deployment that has no fingerprint or rollback anchor", async () => {
+test("v16 gives an active v14 deployment without fingerprint/anchor an explicit legacy ack path", async () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v14-active-deploy-"));
   const path = join(dir, "v14.db");
   try {
@@ -520,6 +551,7 @@ test("v15 fail-closes an active v14 deployment that has no fingerprint or rollba
     const fingerprint = "c".repeat(64);
     const service = new DeliveryService(store, [], [{
       id: "local", name: "Local", provider: "local-launchd", repositoryId: repository.id, fingerprint,
+      manifestHash: "d".repeat(64),
     }]);
     let delivery = service.create(store.getConversation(issue.id)!, {
       changeUrl: "https://example.test/mr/14", deploymentTargetId: "local", deploymentRequired: true,
@@ -558,16 +590,25 @@ test("v15 fail-closes an active v14 deployment that has no fingerprint or rollba
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16);
     expect(migrated.query<{ deployment_status: string; deployment_error: string }, [string]>(
       "SELECT deployment_status, deployment_error FROM deliveries WHERE id = ?",
     ).get(delivery.id)).toEqual({
       deployment_status: "needs_recovery",
-      deployment_error: "v14 active deployment 缺少 target fingerprint/maintenance anchor；需要管理员 recovery",
+      deployment_error: "legacy automatic deployment 缺少可信 baseline；请执行管理员 ack 后重新 bootstrap",
     });
-    expect(migrated.query<{ status: string; target_fingerprint: string; checkpoint: string; rollback_complete: number }, [string]>(
-      "SELECT status, target_fingerprint, checkpoint, rollback_complete FROM deployment_jobs WHERE delivery_id = ?",
-    ).get(delivery.id)).toEqual({ status: "needs_recovery", target_fingerprint: "", checkpoint: "rollback_incomplete", rollback_complete: 0 });
+    expect(migrated.query<{ status: string; target_fingerprint: string; checkpoint: string; rollback_complete: number; failure_kind: string }, [string]>(
+      "SELECT status, target_fingerprint, checkpoint, rollback_complete, failure_kind FROM deployment_jobs WHERE delivery_id = ?",
+    ).get(delivery.id)).toEqual({
+      status: "needs_recovery", target_fingerprint: "", checkpoint: "rollback_incomplete",
+      rollback_complete: 0, failure_kind: "legacy_ack_required",
+    });
+    const migratedStore = new HarborStore(migrated);
+    const legacyJob = migratedStore.listDeploymentJobs(delivery.id)[0]!;
+    expect(migratedStore.acknowledgeLegacyDeployment(legacyJob.id, "b".repeat(40), 99)).toEqual(expect.objectContaining({
+      status: "failed", failureKind: "bootstrap_required", rollbackComplete: true,
+    }));
+    expect(migratedStore.getDeploymentMaintenance()).toBeNull();
     expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
     migrated.close();
   } finally {

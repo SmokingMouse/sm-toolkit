@@ -17,11 +17,14 @@ import { deviceName, serverWsUrl, token } from "../config.js";
 import { detectCapabilities } from "./capabilities.js";
 import { Executor } from "./executor.js";
 import { removeWorktree } from "./worktree.js";
+import { HostMaintenanceSentinel } from "../deployment-worker/maintenance.js";
+import { DaemonMaintenanceLatch } from "./maintenance.js";
 
 const authToken = token(); // 缺失时这里就抛，fail loudly
 const name = deviceName();
 const wsUrl = serverWsUrl();
 const capabilities = detectCapabilities();
+const maintenance = new DaemonMaintenanceLatch(new HostMaintenanceSentinel());
 
 if (!capabilities.clis.claude && !capabilities.clis.codex) {
   console.warn("[harbord] 警告：本机未检测到 claude/codex CLI，收到 run 会直接失败");
@@ -42,6 +45,7 @@ const MUST_DELIVER = new Set<DaemonMsg["type"]>([
 ]);
 
 function sendOrQueue(msg: DaemonMsg): void {
+  if (maintenance.isBlocked()) return;
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
       ws.send(JSON.stringify(msg));
@@ -65,11 +69,19 @@ function ownedRunIds(): string[] {
   return [...ids];
 }
 
-function connect(): void {
+async function connect(): Promise<void> {
+  if (await maintenance.refresh()) {
+    scheduleReconnect();
+    return;
+  }
   console.log(`[harbord] 连接 ${wsUrl} …（device=${name}）`);
   ws = new WebSocket(wsUrl);
 
-  ws.onopen = () => {
+  ws.onopen = async () => {
+    if (await maintenance.refresh()) {
+      ws?.close(1013, "deployment maintenance");
+      return;
+    }
     attempt = 0;
     ws!.send(
       JSON.stringify({
@@ -92,7 +104,11 @@ function connect(): void {
     }
   };
 
-  ws.onmessage = (e) => {
+  ws.onmessage = async (e) => {
+    if (await maintenance.refresh()) {
+      ws?.close(1013, "deployment maintenance");
+      return;
+    }
     let msg: ServerMsg;
     try {
       msg = JSON.parse(String(e.data)) as ServerMsg;
@@ -111,7 +127,7 @@ function connect(): void {
         break;
       case "run_start":
         console.log(`[harbord] run_start ${msg.runId}（backend=${msg.spec.backend} model=${msg.spec.model ?? "默认"} resume=${msg.spec.resume ? "是" : "否"}）`);
-        executor.start(msg.runId, msg.spec);
+        if (!maintenance.isBlocked()) executor.start(msg.runId, msg.spec);
         break;
       case "run_cancel":
         executor.cancel(msg.runId);
@@ -145,9 +161,13 @@ function scheduleReconnect(): void {
   console.log(`[harbord] 连接断开，${Math.round(delay / 1000)}s 后重连（第 ${attempt} 次）`);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    connect();
+    void connect();
   }, delay);
 }
 
 setInterval(() => sendOrQueue({ type: "heartbeat", ts: Date.now() }), HEARTBEAT_INTERVAL_MS);
-connect();
+setInterval(() => void maintenance.refresh().then((blocked) => {
+  if (blocked && ws) ws.close(1013, "deployment maintenance");
+}), 250);
+await maintenance.refresh();
+void connect();

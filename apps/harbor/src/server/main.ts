@@ -32,14 +32,18 @@ const store = new HarborStore(db);
 const bus = new RunBus();
 const hub = new DeviceHub(store, authToken, () => store.listDeploymentMaintenance().length > 0);
 const gc = githubConfig();
-const configuredDeploymentTargets = deploymentTargets();
-const maintenance = new DeploymentMaintenanceGuard(store, configuredDeploymentTargets, new HostMaintenanceSentinel());
+// server 只计算非敏感 routing/fingerprint；health credential value 只允许 worker 解析进内存。
+const configuredDeploymentTargets = deploymentTargets({ resolveSecrets: false });
+const maintenance = new DeploymentMaintenanceGuard(store, new HostMaintenanceSentinel());
 let maintenanceActive = (await maintenance.current()).active;
+const writesBlocked = () => maintenanceActive || store.listDeploymentMaintenance().length > 0;
 hub.setMaintenance(maintenanceActive);
 const deliveries = new DeliveryService(
   store,
   gc ? [new GitHubDeliveryProvider(new GitHubRestClient(gc.token))] : [],
-  configuredDeploymentTargets.map(({ id, name, provider, repositoryId, fingerprint }) => ({ id, name, provider, repositoryId, fingerprint })),
+  configuredDeploymentTargets.map(({ id, name, provider, repositoryId, fingerprint, manifestHash }) => ({
+    id, name, provider, repositoryId, fingerprint, manifestHash,
+  })),
 );
 if (!gc) {
   console.log(
@@ -47,13 +51,14 @@ if (!gc) {
   );
 }
 const coordinator = new RunCoordinator(store, bus, hub, concurrency, deliveries);
-const approvals = new ApprovalService(store, bus, hub);
-const automations = new AutomationService(store, coordinator, () => maintenanceActive || store.listDeploymentMaintenance().length > 0);
+const approvals = new ApprovalService(store, bus, hub, writesBlocked);
+const automations = new AutomationService(store, coordinator, writesBlocked);
 hub.coordinator = coordinator;
 hub.approvals = approvals;
 
 // 飞书入口（可选）：配置齐才挂；审批卡片/结果回报都走它
 let feishu: FeishuEntry | null = null;
+let feishuStarted = false;
 const fc = feishuConfig();
 if (fc) {
   const { FeishuChannel } = await import("@sm/channel-feishu");
@@ -63,16 +68,23 @@ if (fc) {
     botName: fc.botName,
     requireMention: true,
   });
-  feishu = new FeishuEntry(store, coordinator, approvals, fc, channel, () => maintenanceActive || store.listDeploymentMaintenance().length > 0);
+  feishu = new FeishuEntry(store, coordinator, approvals, fc, channel, writesBlocked);
   approvals.sink = feishu;
+  if (maintenanceActive) console.log("[harbor-server] deployment maintenance：飞书入口延迟到全局 gate 解除后启动");
+} else {
+  console.log("[harbor-server] 飞书未配置（~/.harbor.yaml feishu 块），入口关闭");
+}
+
+const startFeishu = () => {
+  if (!feishu || feishuStarted || writesBlocked()) return;
+  feishuStarted = true;
   feishu.start().catch((e) => {
     console.error("[harbor-server] 飞书入口启动失败（server 继续跑，仅 CLI/REST 面可用）：", e);
     feishu = null;
     approvals.sink = null;
   });
-} else {
-  console.log("[harbor-server] 飞书未配置（~/.harbor.yaml feishu 块），入口关闭");
-}
+};
+startFeishu();
 
 // run 终态 hook：审批作废 + 飞书回报
 coordinator.onRunFinished = (run, conv) => {
@@ -136,6 +148,7 @@ setInterval(() => {
     } else {
       approvals.startSweeper();
       automations.start();
+      startFeishu();
     }
   }).catch((error) => {
     maintenanceActive = true;
@@ -148,7 +161,7 @@ setInterval(() => {
 
 // run_events 7 天滚动 prune（boot 一次 + 每小时）
 const prune = () => {
-  if (maintenanceActive) return;
+  if (writesBlocked()) return;
   const n = store.pruneRunEvents(Date.now() - RUN_EVENTS_RETENTION_MS);
   if (n > 0) console.log(`[harbor-server] run_events prune：清理 ${n} 行（>7 天）`);
 };

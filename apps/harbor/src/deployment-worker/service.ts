@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { databasePath, deploymentTargets, validateDeploymentWorkerConfigFile } from "../config.js";
+import { databasePath, deploymentMaintenancePath, deploymentTargets, validateDeploymentWorkerConfigFile } from "../config.js";
 import { buildDaemonServicePath } from "../daemon/service.js";
 
 const LABEL = "com.smokingmouse.harbor.deploy-worker";
@@ -32,6 +32,7 @@ function context() {
     workerEntry,
     pathEnv: process.env.PATH ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
     databasePath: databasePath(),
+    maintenancePath: deploymentMaintenancePath(),
     definitionPath: resolve(home, "Library/LaunchAgents", `${LABEL}.plist`),
     stdoutPath: resolve(logDir, "deploy-worker.log"),
     stderrPath: resolve(logDir, "deploy-worker.err.log"),
@@ -39,7 +40,7 @@ function context() {
 }
 
 export function renderDeploymentWorkerLaunchAgent(input: {
-  home: string; bunPath: string; workerEntry: string; pathEnv: string; databasePath: string; stdoutPath: string; stderrPath: string;
+  home: string; bunPath: string; workerEntry: string; pathEnv: string; databasePath: string; maintenancePath?: string; stdoutPath: string; stderrPath: string;
 }): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -51,6 +52,7 @@ export function renderDeploymentWorkerLaunchAgent(input: {
     <key>HOME</key><string>${xml(input.home)}</string>
     <key>PATH</key><string>${xml(buildDaemonServicePath(input.bunPath, input.pathEnv))}</string>
     <key>HARBOR_DB</key><string>${xml(input.databasePath)}</string>
+    <key>HARBOR_DEPLOYMENT_MAINTENANCE_PATH</key><string>${xml(input.maintenancePath ?? resolve(input.home, ".harbor/deployment/maintenance.json"))}</string>
   </dict>
   <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>3</integer>
   <key>StandardOutPath</key><string>${xml(input.stdoutPath)}</string>
@@ -66,7 +68,16 @@ export function setupDeploymentWorkerService(): DeploymentWorkerServiceStatus {
   const serviceHome = process.env.HARBOR_SERVICE_HOME ?? process.env.HOME ?? homedir();
   validateDeploymentWorkerConfigFile(resolve(serviceHome, ".harbor.yaml"));
   const ctx = context();
-  if (deploymentTargets().length === 0) throw new Error("请先在 env 或 ~/.harbor.yaml 配置 deployment_targets");
+  const safeTargets = deploymentTargets({ resolveSecrets: false });
+  if (safeTargets.length === 0) throw new Error("请先在 env 或 ~/.harbor.yaml 配置 deployment_targets");
+  // LaunchAgent 不继承当前交互 shell 的临时 env。credential value 不写 plist；管理员必须
+  // 先把 reference 写入当前 gui launchd manager（worker 只在进程内收到它）。
+  for (const envName of new Set(safeTargets.flatMap((target) => Object.values(target.health.headerRefs).map((ref) => ref.env)))) {
+    const credential = command(["launchctl", "getenv", envName], true);
+    if (!credential.ok || !credential.out) {
+      throw new Error(`health credential env ${envName} 未注入 launchd manager；请先安全执行 launchctl setenv ${envName} <secret>`);
+    }
+  }
   atomicWrite(ctx.definitionPath, renderDeploymentWorkerLaunchAgent(ctx));
   const domain = launchdDomain();
   command(["launchctl", "bootout", `${domain}/${LABEL}`], true);

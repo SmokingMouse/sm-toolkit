@@ -77,7 +77,7 @@ describe("prompt blocks", () => {
   test("latest migration exposes eight Mew-style blocks and composes issue context + assignment", () => {
     const db = openDb(":memory:");
     const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version;
-    expect(version).toBe(15);
+    expect(version).toBe(16);
     const store = new HarborStore(db);
     const input = fixtures();
     const rendered = renderRunPrompt(store, input);

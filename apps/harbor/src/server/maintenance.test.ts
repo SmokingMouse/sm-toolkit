@@ -17,11 +17,16 @@ import { DeviceHub, type WsData } from "./ws.js";
 const REVISION = "a".repeat(40);
 const BASELINE = "b".repeat(40);
 const FINGERPRINT = "c".repeat(64);
+const MANIFEST_HASH = "d".repeat(64);
+const BASELINE_FINGERPRINT = "e".repeat(64);
+const BASELINE_MANIFEST_HASH = "f".repeat(64);
+const BASELINE_HEALTH_FINGERPRINT = "1".repeat(64);
 
 class FakeSentinel implements DeploymentMaintenanceSentinel {
+  readonly path = "/global/maintenance.json";
   gate: DeploymentMaintenanceGate | null = null;
   async read() { return this.gate; }
-  async write(_target: DeploymentTargetConfig, gate: DeploymentMaintenanceGate) { this.gate = gate; }
+  async write(gate: DeploymentMaintenanceGate) { this.gate = gate; }
   async clear() { this.gate = null; }
 }
 
@@ -30,9 +35,13 @@ function target(repositoryId: string): DeploymentTargetConfig {
     id: "local", name: "Local", provider: "local-launchd", repositoryId,
     repositoryPath: "/repo", releasesPath: "/releases", currentSymlinkPath: "/current",
     sqlitePath: "/db", statePath: "/state", steps: { install: [], build: [], test: [] },
-    environment: {}, launchd: { label: "com.test", domain: "gui/1", plistPath: "/plist", templatePath: "/template" },
-    health: { url: "http://127.0.0.1/health", headers: {}, timeoutMs: 100, intervalMs: 10 },
-    commandTimeoutMs: 100, fingerprint: FINGERPRINT,
+    source: { remote: "origin", remoteUrl: "ssh://git@example.test/repo", allowedRefs: ["refs/remotes/origin/main"] },
+    environment: {}, services: [
+      { id: "server", role: "server", label: "com.test.server", domain: "gui/1", plistPath: "/server.plist", templatePath: "/server.tpl", templateSha256: "2".repeat(64) },
+      { id: "daemon", role: "daemon", label: "com.test.daemon", domain: "gui/1", plistPath: "/daemon.plist", templatePath: "/daemon.tpl", templateSha256: "3".repeat(64) },
+    ],
+    health: { url: "http://127.0.0.1/health", headerRefs: {}, headers: {}, timeoutMs: 100, intervalMs: 10 },
+    commandTimeoutMs: 100, fingerprint: FINGERPRINT, manifestHash: MANIFEST_HASH,
   };
 }
 
@@ -47,7 +56,7 @@ async function activeMaintenanceHarness() {
   const configured = target(repository.id);
   const deliveries = new DeliveryService(store, [], [{
     id: configured.id, name: configured.name, provider: configured.provider,
-    repositoryId: configured.repositoryId, fingerprint: configured.fingerprint,
+    repositoryId: configured.repositoryId, fingerprint: configured.fingerprint, manifestHash: configured.manifestHash,
   }]);
   let delivery = deliveries.create(store.getConversation(issue.id)!, {
     changeUrl: "https://example.test/mr/1", deploymentTargetId: configured.id, deploymentRequired: true,
@@ -57,12 +66,16 @@ async function activeMaintenanceHarness() {
   delivery = await deliveries.merge(store.getDelivery(delivery.id)!, store.getConversation(issue.id)!, {
     confirmed: true, mergedRevision: REVISION,
   }, 10);
-  const job = store.claimDeploymentJob([{ id: configured.id, fingerprint: configured.fingerprint }], 11, 100)!;
-  const gate = store.activateDeploymentMaintenance(job.id, job.leaseToken!, { rollbackAttempt: 1, baselineRevision: BASELINE }, 12);
+  const job = store.claimDeploymentJob([{ id: configured.id, fingerprint: configured.fingerprint, manifestHash: configured.manifestHash }], 11, 100)!;
+  const fence = { leaseToken: job.leaseToken!, fenceEpoch: job.fenceEpoch!, fenceNonce: job.fenceNonce! };
+  const gate = store.activateDeploymentMaintenance(job.id, fence, {
+    rollbackAttempt: 1, baselineRevision: BASELINE, baselineFingerprint: BASELINE_FINGERPRINT,
+    baselineManifestHash: BASELINE_MANIFEST_HASH, baselineHealthFingerprint: BASELINE_HEALTH_FINGERPRINT,
+  }, 12);
   const sentinel = new FakeSentinel();
   sentinel.gate = gate;
-  const guard = new DeploymentMaintenanceGuard(store, [configured], sentinel, { revision: REVISION, fingerprint: FINGERPRINT });
-  return { store, deliveries, configured, gate, guard };
+  const guard = new DeploymentMaintenanceGuard(store, sentinel, { revision: REVISION, fingerprint: FINGERPRINT });
+  return { store, deliveries, configured, gate, guard, issue, job, fence };
 }
 
 test("maintenance sentinel blocks every REST operation and only admits exact revision-aware health", async () => {
@@ -121,6 +134,31 @@ test("DB/file gate disagreement remains fail-closed and never accepts a new 2xx 
   const h = await activeMaintenanceHarness();
   const sentinel = new FakeSentinel();
   sentinel.gate = { ...h.gate, expectedRevision: BASELINE };
-  const guard = new DeploymentMaintenanceGuard(h.store, [h.configured], sentinel, { revision: BASELINE, fingerprint: FINGERPRINT });
+  const guard = new DeploymentMaintenanceGuard(h.store, sentinel, { revision: BASELINE, fingerprint: FINGERPRINT });
   expect(await guard.current()).toEqual(expect.objectContaining({ active: true, exact: false }));
+});
+
+test("conversation detail exposes only the bounded safe deployment job projection", async () => {
+  const h = await activeMaintenanceHarness();
+  h.store.updateDeploymentCheckpoint(h.job.id, h.fence, "server_started", 13, {
+    newServicePids: { "gui/1/com.test.server": 42 },
+  });
+  const coordinator = new RunCoordinator(h.store, new RunBus(), { isOnline: () => false, send: () => false }, 1);
+  const app = buildRest(
+    h.store, new RunBus(),
+    { onlineIds: () => new Set<string>(), isOnline: () => false } as unknown as DeviceHub,
+    coordinator, {} as ApprovalService, new AutomationService(h.store, coordinator, () => false),
+    "token", h.deliveries,
+  );
+  const response = await app.request(`/api/conversations/${h.issue.id}`, { headers: { Authorization: "Bearer token" } });
+  expect(response.status).toBe(200);
+  const body = await response.json() as Record<string, unknown>;
+  expect(body.deploymentJob).toEqual(expect.objectContaining({
+    id: h.job.id, checkpoint: "server_started", attempt: 1, fenceEpoch: h.job.fenceEpoch,
+  }));
+  const encoded = JSON.stringify(body.deploymentJob);
+  expect(encoded).not.toContain(h.job.leaseToken!);
+  expect(encoded).not.toContain(h.job.fenceNonce!);
+  expect(encoded).not.toContain(FINGERPRINT);
+  expect(encoded).not.toContain("newServicePids");
 });

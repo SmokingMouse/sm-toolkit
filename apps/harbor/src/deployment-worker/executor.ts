@@ -1,12 +1,50 @@
-import { basename, join } from "node:path";
-import type { DeploymentTargetConfig } from "../config.js";
+import { createHash } from "node:crypto";
+import { dirname, join, resolve } from "node:path";
+import { exactLaunchdTemplateLabel, type DeploymentServiceConfig, type DeploymentTargetConfig, type SecretReference } from "../config.js";
 import type {
+  DeploymentFailureKind,
   DeploymentJob,
   DeploymentMaintenanceGate,
   DeploymentMaintenancePhase,
 } from "../protocol.js";
 import type { DeploymentMaintenanceSentinel } from "./maintenance.js";
 import { sameMaintenanceIdentity } from "./maintenance.js";
+import { assertNoCredentialMaterial, assertSafeArgv, redactStructured, safeArgvAudit, targetSensitiveValues } from "./redaction.js";
+
+const RELEASE_MANIFEST = ".harbor-deployment.json";
+
+export interface DeploymentReleaseManifest {
+  version: 1;
+  targetId: string;
+  repositoryId: string;
+  revision: string;
+  targetFingerprint: string;
+  targetManifestHash: string;
+  healthFingerprint: string;
+  source: { remote: string; remoteUrl: string; allowedRefs: string[] };
+  paths: {
+    repositoryPath: string;
+    releasesPath: string;
+    currentSymlinkPath: string;
+    sqlitePath: string;
+    statePath: string;
+  };
+  health: {
+    url: string;
+    timeoutMs: number;
+    intervalMs: number;
+    headerRefs: Record<string, SecretReference>;
+  };
+  services: DeploymentServiceConfig[];
+}
+
+interface RollbackAnchor {
+  version: 1;
+  current: string;
+  baseline: DeploymentReleaseManifest;
+  baselineManifestHash: string;
+  oldPlists: Record<string, string>;
+}
 
 export interface DeploymentFileSystem {
   mkdir(path: string, mode: number): Promise<void>;
@@ -14,7 +52,6 @@ export interface DeploymentFileSystem {
   writeText(path: string, content: string, mode: number): Promise<void>;
   rename(from: string, to: string): Promise<void>;
   exists(path: string): Promise<boolean>;
-  /** 只把 ENOENT 映射为 null；regular file、EACCES 与其他错误必须抛出。 */
   readLink(path: string): Promise<string | null>;
   symlink(target: string, path: string): Promise<void>;
   remove(path: string): Promise<void>;
@@ -83,18 +120,27 @@ export interface DeploymentExecutorDeps {
 }
 
 export interface DeploymentExecutionHooks {
-  checkpoint(value: string, metadata?: { newServicePid?: number | null }): Promise<void>;
+  assertFence(boundary: string): Promise<void>;
+  checkpoint(value: string, metadata?: { newServicePids?: Record<string, number>; databaseBackupCreated?: boolean; log?: string }): Promise<void>;
   getMaintenance(): Promise<DeploymentMaintenanceGate | null>;
-  activateMaintenance(input: { rollbackAttempt: number; baselineRevision: string }): Promise<DeploymentMaintenanceGate>;
+  activateMaintenance(input: {
+    rollbackAttempt: number;
+    baselineRevision: string;
+    baselineFingerprint: string;
+    baselineManifestHash: string;
+    baselineHealthFingerprint: string;
+  }): Promise<DeploymentMaintenanceGate>;
   updateMaintenance(
     phase: DeploymentMaintenancePhase,
     expectedRevision: string,
-    metadata?: { checkpoint?: string; newServicePid?: number | null },
+    expectedFingerprint: string,
+    metadata?: { checkpoint?: string; newServicePids?: Record<string, number>; log?: string },
   ): Promise<DeploymentMaintenanceGate>;
   restoreMaintenance(
     gate: DeploymentMaintenanceGate,
     phase: DeploymentMaintenancePhase,
     expectedRevision: string,
+    expectedFingerprint: string,
   ): Promise<DeploymentMaintenanceGate>;
 }
 
@@ -102,6 +148,7 @@ export interface DeploymentExecutionResult {
   status: "succeeded" | "failed" | "needs_recovery";
   log: string;
   error: string | null;
+  failureKind: DeploymentFailureKind | null;
   rollbackComplete: boolean;
   gate: DeploymentMaintenanceGate | null;
 }
@@ -109,7 +156,7 @@ export interface DeploymentExecutionResult {
 class DeploymentFailure extends Error {}
 class StopProofFailure extends DeploymentFailure {}
 
-/** Local launchd pipeline。所有 host 副作用都可注入；测试不会触碰真实 FS/process/launchd/HTTP/clock。 */
+/** 所有 host 副作用可注入；生产实现与 fake 测试共享相同 fencing/rollback 状态机。 */
 export class LocalLaunchdDeploymentExecutor {
   constructor(private readonly deps: DeploymentExecutorDeps) {}
 
@@ -117,26 +164,18 @@ export class LocalLaunchdDeploymentExecutor {
     return this.deps.validator.validate(target);
   }
 
-  async execute(
-    job: DeploymentJob,
-    target: DeploymentTargetConfig,
-    hooks: DeploymentExecutionHooks,
-  ): Promise<DeploymentExecutionResult> {
+  async execute(job: DeploymentJob, target: DeploymentTargetConfig, hooks: DeploymentExecutionHooks): Promise<DeploymentExecutionResult> {
     const logger = this.logger(target);
-    if (job.targetFingerprint !== target.fingerprint) {
-      return this.failure(logger, "job target fingerprint 与当前 worker 配置不一致", false, null);
+    if (job.targetId !== target.id || job.targetFingerprint !== target.fingerprint || job.targetManifestHash !== target.manifestHash) {
+      return this.failure(logger, "job target identity 与当前 worker 配置不一致", true, null, "config_drift");
     }
     if (job.checkpoint === "healthy") return this.resumeHealthy(job, target, hooks, logger);
-    if (job.rollbackAttempt !== null) {
-      return this.recoverOriginalBaseline(job, target, hooks, logger, "上次 worker 在 maintenance 中崩溃");
-    }
+    if (job.rollbackAttempt !== null) return this.recoverOriginalBaseline(job, target, hooks, logger, "worker restart");
 
     const releasePath = join(target.releasesPath, `${job.id}-g${job.generation}-a${job.attempt}`);
     const statePath = join(target.statePath, job.id, `attempt-${job.attempt}`);
+    const databaseBackup = join(statePath, "database.sqlite");
     let gate: DeploymentMaintenanceGate | null = null;
-    let oldPid: number | null = null;
-    let newPid: number | null = null;
-    let stopped = false;
     let backupCreated = false;
 
     try {
@@ -145,133 +184,109 @@ export class LocalLaunchdDeploymentExecutor {
       await this.deps.fs.mkdir(target.releasesPath, 0o700);
       await this.deps.fs.mkdir(join(target.statePath, job.id), 0o700);
       await this.deps.fs.mkdir(statePath, 0o700);
-      await hooks.checkpoint("preparing");
-
-      const resolved = await this.command(
-        ["git", "-C", target.repositoryPath, "rev-parse", "--verify", `${job.revision}^{commit}`],
-        target,
-        undefined,
-        logger,
-      );
-      if (resolved.stdout.trim().toLowerCase() !== job.revision.toLowerCase()) {
-        throw new DeploymentFailure("configured repository 解析出的 commit 与 job revision 不一致");
-      }
-      await this.command(
-        ["git", "-C", target.repositoryPath, "worktree", "add", "--detach", releasePath, job.revision],
-        target,
-        undefined,
-        logger,
-      );
+      await hooks.checkpoint("fetching");
+      await hooks.assertFence("before-controlled-fetch");
+      await this.fetchExactRevision(job, target, logger);
+      await hooks.assertFence("after-controlled-fetch");
+      await this.command(["git", "-C", target.repositoryPath, "worktree", "add", "--detach", releasePath, job.revision], target, undefined, logger);
       for (const group of [target.steps.install, target.steps.build, target.steps.test]) {
         for (const argv of group) {
-          await hooks.checkpoint("preparing");
+          await hooks.assertFence("build-step");
           await this.command(argv, target, releasePath, logger);
         }
       }
-      await hooks.checkpoint("prepared");
 
-      const oldState = await this.requireRunningService(target);
-      oldPid = oldState.pid;
-      const oldPlist = await this.deps.fs.readText(target.launchd.plistPath);
-      const oldCurrent = await this.deps.fs.readLink(target.currentSymlinkPath);
-      if (!oldCurrent) throw new DeploymentFailure("current release symlink 不存在，无法建立 rollback baseline");
-      const baseline = await this.command(
-        ["git", "-C", oldCurrent, "rev-parse", "--verify", "HEAD^{commit}"],
-        target,
-        undefined,
-        logger,
-      );
-      const baselineRevision = baseline.stdout.trim().toLowerCase();
-      if (!/^[a-f0-9]{40,64}$/.test(baselineRevision)) throw new DeploymentFailure("旧 release 无法解析 exact baseline revision");
-      await this.deps.fs.writeText(join(statePath, "old.plist"), oldPlist, 0o600);
-      await this.deps.fs.writeText(join(statePath, "old-current"), oldCurrent, 0o600);
-      await this.deps.fs.writeText(join(statePath, "baseline-revision"), `${baselineRevision}\n`, 0o600);
+      const current = await this.requireCurrentRelease(target);
+      let baseline: DeploymentReleaseManifest;
+      try { baseline = await this.readReleaseManifest(current); }
+      catch (error) { throw new DeploymentFailure(`trusted baseline manifest unavailable: ${message(error)}`); }
+      this.validateTrustedBaseline(baseline, target);
+      const baselineManifestHash = releaseManifestHash(baseline);
+      const oldPlists = Object.fromEntries(await Promise.all(baseline.services.map(async (service) => {
+        const plist = await this.deps.fs.readText(service.plistPath);
+        assertNoCredentialMaterial(plist, Object.values(target.health.headers));
+        if (exactLaunchdTemplateLabel(plist) !== service.label) {
+          throw new DeploymentFailure(`trusted baseline plist ${service.id} Label 与 manifest 不匹配`);
+        }
+        return [serviceKey(service), plist] as const;
+      })));
+      const nextManifest = this.targetManifest(job, target);
+      if (releaseManifestHash(nextManifest) !== target.manifestHash) throw new DeploymentFailure("target manifest hash 与 frozen job 不一致");
+      const rendered = await this.renderServices(target, releasePath, job);
+      const anchor: RollbackAnchor = { version: 1, current, baseline, baselineManifestHash, oldPlists };
+      await this.deps.fs.writeText(join(statePath, "rollback-anchor.json"), `${JSON.stringify(anchor)}\n`, 0o600);
+      await this.deps.fs.writeText(join(releasePath, RELEASE_MANIFEST), `${JSON.stringify(nextManifest)}\n`, 0o600);
+      await hooks.checkpoint("prepared", { log: logger.value() });
 
-      gate = await hooks.activateMaintenance({ rollbackAttempt: job.attempt, baselineRevision });
-      await this.deps.maintenance.write(target, gate);
-      await this.stopAndProve(target, oldPid, logger);
-      stopped = true;
-      await hooks.checkpoint("old_stopped");
+      const union = unionServices(baseline.services, target.services);
+      const oldPids = await this.captureServicePids(union);
+      gate = await hooks.activateMaintenance({
+        rollbackAttempt: job.attempt,
+        baselineRevision: baseline.revision,
+        baselineFingerprint: baseline.targetFingerprint,
+        baselineManifestHash,
+        baselineHealthFingerprint: baseline.healthFingerprint,
+      });
+      await this.writeMaintenanceFenced(hooks, gate, "activate");
+      await hooks.assertFence("before-service-bootout");
+      await this.stopAndProve(union, oldPids, logger, hooks, "deploy");
+      await hooks.assertFence("after-service-bootout-proof");
+      await hooks.checkpoint("old_services_stopped", { log: logger.value() });
 
-      const databaseBackup = join(statePath, "database.sqlite");
+      await hooks.assertFence("before-db-backup");
       await this.deps.sqlite.backup(target.sqlitePath, databaseBackup);
       backupCreated = true;
-      await hooks.checkpoint("backup_created");
+      await hooks.assertFence("after-db-backup");
+      await hooks.checkpoint("backup_created", { databaseBackupCreated: true, log: logger.value() });
 
-      const template = await this.deps.fs.readText(target.launchd.templatePath);
-      for (const placeholder of ["{{release_path}}", "{{revision}}", "{{target_fingerprint}}"] as const) {
-        if (!template.includes(placeholder)) throw new DeploymentFailure(`launchd plist template 缺少 ${placeholder} 占位符`);
+      for (const service of target.services) {
+        await hooks.assertFence(`before-plist-${service.id}`);
+        await atomicWrite(this.deps.fs, service.plistPath, rendered.get(service.id)!, `${job.id}-${job.attempt}-${service.id}`);
+        await hooks.assertFence(`after-plist-${service.id}`);
       }
-      const nextPlist = template
-        .replaceAll("{{release_path}}", xml(releasePath))
-        .replaceAll("{{revision}}", xml(job.revision))
-        .replaceAll("{{target_fingerprint}}", xml(job.targetFingerprint));
-      await atomicWrite(this.deps.fs, target.launchd.plistPath, nextPlist, `${job.id}-${job.attempt}`);
+      for (const service of baseline.services) {
+        if (!target.services.some((candidate) => candidate.plistPath === service.plistPath)) {
+          await hooks.assertFence(`before-remove-plist-${service.id}`);
+          await this.deps.fs.remove(service.plistPath);
+          await hooks.assertFence(`after-remove-plist-${service.id}`);
+        }
+      }
+      await hooks.assertFence("before-current-symlink");
       await atomicSymlink(this.deps.fs, target.currentSymlinkPath, releasePath, `${job.id}-${job.attempt}`);
-      await hooks.checkpoint("switched");
+      await hooks.assertFence("after-current-symlink");
+      await hooks.checkpoint("switched", { log: logger.value() });
 
-      await this.deps.launchd.bootstrap(target.launchd.domain, target.launchd.plistPath);
-      const nextState = await this.waitForRunningService(target);
-      newPid = nextState.pid;
-      gate = await hooks.updateMaintenance("deploying", job.revision, { checkpoint: "new_started", newServicePid: newPid });
-      await this.deps.maintenance.write(target, gate);
-      await this.waitForHealth(target, gate, newPid, hooks, logger);
-      gate = await hooks.updateMaintenance("healthy", job.revision, { checkpoint: "healthy", newServicePid: newPid });
-      await this.deps.maintenance.write(target, gate);
-      logger.record(`deployment ${job.id} generation ${job.generation} exact revision health passed`);
-      return { status: "succeeded", log: logger.value(), error: null, rollbackComplete: true, gate };
+      const server = onlyServer(target.services);
+      await hooks.assertFence("before-server-bootstrap");
+      await this.deps.launchd.bootstrap(server.domain, server.plistPath);
+      await hooks.assertFence("after-server-bootstrap");
+      const serverPid = await this.waitForRunningService(server);
+      const pids = { [serviceKey(server)]: serverPid };
+      gate = await hooks.updateMaintenance("deploying", job.revision, job.targetFingerprint, {
+        checkpoint: "server_started", newServicePids: pids, log: logger.value(),
+      });
+      await this.writeMaintenanceFenced(hooks, gate, "server-started");
+      await this.waitForHealth(nextManifest, target, gate, serverPid, logger);
+      await hooks.assertFence("health-finalize");
+      gate = await hooks.updateMaintenance("healthy", job.revision, job.targetFingerprint, {
+        checkpoint: "healthy", newServicePids: pids, log: logger.value(),
+      });
+      await this.writeMaintenanceFenced(hooks, gate, "healthy");
+      logger.record(`deployment exact revision health passed job=${job.id} generation=${job.generation}`);
+      return { status: "succeeded", log: logger.value(), error: null, failureKind: null, rollbackComplete: true, gate };
     } catch (error) {
-      const reason = message(error);
+      const reason = redactStructured(message(error), targetSensitiveValues(target));
       logger.record(`deployment failed: ${reason}`);
-      if (!gate) return this.failure(logger, reason, true, null);
-      if (error instanceof StopProofFailure && !stopped) {
-        return this.markNeedsRecovery(target, hooks, gate, logger, `${reason}; old service stop proof incomplete`);
+      if (!gate) return this.failure(logger, reason, true, null, reason.includes("baseline") ? "bootstrap_required" : "deployment_failed");
+      if (error instanceof StopProofFailure && !backupCreated) {
+        return this.markNeedsRecovery(hooks, gate, logger, `${reason}; service stop proof incomplete`);
       }
       try {
-        return await this.rollback(
-          job,
-          target,
-          hooks,
-          gate,
-          join(target.statePath, job.id, `attempt-${gate.rollbackAttempt}`),
-          backupCreated,
-          newPid,
-          logger,
-          reason,
-        );
+        return await this.rollback(job, target, hooks, gate, backupCreated, logger, reason);
       } catch (rollbackError) {
-        return this.markNeedsRecovery(target, hooks, gate, logger, `${reason}; rollback incomplete: ${message(rollbackError)}`);
+        return this.markNeedsRecovery(hooks, gate, logger, `${reason}; rollback incomplete: ${message(rollbackError)}`);
       }
     }
-  }
-
-  async releaseMaintenance(target: DeploymentTargetConfig, gate: DeploymentMaintenanceGate): Promise<void> {
-    await this.deps.maintenance.clear(target, gate);
-  }
-
-  readMaintenance(target: DeploymentTargetConfig): Promise<DeploymentMaintenanceGate | null> {
-    return this.deps.maintenance.read(target);
-  }
-
-  /** DB terminal commit 后、host sentinel clear 前崩溃：重新验证运行态后只清 sentinel，不重写 Delivery。 */
-  async releaseTerminalMaintenance(
-    job: DeploymentJob,
-    target: DeploymentTargetConfig,
-    gate: DeploymentMaintenanceGate,
-  ): Promise<void> {
-    await this.deps.validator.validate(target);
-    if (job.targetId !== gate.targetId || job.id !== gate.jobId || job.generation !== gate.generation
-      || job.revision !== gate.revision || job.targetFingerprint !== gate.targetFingerprint) {
-      throw new Error("terminal job 与 maintenance sentinel identity 不一致");
-    }
-    const expectedRevision = job.status === "succeeded" ? job.revision : job.baselineRevision;
-    if (!expectedRevision || gate.expectedRevision !== expectedRevision) throw new Error("terminal sentinel expected revision 不匹配");
-    const service = job.status === "succeeded" && job.newServicePid
-      ? (await this.isExactRunningService(target, job.newServicePid) ? { pid: job.newServicePid } : null)
-      : await this.waitForRunningService(target);
-    if (!service) throw new Error("terminal service label/PID 无法重新证明");
-    await this.waitForHealth(target, gate, service.pid, dummyHooks, this.logger(target), false);
-    await this.deps.maintenance.clear(target, gate);
   }
 
   async recoverOriginalBaseline(
@@ -279,85 +294,128 @@ export class LocalLaunchdDeploymentExecutor {
     target: DeploymentTargetConfig,
     hooks: DeploymentExecutionHooks,
     logger = this.logger(target),
-    reason = "管理员 recovery",
+    reason = "administrator recovery",
   ): Promise<DeploymentExecutionResult> {
-    await this.deps.validator.validate(target);
-    let databaseGate = await hooks.getMaintenance();
-    let fileGate = await this.deps.maintenance.read(target);
-    if (databaseGate && !fileGate && databaseGate.jobId === job.id && databaseGate.targetFingerprint === job.targetFingerprint) {
-      await this.deps.maintenance.write(target, databaseGate);
-      fileGate = databaseGate;
+    const gate = await hooks.getMaintenance();
+    if (!gate || gate.jobId !== job.id || gate.rollbackAttempt !== job.rollbackAttempt
+      || gate.fenceEpoch !== job.fenceEpoch || gate.fenceNonce !== job.fenceNonce) {
+      return this.failure(logger, "recovery maintenance/fence identity 缺失或不匹配", false, gate, "rollback_incomplete");
     }
-    if (databaseGate && fileGate && sameMaintenanceIdentity(databaseGate, fileGate)
-      && (databaseGate.phase !== fileGate.phase || databaseGate.expectedRevision !== fileGate.expectedRevision)) {
-      if ((databaseGate.phase === "rolling_back" || databaseGate.phase === "needs_recovery")
-        && databaseGate.expectedRevision === databaseGate.baselineRevision) {
-        // phase 先落 DB 后落 host sentinel；DB-first crash 可安全补写同一冻结 identity。
-        await this.deps.maintenance.write(target, databaseGate);
-        fileGate = databaseGate;
-      } else if ((fileGate.phase === "rolling_back" || fileGate.phase === "needs_recovery")
-        && fileGate.expectedRevision === fileGate.baselineRevision
-        && databaseGate.phase === "deploying" && databaseGate.expectedRevision === databaseGate.revision) {
-        // SQLite restore 会把 DB gate 回退到 backup 时点；host sentinel 保留更晚的原 anchor rollback phase。
-        databaseGate = await hooks.restoreMaintenance(fileGate, fileGate.phase, fileGate.baselineRevision);
+    await this.writeMaintenanceFenced(hooks, gate, "recovery-claim");
+    try {
+      return await this.rollback(job, target, hooks, gate, job.databaseBackupCreated, logger, reason);
+    } catch (error) {
+      return this.markNeedsRecovery(
+        hooks,
+        gate,
+        logger,
+        `recovery incomplete: ${redactStructured(message(error), targetSensitiveValues(target))}`,
+      );
+    }
+  }
+
+  /** 终态 release：先清并确认 host sentinel，再启动 daemon；DB gate 仍保持全局停写。 */
+  async releaseHostMaintenance(target: DeploymentTargetConfig, gate: DeploymentMaintenanceGate, hooks: Pick<DeploymentExecutionHooks, "assertFence">): Promise<void> {
+    const logger = this.logger(target);
+    const current = await this.requireCurrentRelease(target);
+    const manifest = await this.readReleaseManifest(current);
+    this.validateTrustedBaseline(manifest, target);
+    if (manifest.revision !== gate.expectedRevision || manifest.targetFingerprint !== gate.expectedFingerprint) {
+      throw new Error("release current manifest 与 gate expected identity 不一致");
+    }
+    const expectedManifestHash = gate.expectedRevision === gate.revision && gate.expectedFingerprint === gate.targetFingerprint
+      ? gate.targetManifestHash
+      : gate.baselineManifestHash;
+    if (releaseManifestHash(manifest) !== expectedManifestHash) {
+      throw new Error("release current manifest topology 与 frozen gate 不一致");
+    }
+    const server = onlyServer(manifest.services);
+    const serverState = await this.deps.launchd.inspect(server.domain, server.label);
+    this.assertExactLabel(server, serverState);
+    if (!serverState.loaded || serverState.state !== "running" || !serverState.pid || !await this.deps.launchd.isPidAlive(serverState.pid)) {
+      throw new Error("release 前无法证明 exact server label/PID running");
+    }
+    await this.waitForHealth(manifest, target, gate, serverState.pid, logger);
+
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(gate.jobId) || !Number.isInteger(gate.rollbackAttempt) || gate.rollbackAttempt <= 0) {
+      throw new Error("release gate rollback anchor path identity 无效");
+    }
+    const anchor = parseRollbackAnchor(await this.deps.fs.readText(
+      join(target.statePath, gate.jobId, `attempt-${gate.rollbackAttempt}`, "rollback-anchor.json"),
+    ));
+    this.validateTrustedBaseline(anchor.baseline, target);
+    if (anchor.baselineManifestHash !== gate.baselineManifestHash
+      || releaseManifestHash(anchor.baseline) !== gate.baselineManifestHash
+      || anchor.baseline.revision !== gate.baselineRevision
+      || anchor.baseline.targetFingerprint !== gate.baselineFingerprint) {
+      throw new Error("release rollback anchor 与 frozen baseline identity 不匹配");
+    }
+    // success时要复验baseline-only services；rollback时要复验new-only services。
+    // 只检查current target会漏掉已经从配置移除但仍被launchd加载的旧label。
+    const knownServices = unionServices(target.services, anchor.baseline.services);
+    for (const extra of knownServices.filter((candidate) => !manifest.services.some((service) => serviceKey(service) === serviceKey(candidate)))) {
+      const state = await this.deps.launchd.inspect(extra.domain, extra.label);
+      if (state.loaded || state.pid !== null || state.label !== null) throw new Error(`release 前发现额外 service ${serviceKey(extra)}`);
+    }
+
+    await hooks.assertFence("before-sentinel-clear");
+    await this.deps.maintenance.clear(gate);
+    if (await this.deps.maintenance.read()) throw new Error("host maintenance sentinel clear 未得到证明");
+    await hooks.assertFence("after-sentinel-clear");
+    for (const daemon of manifest.services.filter((service) => service.role === "daemon")) {
+      await hooks.assertFence(`before-daemon-bootstrap-${daemon.id}`);
+      const before = await this.deps.launchd.inspect(daemon.domain, daemon.label);
+      this.assertExactLabel(daemon, before);
+      if (before.loaded) {
+        if (before.state !== "running" || !before.pid || !await this.deps.launchd.isPidAlive(before.pid)) {
+          throw new Error(`daemon ${serviceKey(daemon)} 已 loaded 但 exact running PID 无法证明`);
+        }
+      } else {
+        await this.deps.launchd.bootstrap(daemon.domain, daemon.plistPath);
+        await this.waitForRunningService(daemon);
       }
+      await hooks.assertFence(`after-daemon-bootstrap-${daemon.id}`);
     }
-    if (!databaseGate || !fileGate || !sameMaintenanceIdentity(databaseGate, fileGate)
-      || databaseGate.phase !== fileGate.phase || databaseGate.expectedRevision !== fileGate.expectedRevision) {
-      return this.failure(logger, "DB/file maintenance gate 无法证明同一 rollback anchor", false, fileGate ?? databaseGate);
-    }
-    if (databaseGate.jobId !== job.id || databaseGate.targetFingerprint !== job.targetFingerprint
-      || job.rollbackAttempt !== databaseGate.rollbackAttempt || job.baselineRevision !== databaseGate.baselineRevision) {
-      return this.failure(logger, "job 与原始 maintenance rollback anchor 不一致", false, databaseGate);
-    }
-    const statePath = join(target.statePath, job.id, `attempt-${databaseGate.rollbackAttempt}`);
-    const databaseBackup = join(statePath, "database.sqlite");
-    return this.rollback(
-      job,
-      target,
-      hooks,
-      databaseGate,
-      statePath,
-      await this.deps.fs.exists(databaseBackup),
-      job.newServicePid,
-      logger,
-      reason,
-    ).catch((error) => this.markNeedsRecovery(target, hooks, databaseGate, logger, `${reason}; rollback incomplete: ${message(error)}`));
+  }
+
+  readMaintenance(): Promise<DeploymentMaintenanceGate | null> {
+    return this.deps.maintenance.read();
+  }
+
+  writeMaintenance(gate: DeploymentMaintenanceGate): Promise<void> {
+    return this.deps.maintenance.write(gate);
   }
 
   private async resumeHealthy(
     job: DeploymentJob,
     target: DeploymentTargetConfig,
     hooks: DeploymentExecutionHooks,
-    logger: BoundedDeploymentLog,
+    logger: ReturnType<LocalLaunchdDeploymentExecutor["logger"]>,
   ): Promise<DeploymentExecutionResult> {
-    await this.deps.validator.validate(target);
-    const databaseGate = await hooks.getMaintenance();
-    let fileGate = await this.deps.maintenance.read(target);
-    if (databaseGate && !fileGate && databaseGate.jobId === job.id && databaseGate.targetFingerprint === job.targetFingerprint) {
-      await this.deps.maintenance.write(target, databaseGate);
-      fileGate = databaseGate;
+    const gate = await hooks.getMaintenance();
+    if (!gate || gate.jobId !== job.id || gate.phase !== "healthy" || gate.expectedRevision !== job.revision
+      || gate.expectedFingerprint !== job.targetFingerprint || gate.fenceEpoch !== job.fenceEpoch || gate.fenceNonce !== job.fenceNonce) {
+      return this.failure(logger, "healthy checkpoint 缺少 exact fenced maintenance proof", false, gate, "rollback_incomplete");
     }
-    if (databaseGate && fileGate && sameMaintenanceIdentity(databaseGate, fileGate)
-      && databaseGate.phase === "healthy" && databaseGate.expectedRevision === job.revision
-      && fileGate.phase === "deploying" && fileGate.expectedRevision === job.revision) {
-      // healthy checkpoint 先原子落 DB；若进程在 sentinel write 前崩溃，用同一 identity 补写后再重验。
-      await this.deps.maintenance.write(target, databaseGate);
-      fileGate = databaseGate;
+    await this.writeMaintenanceFenced(hooks, gate, "healthy-resume");
+    const current = await this.requireCurrentRelease(target);
+    const manifest = await this.readReleaseManifest(current);
+    if (manifest.revision !== job.revision || manifest.targetFingerprint !== job.targetFingerprint
+      || releaseManifestHash(manifest) !== job.targetManifestHash) {
+      return this.recoverOriginalBaseline(job, target, hooks, logger, "healthy checkpoint current identity mismatch");
     }
-    const validGate = databaseGate && fileGate && sameMaintenanceIdentity(databaseGate, fileGate)
-      && databaseGate.phase === "healthy" && fileGate.phase === "healthy"
-      && databaseGate.expectedRevision === job.revision && fileGate.expectedRevision === job.revision;
-    if (validGate && job.newServicePid && await this.isExactRunningService(target, job.newServicePid)) {
-      try {
-        await this.waitForHealth(target, databaseGate, job.newServicePid, hooks, logger);
-        logger.record("healthy checkpoint 在 worker restart 后以 exact revision + label/PID 重新验证");
-        return { status: "succeeded", log: logger.value(), error: null, rollbackComplete: true, gate: databaseGate };
-      } catch (error) {
-        logger.record(`healthy recovery validation failed: ${message(error)}`);
-      }
+    const server = onlyServer(manifest.services);
+    const pid = job.newServicePids[serviceKey(server)];
+    if (!pid) return this.recoverOriginalBaseline(job, target, hooks, logger, "healthy checkpoint server PID missing");
+    try {
+      await this.proveRunning(server, pid);
+      await this.waitForHealth(manifest, target, gate, pid, logger);
+      await hooks.assertFence("healthy-resume-finalize");
+      logger.record("worker restart revalidated exact healthy checkpoint");
+      return { status: "succeeded", log: logger.value(), error: null, failureKind: null, rollbackComplete: true, gate };
+    } catch (error) {
+      return this.recoverOriginalBaseline(job, target, hooks, logger, `healthy revalidation failed: ${message(error)}`);
     }
-    return this.recoverOriginalBaseline(job, target, hooks, logger, "healthy checkpoint 无法重新证明 exact revision");
   }
 
   private async rollback(
@@ -365,283 +423,529 @@ export class LocalLaunchdDeploymentExecutor {
     target: DeploymentTargetConfig,
     hooks: DeploymentExecutionHooks,
     originalGate: DeploymentMaintenanceGate,
-    statePath: string,
     restoreDatabase: boolean,
-    expectedNewPid: number | null,
-    logger: BoundedDeploymentLog,
+    logger: ReturnType<LocalLaunchdDeploymentExecutor["logger"]>,
     reason: string,
   ): Promise<DeploymentExecutionResult> {
-    let gate = await hooks.updateMaintenance("rolling_back", originalGate.baselineRevision, { checkpoint: "rolling_back" });
-    await this.deps.maintenance.write(target, gate);
+    const attempt = job.rollbackAttempt ?? originalGate.rollbackAttempt;
+    const statePath = join(target.statePath, job.id, `attempt-${attempt}`);
+    const anchor = parseRollbackAnchor(await this.deps.fs.readText(join(statePath, "rollback-anchor.json")));
+    this.validateTrustedBaseline(anchor.baseline, target);
+    assertReleasePath(anchor.current, target.releasesPath, "rollback anchor current");
+    if (anchor.baseline.revision !== originalGate.baselineRevision
+      || anchor.baseline.targetFingerprint !== originalGate.baselineFingerprint
+      || anchor.baseline.healthFingerprint !== originalGate.baselineHealthFingerprint
+      || anchor.baselineManifestHash !== originalGate.baselineManifestHash
+      || releaseManifestHash(anchor.baseline) !== originalGate.baselineManifestHash) {
+      throw new DeploymentFailure("rollback anchor/baseline fingerprint 不匹配");
+    }
+    let gate = await hooks.updateMaintenance(
+      "rolling_back", anchor.baseline.revision, anchor.baseline.targetFingerprint,
+      { checkpoint: "rolling_back", log: logger.value() },
+    );
+    await this.writeMaintenanceFenced(hooks, gate, "rollback-start");
+    const union = unionServices(target.services, anchor.baseline.services);
+    const pids = await this.captureServicePids(union);
+    await hooks.assertFence("before-rollback-bootout");
+    await this.stopAndProve(union, pids, logger, hooks, "rollback");
+    await hooks.assertFence("after-rollback-stop-proof");
 
-    // 未证明 new/target service 与其 launchd PID 全部停止前，禁止触碰 plist/symlink/DB。
-    await this.stopAndProve(target, expectedNewPid, logger);
-    const oldPlist = await this.deps.fs.readText(join(statePath, "old.plist"));
-    const oldCurrent = (await this.deps.fs.readText(join(statePath, "old-current"))).trim();
-    const baselineRevision = (await this.deps.fs.readText(join(statePath, "baseline-revision"))).trim().toLowerCase();
-    if (!oldCurrent || baselineRevision !== originalGate.baselineRevision) throw new DeploymentFailure("rollback anchor 文件与冻结 baseline 不一致");
-    await atomicWrite(this.deps.fs, target.launchd.plistPath, oldPlist, "rollback");
-    await atomicSymlink(this.deps.fs, target.currentSymlinkPath, oldCurrent, "rollback");
-    if (restoreDatabase) await this.deps.sqlite.restore(join(statePath, "database.sqlite"), target.sqlitePath);
+    if (restoreDatabase) {
+      await hooks.assertFence("before-db-restore");
+      const sentinel = await this.deps.maintenance.read();
+      if (!sentinel || !sameMaintenanceIdentity(sentinel, gate)) throw new DeploymentFailure("DB restore 前 host sentinel fence 不匹配");
+      await this.deps.sqlite.restore(join(statePath, "database.sqlite"), target.sqlitePath);
+      gate = await hooks.restoreMaintenance(gate, "rolling_back", anchor.baseline.revision, anchor.baseline.targetFingerprint);
+      await this.writeMaintenanceFenced(hooks, gate, "db-restore-rehydrate");
+      await hooks.assertFence("after-db-restore-rehydrate");
+    }
 
-    // SQLite restore 会回退 lease/checkpoint；用冻结 identity 恢复 gate，仍不解除 maintenance。
-    gate = await hooks.restoreMaintenance(originalGate, "rolling_back", baselineRevision);
-    await this.deps.maintenance.write(target, gate);
-    await this.deps.launchd.bootstrap(target.launchd.domain, target.launchd.plistPath);
-    const baselineState = await this.waitForRunningService(target);
-    await this.waitForHealth(target, gate, baselineState.pid, hooks, logger, false);
-    logger.record("旧 service definition/release/SQLite 已恢复，并通过 exact baseline revision + label/PID health");
+    for (const service of target.services) {
+      const baselineService = anchor.baseline.services.find((candidate) => serviceKey(candidate) === serviceKey(service));
+      if (!baselineService || baselineService.plistPath !== service.plistPath) {
+        await hooks.assertFence(`before-rollback-remove-plist-${service.id}`);
+        await this.deps.fs.remove(service.plistPath);
+        await hooks.assertFence(`after-rollback-remove-plist-${service.id}`);
+      }
+    }
+    for (const service of anchor.baseline.services) {
+      await hooks.assertFence(`before-rollback-plist-${service.id}`);
+      const old = anchor.oldPlists[serviceKey(service)];
+      if (old === undefined) throw new DeploymentFailure(`rollback anchor 缺少 plist ${serviceKey(service)}`);
+      assertNoCredentialMaterial(old, Object.values(target.health.headers));
+      if (exactLaunchdTemplateLabel(old) !== service.label) throw new DeploymentFailure(`rollback plist ${service.id} Label 与 baseline manifest 不匹配`);
+      await atomicWrite(this.deps.fs, service.plistPath, old, `${job.id}-rollback-${service.id}`);
+      await hooks.assertFence(`after-rollback-plist-${service.id}`);
+    }
+    await hooks.assertFence("before-rollback-current-symlink");
+    await atomicSymlink(this.deps.fs, target.currentSymlinkPath, anchor.current, `${job.id}-rollback`);
+    await hooks.assertFence("after-rollback-current-symlink");
+    const server = onlyServer(anchor.baseline.services);
+    await hooks.assertFence("before-baseline-server-bootstrap");
+    await this.deps.launchd.bootstrap(server.domain, server.plistPath);
+    await hooks.assertFence("after-baseline-server-bootstrap");
+    const pid = await this.waitForRunningService(server);
+    gate = await hooks.updateMaintenance("rolling_back", anchor.baseline.revision, anchor.baseline.targetFingerprint, {
+      checkpoint: "baseline_server_started", newServicePids: { [serviceKey(server)]: pid }, log: logger.value(),
+    });
+    await this.writeMaintenanceFenced(hooks, gate, "baseline-server-started");
+    await this.waitForHealth(anchor.baseline, target, gate, pid, logger);
+    await hooks.assertFence("rollback-health-finalize");
+    logger.record(`rollback verified exact baseline; cause=${reason}`);
     return {
       status: "failed",
       log: logger.value(),
-      error: redact(`${reason}; rolled back to ${baselineRevision}`, this.sensitive(target)).slice(0, 4_000),
+      error: `deployment failed and rolled back: ${reason}`,
+      failureKind: "deployment_failed",
       rollbackComplete: true,
       gate,
     };
   }
 
-  private async markNeedsRecovery(
-    target: DeploymentTargetConfig,
-    hooks: DeploymentExecutionHooks,
-    gate: DeploymentMaintenanceGate,
-    logger: BoundedDeploymentLog,
-    reason: string,
-  ): Promise<DeploymentExecutionResult> {
-    logger.record(reason);
-    let durableGate: DeploymentMaintenanceGate = { ...gate, phase: "needs_recovery", updatedAt: this.deps.clock.now() };
-    try {
-      durableGate = await hooks.updateMaintenance("needs_recovery", gate.expectedRevision, { checkpoint: "rollback_incomplete" });
-    } catch {
-      try {
-        durableGate = await hooks.restoreMaintenance(gate, "needs_recovery", gate.expectedRevision);
-      } catch {
-        // DB 可能不可用；host sentinel 仍是最后一道写闸。
-      }
+  private async fetchExactRevision(job: DeploymentJob, target: DeploymentTargetConfig, logger: ReturnType<LocalLaunchdDeploymentExecutor["logger"]>): Promise<void> {
+    const remote = await this.command(["git", "-C", target.repositoryPath, "remote", "get-url", target.source.remote], target, undefined, logger);
+    if (remote.stdout.trim() !== target.source.remoteUrl) throw new DeploymentFailure("configured git remote URL drifted");
+    await this.command(["git", "-C", target.repositoryPath, "fetch", "--no-tags", "--prune", target.source.remote], target, undefined, logger);
+    const resolved = await this.command(["git", "-C", target.repositoryPath, "rev-parse", "--verify", `${job.revision}^{commit}`], target, undefined, logger);
+    if (resolved.stdout.trim().toLowerCase() !== job.revision.toLowerCase()) throw new DeploymentFailure("fetch 后 object 不是 exact committed revision");
+    let reachable = false;
+    for (const allowedRef of target.source.allowedRefs) {
+      const result = await this.command(
+        ["git", "-C", target.repositoryPath, "merge-base", "--is-ancestor", job.revision, allowedRef],
+        target, undefined, logger, true,
+      );
+      if (result.exitCode === 0) { reachable = true; break; }
     }
-    await this.deps.maintenance.write(target, durableGate);
-    return this.failure(logger, reason, false, durableGate);
+    if (!reachable) throw new DeploymentFailure("exact revision 不可由 configured merged/base ref 到达");
+  }
+
+  private async renderServices(target: DeploymentTargetConfig, releasePath: string, job: DeploymentJob): Promise<Map<string, string>> {
+    const rendered = new Map<string, string>();
+    for (const service of target.services) {
+      const template = await this.deps.fs.readText(service.templatePath);
+      assertNoCredentialMaterial(template, Object.values(target.health.headers));
+      if (sha256(template) !== service.templateSha256) throw new DeploymentFailure(`service ${service.id} template 内容 hash 漂移`);
+      const label = exactLaunchdTemplateLabel(template);
+      if (label !== service.label) throw new DeploymentFailure(`service ${service.id} template Label 与配置不匹配`);
+      for (const placeholder of ["{{release_path}}", "{{revision}}", "{{target_fingerprint}}"] as const) {
+        if (!template.includes(placeholder)) throw new DeploymentFailure(`service ${service.id} template 缺少 ${placeholder}`);
+      }
+      rendered.set(service.id, template
+        .replaceAll("{{release_path}}", xml(releasePath))
+        .replaceAll("{{revision}}", xml(job.revision))
+        .replaceAll("{{target_fingerprint}}", xml(job.targetFingerprint)));
+    }
+    return rendered;
+  }
+
+  private async captureServicePids(services: DeploymentServiceConfig[]): Promise<Map<string, number | null>> {
+    const result = new Map<string, number | null>();
+    for (const service of services) {
+      const state = await this.deps.launchd.inspect(service.domain, service.label);
+      this.assertExactLabel(service, state);
+      result.set(serviceKey(service), state.pid);
+    }
+    return result;
+  }
+
+  private async stopAndProve(
+    services: DeploymentServiceConfig[],
+    priorPids: Map<string, number | null>,
+    logger: ReturnType<LocalLaunchdDeploymentExecutor["logger"]>,
+    hooks: Pick<DeploymentExecutionHooks, "assertFence">,
+    prefix: string,
+  ): Promise<void> {
+    let ambiguous: string | null = null;
+    for (const service of services) {
+      await hooks.assertFence(`before-${prefix}-bootout-${service.id}`);
+      const before = await this.deps.launchd.inspect(service.domain, service.label);
+      this.assertExactLabel(service, before);
+      if (before.loaded) {
+        try {
+          await this.deps.launchd.bootout(service.domain, service.label);
+        } catch (error) {
+          ambiguous ??= `${serviceKey(service)} bootout failed: ${message(error)}`;
+        }
+      }
+      await hooks.assertFence(`after-${prefix}-bootout-${service.id}`);
+    }
+    for (const service of services) {
+      await hooks.assertFence(`before-${prefix}-stop-proof-${service.id}`);
+      const state = await this.deps.launchd.inspect(service.domain, service.label);
+      if (state.loaded || state.pid !== null || state.label !== null) ambiguous ??= `${serviceKey(service)} 仍 loaded/有 PID/label`;
+      const prior = priorPids.get(serviceKey(service));
+      if (prior && await this.deps.launchd.isPidAlive(prior)) ambiguous ??= `${serviceKey(service)} old PID ${prior} 仍存活`;
+      await hooks.assertFence(`after-${prefix}-stop-proof-${service.id}`);
+    }
+    if (ambiguous) throw new StopProofFailure(`无法证明所有 exact launchd services 已停止：${ambiguous}`);
+    logger.record(`proved ${services.length} exact launchd services unloaded and old PIDs dead`);
+  }
+
+  private async waitForRunningService(service: DeploymentServiceConfig): Promise<number> {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const state = await this.deps.launchd.inspect(service.domain, service.label);
+      this.assertExactLabel(service, state);
+      if (state.loaded && state.state === "running" && state.pid && await this.deps.launchd.isPidAlive(state.pid)) return state.pid;
+      await this.deps.clock.sleep(50);
+    }
+    throw new DeploymentFailure(`launchd service ${serviceKey(service)} 未进入 exact running PID state`);
+  }
+
+  private async proveRunning(service: DeploymentServiceConfig, pid: number): Promise<void> {
+    const state = await this.deps.launchd.inspect(service.domain, service.label);
+    this.assertExactLabel(service, state);
+    if (!state.loaded || state.state !== "running" || state.pid !== pid || !await this.deps.launchd.isPidAlive(pid)) {
+      throw new DeploymentFailure(`launchd service ${serviceKey(service)} exact PID proof 失败`);
+    }
+  }
+
+  private assertExactLabel(service: DeploymentServiceConfig, state: LaunchdServiceState): void {
+    if (state.loaded && state.label !== service.label) throw new DeploymentFailure(`launchctl returned wrong label for ${serviceKey(service)}`);
+  }
+
+  private async waitForHealth(
+    manifest: DeploymentReleaseManifest,
+    target: DeploymentTargetConfig,
+    gate: DeploymentMaintenanceGate,
+    serverPid: number,
+    logger: ReturnType<LocalLaunchdDeploymentExecutor["logger"]>,
+  ): Promise<void> {
+    const server = onlyServer(manifest.services);
+    const headers = resolveHealthHeaders(manifest.health.headerRefs, target);
+    const deadline = this.deps.clock.now() + manifest.health.timeoutMs;
+    while (this.deps.clock.now() <= deadline) {
+      await this.proveRunning(server, serverPid);
+      const url = new URL(manifest.health.url);
+      url.searchParams.set("deployment_job_id", gate.jobId);
+      url.searchParams.set("revision", manifest.revision);
+      url.searchParams.set("target_fingerprint", manifest.targetFingerprint);
+      const response = await this.deps.health.get(url.toString(), headers, Math.min(5_000, manifest.health.timeoutMs));
+      const body = response.body as Record<string, unknown> | null;
+      if (response.status >= 200 && response.status < 300
+        && body?.ok === true && body.revision === manifest.revision
+        && body.targetFingerprint === manifest.targetFingerprint
+        && body.deploymentJobId === gate.jobId && body.maintenance === true) return;
+      if (response.status >= 200 && response.status < 300) logger.record("health 2xx but revision/job/fingerprint body mismatch");
+      await this.deps.clock.sleep(manifest.health.intervalMs);
+    }
+    throw new DeploymentFailure("revision-aware health check timeout");
+  }
+
+  private async requireCurrentRelease(target: DeploymentTargetConfig): Promise<string> {
+    const current = await this.deps.fs.readLink(target.currentSymlinkPath);
+    if (!current) throw new DeploymentFailure("trusted current release manifest 不存在；administrator bootstrap required");
+    const releasePath = resolve(dirname(target.currentSymlinkPath), current);
+    assertReleasePath(releasePath, target.releasesPath, "trusted current release");
+    return releasePath;
+  }
+
+  private async readReleaseManifest(releasePath: string): Promise<DeploymentReleaseManifest> {
+    return parseReleaseManifest(await this.deps.fs.readText(join(releasePath, RELEASE_MANIFEST)));
+  }
+
+  private validateTrustedBaseline(manifest: DeploymentReleaseManifest, target: DeploymentTargetConfig): void {
+    if (manifest.targetId !== target.id) throw new DeploymentFailure("trusted baseline target identity 不匹配");
+    if (manifest.repositoryId !== target.repositoryId) throw new DeploymentFailure("trusted baseline repository identity 不匹配");
+    if (!/^[a-f0-9]{40,64}$/.test(manifest.revision) || !/^[a-f0-9]{64}$/.test(manifest.targetFingerprint)
+      || !/^[a-f0-9]{64}$/.test(manifest.targetManifestHash) || !/^[a-f0-9]{64}$/.test(manifest.healthFingerprint)) {
+      throw new DeploymentFailure("trusted baseline manifest identity 无效");
+    }
+    validateManifestServices(manifest.services);
+    validateManifestHealth(manifest.health);
+    // rollback health contract属于冻结baseline，进入maintenance前就要证明其secret refs
+    // 能由当前worker内存解析，不能等新服务失败后才发现旧健康检查已不可执行。
+    resolveHealthHeaders(manifest.health.headerRefs, target);
+    const allowedDomains = new Set(target.services.map((service) => service.domain));
+    if (manifest.services.some((service) => !allowedDomains.has(service.domain))) {
+      throw new DeploymentFailure("trusted baseline launchd domain 与当前 worker target 不匹配");
+    }
+    for (const key of ["repositoryPath", "releasesPath", "currentSymlinkPath", "sqlitePath", "statePath"] as const) {
+      if (manifest.paths[key] !== target[key]) throw new DeploymentFailure(`trusted baseline ${key} 与当前 target 不匹配；需要管理员 bootstrap`);
+    }
+    validateManifestPaths(manifest);
+    if (manifest.healthFingerprint !== sha256(JSON.stringify(manifest.health))) {
+      throw new DeploymentFailure("trusted baseline health contract fingerprint 不匹配");
+    }
+    if (manifest.targetManifestHash !== releaseManifestHash(manifest)) {
+      throw new DeploymentFailure("trusted baseline manifest hash 不匹配");
+    }
+  }
+
+  private targetManifest(job: DeploymentJob, target: DeploymentTargetConfig): DeploymentReleaseManifest {
+    const health = {
+      url: target.health.url,
+      timeoutMs: target.health.timeoutMs,
+      intervalMs: target.health.intervalMs,
+      headerRefs: target.health.headerRefs,
+    };
+    return {
+      version: 1,
+      targetId: target.id,
+      repositoryId: target.repositoryId,
+      revision: job.revision,
+      targetFingerprint: target.fingerprint,
+      targetManifestHash: target.manifestHash,
+      healthFingerprint: sha256(JSON.stringify(health)),
+      source: target.source,
+      paths: {
+        repositoryPath: target.repositoryPath,
+        releasesPath: target.releasesPath,
+        currentSymlinkPath: target.currentSymlinkPath,
+        sqlitePath: target.sqlitePath,
+        statePath: target.statePath,
+      },
+      health,
+      services: target.services,
+    };
   }
 
   private async command(
     argv: string[],
     target: DeploymentTargetConfig,
     cwd: string | undefined,
-    logger: BoundedDeploymentLog,
+    logger: ReturnType<LocalLaunchdDeploymentExecutor["logger"]>,
+    allowFailure = false,
   ): Promise<DeploymentProcessResult> {
-    if (argv.length === 0 || argv.some((arg) => typeof arg !== "string" || !arg)) throw new DeploymentFailure("deployment argv 无效");
-    logger.record(`$ ${basename(argv[0]!)} [${Math.max(0, argv.length - 1)} args redacted]`);
+    const sensitive = targetSensitiveValues(target);
+    assertSafeArgv(argv, Object.values(target.health.headers));
+    logger.record(safeArgvAudit(argv));
     const result = await this.deps.process.run(argv, {
       cwd,
-      env: { ...target.environment },
+      env: target.environment,
       timeoutMs: target.commandTimeoutMs,
-      maxCaptureBytes: 8_192,
-      onOutput: (_stream, chunk) => logger.record(chunk),
+      maxCaptureBytes: 16_384,
+      // HostProcess 始终流式 drain；audit 等 bounded capture 完整后统一 redaction，避免
+      // credential 刚好跨 stdout chunk 边界时被逐 chunk 处理而泄漏。
+      onOutput: () => {},
     });
-    if (result.timedOut) throw new DeploymentFailure(`command timeout after ${target.commandTimeoutMs}ms`);
-    if (result.exitCode !== 0) throw new DeploymentFailure(`command exited ${result.exitCode}`);
+    if (result.stdout) logger.record(`[stdout] ${redactStructured(result.stdout, sensitive)}`);
+    if (result.stderr) logger.record(`[stderr] ${redactStructured(result.stderr, sensitive)}`);
+    if (result.timedOut) throw new DeploymentFailure("command timeout");
+    if (!allowFailure && result.exitCode !== 0) throw new DeploymentFailure(`command failed exit=${result.exitCode}: ${redactStructured(result.stderr || result.stdout, sensitive)}`);
     return result;
   }
 
-  private async stopAndProve(
-    target: DeploymentTargetConfig,
-    expectedPid: number | null,
-    logger: BoundedDeploymentLog,
-  ): Promise<void> {
-    const before = await this.deps.launchd.inspect(target.launchd.domain, target.launchd.label);
-    this.assertLaunchdIdentity(before, target.launchd.label);
-    if (!before.loaded) {
-      if (before.pid !== null) throw new StopProofFailure("launchctl reports unloaded but still has PID");
-      if (expectedPid && await this.deps.launchd.isPidAlive(expectedPid)) throw new StopProofFailure(`target PID ${expectedPid} still alive`);
-      logger.record("launchd target already unloaded and PID absence proved");
-      return;
-    }
-    if (!before.pid) throw new StopProofFailure("launchd target loaded but PID is absent/ambiguous");
-    if (expectedPid && before.pid !== expectedPid) throw new StopProofFailure(`launchd PID changed from ${expectedPid} to ${before.pid}`);
-    try {
-      await this.deps.launchd.bootout(target.launchd.domain, target.launchd.label);
-    } catch (error) {
-      throw new StopProofFailure(`bootout failed: ${message(error)}`);
-    }
-    const deadline = this.deps.clock.now() + Math.min(target.health.timeoutMs, 30_000);
-    while (this.deps.clock.now() <= deadline) {
-      const state = await this.deps.launchd.inspect(target.launchd.domain, target.launchd.label);
-      this.assertLaunchdIdentity(state, target.launchd.label);
-      const oldPidAlive = await this.deps.launchd.isPidAlive(before.pid);
-      if (!state.loaded && state.pid === null && !oldPidAlive) {
-        logger.record(`launchd ${target.launchd.label} bootout complete; PID ${before.pid} exited`);
-        return;
-      }
-      if (!state.loaded && state.pid !== null) throw new StopProofFailure("launchctl unloaded/PID state ambiguous");
-      await this.deps.clock.sleep(Math.min(100, target.health.intervalMs));
-    }
-    throw new StopProofFailure(`无法证明 launchd ${target.launchd.label} 与 PID ${before.pid} 已停止`);
-  }
-
-  private async requireRunningService(target: DeploymentTargetConfig): Promise<LaunchdServiceState & { pid: number }> {
-    const state = await this.deps.launchd.inspect(target.launchd.domain, target.launchd.label);
-    this.assertLaunchdIdentity(state, target.launchd.label);
-    if (!state.loaded || state.state !== "running" || !state.pid || !(await this.deps.launchd.isPidAlive(state.pid))) {
-      throw new DeploymentFailure("旧 launchd service 必须 loaded/running 且 PID 存活，才能建立 rollback baseline");
-    }
-    return state as LaunchdServiceState & { pid: number };
-  }
-
-  private async waitForRunningService(target: DeploymentTargetConfig): Promise<LaunchdServiceState & { pid: number }> {
-    const deadline = this.deps.clock.now() + target.health.timeoutMs;
-    while (this.deps.clock.now() <= deadline) {
-      const state = await this.deps.launchd.inspect(target.launchd.domain, target.launchd.label);
-      this.assertLaunchdIdentity(state, target.launchd.label);
-      if (state.loaded && state.state === "running" && state.pid && await this.deps.launchd.isPidAlive(state.pid)) {
-        return state as LaunchdServiceState & { pid: number };
-      }
-      await this.deps.clock.sleep(target.health.intervalMs);
-    }
-    throw new DeploymentFailure(`launchd ${target.launchd.label} 未进入 running/PID alive`);
-  }
-
-  private async isExactRunningService(target: DeploymentTargetConfig, expectedPid: number): Promise<boolean> {
-    const state = await this.deps.launchd.inspect(target.launchd.domain, target.launchd.label);
-    this.assertLaunchdIdentity(state, target.launchd.label);
-    return state.loaded && state.state === "running" && state.pid === expectedPid && await this.deps.launchd.isPidAlive(expectedPid);
-  }
-
-  private assertLaunchdIdentity(state: LaunchdServiceState, expectedLabel: string): void {
-    if (state.loaded && state.label !== expectedLabel) throw new StopProofFailure(`launchctl label mismatch: expected ${expectedLabel}, got ${state.label ?? "none"}`);
-    if (state.pid !== null && (!Number.isSafeInteger(state.pid) || state.pid <= 0)) throw new StopProofFailure("launchctl PID 无效");
-  }
-
-  private async waitForHealth(
-    target: DeploymentTargetConfig,
-    gate: DeploymentMaintenanceGate,
-    expectedPid: number,
-    hooks: DeploymentExecutionHooks,
-    logger: BoundedDeploymentLog,
-    renew = true,
-  ): Promise<void> {
-    const deadline = this.deps.clock.now() + target.health.timeoutMs;
-    let last = "no response";
-    const healthUrl = new URL(target.health.url);
-    healthUrl.searchParams.set("deployment_job_id", gate.jobId);
-    healthUrl.searchParams.set("revision", gate.expectedRevision);
-    healthUrl.searchParams.set("target_fingerprint", gate.targetFingerprint);
-    while (this.deps.clock.now() <= deadline) {
-      if (!(await this.isExactRunningService(target, expectedPid))) throw new DeploymentFailure("health 期间 launchd label/PID identity 漂移");
-      try {
-        const response = await this.deps.health.get(
-          healthUrl.toString(),
-          target.health.headers,
-          Math.max(1, deadline - this.deps.clock.now()),
-        );
-        last = `HTTP ${response.status}`;
-        if (response.status >= 200 && response.status < 300 && exactHealthBody(response.body, gate)) return;
-        if (response.status >= 200 && response.status < 300) last = "2xx but revision/job/fingerprint body mismatch";
-      } catch (error) {
-        last = message(error);
-      }
-      if (renew) await hooks.checkpoint(gate.phase === "rolling_back" ? "rolling_back" : "new_started", { newServicePid: expectedPid });
-      await this.deps.clock.sleep(target.health.intervalMs);
-    }
-    logger.record(`health failed: ${last}`);
-    throw new DeploymentFailure(`health check timeout (${last})`);
-  }
-
   private assertJob(job: DeploymentJob): void {
-    if (!/^[a-f0-9]{40,64}$/i.test(job.revision)) throw new DeploymentFailure("job revision 不是完整 commit id");
-    if (!/^[a-f0-9]{64}$/.test(job.targetFingerprint)) throw new DeploymentFailure("job target fingerprint 无效");
+    if (!/^[a-f0-9]{40,64}$/i.test(job.revision) || !/^[a-f0-9]{64}$/.test(job.targetFingerprint)
+      || !/^[a-f0-9]{64}$/.test(job.targetManifestHash) || !/^[A-Za-z0-9_-]{1,128}$/.test(job.id)
+      || !Number.isInteger(job.generation) || job.generation <= 0 || !Number.isInteger(job.attempt) || job.attempt <= 0
+      || !job.fenceEpoch || !job.fenceNonce || !job.leaseToken) {
+      throw new DeploymentFailure("deployment job exact revision/manifest/fence 无效");
+    }
   }
 
-  private logger(target: DeploymentTargetConfig): BoundedDeploymentLog {
-    return new BoundedDeploymentLog(this.sensitive(target));
-  }
-
-  private sensitive(target: DeploymentTargetConfig): string[] {
-    return [
-      target.repositoryPath,
-      target.releasesPath,
-      target.currentSymlinkPath,
-      target.sqlitePath,
-      target.statePath,
-      target.launchd.plistPath,
-      target.launchd.templatePath,
-      target.health.url,
-      ...Object.values(target.environment),
-      ...Object.values(target.health.headers).flatMap((value) => [value, value.replace(/^Bearer\s+/i, "")]),
-    ].filter(Boolean).sort((a, b) => b.length - a.length);
-  }
-
-  private failure(logger: BoundedDeploymentLog, reason: string, rollbackComplete: boolean, gate: DeploymentMaintenanceGate | null): DeploymentExecutionResult {
+  private logger(target: DeploymentTargetConfig) {
+    const sensitive = targetSensitiveValues(target);
+    let value = "";
+    let truncated = false;
     return {
-      status: rollbackComplete ? "failed" : "needs_recovery",
-      log: logger.value(),
-      error: redact(`${reason}${rollbackComplete ? "" : "; needs recovery"}`, logger.sensitive).slice(0, 4_000),
-      rollbackComplete,
-      gate,
+      record(chunk: string) {
+        if (truncated) return;
+        const boundedChunk = chunk.length > 8_192 ? `${chunk.slice(0, 8_192)}…[truncated]` : chunk;
+        const safe = redactStructured(boundedChunk, sensitive);
+        const room = 32_000 - value.length;
+        if (safe.length + 1 <= room) value += `${safe}\n`;
+        else {
+          value += `${safe.slice(0, Math.max(0, room - 15))}…[truncated]\n`;
+          truncated = true;
+        }
+      },
+      value: () => value.slice(0, 32_000),
     };
   }
-}
 
-export class BoundedDeploymentLog {
-  private valueText = "";
-  private truncated = false;
+  private failure(
+    logger: ReturnType<LocalLaunchdDeploymentExecutor["logger"]>,
+    error: string,
+    rollbackComplete: boolean,
+    gate: DeploymentMaintenanceGate | null,
+    failureKind: DeploymentFailureKind,
+  ): DeploymentExecutionResult {
+    return { status: rollbackComplete ? "failed" : "needs_recovery", log: logger.value(), error, failureKind, rollbackComplete, gate };
+  }
 
-  constructor(readonly sensitive: string[], private readonly limit = 32_000) {}
-
-  record(value: string): void {
-    if (!value || this.truncated) return;
-    const safe = redact(value, this.sensitive);
-    const separator = this.valueText ? "\n" : "";
-    const remaining = this.limit - this.valueText.length;
-    if (separator.length + safe.length <= remaining) {
-      this.valueText += `${separator}${safe}`;
-      return;
+  private async markNeedsRecovery(
+    hooks: DeploymentExecutionHooks,
+    gate: DeploymentMaintenanceGate,
+    logger: ReturnType<LocalLaunchdDeploymentExecutor["logger"]>,
+    error: string,
+  ): Promise<DeploymentExecutionResult> {
+    let current = gate;
+    try {
+      current = await hooks.updateMaintenance("needs_recovery", gate.expectedRevision, gate.expectedFingerprint, {
+        checkpoint: "rollback_incomplete", log: logger.value(),
+      });
+      await this.writeMaintenanceFenced(hooks, current, "needs-recovery");
+    } catch (markError) {
+      logger.record(`failed to persist needs_recovery: ${message(markError)}`);
     }
-    const marker = "\n…[truncated]";
-    const usable = Math.max(0, remaining - marker.length);
-    this.valueText += `${separator}${safe.slice(0, Math.max(0, usable - separator.length))}${marker}`;
-    this.valueText = this.valueText.slice(0, this.limit);
-    this.truncated = true;
+    return { status: "needs_recovery", log: logger.value(), error, failureKind: "rollback_incomplete", rollbackComplete: false, gate: current };
   }
 
-  value(): string {
-    return this.valueText;
+  private async writeMaintenanceFenced(
+    hooks: Pick<DeploymentExecutionHooks, "assertFence">,
+    gate: DeploymentMaintenanceGate,
+    boundary: string,
+  ): Promise<void> {
+    await hooks.assertFence(`before-sentinel-write-${boundary}`);
+    await this.deps.maintenance.write(gate);
+    await hooks.assertFence(`after-sentinel-write-${boundary}`);
   }
 }
 
-const dummyHooks: DeploymentExecutionHooks = {
-  checkpoint: async () => {},
-  getMaintenance: async () => null,
-  activateMaintenance: async () => { throw new Error("not available"); },
-  updateMaintenance: async () => { throw new Error("not available"); },
-  restoreMaintenance: async () => { throw new Error("not available"); },
-};
+export function releaseManifestHash(manifest: DeploymentReleaseManifest): string {
+  const identity = {
+    version: manifest.version,
+    targetId: manifest.targetId,
+    repositoryId: manifest.repositoryId,
+    source: manifest.source,
+    services: manifest.services,
+    health: manifest.health,
+    paths: manifest.paths,
+  };
+  return sha256(JSON.stringify(identity));
+}
 
-async function atomicWrite(fs: DeploymentFileSystem, path: string, content: string, suffix: string): Promise<void> {
+function parseReleaseManifest(value: string): DeploymentReleaseManifest {
+  let raw: unknown;
+  try { raw = JSON.parse(value); } catch { throw new DeploymentFailure("release manifest JSON 无效"); }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new DeploymentFailure("release manifest 必须是对象");
+  const manifest = raw as DeploymentReleaseManifest;
+  if (manifest.version !== 1 || typeof manifest.targetId !== "string" || typeof manifest.repositoryId !== "string"
+    || typeof manifest.revision !== "string"
+    || typeof manifest.targetFingerprint !== "string" || typeof manifest.targetManifestHash !== "string"
+    || typeof manifest.healthFingerprint !== "string" || !Array.isArray(manifest.services)
+    || !manifest.health || !manifest.source || !manifest.paths) throw new DeploymentFailure("release manifest fields 无效");
+  return manifest;
+}
+
+function parseRollbackAnchor(value: string): RollbackAnchor {
+  let raw: unknown;
+  try { raw = JSON.parse(value); } catch { throw new DeploymentFailure("rollback anchor JSON 无效"); }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new DeploymentFailure("rollback anchor 无效");
+  const anchor = raw as RollbackAnchor;
+  if (anchor.version !== 1 || typeof anchor.current !== "string" || typeof anchor.baselineManifestHash !== "string"
+    || !anchor.baseline || !anchor.oldPlists) throw new DeploymentFailure("rollback anchor fields 无效");
+  return anchor;
+}
+
+function unionServices(left: DeploymentServiceConfig[], right: DeploymentServiceConfig[]): DeploymentServiceConfig[] {
+  const services = new Map<string, DeploymentServiceConfig>();
+  for (const service of [...left, ...right]) services.set(serviceKey(service), service);
+  return [...services.values()];
+}
+
+function onlyServer(services: DeploymentServiceConfig[]): DeploymentServiceConfig {
+  const servers = services.filter((service) => service.role === "server");
+  if (servers.length !== 1) throw new DeploymentFailure("service manifest 必须恰有一个 server");
+  return servers[0]!;
+}
+
+function serviceKey(service: Pick<DeploymentServiceConfig, "domain" | "label">): string {
+  return `${service.domain}/${service.label}`;
+}
+
+function resolveHealthHeaders(refs: Record<string, SecretReference>, target: DeploymentTargetConfig): Record<string, string> {
+  const valuesByEnv = new Map<string, string>();
+  for (const [name, reference] of Object.entries(target.health.headerRefs)) valuesByEnv.set(reference.env, target.health.headers[name]!);
+  return Object.fromEntries(Object.entries(refs).map(([name, reference]) => {
+    const value = valuesByEnv.get(reference.env);
+    if (!value) throw new DeploymentFailure(`health secret reference ${reference.env} 无法在 worker 内存解析`);
+    return [name, value];
+  }));
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function assertReleasePath(path: string, releasesPath: string, label: string): void {
+  if (resolve(path) !== path) throw new DeploymentFailure(`${label} 不是 canonical absolute path`);
+  const relativePath = path.slice(releasesPath.endsWith("/") ? releasesPath.length : releasesPath.length + 1);
+  if (!path.startsWith(`${releasesPath}/`) || !relativePath || relativePath.split("/").includes("..")) {
+    throw new DeploymentFailure(`${label} 必须位于 releases_path 内`);
+  }
+}
+
+function validateManifestServices(services: DeploymentServiceConfig[]): void {
+  if (!Array.isArray(services) || services.length < 2) throw new DeploymentFailure("release manifest 缺少 server + daemon services");
+  const ids = new Set<string>();
+  const labels = new Set<string>();
+  const plistPaths = new Set<string>();
+  for (const service of services) {
+    if (!service || !/^[a-z][a-z0-9_-]{0,31}$/.test(service.id) || ids.has(service.id)) throw new DeploymentFailure("release manifest service id 无效或重复");
+    if (service.role !== "server" && service.role !== "daemon") throw new DeploymentFailure("release manifest service role 无效");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(service.label) || !/^gui\/\d+$/.test(service.domain)) {
+      throw new DeploymentFailure("release manifest launchd identity 无效");
+    }
+    const key = serviceKey(service);
+    if (labels.has(key) || plistPaths.has(service.plistPath)) throw new DeploymentFailure("release manifest service label/plist 重复");
+    for (const path of [service.plistPath, service.templatePath]) {
+      if (resolve(path) !== path) throw new DeploymentFailure("release manifest service path 不是 canonical absolute path");
+    }
+    if (!/^[a-f0-9]{64}$/.test(service.templateSha256)) throw new DeploymentFailure("release manifest template hash 无效");
+    ids.add(service.id);
+    labels.add(key);
+    plistPaths.add(service.plistPath);
+  }
+  onlyServer(services);
+  if (!services.some((service) => service.role === "daemon")) throw new DeploymentFailure("release manifest 缺少 daemon");
+}
+
+function validateManifestHealth(health: DeploymentReleaseManifest["health"]): void {
+  let url: URL;
+  try { url = new URL(health.url); } catch { throw new DeploymentFailure("release manifest health URL 无效"); }
+  if (!(["http:", "https:"] as string[]).includes(url.protocol) || url.username || url.password
+    || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
+    throw new DeploymentFailure("release manifest health 必须是无凭证 loopback URL");
+  }
+  if (!Number.isInteger(health.timeoutMs) || health.timeoutMs <= 0 || !Number.isInteger(health.intervalMs) || health.intervalMs <= 0
+    || !health.headerRefs || typeof health.headerRefs !== "object") throw new DeploymentFailure("release manifest health contract 无效");
+  for (const [name, reference] of Object.entries(health.headerRefs)) {
+    if (!/^[A-Za-z0-9-]{1,128}$/.test(name) || !reference || !/^[A-Z_][A-Z0-9_]*$/.test(reference.env)) {
+      throw new DeploymentFailure("release manifest health secret reference 无效");
+    }
+  }
+}
+
+function validateManifestPaths(manifest: DeploymentReleaseManifest): void {
+  const paths = [
+    manifest.paths.repositoryPath,
+    manifest.paths.releasesPath,
+    manifest.paths.currentSymlinkPath,
+    manifest.paths.sqlitePath,
+    manifest.paths.statePath,
+    ...manifest.services.flatMap((service) => [service.plistPath, service.templatePath]),
+  ];
+  if (paths.some((path) => typeof path !== "string" || resolve(path) !== path || path === "/")) {
+    throw new DeploymentFailure("release manifest host path 不是 canonical non-root absolute path");
+  }
+  for (let left = 0; left < paths.length; left++) {
+    for (let right = left + 1; right < paths.length; right++) {
+      const a = paths[left]!;
+      const b = paths[right]!;
+      if (a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)) {
+        throw new DeploymentFailure("release manifest host paths 冲突或互相包含");
+      }
+    }
+  }
+  if (!manifest.source || typeof manifest.source.remote !== "string" || typeof manifest.source.remoteUrl !== "string"
+    || !Array.isArray(manifest.source.allowedRefs) || manifest.source.allowedRefs.some((ref) => typeof ref !== "string")) {
+    throw new DeploymentFailure("release manifest fixed source identity 无效");
+  }
+}
+
+async function atomicWrite(fs: DeploymentFileSystem, path: string, value: string, suffix: string): Promise<void> {
   const temp = `${path}.tmp-${suffix}`;
-  await fs.writeText(temp, content, 0o600);
+  await fs.writeText(temp, value, 0o600);
   await fs.rename(temp, path);
 }
 
 async function atomicSymlink(fs: DeploymentFileSystem, path: string, target: string, suffix: string): Promise<void> {
   const temp = `${path}.tmp-${suffix}`;
-  await fs.remove(temp);
+  if (await fs.exists(temp)) await fs.remove(temp);
   await fs.symlink(target, temp);
   await fs.rename(temp, path);
-}
-
-function exactHealthBody(value: unknown, gate: DeploymentMaintenanceGate): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const body = value as Record<string, unknown>;
-  return body.ok === true
-    && typeof body.revision === "string" && body.revision.toLowerCase() === gate.expectedRevision
-    && body.deploymentJobId === gate.jobId
-    && body.targetFingerprint === gate.targetFingerprint
-    && body.maintenance === true;
-}
-
-function redact(value: string, sensitive: string[]): string {
-  let safe = value;
-  for (const secret of sensitive) safe = safe.replaceAll(secret, "[redacted]");
-  return safe;
 }
 
 function xml(value: string): string {

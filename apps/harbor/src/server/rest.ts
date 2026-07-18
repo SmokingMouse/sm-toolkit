@@ -843,6 +843,7 @@ export function buildRest(
     const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
     const agent = conv.agentId ? store.getAgent(conv.agentId) : null;
     const repository = conv.repositoryId ? store.getRepository(conv.repositoryId) : null;
+    const delivery = store.getDeliveryForConversation(conv.id);
     return c.json({
       conversation: conv,
       agent,
@@ -850,9 +851,11 @@ export function buildRest(
       // resultText：Chat/Issue 历史渲染用；run_events 7 天 prune 后为 null（UI 显示「记录已过期」）
       runs: store.listRunsByConversation(conv.id).map((r) => ({ ...r, resultText: store.getRunResultText(r.id) })),
       statusLog: store.listStatusLog(conv.id),
-      delivery: store.getDeliveryForConversation(conv.id),
+      delivery,
+      deploymentJob: delivery?.activeDeploymentJobId
+        ? store.getDeploymentJobView(delivery.activeDeploymentJobId)
+        : null,
       deliveryEvents: (() => {
-        const delivery = store.getDeliveryForConversation(conv.id);
         return delivery ? store.listDeliveryEvents(delivery.id) : [];
       })(),
     });

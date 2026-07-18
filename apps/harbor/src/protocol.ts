@@ -250,23 +250,44 @@ export interface DeploymentTargetDescriptor {
 
 export type DeploymentJobStatus = "queued" | "running" | "recovering" | "succeeded" | "failed" | "needs_recovery";
 
-export type DeploymentMaintenancePhase = "deploying" | "healthy" | "rolling_back" | "needs_recovery";
+export type DeploymentMaintenancePhase =
+  | "deploying"
+  | "healthy"
+  | "rolling_back"
+  | "releasing"
+  | "needs_recovery";
+
+export type DeploymentFailureKind =
+  | "config_drift"
+  | "bootstrap_required"
+  | "deployment_failed"
+  | "rollback_incomplete"
+  | "legacy_ack_required";
 
 /**
  * DB 与 host 0600 sentinel 共用的非敏感 maintenance identity。
  * 路径、argv、health URL/header 和环境变量绝不进入该记录。
  */
 export interface DeploymentMaintenanceGate {
-  version: 1;
+  version: 2;
+  /** 单机全局 monotonic fencing epoch；SQLite restore 也不得回退。 */
+  fenceEpoch: number;
+  /** host-private CAS nonce；REST/UI/audit 绝不暴露。 */
+  fenceNonce: string;
   targetId: string;
   jobId: string;
   deliveryId: string;
   generation: number;
   revision: string;
   targetFingerprint: string;
+  targetManifestHash: string;
   rollbackAttempt: number;
   baselineRevision: string;
+  baselineFingerprint: string;
+  baselineManifestHash: string;
+  baselineHealthFingerprint: string;
   expectedRevision: string;
+  expectedFingerprint: string;
   phase: DeploymentMaintenancePhase;
   createdAt: number;
   updatedAt: number;
@@ -280,18 +301,58 @@ export interface DeploymentJob {
   revision: string;
   /** enqueue 时冻结的非敏感 target topology fingerprint。 */
   targetFingerprint: string;
+  /** enqueue 时冻结的完整、非敏感 release manifest hash。 */
+  targetManifestHash: string;
   status: DeploymentJobStatus;
   attempt: number;
+  fenceEpoch: number | null;
+  /** host-private；只在 worker/store 内使用，禁止投影到 REST。 */
+  fenceNonce: string | null;
   leaseToken: string | null;
   leaseExpiresAt: number | null;
   checkpoint: string;
   log: string | null;
   error: string | null;
+  failureKind: DeploymentFailureKind | null;
   rollbackComplete: boolean | null;
   /** 首次进入 maintenance/cutover 的 attempt；重领后不得改写此 rollback anchor。 */
   rollbackAttempt: number | null;
   baselineRevision: string | null;
-  newServicePid: number | null;
+  baselineFingerprint: string | null;
+  baselineManifestHash: string | null;
+  baselineHealthFingerprint: string | null;
+  /** backup 完成后先持久化；崩溃恢复不能用“文件是否碰巧存在”猜测是否必须恢复 DB。 */
+  databaseBackupCreated: boolean;
+  /** exact launchd label -> observed PID；只存非敏感 proof。 */
+  newServicePids: Record<string, number>;
+  createdAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  updatedAt: number;
+}
+
+/** worker 每个副作用边界携带的完整 CAS proof。 */
+export interface DeploymentFence {
+  leaseToken: string;
+  fenceEpoch: number;
+  fenceNonce: string;
+}
+
+/** Conversation/REST 的非敏感 projection；刻意不含 lease/fence nonce、路径、URL、argv、header。 */
+export interface DeploymentJobView {
+  id: string;
+  generation: number;
+  targetId: string;
+  revision: string;
+  status: DeploymentJobStatus;
+  attempt: number;
+  checkpoint: string;
+  log: string | null;
+  error: string | null;
+  failureKind: DeploymentFailureKind | null;
+  rollbackComplete: boolean | null;
+  fenceEpoch: number | null;
+  recoveryRequired: boolean;
   createdAt: number;
   startedAt: number | null;
   finishedAt: number | null;
