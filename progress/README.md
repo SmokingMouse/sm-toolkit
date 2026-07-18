@@ -55,6 +55,12 @@ Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、A
 
 ## Session Log
 
+### 2026-07-19 — Deployment safety integration与真实bootstrap
+- **Done**：独立 Mac mini Claude Review 对最终 fencing 修复返回 APPROVE；将 application guard 按 canonical migration 线重编号为 v21，worker compatibility 下限重映射为 v19，并保留 v20 built-in Skill、Agent team、GitHub/Codebase 与 Mew UI。Feishu maintenance 测试按多 Bot constructor 正确装配；新增所有非 deployment application table 的 INSERT/UPDATE/DELETE trigger 覆盖断言。
+- **Verified**：合入提交 `49c5744`；全量 **357 tests / 1707 assertions**、root typecheck、Harbor build、Next production build 12 pages 与 `git diff --check` 全绿。live DB schema=v19、maintenance gate=0，已创建一致性 bootstrap backup `/Users/bytedance/.harbor/bootstrap-backups/20260719-073951/harbor.db`（integrity=ok，SHA-256 `37d8d52b8a148550994d9d600f8ac2830380368ec6d8012f5e42638e86def4d4`）。
+- **Root cause / fix**：真实标准 launchd plist 含 XML declaration → 换行 → Apple DOCTYPE；strict parser 已识别 declaration/DOCTYPE，却未跳过 document-level whitespace，导致合法模板被误拒。root parse 前现仅跳过纯空白 text token，不放宽 entity/comment/root Label 语义；两份真实模板同时通过 `plutil -lint` 与 Harbor strict parser，worker 23 tests / 117 assertions、Harbor build 通过。
+- **Next**：增量 Review 通过后创建 trusted baseline release/manifest，迁移 live DB v19→v21，安装独立 deployment worker，再做自动 job acceptance；随后迁移 Mac mini control plane 与双 Device。
+
 ### 2026-07-19 — Built-in Harbor control-plane Skill
 - **Decision**：控制面协议属于 Harbor Workspace/server，不属于某台 Device 或某个角色 Agent；因此使用 release-versioned、必选的 `builtin` Skill，Agent instruction 只保留角色判断与责任边界。完整理由见 ADR。
 - **Done**：新增 canonical `harbor/SKILL.md`，覆盖控制面心智模型、action capability、Orchestrator/Developer/Reviewer playbook、状态/交付/部署 gates 与 failure modes；SQLite v20 新增 `builtin` source；startup 和 Workspace create 幂等播种，已有/新 Agent 自动绑定且 API 无法解除；Skills UI 展示 managed source，Agent picker 标为 required；scheduler 删除重复 action schema只保留全局安全闸。

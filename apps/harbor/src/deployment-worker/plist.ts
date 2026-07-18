@@ -39,6 +39,11 @@ function parseXmlPlist(value: string): XmlNode {
   if (Buffer.byteLength(value, "utf8") > 1_048_576) throw new Error("launchd plist 超过 1MiB 安全上限");
   const tokens = tokenize(value.replace(/^\uFEFF/, ""));
   let index = 0;
+  while (true) {
+    const token = tokens[index];
+    if (!token || token.kind !== "text" || token.value.trim()) break;
+    index++;
+  }
   const parseNode = (depth: number): XmlNode => {
     if (depth > 64) throw new Error("launchd plist XML 嵌套过深");
     const token = tokens[index++];

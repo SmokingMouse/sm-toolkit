@@ -608,6 +608,10 @@ test("bootout-adjacent PID transitions are part of both deploy and rollback stop
 
 test("strict plist semantics reject comments, entity duplicates, nested Label and wrong value types", () => {
   const plist = (body: string) => `<?xml version="1.0"?><plist version="1.0"><dict>${body}</dict></plist>`;
+  const standard = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Label</key><string>com.test</string></dict></plist>`;
+  expect(exactPlistRootLabel(standard)).toBe("com.test");
   expect(() => exactPlistRootLabel(plist("<!-- <key>Label</key><string>com.test</string> -->"))).toThrow("恰好一个");
   expect(() => exactPlistRootLabel(plist(
     "<key>La&#98;el</key><string>com.test</string><key>Label</key><string>com.evil</string>",
