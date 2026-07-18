@@ -26,7 +26,7 @@
  *       current_symlink_path: /Users/me/.harbor/deploy/current
  *       sqlite_path: /Users/me/.harbor/harbor.db
  *       state_path: /Users/me/.harbor/deploy/state
- *       source: { remote: origin, url: https://github.com/me/harbor.git, allowed_refs: [refs/remotes/origin/main] }
+ *       source: { remote: origin, url: https://github.com/me/harbor.git, allowed_refs: [refs/heads/main] }
  *       command_timeout_ms: 1800000
  *       steps: { install: [[bun, install, --frozen-lockfile]], build: [[bun, run, build]], test: [[bun, test]] }
  *       services:
@@ -396,7 +396,9 @@ export function parseDeploymentTargets(
     if (!Array.isArray(source.allowed_refs) || source.allowed_refs.length === 0) throw new Error(`deployment target "${id}" source.allowed_refs 必须非空`);
     const allowedRefs = source.allowed_refs.map((ref, refIndex) => {
       const parsed = requiredString(ref, `deployment target "${id}" source.allowed_refs[${refIndex}]`);
-      if (!/^refs\/(heads|remotes)\/[A-Za-z0-9._\/-]+$/.test(parsed) || parsed.includes("..")) throw new Error(`deployment target "${id}" allowed ref 无效`);
+      if (!/^refs\/heads\/[A-Za-z0-9._\/-]+$/.test(parsed) || parsed.includes("..") || parsed.includes("//") || parsed.endsWith("/")) {
+        throw new Error(`deployment target "${id}" allowed ref 必须是固定 remote refs/heads/*`);
+      }
       return parsed;
     }).sort();
     const healthTimeoutMs = positiveInt(health.timeout_ms, 30_000, `deployment target "${id}" health.timeout_ms`);
@@ -538,14 +540,6 @@ function credentialLike(value: string): boolean {
     || /^[a-z][a-z0-9+.-]*:\/\/[^/@\s]+@/i.test(value);
 }
 
-/** launchd plist template 必须恰有一个 Label；重复 Label 也视为不可信。 */
-export function exactLaunchdTemplateLabel(value: string): string | null {
-  const labels = [...value.matchAll(/<key>\s*Label\s*<\/key>\s*<string>\s*([^<]+?)\s*<\/string>/gi)]
-    .map((match) => match[1]?.trim())
-    .filter((label): label is string => !!label);
-  return labels.length === 1 ? labels[0]! : null;
-}
-
 /** deploy worker 每次进程启动都必须复验 YAML 本身，不能复用 setup 时的旧结论。 */
 export function validateDeploymentWorkerConfigFile(
   path = resolve(process.env.HOME ?? "~", ".harbor.yaml"),
@@ -562,13 +556,39 @@ export function validateDeploymentWorkerConfigFile(
     throw new Error(`deploy worker 配置 ${path} 无法读取：${error instanceof Error ? error.message : String(error)}`);
   }
   assertPrivateConfigMetadata(metadata, expectedUid, path);
+  assertTrustedConfigComponents(path, expectedUid);
   if (realpathSync(path) !== path) throw new Error(`deploy worker 配置 ${path} 不能包含 symlink component`);
   const parent = dirname(path);
   const parentMetadata = lstatSync(parent);
   if (parentMetadata.isSymbolicLink() || !parentMetadata.isDirectory()
     || (expectedUid !== undefined && parentMetadata.uid !== expectedUid)
+    || (parentMetadata.mode & 0o022) !== 0
     || realpathSync(parent) !== parent) {
-    throw new Error(`deploy worker 配置父目录 ${parent} 必须是当前 uid 拥有的 canonical non-symlink directory`);
+    throw new Error(`deploy worker 配置父目录 ${parent} 必须是当前 uid 拥有、不可写篡改的 canonical non-symlink directory`);
+  }
+}
+
+function assertTrustedConfigComponents(path: string, expectedUid: number | undefined): void {
+  const components: string[] = [];
+  for (let current = path;; current = dirname(current)) {
+    components.push(current);
+    if (dirname(current) === current) break;
+  }
+  components.reverse();
+  for (let index = 0; index < components.length; index++) {
+    const component = components[index]!;
+    const metadata = lstatSync(component);
+    const leaf = index === components.length - 1;
+    if (metadata.isSymbolicLink() || (!leaf && !metadata.isDirectory())) {
+      throw new Error(`deploy worker 配置路径含不可信 component ${component}`);
+    }
+    if (expectedUid !== undefined && metadata.uid !== expectedUid && metadata.uid !== 0) {
+      throw new Error(`deploy worker 配置 component ${component} owner 不可信`);
+    }
+    if ((metadata.mode & 0o022) !== 0) {
+      const trustedStickySystemParent = !leaf && metadata.uid === 0 && (metadata.mode & 0o1000) !== 0;
+      if (!trustedStickySystemParent) throw new Error(`deploy worker 配置 component ${component} 不能 group/world writable`);
+    }
   }
 }
 

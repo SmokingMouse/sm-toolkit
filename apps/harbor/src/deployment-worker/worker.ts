@@ -66,7 +66,8 @@ export class DeploymentWorker {
     }
     if (sentinel && !gate) throw new Error("host sentinel exists without DB global gate; administrator recovery required");
 
-    const job = this.store.claimDeploymentJob(identities, this.clock.now(), this.leaseMs);
+    const job = await this.executor.withMaintenanceLock(async () =>
+      this.store.claimDeploymentJob(identities, this.clock.now(), this.leaseMs));
     if (!job) {
       if (invalid.length > 0) throw new Error(`deployment target runtime validation failed: ${safeTargetError(invalid[0]!.error, invalid[0]!.target)}`);
       return this.snapshot(false, null);
@@ -81,29 +82,42 @@ export class DeploymentWorker {
     const target = this.targets.get(targetId);
     if (!target) throw new Error(`deployment target "${targetId}" 未配置`);
     await this.executor.validateTarget(target);
-    const job = this.store.claimDeploymentRecovery(
-      jobId, target.id, target.fingerprint, target.manifestHash, this.clock.now(), this.leaseMs,
-    );
-    const gate = this.store.getDeploymentMaintenance();
-    if (!gate || gate.jobId !== job.id) throw new Error("recovery global maintenance gate missing");
-    // claim 已旋转 epoch；先把新 fence durable 到 host sentinel，旧 worker 此后不能清闸。
-    const fence = jobFence(job);
-    if (!this.store.renewDeploymentJob(job.id, fence, this.clock.now(), this.leaseMs)) {
-      throw new Error("recovery fence 在写 host sentinel 前已失效");
-    }
-    await this.executor.writeMaintenance(gate);
-    if (!this.store.renewDeploymentJob(job.id, fence, this.clock.now(), this.leaseMs)) {
-      throw new Error("recovery fence 在写 host sentinel 后已失效");
-    }
+    const job = await this.executor.withMaintenanceLock(async () => {
+      const claimed = this.store.claimDeploymentRecovery(
+        jobId, target.id, target.fingerprint, target.manifestHash, this.clock.now(), this.leaseMs,
+      );
+      const current = this.store.getDeploymentMaintenance();
+      if (!current || current.jobId !== claimed.id) throw new Error("recovery global maintenance gate missing");
+      const fence = jobFence(claimed);
+      if (!this.store.renewDeploymentJob(claimed.id, fence, this.clock.now(), this.leaseMs)) {
+        throw new Error("recovery fence 在写 host sentinel 前已失效");
+      }
+      await this.executor.writeMaintenance(current);
+      if (!this.store.renewDeploymentJob(claimed.id, fence, this.clock.now(), this.leaseMs)) {
+        throw new Error("recovery fence 在写 host sentinel 后已失效");
+      }
+      return claimed;
+    });
     return this.executeClaimed(job, target, true);
   }
 
   private async executeClaimed(job: DeploymentJob, target: DeploymentTargetConfig, recovery: boolean): Promise<DeploymentWorkerResult> {
     const fence = jobFence(job);
     let leaseAlive = true;
+    let renewing = false;
+    let renewalInFlight: Promise<void> = Promise.resolve();
     const renewTimer = setInterval(() => {
-      try { leaseAlive = this.store.renewDeploymentJob(job.id, fence, this.clock.now(), this.leaseMs); }
-      catch { leaseAlive = false; }
+      if (renewing) return;
+      renewing = true;
+      renewalInFlight = this.executor.withMaintenanceLock(async () => {
+        try { leaseAlive = this.store.renewDeploymentJob(job.id, fence, this.clock.now(), this.leaseMs); }
+        catch { leaseAlive = false; }
+      }).catch((error) => {
+        // 主执行流可能正持锁执行较慢的VACUUM/host mutation，并会在同一
+        // 临界区末尾自行renew。定时heartbeat只跳过这一拍；非锁竞争错误
+        // 才代表lease不可继续信任。
+        if (!message(error).includes("maintenance host lock 已占用")) leaseAlive = false;
+      }).finally(() => { renewing = false; });
     }, Math.max(1_000, Math.floor(this.leaseMs / 3)));
     const hooks = this.hooks(job, fence, () => leaseAlive, () => { leaseAlive = false; });
     let result: DeploymentExecutionResult;
@@ -113,40 +127,45 @@ export class DeploymentWorker {
         : await this.executor.execute(job, target, hooks);
     } finally {
       clearInterval(renewTimer);
+      await renewalInFlight;
     }
-    const now = this.clock.now();
-    if (!this.store.renewDeploymentJob(job.id, fence, now, this.leaseMs)) {
-      throw new Error("deployment fence 在提交 result 前已失效");
-    }
-    const persisted = result.gate && result.status !== "succeeded"
-      ? this.store.completeRecoveredDeploymentJob(result.gate, fence, {
-          status: result.status === "needs_recovery" ? "needs_recovery" : "failed",
-          log: result.log, error: result.error, failureKind: result.failureKind,
-          rollbackComplete: result.rollbackComplete,
-        }, now).job
-      : this.store.completeDeploymentJob(job.id, fence, result, now).job;
-    const terminalGate = this.store.getDeploymentMaintenance();
+    const { persisted, terminalGate } = await this.executor.withMaintenanceLock(async () => {
+      const now = this.clock.now();
+      if (!this.store.renewDeploymentJob(job.id, fence, now, this.leaseMs)) {
+        throw new Error("deployment fence 在提交 result 前已失效");
+      }
+      const persisted = result.gate && result.status !== "succeeded"
+        ? this.store.completeRecoveredDeploymentJob(result.gate, fence, {
+            status: result.status === "needs_recovery" ? "needs_recovery" : "failed",
+            log: result.log, error: result.error, failureKind: result.failureKind,
+            rollbackComplete: result.rollbackComplete,
+          }, now).job
+        : this.store.completeDeploymentJob(job.id, fence, result, now).job;
+      return { persisted, terminalGate: this.store.getDeploymentMaintenance() };
+    });
     if (terminalGate?.phase === "releasing") return this.releaseTerminal(target, terminalGate);
     return this.snapshot(true, persisted);
   }
 
   private async releaseTerminal(target: DeploymentTargetConfig, gate: DeploymentMaintenanceGate): Promise<DeploymentWorkerResult> {
-    try {
-      await this.executor.releaseHostMaintenance(target, gate, {
-        assertFence: async () => {
-          if (!this.store.assertDeploymentReleaseFence(gate)) throw new Error("terminal release fence 已失效");
-        },
-      });
-      if (await this.executor.readMaintenance()) throw new Error("host sentinel 仍存在，拒绝 release DB gate");
-      const released = this.store.releaseDeploymentMaintenance(gate, this.clock.now());
-      return this.snapshot(true, released.job);
-    } catch (error) {
-      const current = this.store.getDeploymentMaintenance();
-      const job = current && sameMaintenanceIdentity(current, gate)
-        ? this.store.failDeploymentRelease(gate, `maintenance release incomplete: ${safeTargetError(error, target)}`, this.clock.now())
-        : this.store.getDeploymentJob(gate.jobId);
-      return this.snapshot(true, job);
-    }
+    return this.executor.withMaintenanceLock(async () => {
+      try {
+        await this.executor.releaseHostMaintenance(target, gate, {
+          assertFence: async () => {
+            if (!this.store.assertDeploymentReleaseFence(gate)) throw new Error("terminal release fence 已失效");
+          },
+        });
+        if (await this.executor.readMaintenance()) throw new Error("host sentinel 仍存在，拒绝 release DB gate");
+        const released = this.store.releaseDeploymentMaintenance(gate, this.clock.now());
+        return this.snapshot(true, released.job);
+      } catch (error) {
+        const current = this.store.getDeploymentMaintenance();
+        const job = current && sameMaintenanceIdentity(current, gate)
+          ? this.store.failDeploymentRelease(gate, `maintenance release incomplete: ${safeTargetError(error, target)}`, this.clock.now())
+          : this.store.getDeploymentJob(gate.jobId);
+        return this.snapshot(true, job);
+      }
+    });
   }
 
   private hooks(
@@ -164,34 +183,38 @@ export class DeploymentWorker {
       }
       return now;
     };
+    const fenced = <T>(action: (now: number) => Promise<T> | T): Promise<T> =>
+      this.executor.withMaintenanceLock(async () => action(renew()));
     return {
-      assertFence: async () => { renew(); },
-      checkpoint: async (checkpoint, metadata) => {
-        const now = renew();
+      assertFence: async () => fenced(() => undefined),
+      assertRestoreFence: async (gate) => fenced(() => {
+        if (!this.store.assertDeploymentRestoreFence(gate)) {
+          throw new Error("DB restore fence/high-water 已被较新 claim 取代");
+        }
+      }),
+      checkpoint: async (checkpoint, metadata) => fenced((now) => {
         if (!this.store.updateDeploymentCheckpoint(job.id, fence, checkpoint, now, metadata)) {
           throw new Error("deployment checkpoint 被陈旧 worker fence 拒绝");
         }
-      },
-      getMaintenance: async () => this.store.getDeploymentMaintenance(),
+      }),
+      getMaintenance: async () => fenced(() => this.store.getDeploymentMaintenance()),
       activateMaintenance: async (input) => {
         // build可以与另一target并行，但host cutover只有一个singleton lock。占用期间
         // 保持当前lease并等待，不把一个已完成build的job误报成deployment failed。
         while (true) {
           try {
-            return this.store.activateDeploymentMaintenance(job.id, fence, input, renew());
+            return await fenced((now) => this.store.activateDeploymentMaintenance(job.id, fence, input, now));
           } catch (error) {
             if (!message(error).includes("另一个 target/job maintenance gate 占用")) throw error;
             await this.clock.sleep(Math.max(100, Math.min(1_000, Math.floor(this.leaseMs / 6))));
-            renew();
+            await fenced(() => undefined);
           }
         }
       },
-      updateMaintenance: async (phase, expectedRevision, expectedFingerprint, metadata) => this.store.updateDeploymentMaintenance(
-        job.id, fence, phase, expectedRevision, expectedFingerprint, renew(), metadata,
-      ),
-      restoreMaintenance: async (gate, phase, expectedRevision, expectedFingerprint) => this.store.restoreDeploymentMaintenance(
-        gate, fence, phase, expectedRevision, expectedFingerprint, this.clock.now(),
-      ),
+      updateMaintenance: async (phase, expectedRevision, expectedFingerprint, metadata) => fenced((now) =>
+        this.store.updateDeploymentMaintenance(job.id, fence, phase, expectedRevision, expectedFingerprint, now, metadata)),
+      restoreMaintenance: async (gate, phase, expectedRevision, expectedFingerprint) => fenced((now) =>
+        this.store.restoreDeploymentMaintenance(gate, fence, phase, expectedRevision, expectedFingerprint, now)),
     };
   }
 
@@ -216,6 +239,7 @@ export interface DeploymentJobStore {
   getDeploymentJob(id: string): DeploymentJob | null;
   getDeploymentMaintenance(targetId?: string): DeploymentMaintenanceGate | null;
   assertDeploymentReleaseFence(gate: DeploymentMaintenanceGate): boolean;
+  assertDeploymentRestoreFence(gate: DeploymentMaintenanceGate): boolean;
   renewDeploymentJob(id: string, fence: DeploymentFence, now: number, leaseMs: number): boolean;
   updateDeploymentCheckpoint(id: string, fence: DeploymentFence, checkpoint: string, now: number, metadata?: { newServicePids?: Record<string, number>; databaseBackupCreated?: boolean; log?: string }): boolean;
   activateDeploymentMaintenance(

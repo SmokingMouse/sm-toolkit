@@ -29,6 +29,7 @@ class FakeSentinel implements DeploymentMaintenanceSentinel {
   async read() { return this.gate; }
   async write(gate: DeploymentMaintenanceGate) { this.gate = gate; }
   async clear() { this.gate = null; }
+  async withLock<T>(action: () => Promise<T> | T) { return action(); }
 }
 
 function target(repositoryId: string): DeploymentTargetConfig {
@@ -36,7 +37,7 @@ function target(repositoryId: string): DeploymentTargetConfig {
     id: "local", name: "Local", provider: "local-launchd", repositoryId,
     repositoryPath: "/repo", releasesPath: "/releases", currentSymlinkPath: "/current",
     sqlitePath: "/db", statePath: "/state", steps: { install: [], build: [], test: [] },
-    source: { remote: "origin", remoteUrl: "ssh://git@example.test/repo", allowedRefs: ["refs/remotes/origin/main"] },
+    source: { remote: "origin", remoteUrl: "ssh://git@example.test/repo", allowedRefs: ["refs/heads/main"] },
     environment: {}, services: [
       { id: "server", role: "server", label: "com.test.server", domain: "gui/1", plistPath: "/server.plist", templatePath: "/server.tpl", templateSha256: "2".repeat(64) },
       { id: "daemon", role: "daemon", label: "com.test.daemon", domain: "gui/1", plistPath: "/daemon.plist", templatePath: "/daemon.tpl", templateSha256: "3".repeat(64) },

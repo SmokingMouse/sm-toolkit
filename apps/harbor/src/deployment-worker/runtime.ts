@@ -15,7 +15,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { exactLaunchdTemplateLabel, type DeploymentTargetConfig } from "../config.js";
+import { type DeploymentTargetConfig } from "../config.js";
 import { openDeploymentDb } from "../server/db.js";
 import { HarborStore } from "../server/store.js";
 import type { DeploymentJobStore } from "./worker.js";
@@ -30,6 +30,8 @@ import type {
   SqliteBackupControl,
   DeploymentTargetValidator,
 } from "./executor.js";
+import { exactPlistRootLabel } from "./plist.js";
+import { redactStructured } from "./redaction.js";
 
 export class EphemeralDeploymentJobStore implements DeploymentJobStore {
   constructor(private readonly databasePath: string) {}
@@ -47,6 +49,9 @@ export class EphemeralDeploymentJobStore implements DeploymentJobStore {
   getDeploymentMaintenance(targetId?: string) { return this.use((store) => store.getDeploymentMaintenance(targetId)); }
   assertDeploymentReleaseFence(gate: Parameters<HarborStore["assertDeploymentReleaseFence"]>[0]) {
     return this.use((store) => store.assertDeploymentReleaseFence(gate));
+  }
+  assertDeploymentRestoreFence(gate: Parameters<HarborStore["assertDeploymentRestoreFence"]>[0]) {
+    return this.use((store) => store.assertDeploymentRestoreFence(gate));
   }
   renewDeploymentJob(id: string, fence: Parameters<HarborStore["renewDeploymentJob"]>[1], now: number, leaseMs: number) {
     return this.use((store) => store.renewDeploymentJob(id, fence, now, leaseMs));
@@ -110,6 +115,7 @@ export class HostFileSystem implements DeploymentFileSystem {
   async mkdir(path: string, mode: number) {
     await mkdir(path, { recursive: true, mode });
     await chmod(path, mode);
+    await validateDirectory(path, process.getuid?.(), mode);
   }
   async readText(path: string) {
     await validateRegularFile(path, process.getuid?.());
@@ -127,7 +133,20 @@ export class HostFileSystem implements DeploymentFileSystem {
       await handle.close();
     }
   }
-  async rename(from: string, to: string) { await rename(from, to); }
+  async rename(from: string, to: string) {
+    await validateOwnedParent(from, process.getuid?.());
+    await validateOwnedParent(to, process.getuid?.());
+    const source = await lstat(from);
+    if (source.isDirectory() || (process.getuid && source.uid !== process.getuid())) throw new Error(`${from} rename source 不可信`);
+    if (!source.isSymbolicLink() && (source.mode & 0o022) !== 0) throw new Error(`${from} rename source 不能 group/world writable`);
+    try {
+      const destination = await lstat(to);
+      if (destination.isDirectory() || (process.getuid && destination.uid !== process.getuid())) throw new Error(`${to} rename destination 不可信`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await rename(from, to);
+  }
   async exists(path: string) {
     try { await lstat(path); return true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
@@ -135,8 +154,19 @@ export class HostFileSystem implements DeploymentFileSystem {
   async readLink(path: string) {
     return readLinkOrMissing(() => readlink(path));
   }
-  async symlink(target: string, path: string) { await symlink(target, path); }
+  async symlink(target: string, path: string) {
+    await validateOwnedParent(path, process.getuid?.());
+    await symlink(target, path);
+  }
   async remove(path: string) {
+    await validateOwnedParent(path, process.getuid?.());
+    try {
+      const metadata = await lstat(path);
+      if (metadata.isDirectory() || (process.getuid && metadata.uid !== process.getuid())) throw new Error(`${path} remove target 不可信`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
     try { await unlink(path); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   }
@@ -147,7 +177,7 @@ export class HostProcess implements DeploymentProcess {
 
   constructor(
     environment: NodeJS.ProcessEnv = process.env,
-    private readonly killGroup: (pid: number, signal: NodeJS.Signals) => void = (pid, signal) => process.kill(-pid, signal),
+    private readonly processGroup: ProcessGroupControl = new MacOsProcessGroupControl(),
     private readonly graceMs = 2_000,
     private readonly drainDeadlineMs = 2_000,
   ) {
@@ -171,8 +201,18 @@ export class HostProcess implements DeploymentProcess {
       timedOut = true;
       exitCode = await terminateProcessGroup(
         { pid: child.pid, exited: child.exited },
-        (pid, signal) => this.signalGroup(pid, signal),
+        (pid, signal) => this.processGroup.signal(pid, signal),
         this.graceMs,
+        (pid) => this.processGroup.exists(pid),
+      );
+    } else if (await this.processGroup.exists(child.pid)) {
+      // A successful direct child may have daemonized descendants that still
+      // own stdout/stderr pipes.  Success is not a licence to leak the group.
+      await terminateProcessGroup(
+        { pid: child.pid, exited: child.exited },
+        (pid, signal) => this.processGroup.signal(pid, signal),
+        this.graceMs,
+        (pid) => this.processGroup.exists(pid),
       );
     }
     const [stdout, stderr] = await Promise.all([
@@ -182,9 +222,29 @@ export class HostProcess implements DeploymentProcess {
     return { exitCode: exitCode ?? -1, stdout, stderr, timedOut };
   }
 
-  private signalGroup(pid: number, signal: NodeJS.Signals): void {
-    try { this.killGroup(pid, signal); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+}
+
+export interface ProcessGroupControl {
+  signal(pgid: number, signal: NodeJS.Signals): Promise<void>;
+  exists(pgid: number): Promise<boolean>;
+}
+
+/** Bun 1.1 on macOS rejects negative PIDs in process.kill(). */
+export class MacOsProcessGroupControl implements ProcessGroupControl {
+  async signal(pgid: number, signal: NodeJS.Signals): Promise<void> {
+    await this.kill([signal === "SIGKILL" ? "-KILL" : "-TERM", "--", `-${positivePgid(pgid)}`], true);
+  }
+
+  async exists(pgid: number): Promise<boolean> {
+    return (await this.kill(["-0", "--", `-${positivePgid(pgid)}`], false)) === 0;
+  }
+
+  private async kill(argv: string[], missingIsSuccess: boolean): Promise<number> {
+    const child = Bun.spawn(["/bin/kill", ...argv], { stdin: "ignore", stdout: "ignore", stderr: "pipe" });
+    const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    if (exitCode === 0 || (missingIsSuccess && /no such process/i.test(stderr))) return exitCode;
+    if (!missingIsSuccess && /no such process/i.test(stderr)) return exitCode;
+    throw new Error(`/bin/kill process-group primitive failed (${exitCode}): ${stderr.trim()}`);
   }
 }
 
@@ -224,6 +284,7 @@ export class HostLaunchd implements LaunchdControl {
 
 export class HostSqliteBackup implements SqliteBackupControl {
   async backup(databasePath: string, backupPath: string): Promise<void> {
+    await validateRegularFile(databasePath, process.getuid?.(), 0o600);
     await mkdir(dirname(backupPath), { recursive: true, mode: 0o700 });
     await chmod(dirname(backupPath), 0o700);
     await validateDirectory(dirname(backupPath), process.getuid?.(), 0o700);
@@ -282,7 +343,7 @@ export class HostDeploymentTargetValidator implements DeploymentTargetValidator 
       if (createHash("sha256").update(template).digest("hex") !== service.templateSha256) {
         throw new Error(`launchd template ${service.id} 内容 hash 漂移`);
       }
-      const label = exactLaunchdTemplateLabel(template);
+      const label = exactPlistRootLabel(template);
       if (label !== service.label) throw new Error(`launchd template ${service.id} Label 与配置不匹配`);
     }
     await validateOwnedParent(target.currentSymlinkPath, uid);
@@ -351,25 +412,30 @@ function startDrain(
   const reader = stream.getReader();
   const promise = (async () => {
     const streamDecoder = new TextDecoder();
-    const captured: Uint8Array[] = [];
-    let capturedBytes = 0;
-    let truncated = false;
+    const secrets = options.redactValues ?? [];
+    const lookahead = Math.min(65_536, Math.max(8_192, ...secrets.map((value) => value.length + 256)));
+    const rawLimit = options.maxCaptureBytes + lookahead;
+    let raw = "";
+    let rawTruncated = false;
+    const appendRaw = (chunk: string) => {
+      if (!chunk) return;
+      const room = Math.max(0, rawLimit - Buffer.byteLength(raw));
+      if (room <= 0) { rawTruncated = true; return; }
+      const bytes = Buffer.from(chunk);
+      raw += new TextDecoder().decode(bytes.subarray(0, room));
+      if (bytes.byteLength > room) rawTruncated = true;
+    };
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      const chunk = streamDecoder.decode(value, { stream: true });
-      options.onOutput(name, chunk);
-      const room = Math.max(0, options.maxCaptureBytes - capturedBytes);
-      if (room > 0) {
-        const part = value.slice(0, room);
-        captured.push(part);
-        capturedBytes += part.byteLength;
-      }
-      if (value.byteLength > room) truncated = true;
+      appendRaw(streamDecoder.decode(value, { stream: true }));
     }
-    const tail = streamDecoder.decode();
-    if (tail) options.onOutput(name, tail);
-    const bytes = Buffer.concat(captured.map((part) => Buffer.from(part)));
+    appendRaw(streamDecoder.decode());
+    const safe = redactStructured(raw, secrets);
+    options.onOutput(name, safe);
+    const safeBytes = Buffer.from(safe);
+    const truncated = rawTruncated || safeBytes.byteLength > options.maxCaptureBytes;
+    const bytes = safeBytes.subarray(0, options.maxCaptureBytes);
     if (!truncated) return new TextDecoder().decode(bytes);
     const marker = Buffer.from("…[truncated]");
     const bodyBytes = Math.max(0, options.maxCaptureBytes - marker.byteLength);
@@ -395,15 +461,43 @@ export async function finishDrainBeforeDeadline(
 
 export async function terminateProcessGroup(
   child: { pid: number; exited: Promise<number> },
-  signalGroup: (pid: number, signal: NodeJS.Signals) => void,
+  signalGroup: (pid: number, signal: NodeJS.Signals) => void | Promise<void>,
   graceMs: number,
+  groupExists?: (pid: number) => boolean | Promise<boolean>,
 ): Promise<number | null> {
-  signalGroup(child.pid, "SIGTERM");
+  await signalGroup(child.pid, "SIGTERM");
+  if (groupExists) {
+    if (!await waitForGroupExit(child.pid, groupExists, graceMs)) {
+      await signalGroup(child.pid, "SIGKILL");
+      if (!await waitForGroupExit(child.pid, groupExists, graceMs)) {
+        throw new Error(`process group ${child.pid} 在 KILL 后仍无法证明已停止`);
+      }
+    }
+    return deadline(child.exited, graceMs);
+  }
   let exitCode = await deadline(child.exited, graceMs);
   if (exitCode !== null) return exitCode;
-  signalGroup(child.pid, "SIGKILL");
+  await signalGroup(child.pid, "SIGKILL");
   exitCode = await deadline(child.exited, graceMs);
   return exitCode;
+}
+
+async function waitForGroupExit(
+  pid: number,
+  exists: (pid: number) => boolean | Promise<boolean>,
+  timeoutMs: number,
+): Promise<boolean> {
+  const end = Date.now() + timeoutMs;
+  do {
+    if (!await exists(pid)) return true;
+    await Bun.sleep(Math.min(20, Math.max(1, timeoutMs)));
+  } while (Date.now() <= end);
+  return !await exists(pid);
+}
+
+function positivePgid(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 1) throw new Error("process group id 无效");
+  return value;
 }
 
 async function deadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
@@ -445,6 +539,7 @@ async function validateOwnedParent(path: string, uid: number | undefined): Promi
 
 async function validateDirectory(path: string, uid: number | undefined, exactMode: number | null): Promise<void> {
   if (!isAbsolute(path) || resolve(path) !== path) throw new Error(`${path} 不是 lexical canonical absolute path`);
+  await validateCanonicalComponents(path, uid);
   const metadata = await lstat(path);
   assertRuntimePathMetadata(path, metadata, "directory", uid, exactMode);
   if (await realpath(path) !== path) throw new Error(`${path} 含 symlink/non-canonical component`);
@@ -452,6 +547,7 @@ async function validateDirectory(path: string, uid: number | undefined, exactMod
 
 async function validateRegularFile(path: string, uid: number | undefined, exactMode: number | null = null): Promise<void> {
   await validateOwnedParent(path, uid);
+  await validateCanonicalComponents(path, uid);
   const metadata = await lstat(path);
   assertRuntimePathMetadata(path, metadata, "file", uid, exactMode);
   if (await realpath(path) !== path) throw new Error(`${path} 含 symlink/non-canonical component`);
@@ -475,5 +571,32 @@ export function assertRuntimePathMetadata(
     throw new Error(`${label} 必须是 non-symlink ${kind === "directory" ? "directory" : "regular file"}`);
   }
   if (expectedUid !== undefined && metadata.uid !== expectedUid) throw new Error(`${label} owner 不是当前 uid`);
+  if ((metadata.mode & 0o022) !== 0) throw new Error(`${label} 不能 group/world writable`);
   if (exactMode !== null && (metadata.mode & 0o777) !== exactMode) throw new Error(`${label} 权限必须为 0${exactMode.toString(8)}`);
+}
+
+async function validateCanonicalComponents(path: string, expectedUid: number | undefined): Promise<void> {
+  const components: string[] = [];
+  let current = path;
+  while (true) {
+    components.push(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  components.reverse();
+  for (let index = 0; index < components.length; index++) {
+    const component = components[index]!;
+    const metadata = await lstat(component);
+    const leaf = index === components.length - 1;
+    if (metadata.isSymbolicLink()) throw new Error(`${path} 含 symlink component ${component}`);
+    if (!leaf && !metadata.isDirectory()) throw new Error(`${path} parent component ${component} 不是 directory`);
+    if (expectedUid !== undefined && metadata.uid !== expectedUid && metadata.uid !== 0) {
+      throw new Error(`${path} component ${component} owner 不可信`);
+    }
+    if ((metadata.mode & 0o022) !== 0) {
+      const rootOwnedStickySystemParent = !leaf && metadata.uid === 0 && (metadata.mode & 0o1000) !== 0;
+      if (!rootOwnedStickySystemParent) throw new Error(`${path} component ${component} 不能 group/world writable`);
+    }
+  }
 }

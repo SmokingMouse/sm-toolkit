@@ -515,6 +515,10 @@ export class DeliveryService {
     now = Date.now(),
   ): Promise<Delivery> {
     this.assertReviewIdle(conv);
+    const activeJob = delivery.activeDeploymentJobId ? this.store.getDeploymentJob(delivery.activeDeploymentJobId) : null;
+    if (activeJob?.status === "needs_recovery") {
+      throw new Error("Deployment needs_recovery；必须先由 host 管理员执行 deploy-worker recover，普通 Retry 被禁止");
+    }
     if (delivery.mergeStatus !== "merged") throw new Error("代码尚未合并，不能开始部署");
     if (delivery.deploymentStatus === "not_required") throw new Error("当前 Delivery 配置为无需部署");
     if (delivery.deploymentStatus !== "pending" && delivery.deploymentStatus !== "failed") {
@@ -618,6 +622,10 @@ export class DeliveryService {
   /** gates 已满足时幂等 enqueue；Retry 会由 failed 推进新 generation。 */
   reconcileAutomaticDeployment(id: string, now = Date.now()): Delivery {
     const delivery = this.requireDelivery(id);
+    const activeJob = delivery.activeDeploymentJobId ? this.store.getDeploymentJob(delivery.activeDeploymentJobId) : null;
+    if (activeJob?.status === "needs_recovery") {
+      throw new Error("Deployment needs_recovery；必须先由 host 管理员恢复并验证旧 baseline，不能普通 Retry");
+    }
     if (!delivery.deploymentTargetId) return delivery;
     if (delivery.mergeStatus !== "merged" || delivery.reviewStatus !== "approved" || delivery.checkStatus !== "passed") {
       return delivery;

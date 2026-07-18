@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
-import { exactLaunchdTemplateLabel, type DeploymentServiceConfig, type DeploymentTargetConfig, type SecretReference } from "../config.js";
+import { type DeploymentServiceConfig, type DeploymentTargetConfig, type SecretReference } from "../config.js";
 import type {
   DeploymentFailureKind,
   DeploymentJob,
@@ -10,6 +10,7 @@ import type {
 import type { DeploymentMaintenanceSentinel } from "./maintenance.js";
 import { sameMaintenanceIdentity } from "./maintenance.js";
 import { assertNoCredentialMaterial, assertSafeArgv, redactStructured, safeArgvAudit, targetSensitiveValues } from "./redaction.js";
+import { exactPlistRootLabel } from "./plist.js";
 
 const RELEASE_MANIFEST = ".harbor-deployment.json";
 
@@ -62,6 +63,7 @@ export interface DeploymentProcessOptions {
   env: Record<string, string>;
   timeoutMs: number;
   maxCaptureBytes: number;
+  redactValues?: string[];
   onOutput(stream: "stdout" | "stderr", chunk: string): void;
 }
 
@@ -121,6 +123,7 @@ export interface DeploymentExecutorDeps {
 
 export interface DeploymentExecutionHooks {
   assertFence(boundary: string): Promise<void>;
+  assertRestoreFence(gate: DeploymentMaintenanceGate): Promise<void>;
   checkpoint(value: string, metadata?: { newServicePids?: Record<string, number>; databaseBackupCreated?: boolean; log?: string }): Promise<void>;
   getMaintenance(): Promise<DeploymentMaintenanceGate | null>;
   activateMaintenance(input: {
@@ -186,9 +189,8 @@ export class LocalLaunchdDeploymentExecutor {
       await this.deps.fs.mkdir(statePath, 0o700);
       await hooks.checkpoint("fetching");
       await hooks.assertFence("before-controlled-fetch");
-      await this.fetchExactRevision(job, target, logger);
+      await this.fetchExactRevision(job, target, releasePath, logger);
       await hooks.assertFence("after-controlled-fetch");
-      await this.command(["git", "-C", target.repositoryPath, "worktree", "add", "--detach", releasePath, job.revision], target, undefined, logger);
       for (const group of [target.steps.install, target.steps.build, target.steps.test]) {
         for (const argv of group) {
           await hooks.assertFence("build-step");
@@ -200,12 +202,13 @@ export class LocalLaunchdDeploymentExecutor {
       let baseline: DeploymentReleaseManifest;
       try { baseline = await this.readReleaseManifest(current); }
       catch (error) { throw new DeploymentFailure(`trusted baseline manifest unavailable: ${message(error)}`); }
+      logger.addSensitive(manifestSensitiveValues(baseline));
       this.validateTrustedBaseline(baseline, target);
       const baselineManifestHash = releaseManifestHash(baseline);
       const oldPlists = Object.fromEntries(await Promise.all(baseline.services.map(async (service) => {
         const plist = await this.deps.fs.readText(service.plistPath);
         assertNoCredentialMaterial(plist, Object.values(target.health.headers));
-        if (exactLaunchdTemplateLabel(plist) !== service.label) {
+        if (exactPlistRootLabel(plist) !== service.label) {
           throw new DeploymentFailure(`trusted baseline plist ${service.id} Label 与 manifest 不匹配`);
         }
         return [serviceKey(service), plist] as const;
@@ -220,46 +223,62 @@ export class LocalLaunchdDeploymentExecutor {
 
       const union = unionServices(baseline.services, target.services);
       const oldPids = await this.captureServicePids(union);
-      gate = await hooks.activateMaintenance({
-        rollbackAttempt: job.attempt,
-        baselineRevision: baseline.revision,
-        baselineFingerprint: baseline.targetFingerprint,
-        baselineManifestHash,
-        baselineHealthFingerprint: baseline.healthFingerprint,
+      gate = await this.deps.maintenance.withLock(async () => {
+        const activated = await hooks.activateMaintenance({
+          rollbackAttempt: job.attempt,
+          baselineRevision: baseline.revision,
+          baselineFingerprint: baseline.targetFingerprint,
+          baselineManifestHash,
+          baselineHealthFingerprint: baseline.healthFingerprint,
+        });
+        await this.writeMaintenanceFenced(hooks, activated, "activate");
+        return activated;
       });
-      await this.writeMaintenanceFenced(hooks, gate, "activate");
       await hooks.assertFence("before-service-bootout");
       await this.stopAndProve(union, oldPids, logger, hooks, "deploy");
       await hooks.assertFence("after-service-bootout-proof");
       await hooks.checkpoint("old_services_stopped", { log: logger.value() });
 
-      await hooks.assertFence("before-db-backup");
-      await this.deps.sqlite.backup(target.sqlitePath, databaseBackup);
-      backupCreated = true;
-      await hooks.assertFence("after-db-backup");
+      await this.deps.maintenance.withLock(async () => {
+        await hooks.assertFence("before-db-backup");
+        await this.deps.sqlite.backup(target.sqlitePath, databaseBackup);
+        backupCreated = true;
+        await hooks.assertFence("after-db-backup");
+      });
       await hooks.checkpoint("backup_created", { databaseBackupCreated: true, log: logger.value() });
 
       for (const service of target.services) {
-        await hooks.assertFence(`before-plist-${service.id}`);
-        await atomicWrite(this.deps.fs, service.plistPath, rendered.get(service.id)!, `${job.id}-${job.attempt}-${service.id}`);
-        await hooks.assertFence(`after-plist-${service.id}`);
+        await this.deps.maintenance.withLock(async () => {
+          await hooks.assertFence(`before-plist-${service.id}`);
+          await atomicWrite(this.deps.fs, service.plistPath, rendered.get(service.id)!, `${job.id}-${job.attempt}-${service.id}`);
+          if (exactPlistRootLabel(await this.deps.fs.readText(service.plistPath)) !== service.label) {
+            throw new DeploymentFailure(`written plist ${service.id} Label 复验失败`);
+          }
+          await hooks.assertFence(`after-plist-${service.id}`);
+        });
       }
       for (const service of baseline.services) {
         if (!target.services.some((candidate) => candidate.plistPath === service.plistPath)) {
-          await hooks.assertFence(`before-remove-plist-${service.id}`);
-          await this.deps.fs.remove(service.plistPath);
-          await hooks.assertFence(`after-remove-plist-${service.id}`);
+          await this.deps.maintenance.withLock(async () => {
+            await hooks.assertFence(`before-remove-plist-${service.id}`);
+            await this.deps.fs.remove(service.plistPath);
+            await hooks.assertFence(`after-remove-plist-${service.id}`);
+          });
         }
       }
-      await hooks.assertFence("before-current-symlink");
-      await atomicSymlink(this.deps.fs, target.currentSymlinkPath, releasePath, `${job.id}-${job.attempt}`);
-      await hooks.assertFence("after-current-symlink");
+      await this.deps.maintenance.withLock(async () => {
+        await hooks.assertFence("before-current-symlink");
+        await atomicSymlink(this.deps.fs, target.currentSymlinkPath, releasePath, `${job.id}-${job.attempt}`);
+        await hooks.assertFence("after-current-symlink");
+      });
       await hooks.checkpoint("switched", { log: logger.value() });
 
       const server = onlyServer(target.services);
-      await hooks.assertFence("before-server-bootstrap");
-      await this.deps.launchd.bootstrap(server.domain, server.plistPath);
-      await hooks.assertFence("after-server-bootstrap");
+      await this.deps.maintenance.withLock(async () => {
+        await hooks.assertFence("before-server-bootstrap");
+        await this.deps.launchd.bootstrap(server.domain, server.plistPath);
+        await hooks.assertFence("after-server-bootstrap");
+      });
       const serverPid = await this.waitForRunningService(server);
       const pids = { [serviceKey(server)]: serverPid };
       gate = await hooks.updateMaintenance("deploying", job.revision, job.targetFingerprint, {
@@ -319,6 +338,7 @@ export class LocalLaunchdDeploymentExecutor {
     const logger = this.logger(target);
     const current = await this.requireCurrentRelease(target);
     const manifest = await this.readReleaseManifest(current);
+    logger.addSensitive(manifestSensitiveValues(manifest));
     this.validateTrustedBaseline(manifest, target);
     if (manifest.revision !== gate.expectedRevision || manifest.targetFingerprint !== gate.expectedFingerprint) {
       throw new Error("release current manifest 与 gate expected identity 不一致");
@@ -330,6 +350,13 @@ export class LocalLaunchdDeploymentExecutor {
       throw new Error("release current manifest topology 与 frozen gate 不一致");
     }
     const server = onlyServer(manifest.services);
+    for (const service of manifest.services) {
+      const installedPlist = await this.deps.fs.readText(service.plistPath);
+      assertNoCredentialMaterial(installedPlist, Object.values(target.health.headers));
+      if (exactPlistRootLabel(installedPlist) !== service.label) {
+        throw new Error(`release plist ${service.id} Label 与 frozen manifest 不匹配`);
+      }
+    }
     const serverState = await this.deps.launchd.inspect(server.domain, server.label);
     this.assertExactLabel(server, serverState);
     if (!serverState.loaded || serverState.state !== "running" || !serverState.pid || !await this.deps.launchd.isPidAlive(serverState.pid)) {
@@ -343,6 +370,7 @@ export class LocalLaunchdDeploymentExecutor {
     const anchor = parseRollbackAnchor(await this.deps.fs.readText(
       join(target.statePath, gate.jobId, `attempt-${gate.rollbackAttempt}`, "rollback-anchor.json"),
     ));
+    logger.addSensitive(manifestSensitiveValues(anchor.baseline));
     this.validateTrustedBaseline(anchor.baseline, target);
     if (anchor.baselineManifestHash !== gate.baselineManifestHash
       || releaseManifestHash(anchor.baseline) !== gate.baselineManifestHash
@@ -386,6 +414,10 @@ export class LocalLaunchdDeploymentExecutor {
     return this.deps.maintenance.write(gate);
   }
 
+  withMaintenanceLock<T>(action: () => Promise<T> | T): Promise<T> {
+    return this.deps.maintenance.withLock(action);
+  }
+
   private async resumeHealthy(
     job: DeploymentJob,
     target: DeploymentTargetConfig,
@@ -400,6 +432,7 @@ export class LocalLaunchdDeploymentExecutor {
     await this.writeMaintenanceFenced(hooks, gate, "healthy-resume");
     const current = await this.requireCurrentRelease(target);
     const manifest = await this.readReleaseManifest(current);
+    logger.addSensitive(manifestSensitiveValues(manifest));
     if (manifest.revision !== job.revision || manifest.targetFingerprint !== job.targetFingerprint
       || releaseManifestHash(manifest) !== job.targetManifestHash) {
       return this.recoverOriginalBaseline(job, target, hooks, logger, "healthy checkpoint current identity mismatch");
@@ -430,6 +463,7 @@ export class LocalLaunchdDeploymentExecutor {
     const attempt = job.rollbackAttempt ?? originalGate.rollbackAttempt;
     const statePath = join(target.statePath, job.id, `attempt-${attempt}`);
     const anchor = parseRollbackAnchor(await this.deps.fs.readText(join(statePath, "rollback-anchor.json")));
+    logger.addSensitive(manifestSensitiveValues(anchor.baseline));
     this.validateTrustedBaseline(anchor.baseline, target);
     assertReleasePath(anchor.current, target.releasesPath, "rollback anchor current");
     if (anchor.baseline.revision !== originalGate.baselineRevision
@@ -451,39 +485,54 @@ export class LocalLaunchdDeploymentExecutor {
     await hooks.assertFence("after-rollback-stop-proof");
 
     if (restoreDatabase) {
-      await hooks.assertFence("before-db-restore");
-      const sentinel = await this.deps.maintenance.read();
-      if (!sentinel || !sameMaintenanceIdentity(sentinel, gate)) throw new DeploymentFailure("DB restore 前 host sentinel fence 不匹配");
-      await this.deps.sqlite.restore(join(statePath, "database.sqlite"), target.sqlitePath);
-      gate = await hooks.restoreMaintenance(gate, "rolling_back", anchor.baseline.revision, anchor.baseline.targetFingerprint);
-      await this.writeMaintenanceFenced(hooks, gate, "db-restore-rehydrate");
-      await hooks.assertFence("after-db-restore-rehydrate");
+      gate = await this.deps.maintenance.withLock(async () => {
+        await hooks.assertFence("before-db-restore");
+        const sentinel = await this.deps.maintenance.read();
+        if (!sentinel || !sameMaintenanceIdentity(sentinel, gate)) throw new DeploymentFailure("DB restore 前 host sentinel fence 不匹配");
+        await hooks.assertRestoreFence(gate);
+        await this.deps.sqlite.restore(join(statePath, "database.sqlite"), target.sqlitePath);
+        const restored = await hooks.restoreMaintenance(gate, "rolling_back", anchor.baseline.revision, anchor.baseline.targetFingerprint);
+        await this.writeMaintenanceFenced(hooks, restored, "db-restore-rehydrate");
+        await hooks.assertFence("after-db-restore-rehydrate");
+        return restored;
+      });
     }
 
     for (const service of target.services) {
       const baselineService = anchor.baseline.services.find((candidate) => serviceKey(candidate) === serviceKey(service));
       if (!baselineService || baselineService.plistPath !== service.plistPath) {
-        await hooks.assertFence(`before-rollback-remove-plist-${service.id}`);
-        await this.deps.fs.remove(service.plistPath);
-        await hooks.assertFence(`after-rollback-remove-plist-${service.id}`);
+        await this.deps.maintenance.withLock(async () => {
+          await hooks.assertFence(`before-rollback-remove-plist-${service.id}`);
+          await this.deps.fs.remove(service.plistPath);
+          await hooks.assertFence(`after-rollback-remove-plist-${service.id}`);
+        });
       }
     }
     for (const service of anchor.baseline.services) {
-      await hooks.assertFence(`before-rollback-plist-${service.id}`);
-      const old = anchor.oldPlists[serviceKey(service)];
-      if (old === undefined) throw new DeploymentFailure(`rollback anchor 缺少 plist ${serviceKey(service)}`);
-      assertNoCredentialMaterial(old, Object.values(target.health.headers));
-      if (exactLaunchdTemplateLabel(old) !== service.label) throw new DeploymentFailure(`rollback plist ${service.id} Label 与 baseline manifest 不匹配`);
-      await atomicWrite(this.deps.fs, service.plistPath, old, `${job.id}-rollback-${service.id}`);
-      await hooks.assertFence(`after-rollback-plist-${service.id}`);
+      await this.deps.maintenance.withLock(async () => {
+        await hooks.assertFence(`before-rollback-plist-${service.id}`);
+        const old = anchor.oldPlists[serviceKey(service)];
+        if (old === undefined) throw new DeploymentFailure(`rollback anchor 缺少 plist ${serviceKey(service)}`);
+        assertNoCredentialMaterial(old, Object.values(target.health.headers));
+        if (exactPlistRootLabel(old) !== service.label) throw new DeploymentFailure(`rollback plist ${service.id} Label 与 baseline manifest 不匹配`);
+        await atomicWrite(this.deps.fs, service.plistPath, old, `${job.id}-rollback-${service.id}`);
+        if (exactPlistRootLabel(await this.deps.fs.readText(service.plistPath)) !== service.label) {
+          throw new DeploymentFailure(`written rollback plist ${service.id} Label 复验失败`);
+        }
+        await hooks.assertFence(`after-rollback-plist-${service.id}`);
+      });
     }
-    await hooks.assertFence("before-rollback-current-symlink");
-    await atomicSymlink(this.deps.fs, target.currentSymlinkPath, anchor.current, `${job.id}-rollback`);
-    await hooks.assertFence("after-rollback-current-symlink");
+    await this.deps.maintenance.withLock(async () => {
+      await hooks.assertFence("before-rollback-current-symlink");
+      await atomicSymlink(this.deps.fs, target.currentSymlinkPath, anchor.current, `${job.id}-rollback`);
+      await hooks.assertFence("after-rollback-current-symlink");
+    });
     const server = onlyServer(anchor.baseline.services);
-    await hooks.assertFence("before-baseline-server-bootstrap");
-    await this.deps.launchd.bootstrap(server.domain, server.plistPath);
-    await hooks.assertFence("after-baseline-server-bootstrap");
+    await this.deps.maintenance.withLock(async () => {
+      await hooks.assertFence("before-baseline-server-bootstrap");
+      await this.deps.launchd.bootstrap(server.domain, server.plistPath);
+      await hooks.assertFence("after-baseline-server-bootstrap");
+    });
     const pid = await this.waitForRunningService(server);
     gate = await hooks.updateMaintenance("rolling_back", anchor.baseline.revision, anchor.baseline.targetFingerprint, {
       checkpoint: "baseline_server_started", newServicePids: { [serviceKey(server)]: pid }, log: logger.value(),
@@ -502,21 +551,39 @@ export class LocalLaunchdDeploymentExecutor {
     };
   }
 
-  private async fetchExactRevision(job: DeploymentJob, target: DeploymentTargetConfig, logger: ReturnType<LocalLaunchdDeploymentExecutor["logger"]>): Promise<void> {
+  private async fetchExactRevision(
+    job: DeploymentJob,
+    target: DeploymentTargetConfig,
+    releasePath: string,
+    logger: ReturnType<LocalLaunchdDeploymentExecutor["logger"]>,
+  ): Promise<void> {
     const remote = await this.command(["git", "-C", target.repositoryPath, "remote", "get-url", target.source.remote], target, undefined, logger);
     if (remote.stdout.trim() !== target.source.remoteUrl) throw new DeploymentFailure("configured git remote URL drifted");
-    await this.command(["git", "-C", target.repositoryPath, "fetch", "--no-tags", "--prune", target.source.remote], target, undefined, logger);
-    const resolved = await this.command(["git", "-C", target.repositoryPath, "rev-parse", "--verify", `${job.revision}^{commit}`], target, undefined, logger);
-    if (resolved.stdout.trim().toLowerCase() !== job.revision.toLowerCase()) throw new DeploymentFailure("fetch 后 object 不是 exact committed revision");
-    let reachable = false;
-    for (const allowedRef of target.source.allowedRefs) {
-      const result = await this.command(
-        ["git", "-C", target.repositoryPath, "merge-base", "--is-ancestor", job.revision, allowedRef],
-        target, undefined, logger, true,
-      );
-      if (result.exitCode === 0) { reachable = true; break; }
+    const temporaryRefs = target.source.allowedRefs.map((allowedRef, index) =>
+      `refs/harbor-deploy/${job.id}/a${job.attempt}/${index}-${sha256(allowedRef).slice(0, 12)}`);
+    for (const ref of temporaryRefs) {
+      await this.command(["git", "-C", target.repositoryPath, "update-ref", "-d", ref], target, undefined, logger, true);
     }
-    if (!reachable) throw new DeploymentFailure("exact revision 不可由 configured merged/base ref 到达");
+    try {
+      const refspecs = target.source.allowedRefs.map((allowedRef, index) => `+${allowedRef}:${temporaryRefs[index]}`);
+      await this.command(["git", "-C", target.repositoryPath, "fetch", "--no-tags", "--prune", target.source.remote, ...refspecs], target, undefined, logger);
+      const resolved = await this.command(["git", "-C", target.repositoryPath, "rev-parse", "--verify", `${job.revision}^{commit}`], target, undefined, logger);
+      if (resolved.stdout.trim().toLowerCase() !== job.revision.toLowerCase()) throw new DeploymentFailure("fetch 后 object 不是 exact committed revision");
+      let reachable = false;
+      for (const fetchedRef of temporaryRefs) {
+        const result = await this.command(
+          ["git", "-C", target.repositoryPath, "merge-base", "--is-ancestor", job.revision, fetchedRef],
+          target, undefined, logger, true,
+        );
+        if (result.exitCode === 0) { reachable = true; break; }
+      }
+      if (!reachable) throw new DeploymentFailure("exact revision 不可由本次 configured remote fetch refs 到达");
+      await this.command(["git", "-C", target.repositoryPath, "worktree", "add", "--detach", releasePath, job.revision], target, undefined, logger);
+    } finally {
+      for (const ref of temporaryRefs) {
+        await this.command(["git", "-C", target.repositoryPath, "update-ref", "-d", ref], target, undefined, logger, true);
+      }
+    }
   }
 
   private async renderServices(target: DeploymentTargetConfig, releasePath: string, job: DeploymentJob): Promise<Map<string, string>> {
@@ -525,15 +592,17 @@ export class LocalLaunchdDeploymentExecutor {
       const template = await this.deps.fs.readText(service.templatePath);
       assertNoCredentialMaterial(template, Object.values(target.health.headers));
       if (sha256(template) !== service.templateSha256) throw new DeploymentFailure(`service ${service.id} template 内容 hash 漂移`);
-      const label = exactLaunchdTemplateLabel(template);
+      const label = exactPlistRootLabel(template);
       if (label !== service.label) throw new DeploymentFailure(`service ${service.id} template Label 与配置不匹配`);
       for (const placeholder of ["{{release_path}}", "{{revision}}", "{{target_fingerprint}}"] as const) {
         if (!template.includes(placeholder)) throw new DeploymentFailure(`service ${service.id} template 缺少 ${placeholder}`);
       }
-      rendered.set(service.id, template
+      const finalPlist = template
         .replaceAll("{{release_path}}", xml(releasePath))
         .replaceAll("{{revision}}", xml(job.revision))
-        .replaceAll("{{target_fingerprint}}", xml(job.targetFingerprint)));
+        .replaceAll("{{target_fingerprint}}", xml(job.targetFingerprint));
+      if (exactPlistRootLabel(finalPlist) !== service.label) throw new DeploymentFailure(`service ${service.id} rendered plist Label 与配置不匹配`);
+      rendered.set(service.id, finalPlist);
     }
     return rendered;
   }
@@ -556,26 +625,40 @@ export class LocalLaunchdDeploymentExecutor {
     prefix: string,
   ): Promise<void> {
     let ambiguous: string | null = null;
+    const proofPids = new Map<string, Set<number>>();
     for (const service of services) {
-      await hooks.assertFence(`before-${prefix}-bootout-${service.id}`);
-      const before = await this.deps.launchd.inspect(service.domain, service.label);
-      this.assertExactLabel(service, before);
-      if (before.loaded) {
-        try {
-          await this.deps.launchd.bootout(service.domain, service.label);
-        } catch (error) {
-          ambiguous ??= `${serviceKey(service)} bootout failed: ${message(error)}`;
-        }
-      }
-      await hooks.assertFence(`after-${prefix}-bootout-${service.id}`);
+      const initial = priorPids.get(serviceKey(service));
+      proofPids.set(serviceKey(service), new Set(initial ? [initial] : []));
     }
     for (const service of services) {
-      await hooks.assertFence(`before-${prefix}-stop-proof-${service.id}`);
-      const state = await this.deps.launchd.inspect(service.domain, service.label);
-      if (state.loaded || state.pid !== null || state.label !== null) ambiguous ??= `${serviceKey(service)} 仍 loaded/有 PID/label`;
-      const prior = priorPids.get(serviceKey(service));
-      if (prior && await this.deps.launchd.isPidAlive(prior)) ambiguous ??= `${serviceKey(service)} old PID ${prior} 仍存活`;
-      await hooks.assertFence(`after-${prefix}-stop-proof-${service.id}`);
+      await this.deps.maintenance.withLock(async () => {
+        await hooks.assertFence(`before-${prefix}-bootout-${service.id}`);
+        // This inspect is deliberately adjacent to bootout.  captureServicePids
+        // may have observed an earlier incarnation and is not a stop proof.
+        const before = await this.deps.launchd.inspect(service.domain, service.label);
+        this.assertExactLabel(service, before);
+        if (before.pid) proofPids.get(serviceKey(service))!.add(before.pid);
+        if (before.loaded) {
+          try {
+            await this.deps.launchd.bootout(service.domain, service.label);
+          } catch (error) {
+            ambiguous ??= `${serviceKey(service)} bootout failed: ${message(error)}`;
+          }
+        }
+        await hooks.assertFence(`after-${prefix}-bootout-${service.id}`);
+      });
+    }
+    for (const service of services) {
+      await this.deps.maintenance.withLock(async () => {
+        await hooks.assertFence(`before-${prefix}-stop-proof-${service.id}`);
+        const state = await this.deps.launchd.inspect(service.domain, service.label);
+        if (state.loaded || state.pid !== null || state.label !== null) ambiguous ??= `${serviceKey(service)} 仍 loaded/有 PID/label`;
+        if (state.pid) proofPids.get(serviceKey(service))!.add(state.pid);
+        for (const pid of proofPids.get(serviceKey(service))!) {
+          if (await this.deps.launchd.isPidAlive(pid)) ambiguous ??= `${serviceKey(service)} observed PID ${pid} 仍存活`;
+        }
+        await hooks.assertFence(`after-${prefix}-stop-proof-${service.id}`);
+      });
     }
     if (ambiguous) throw new StopProofFailure(`无法证明所有 exact launchd services 已停止：${ambiguous}`);
     logger.record(`proved ${services.length} exact launchd services unloaded and old PIDs dead`);
@@ -714,6 +797,7 @@ export class LocalLaunchdDeploymentExecutor {
       env: target.environment,
       timeoutMs: target.commandTimeoutMs,
       maxCaptureBytes: 16_384,
+      redactValues: sensitive,
       // HostProcess 始终流式 drain；audit 等 bounded capture 完整后统一 redaction，避免
       // credential 刚好跨 stdout chunk 边界时被逐 chunk 处理而泄漏。
       onOutput: () => {},
@@ -735,14 +819,14 @@ export class LocalLaunchdDeploymentExecutor {
   }
 
   private logger(target: DeploymentTargetConfig) {
-    const sensitive = targetSensitiveValues(target);
+    const sensitive = new Set(targetSensitiveValues(target));
     let value = "";
     let truncated = false;
     return {
       record(chunk: string) {
         if (truncated) return;
-        const boundedChunk = chunk.length > 8_192 ? `${chunk.slice(0, 8_192)}…[truncated]` : chunk;
-        const safe = redactStructured(boundedChunk, sensitive);
+        const redacted = redactStructured(chunk, [...sensitive]);
+        const safe = redacted.length > 8_192 ? `${redacted.slice(0, 8_192)}…[truncated]` : redacted;
         const room = 32_000 - value.length;
         if (safe.length + 1 <= room) value += `${safe}\n`;
         else {
@@ -750,6 +834,7 @@ export class LocalLaunchdDeploymentExecutor {
           truncated = true;
         }
       },
+      addSensitive(values: string[]) { for (const value of values) if (value) sensitive.add(value); },
       value: () => value.slice(0, 32_000),
     };
   }
@@ -787,9 +872,11 @@ export class LocalLaunchdDeploymentExecutor {
     gate: DeploymentMaintenanceGate,
     boundary: string,
   ): Promise<void> {
-    await hooks.assertFence(`before-sentinel-write-${boundary}`);
-    await this.deps.maintenance.write(gate);
-    await hooks.assertFence(`after-sentinel-write-${boundary}`);
+    await this.deps.maintenance.withLock(async () => {
+      await hooks.assertFence(`before-sentinel-write-${boundary}`);
+      await this.deps.maintenance.write(gate);
+      await hooks.assertFence(`after-sentinel-write-${boundary}`);
+    });
   }
 }
 
@@ -853,6 +940,17 @@ function resolveHealthHeaders(refs: Record<string, SecretReference>, target: Dep
     if (!value) throw new DeploymentFailure(`health secret reference ${reference.env} 无法在 worker 内存解析`);
     return [name, value];
   }));
+}
+
+function manifestSensitiveValues(manifest: DeploymentReleaseManifest): string[] {
+  return [
+    manifest.source.remote,
+    manifest.source.remoteUrl,
+    manifest.health.url,
+    ...Object.values(manifest.paths),
+    ...manifest.services.flatMap((service) => [service.label, service.domain, service.plistPath, service.templatePath]),
+    ...Object.entries(manifest.health.headerRefs).flatMap(([name, reference]) => [name, reference.env]),
+  ];
 }
 
 function sha256(value: string): string {

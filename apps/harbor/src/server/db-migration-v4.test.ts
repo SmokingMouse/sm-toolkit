@@ -87,7 +87,7 @@ test("legacy database migrates through latest schema without losing conversation
     legacy.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(21);
     expect(
       migrated.query<{ agent_id: string | null; description: string | null; priority: string; status: string }, []>(
         "SELECT agent_id, description, priority, status FROM conversations WHERE id = 'conversation_1'",
@@ -265,7 +265,7 @@ test("latest schema upgrades an already-running v9 database and preserves unboun
     v9.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(21);
     const agent = migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM agents WHERE id = 'agent_1'").get();
     expect(agent?.repository_id).toStartWith("repo_unconfigured_");
     expect(migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM conversations WHERE id = 'conversation_1'").get()).toEqual(agent);
@@ -361,7 +361,7 @@ test("latest schema preserves v11 Delivery rows and audit events while adding de
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(21);
     expect(migrated.query<{ provider: string; change_url: string }, [string]>("SELECT provider, change_url FROM deliveries WHERE id = ?").get(delivery.id)).toEqual({
       provider: "manual",
       change_url: "https://github.com/acme/repo/pull/1",
@@ -441,7 +441,7 @@ test("latest schema invalidates unbound GitHub evidence from v12 while preservin
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(21);
     expect(
       migrated.query<{
         provider: string;
@@ -547,7 +547,7 @@ test("latest schema converges the historical self-hosting v13 fork without losin
     fork.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(21);
     expect(
       migrated.query<{ name: string }, []>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'automation_triggers'",
@@ -627,7 +627,7 @@ test("latest schema preserves a legitimate pre-provider manual no-target running
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(21);
     expect(migrated.query<{
       provider: string; review_status: string; check_status: string; deployment_status: string;
       review_approved_at: number; revision: number; deployment_target_id: null; deployment_generation: number;
@@ -707,7 +707,7 @@ test("latest schema gives an active phase-1 deployment without fingerprint/ancho
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(21);
     expect(migrated.query<{ deployment_status: string; deployment_error: string }, [string]>(
       "SELECT deployment_status, deployment_error FROM deliveries WHERE id = ?",
     ).get(delivery.id)).toEqual({
