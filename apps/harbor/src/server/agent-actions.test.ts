@@ -173,6 +173,7 @@ test("implementation and review action tokens can open, approve, and policy-merg
         checkStatus: "passed",
         mergeStatus: "open",
         mergedAt: null,
+        mergedRevision: null,
       };
     },
     async merge() {
@@ -266,10 +267,10 @@ test("implementation and review action tokens can open, approve, and policy-merg
   }));
   expect(store.listDeliveryEvents(store.getDeliveryForConversation(issue.id)!.id).map((event) => event.actor)).toContain("agent");
   expect(transitions).toContainEqual({ before: "merge_ready", after: "merged" });
-  let deployed = deliveries.beginAutomatedDeployment(store.getDeliveryForConversation(issue.id)!, "deployment-run", 16);
-  expect(deployed.deploymentStatus).toBe("running");
-  deployed = deliveries.finishDeployment(deployed, "succeeded", 17, "agent");
-  expect(deployed.status).toBe("succeeded");
+  expect(store.getDeliveryForConversation(issue.id)).toEqual(expect.objectContaining({
+    mergeStatus: "merged",
+    deploymentStatus: "pending",
+  }));
 });
 
 test("request_changes queues the Developer behind the active review Run without conversation overlap", async () => {

@@ -47,6 +47,7 @@ interface FakeGitHubState {
   pullState?: "open" | "closed";
   merged?: boolean;
   mergedAt?: string | null;
+  mergeCommitSha?: string | null;
   headSha?: string;
   branchProtected?: boolean;
   checkRuns?: FakeCheckRun[];
@@ -98,6 +99,7 @@ function fakeGitHub(initial: FakeGitHubState = {}) {
         state: state.pullState,
         merged: state.merged,
         merged_at: state.mergedAt,
+        merge_commit_sha: state.mergeCommitSha,
         html_url: "https://github.com/acme/harbor/pull/42",
         head: { ref: "feature/github-delivery", sha: state.headSha },
         base: { ref: "main" },
@@ -158,7 +160,8 @@ function fakeGitHub(initial: FakeGitHubState = {}) {
       state.merged = true;
       state.pullState = "closed";
       state.mergedAt = "2026-07-18T12:00:00Z";
-      return json({ merged: true, sha: "merge456", message: "Pull Request successfully merged" });
+      state.mergeCommitSha = "b".repeat(40);
+      return json({ merged: true, sha: state.mergeCommitSha, message: "Pull Request successfully merged" });
     }
     return json({ message: `unexpected ${method} ${url.pathname}` }, 500);
   }) as typeof fetch;
@@ -728,6 +731,7 @@ describe("GitHub Delivery sync", () => {
       merged: true,
       pullState: "closed",
       mergedAt: "2026-07-18T12:00:00Z",
+      mergeCommitSha: "b".repeat(40),
       branchProtected: true,
       required: { contexts: ["build"] },
       checkRuns: [{ name: "build", status: "completed", conclusion: "success" }],
@@ -740,6 +744,7 @@ describe("GitHub Delivery sync", () => {
       status: "review_pending",
       latestHeadSha: "abc123",
       mergedAt: Date.parse("2026-07-18T12:00:00Z"),
+      mergedRevision: "b".repeat(40),
     }));
     const eventCount = h.store.listDeliveryEvents(synced.id).length;
     const updatedAt = synced.updatedAt;
@@ -863,7 +868,7 @@ describe("GitHub controlled merge", () => {
 
     fake.state.mergeFailure = false;
     delivery = await h.service.merge(delivery, h.conversation, {}, 16);
-    expect(delivery).toEqual(expect.objectContaining({ mergeStatus: "merged", status: "succeeded" }));
+    expect(delivery).toEqual(expect.objectContaining({ mergeStatus: "merged", mergedRevision: "b".repeat(40), status: "succeeded" }));
     expect(fake.calls.filter((call) => call.method === "PUT").at(-1)?.body).toBe(JSON.stringify({ sha: "abc123" }));
     const mergeCalls = fake.calls.filter((call) => call.method === "PUT").length;
     await h.service.merge(delivery, h.conversation, {}, 17);

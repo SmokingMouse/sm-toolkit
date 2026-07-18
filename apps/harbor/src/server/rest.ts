@@ -48,6 +48,7 @@ import type { DeviceHub } from "./ws.js";
 import type { RunCoordinator } from "./scheduler.js";
 import type { ApprovalService } from "./approvals.js";
 import { AutomationService, hashWebhookSecret } from "./automation.js";
+import { inactiveMaintenanceGuard, matchesRevisionAwareHealth, type MaintenanceGuard } from "./maintenance.js";
 import { transitionConversation } from "./statemachine.js";
 import { DeliveryService } from "./delivery.js";
 import type { ScmService } from "./scm.js";
@@ -186,6 +187,11 @@ function parseSkillDependencies(value: unknown) {
   });
 }
 
+function rejectUnknownFields(body: Record<string, unknown>, allowed: string[]): void {
+  const unknown = Object.keys(body).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) bad(`不支持字段：${unknown.join(", ")}；部署命令、路径与 health 配置只能来自 server 管理员配置`);
+}
+
 export function buildRest(
   store: HarborStore,
   bus: RunBus,
@@ -199,6 +205,7 @@ export function buildRest(
   codebaseWebhookSecret = "",
   skillImports = new SkillImportService(),
   customLarkWorkspaceIds: ReadonlySet<string> = new Set(),
+  maintenance: MaintenanceGuard = inactiveMaintenanceGuard,
 ): Hono {
   const app = new Hono();
   type ApiActor =
@@ -790,6 +797,23 @@ export function buildRest(
     }
   });
 
+  app.use("*", async (c, next) => {
+    let snapshot;
+    try {
+      snapshot = await maintenance.current();
+    } catch {
+      return c.json({ error: "deployment maintenance state 不可判定；Harbor 已 fail-closed" }, 503);
+    }
+    if (!snapshot.active) return next();
+    const url = new URL(c.req.url);
+    if (url.pathname === "/api/health" && matchesRevisionAwareHealth(url, snapshot)) return next();
+    return c.json({
+      error: "Harbor 正处于 deployment maintenance；仅允许 exact revision health probe",
+      deploymentJobId: snapshot.gate?.jobId ?? null,
+      phase: snapshot.gate?.phase ?? "ambiguous",
+    }, 503);
+  });
+
   app.use("/api/*", async (c, next) => {
     const auth = c.req.header("Authorization");
     const raw = auth?.startsWith("Bearer ") ? auth.slice(7) : "";
@@ -813,7 +837,18 @@ export function buildRest(
     await next();
   });
 
-  app.get("/api/health", (c) => c.json({ ok: true }));
+  app.get("/api/deployment-targets", (c) => c.json(deliveries.listDeploymentTargets()));
+
+  app.get("/api/health", async (c) => {
+    const snapshot = await maintenance.current();
+    return c.json({
+      ok: true,
+      revision: snapshot.runtimeRevision,
+      targetFingerprint: snapshot.runtimeFingerprint,
+      deploymentJobId: snapshot.gate?.jobId ?? null,
+      maintenance: snapshot.active,
+    });
+  });
 
   app.get("/api/me", (c) => {
     const actor = requestActor(c);
@@ -2462,6 +2497,7 @@ export function buildRest(
     const repository = conv.repositoryId
       ? store.getRepository(conv.repositoryId)
       : null;
+    const delivery = store.getDeliveryForConversation(conv.id);
     return c.json({
       conversation: conv,
       agent,
@@ -2471,9 +2507,11 @@ export function buildRest(
         .listRunsByConversation(conv.id)
         .map((r) => ({ ...r, resultText: store.getRunResultText(r.id) })),
       statusLog: store.listStatusLog(conv.id),
-      delivery: store.getDeliveryForConversation(conv.id),
+      delivery,
+      deploymentJob: delivery?.activeDeploymentJobId
+        ? store.getDeploymentJobView(delivery.activeDeploymentJobId)
+        : null,
       deliveryEvents: (() => {
-        const delivery = store.getDeliveryForConversation(conv.id);
         return delivery ? store.listDeliveryEvents(delivery.id) : [];
       })(),
       messages: store.listConversationMessages(conv.id),
@@ -2702,7 +2740,9 @@ export function buildRest(
       headBranch?: string;
       baseBranch?: string;
       deploymentRequired?: boolean;
+      deploymentTargetId?: string | null;
     };
+    rejectUnknownFields(b as Record<string, unknown>, ["provider", "changeUrl", "externalId", "headBranch", "baseBranch", "deploymentRequired", "deploymentTargetId"]);
     validateDeliveryUrl(b.changeUrl);
     const delivery = await deliveryAction(() => deliveries.create(conv, b));
     return c.json(delivery, 201);
@@ -2736,7 +2776,14 @@ export function buildRest(
       currentWorkspace(c).id,
       c.req.param("id"),
     );
-    const b = (await c.req.json()) as { confirmed?: boolean };
+    const b = (await c.req.json()) as {
+      confirmed?: boolean;
+      mergedRevision?: string;
+    };
+    rejectUnknownFields(b as Record<string, unknown>, [
+      "confirmed",
+      "mergedRevision",
+    ]);
     const fresh = await deliveryAction(() =>
       deliveries.merge(delivery, conv, b),
     );
@@ -2767,6 +2814,7 @@ export function buildRest(
       c.req.param("id"),
     );
     const b = (await c.req.json()) as { confirmed?: boolean };
+    rejectUnknownFields(b as Record<string, unknown>, ["confirmed"]);
     return c.json(
       await deliveryAction(() => deliveries.startDeployment(delivery, conv, b)),
     );
@@ -2778,6 +2826,7 @@ export function buildRest(
       c.req.param("id"),
     );
     const b = (await c.req.json()) as { status?: "succeeded" | "failed" };
+    rejectUnknownFields(b as Record<string, unknown>, ["status"]);
     if (b.status !== "succeeded" && b.status !== "failed")
       bad("status 可选 succeeded/failed");
     const fresh = await deliveryAction(() =>

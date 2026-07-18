@@ -1,6 +1,6 @@
 /**
- * Delivery control plane：policy 决定“能不能做”，Provider 只决定“怎么对外执行/确认”。
- * manual provider 不伪装调用外部平台；GitHub provider 只接受 server 配置和外部 API 事实。
+ * Delivery control plane：policy 决定“能不能做”；SCM Provider 与 Deployment target/provider 正交。
+ * manual SCM 不伪装调用外部平台；自动部署结果只来自独立 host worker。
  */
 
 import type {
@@ -10,6 +10,7 @@ import type {
   DeliveryEvent,
   DeliveryMergeStatus,
   DeliveryProviderKind,
+  DeploymentTargetDescriptor,
   HarborRepository,
   Run,
 } from "../protocol.js";
@@ -17,11 +18,14 @@ import type { HarborStore } from "./store.js";
 
 export interface DeliveryProviderAction {
   confirmed?: boolean;
+  mergedRevision?: string;
 }
 
 export interface DeliveryProviderResult {
   message: string;
   data?: unknown;
+  /** SCM merge 后可部署的 exact committed revision；自动 target 不接受 branch/Agent 自报。 */
+  mergedRevision?: string | null;
 }
 
 export interface DeliveryProviderContext {
@@ -35,6 +39,7 @@ export interface DeliveryChangeInput {
   headBranch?: string | null;
   baseBranch?: string | null;
   deploymentRequired?: boolean;
+  deploymentTargetId?: string | null;
   checkStatus?: DeliveryCheckStatus;
   title?: string | null;
   body?: string | null;
@@ -62,6 +67,7 @@ export interface DeliveryProviderSyncResult extends DeliveryProviderResult {
   checkStatus: DeliveryCheckStatus;
   mergeStatus: DeliveryMergeStatus;
   mergedAt: number | null;
+  mergedRevision: string | null;
 }
 
 export interface DeliveryProvider {
@@ -84,6 +90,13 @@ export interface DeliveryProvider {
   refresh?(delivery: Delivery, context: DeliveryProviderContext): Promise<DeliveryProviderSnapshot>;
 }
 
+/** server 只持有 target 的安全 routing metadata；执行路径/argv/secret 只给独立 worker。 */
+export interface DeploymentTargetRegistration extends DeploymentTargetDescriptor {
+  repositoryId: string;
+  fingerprint: string;
+  manifestHash: string;
+}
+
 /**
  * 人工 Provider 的按钮语义是“我已在外部系统完成/开始”，不是 Harbor 代替用户执行。
  * 这条边界必须体现在文案和 API confirmed=true 上。
@@ -98,32 +111,34 @@ export class ManualDeliveryProvider implements DeliveryProvider {
     _context: DeliveryProviderContext,
   ): Promise<DeliveryProviderResult> {
     if (input.confirmed !== true) throw new Error("manual provider 需要 confirmed=true 才能记录已合并事实");
-    return { message: "人工确认变更已在外部 SCM 合并" };
+    if (_delivery.deploymentTargetId && !/^[a-f0-9]{40,64}$/i.test(input.mergedRevision ?? "")) {
+      throw new Error("manual SCM + 自动 deployment target 需要填写完整十六进制 merged commit id");
+    }
+    return { message: "人工确认变更已在外部 SCM 合并", mergedRevision: input.mergedRevision?.toLowerCase() ?? null };
   }
 
-  async startDeployment(
-    _delivery: Delivery,
-    input: DeliveryProviderAction,
-    _context: DeliveryProviderContext,
-  ): Promise<DeliveryProviderResult> {
-    if (input.confirmed !== true) throw new Error("manual provider 需要 confirmed=true 才能记录部署已开始");
-    return { message: "人工确认外部部署已开始" };
-  }
 }
 
 export class DeliveryService {
   /** 仅发布已经持久化的正交事实变化；监听方失败不能反向污染外部 merge 结果。 */
   onTransition?: (before: Delivery, after: Delivery) => void;
   private readonly providers: Map<DeliveryProviderKind, DeliveryProvider>;
+  private readonly deploymentTargets: Map<string, DeploymentTargetRegistration>;
   private readonly externalActionTails = new Map<string, Promise<void>>();
 
   constructor(
     private readonly store: HarborStore,
     providers: DeliveryProvider[] = [],
+    deploymentTargets: DeploymentTargetRegistration[] = [],
   ) {
     this.providers = new Map(
       [new ManualDeliveryProvider(), ...providers].map((provider) => [provider.kind, provider]),
     );
+    this.deploymentTargets = new Map(deploymentTargets.map((target) => [target.id, target]));
+  }
+
+  listDeploymentTargets(): DeploymentTargetDescriptor[] {
+    return [...this.deploymentTargets.values()].map(({ id, name, provider }) => ({ id, name, provider }));
   }
 
   create(
@@ -135,6 +150,7 @@ export class DeliveryService {
       headBranch?: string | null;
       baseBranch?: string | null;
       deploymentRequired?: boolean;
+      deploymentTargetId?: string | null;
     },
     now = Date.now(),
   ): Delivery {
@@ -198,6 +214,16 @@ export class DeliveryService {
     const repository = conv.repositoryId ? this.store.getRepository(conv.repositoryId) : null;
     const providerKind = input.provider ?? (repository?.scmProvider === "codebase" ? "codebase" : "manual");
     const provider = this.configuredProvider(providerKind);
+    const deploymentTargetId = clean(input.deploymentTargetId);
+    if (deploymentTargetId && input.deploymentRequired === false) {
+      throw new Error("选择 deployment target 后 deploymentRequired 必须为 true");
+    }
+    if (deploymentTargetId) {
+      const target = this.configuredTarget(deploymentTargetId);
+      if (!conv.repositoryId || target.repositoryId !== conv.repositoryId) {
+        throw new Error(`deployment target "${deploymentTargetId}" 不属于当前 Issue Repository`);
+      }
+    }
     if (providerKind === "manual" && !input.changeUrl?.trim()) {
       throw new Error("manual provider 需要填写 MR/PR URL");
     }
@@ -222,7 +248,8 @@ export class DeliveryService {
         headBranch: clean(prepared.headBranch),
         baseBranch: clean(prepared.baseBranch),
         checkStatus: prepared.checkStatus,
-        deploymentRequired: prepared.deploymentRequired ?? false,
+        deploymentRequired: deploymentTargetId ? true : prepared.deploymentRequired ?? false,
+        deploymentTargetId,
       },
       now,
     );
@@ -231,7 +258,8 @@ export class DeliveryService {
       "created",
       {
         provider: providerKind,
-        deploymentRequired: prepared.deploymentRequired ?? false,
+        deploymentRequired: deploymentTargetId ? true : prepared.deploymentRequired ?? false,
+        deploymentTargetId,
         changeUrl: delivery.changeUrl,
       },
       actor,
@@ -332,7 +360,7 @@ export class DeliveryService {
       actor,
       now,
     );
-    const after = this.store.getDelivery(current.id)!;
+    const after = this.reconcileAutomaticDeployment(current.id, now);
     this.emitTransition(current, after);
     return after;
   }
@@ -361,6 +389,7 @@ export class DeliveryService {
       if (result.checkStatus !== current.checkStatus) patch.checkStatus = result.checkStatus;
       if (nextMergeStatus !== current.mergeStatus) patch.mergeStatus = nextMergeStatus;
       if (nextMergedAt !== current.mergedAt) patch.mergedAt = nextMergedAt;
+      if (result.mergedRevision !== current.mergedRevision) patch.mergedRevision = result.mergedRevision;
       if (headChanged) {
         // 旧 checks 先随旧 head 失效；本次 result.checkStatus 是同一 sync 对新 head 重建的新证据。
         patch.reviewStatus = "pending";
@@ -371,7 +400,7 @@ export class DeliveryService {
         if (this.requireDelivery(current.id).revision !== current.revision) {
           throw new Error("Delivery 证据在 GitHub sync 期间已变化；旧响应已丢弃，请重新 Sync from GitHub");
         }
-        return current;
+        return this.reconcileAutomaticDeployment(current.id, now);
       }
 
       const events = [
@@ -408,7 +437,7 @@ export class DeliveryService {
       if (!this.store.compareAndSetDelivery(current.id, current.revision, patch, events, now)) {
         throw new Error("Delivery 证据在 GitHub sync 期间已变化；旧响应已丢弃，请重新 Sync from GitHub");
       }
-      const after = this.requireDelivery(current.id);
+      const after = this.reconcileAutomaticDeployment(current.id, now);
       this.emitTransition(current, after);
       return after;
     });
@@ -447,7 +476,7 @@ export class DeliveryService {
       const current = this.requireDelivery(delivery.id);
       const conv = this.requireConversation(current);
       this.assertReviewIdle(conv, allowedRunId);
-      if (current.mergeStatus === "merged") return current;
+      if (current.mergeStatus === "merged") return this.reconcileAutomaticDeployment(current.id, now);
       if (current.mergeStatus !== "open") throw new Error("PR 已关闭且未合并；重新打开并 Sync 后才能合并");
       if (!current.changeUrl) throw new Error("Delivery 尚未关联 MR/PR");
       if (current.reviewStatus !== "approved") throw new Error("人工验收尚未通过，不能合并");
@@ -462,7 +491,7 @@ export class DeliveryService {
       const committed = this.store.compareAndSetDelivery(
         current.id,
         current.revision,
-        { mergeStatus: "merged", mergedAt: now },
+        { mergeStatus: "merged", mergedAt: now, mergedRevision: result.mergedRevision ?? null },
         [{ kind: "merged", data: { message: result.message, data: result.data }, actor: "provider" }],
         now,
       );
@@ -473,7 +502,7 @@ export class DeliveryService {
           "GitHub merge 返回期间 Delivery 证据已变化；未写入 merged，请 Sync from GitHub 核对外部结果后重新验收",
         );
       }
-      const after = this.requireDelivery(current.id);
+      const after = this.reconcileAutomaticDeployment(current.id, now);
       this.emitTransition(current, after);
       return after;
     });
@@ -489,22 +518,35 @@ export class DeliveryService {
     if (delivery.mergeStatus !== "merged") throw new Error("代码尚未合并，不能开始部署");
     if (delivery.deploymentStatus === "not_required") throw new Error("当前 Delivery 配置为无需部署");
     if (delivery.deploymentStatus !== "pending" && delivery.deploymentStatus !== "failed") {
+      if (delivery.deploymentStatus === "needs_recovery") {
+        throw new Error("Deployment needs_recovery；必须先由 host 管理员执行 deploy-worker recover，普通 Retry 被禁止");
+      }
       throw new Error(`当前部署状态为 ${delivery.deploymentStatus}，不能重新开始`);
     }
-    const provider = this.provider(delivery);
-    if (!provider.startDeployment) {
-      throw new Error(`delivery provider "${delivery.provider}" 不支持启动 deployment`);
+    if (delivery.deploymentTargetId) {
+      const after = this.reconcileAutomaticDeployment(delivery.id, now);
+      this.emitTransition(delivery, after);
+      return after;
     }
-    const result = await provider.startDeployment(delivery, input, this.context(conv));
-    this.store.updateDeliveryState(delivery.id, { deploymentStatus: "running", deployedAt: null }, now);
+    const provider = this.provider(delivery);
+    const result = provider.startDeployment
+      ? await provider.startDeployment(delivery, input, this.context(conv))
+      : input.confirmed === true
+        ? { message: "人工确认外部部署已开始" }
+        : (() => {
+            throw new Error("manual deployment 需要 confirmed=true 才能记录已开始");
+          })();
+    this.store.updateDeliveryState(delivery.id, { deploymentStatus: "running", deployedAt: null, deploymentError: null }, now);
     this.store.appendDeliveryEvent(
       delivery.id,
       "deployment_started",
       { message: result.message, data: result.data },
-      "provider",
+      provider.startDeployment ? "provider" : "human",
       now,
     );
-    return this.store.getDelivery(delivery.id)!;
+    const after = this.store.getDelivery(delivery.id)!;
+    this.emitTransition(delivery, after);
+    return after;
   }
 
   async refresh(delivery: Delivery, now = Date.now()): Promise<Delivery> {
@@ -541,35 +583,27 @@ export class DeliveryService {
       "provider",
       now,
     );
-    const after = this.store.getDelivery(delivery.id)!;
+    const after = this.reconcileAutomaticDeployment(delivery.id, now);
     this.emitTransition(delivery, after);
     return after;
-  }
-
-  beginAutomatedDeployment(delivery: Delivery, runId: string, now = Date.now()): Delivery {
-    if (delivery.mergeStatus !== "merged") throw new Error("代码尚未合并，不能开始自动部署");
-    if (delivery.deploymentStatus !== "pending") {
-      throw new Error(`当前部署状态为 ${delivery.deploymentStatus}，不能开始自动部署`);
-    }
-    this.store.updateDeliveryState(delivery.id, { deploymentStatus: "running", deployedAt: null }, now);
-    this.store.appendDeliveryEvent(delivery.id, "deployment_started", { runId, mode: "automation" }, "system", now);
-    return this.store.getDelivery(delivery.id)!;
   }
 
   finishDeployment(
     delivery: Delivery,
     status: "succeeded" | "failed",
     now = Date.now(),
-    actor: DeliveryEvent["actor"] = "human",
   ): Delivery {
+    if (delivery.deploymentTargetId) {
+      throw new Error("自动 deployment target 的结果只能由独立 host worker 写入，不能由 UI/Issue 自报");
+    }
     if (delivery.mergeStatus !== "merged") throw new Error("代码尚未合并，不能记录部署结果");
     if (delivery.deploymentStatus !== "running") throw new Error("只有 running 的部署可以记录结果");
     this.store.updateDeliveryState(
       delivery.id,
-      { deploymentStatus: status, deployedAt: status === "succeeded" ? now : null },
+      { deploymentStatus: status, deployedAt: status === "succeeded" ? now : null, deploymentError: status === "failed" ? "人工确认外部部署失败" : null },
       now,
     );
-    this.store.appendDeliveryEvent(delivery.id, `deployment_${status}`, {}, actor, now);
+    this.store.appendDeliveryEvent(delivery.id, `deployment_${status}`, {}, "human", now);
     return this.store.getDelivery(delivery.id)!;
   }
 
@@ -579,6 +613,47 @@ export class DeliveryService {
 
   private provider(delivery: Delivery): DeliveryProvider {
     return this.configuredProvider(delivery.provider);
+  }
+
+  /** gates 已满足时幂等 enqueue；Retry 会由 failed 推进新 generation。 */
+  reconcileAutomaticDeployment(id: string, now = Date.now()): Delivery {
+    const delivery = this.requireDelivery(id);
+    if (!delivery.deploymentTargetId) return delivery;
+    if (delivery.mergeStatus !== "merged" || delivery.reviewStatus !== "approved" || delivery.checkStatus !== "passed") {
+      return delivery;
+    }
+    const target = this.configuredTarget(delivery.deploymentTargetId);
+    if (delivery.deploymentStatus === "queued" || delivery.deploymentStatus === "running" || delivery.deploymentStatus === "succeeded") {
+      return delivery;
+    }
+    if (delivery.deploymentStatus === "needs_recovery") {
+      throw new Error("Deployment needs_recovery；必须先由 host 管理员恢复并验证旧 baseline，不能普通 Retry");
+    }
+    if (!delivery.mergedRevision || !/^[a-f0-9]{40,64}$/i.test(delivery.mergedRevision)) {
+      const message = "SCM Provider 未提供可信 exact merged revision，自动部署未入队";
+      if (delivery.deploymentStatus !== "failed" || delivery.deploymentError !== message) {
+        this.store.updateDeliveryState(delivery.id, { deploymentStatus: "failed", deploymentError: message }, now);
+        this.store.appendDeliveryEvent(delivery.id, "deployment_enqueue_failed", { reason: "missing_exact_merged_revision" }, "system", now);
+      }
+      return this.requireDelivery(delivery.id);
+    }
+    this.store.enqueueDeploymentJob(
+      delivery.id,
+      delivery.deploymentTargetId,
+      delivery.mergedRevision,
+      target.fingerprint,
+      target.manifestHash,
+      now,
+    );
+    return this.requireDelivery(delivery.id);
+  }
+
+  private configuredTarget(id: string): DeploymentTargetRegistration {
+    const target = this.deploymentTargets.get(id);
+    if (!target) {
+      throw new Error(`deployment target "${id}" 未配置或已移除；请检查 server/worker 的 env 或 ~/.harbor.yaml`);
+    }
+    return target;
   }
 
   private configuredProvider(kind: DeliveryProviderKind): DeliveryProvider {

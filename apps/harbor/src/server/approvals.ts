@@ -26,18 +26,22 @@ export class ApprovalService {
     private store: HarborStore,
     private bus: RunBus,
     private transport: DeviceTransport,
+    private readonly maintenanceActive: () => boolean = () => false,
   ) {}
 
   startSweeper(): void {
+    if (this.maintenanceActive() || this.sweeper) return;
     this.sweeper = setInterval(() => this.sweep(), 60_000);
   }
 
   stopSweeper(): void {
     if (this.sweeper) clearInterval(this.sweeper);
+    this.sweeper = null;
   }
 
   /** daemon approval_req 到达 */
   onApprovalReq(msg: { runId: string; requestId: string; toolName: string; input: unknown }): void {
+    if (this.maintenanceActive()) return;
     const run = this.store.getRun(msg.runId);
     if (!run || (run.status !== "running" && run.status !== "queued")) {
       // run 已终态（取消竞态等）——直接回 deny，别让 daemon 侧挂着
@@ -65,6 +69,7 @@ export class ApprovalService {
    * @returns 决议后的 approval；已决议过则原样返回（调用方据 decidedBy/status 提示）
    */
   decide(approvalId: string, behavior: "allow" | "deny", decidedBy: string): Approval {
+    if (this.maintenanceActive()) throw new Error("deployment maintenance 期间禁止审批 mutation");
     const approval = this.store.getApproval(approvalId);
     if (!approval) throw new Error(`approval "${approvalId}" 不存在`);
     if (approval.status !== "pending") return approval; // 幂等：重复点击/双通道竞态
@@ -83,6 +88,7 @@ export class ApprovalService {
 
   /** run 终态：挂着的 pending 全部作废（daemon 侧 executor 自行清理其 promise） */
   expireForRun(runId: string): void {
+    if (this.maintenanceActive()) return;
     const now = Date.now();
     for (const a of this.store.pendingApprovalsForRun(runId)) {
       this.store.markApprovalDecided(a.id, "expired", "system", now);
@@ -117,6 +123,7 @@ export class ApprovalService {
   }
 
   private sweep(): void {
+    if (this.maintenanceActive()) return;
     const cutoff = Date.now() - APPROVAL_TTL_MS;
     for (const a of this.store.pendingApprovalsOlderThan(cutoff)) {
       this.store.markApprovalDecided(a.id, "expired", "sweep", Date.now());

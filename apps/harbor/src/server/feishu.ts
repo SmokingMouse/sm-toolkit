@@ -89,6 +89,7 @@ export class FeishuEntry implements ApprovalSink {
       botMode: LarkWorkspaceBinding["botMode"];
       workspaceId?: string;
     } = { botMode: "global" },
+    private readonly maintenanceActive: () => boolean = () => false,
   ) {}
 
   async start(): Promise<void> {
@@ -103,6 +104,7 @@ export class FeishuEntry implements ApprovalSink {
   // ── 消息路由 ──────────────────────────────────────────
 
   async handleMessage(msg: IncomingMessage): Promise<void> {
+    if (this.maintenanceActive()) return;
     const text = this.messageText(msg);
     if (!text) return;
     const binding =
@@ -683,6 +685,7 @@ export class FeishuEntry implements ApprovalSink {
   // ── 卡片按钮回调 ──────────────────────────────────────
 
   async handleAction(action: IncomingAction): Promise<void> {
+    if (this.maintenanceActive()) return;
     let value: { cmd?: string; id?: string; behavior?: string };
     try {
       const parsed = JSON.parse(action.value) as unknown;

@@ -57,10 +57,12 @@ export class AutomationService {
   constructor(
     private store: HarborStore,
     private coordinator: RunCoordinator,
+    private readonly maintenanceActive: () => boolean = () => false,
   ) {}
 
   /** boot：missed 检查 + 全部 enabled schedule Trigger 排班。 */
   start(): void {
+    if (this.maintenanceActive()) return;
     const now = Date.now();
     for (const automation of this.store.listAutomations()) {
       if (!automation.enabled) continue;
@@ -83,6 +85,8 @@ export class AutomationService {
   }
 
   schedule(automation: Automation): void {
+    if (this.maintenanceActive())
+      throw new Error("deployment maintenance 期间禁止排班/触发 automation");
     this.unschedule(automation.id);
     if (!automation.enabled) return;
     for (const trigger of automation.triggers) {
@@ -102,6 +106,8 @@ export class AutomationService {
 
   /** 即使已停用也允许人工单次执行；停用只控制自动 Trigger。 */
   runNow(id: string): Run {
+    if (this.maintenanceActive())
+      throw new Error("deployment maintenance 期间禁止触发 automation");
     const automation = this.store.getAutomation(id);
     if (!automation) throw new Error(`automation "${id}" 不存在`);
     const run = this.dispatch(automation, null, "event.automation.manual", {
@@ -113,6 +119,8 @@ export class AutomationService {
   }
 
   receiveWebhook(triggerId: string, input: AutomationWebhookInput): AutomationWebhookResult {
+    if (this.maintenanceActive())
+      throw new Error("deployment maintenance 期间禁止触发 automation");
     const trigger = this.store.getAutomationTrigger(triggerId);
     if (!trigger || trigger.type !== "webhook") return { status: "ignored", reason: "webhook trigger 不存在" };
     const automation = this.store.getAutomation(trigger.automationId);
@@ -167,6 +175,7 @@ export class AutomationService {
    * 一个事件可命中多条 Automation；每个 Trigger 用 eventId 独立去重。
    */
   receiveEvent(input: AutomationEventInput): AutomationEventResult[] {
+    if (this.maintenanceActive()) return [];
     const eventType = input.eventType.trim();
     if (!eventType) throw new Error("Automation eventType 不能为空");
     if (!input.eventId.trim()) throw new Error("Automation eventId 不能为空");
@@ -242,6 +251,7 @@ export class AutomationService {
   }
 
   private fire(triggerId: string): void {
+    if (this.maintenanceActive()) return;
     const trigger = this.store.getAutomationTrigger(triggerId);
     if (!trigger || trigger.type !== "schedule" || !trigger.enabled) return;
     const automation = this.store.getAutomation(trigger.automationId);
@@ -271,6 +281,8 @@ export class AutomationService {
     triggerContext: Record<string, unknown>,
     eventId: string | null = null,
   ): Run | null {
+    if (this.maintenanceActive())
+      throw new Error("deployment maintenance 期间禁止 automation 写入");
     const agent = this.store.getAgent(automation.agentId);
     if (!agent || agent.archivedAt) throw new Error("agent 不存在或已归档，未触发");
     if (agent.workspaceId !== automation.workspaceId) {

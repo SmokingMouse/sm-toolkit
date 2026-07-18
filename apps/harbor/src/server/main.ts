@@ -5,7 +5,6 @@
  * HARBOR_CONCURRENCY=2（per-device 并发闸）；飞书入口走 ~/.harbor.yaml feishu 块（可缺省）。
  */
 
-import { resolve } from "node:path";
 import { openDb } from "./db.js";
 import { HarborStore } from "./store.js";
 import { RunBus } from "./bus.js";
@@ -15,7 +14,7 @@ import { ApprovalService } from "./approvals.js";
 import { AutomationService } from "./automation.js";
 import { FeishuEntry } from "./feishu.js";
 import { buildRest } from "./rest.js";
-import { DeliveryService, ManualDeliveryProvider } from "./delivery.js";
+import { DeliveryService } from "./delivery.js";
 import { GitHubDeliveryProvider, GitHubRestClient } from "./github-delivery.js";
 import { CodebaseDeliveryProvider } from "./codebase.js";
 import { ScmService } from "./scm.js";
@@ -24,6 +23,8 @@ import { SkillImportService } from "./skill-import.js";
 import { SkillSyncService } from "./skill-sync.js";
 import {
   codebaseConfig,
+  databasePath,
+  deploymentTargets,
   feishuBotProfiles,
   githubConfig,
   token,
@@ -35,12 +36,13 @@ import {
   type Conversation,
   type Delivery,
 } from "../protocol.js";
+import { reconcileCompletedDeployments } from "./deployment-reconciler.js";
+import { HostMaintenanceSentinel } from "../deployment-worker/maintenance.js";
+import { DeploymentMaintenanceGuard } from "./maintenance.js";
 
 const authToken = token();
 const port = Number(process.env.HARBOR_PORT ?? DEFAULT_PORT);
-const dbPath =
-  process.env.HARBOR_DB ??
-  resolve(process.env.HOME ?? "~", ".harbor/harbor.db");
+const dbPath = databasePath();
 const concurrency = Number(
   process.env.HARBOR_CONCURRENCY ?? DEFAULT_DEVICE_CONCURRENCY,
 );
@@ -48,23 +50,34 @@ const concurrency = Number(
 const db = openDb(dbPath);
 const store = new HarborStore(db);
 const bus = new RunBus();
-const hub = new DeviceHub(store, authToken);
+const hub = new DeviceHub(store, authToken, () => store.listDeploymentMaintenance().length > 0);
 const gc = githubConfig();
-const deliveries = new DeliveryService(store, [
-  new ManualDeliveryProvider(),
-  new CodebaseDeliveryProvider(store),
-  ...(gc
-    ? [new GitHubDeliveryProvider(new GitHubRestClient(gc.token))]
-    : []),
-]);
+// server 只计算非敏感 routing/fingerprint；health credential value 只允许 worker 解析进内存。
+const configuredDeploymentTargets = deploymentTargets({ resolveSecrets: false });
+const maintenance = new DeploymentMaintenanceGuard(store, new HostMaintenanceSentinel());
+let maintenanceActive = (await maintenance.current()).active;
+const writesBlocked = () => maintenanceActive || store.listDeploymentMaintenance().length > 0;
+hub.setMaintenance(maintenanceActive);
+const deliveries = new DeliveryService(
+  store,
+  [
+    new CodebaseDeliveryProvider(store),
+    ...(gc
+      ? [new GitHubDeliveryProvider(new GitHubRestClient(gc.token))]
+      : []),
+  ],
+  configuredDeploymentTargets.map(({ id, name, provider, repositoryId, fingerprint, manifestHash }) => ({
+    id, name, provider, repositoryId, fingerprint, manifestHash,
+  })),
+);
 if (!gc) {
   console.log(
     "[harbor-server] GitHub Delivery 未配置（HARBOR_GITHUB_TOKEN 或 ~/.harbor.yaml github.token），manual provider 仍可用",
   );
 }
 const coordinator = new RunCoordinator(store, bus, hub, concurrency, deliveries);
-const approvals = new ApprovalService(store, bus, hub);
-const automations = new AutomationService(store, coordinator);
+const approvals = new ApprovalService(store, bus, hub, writesBlocked);
+const automations = new AutomationService(store, coordinator, writesBlocked);
 const scm = new ScmService(store, coordinator, deliveries);
 const codebase = codebaseConfig();
 const skillImports = new SkillImportService();
@@ -87,7 +100,7 @@ const finalizeDelivery = (deliveryId: string): void => {
 };
 
 const dispatchMergedEvent = (delivery: Delivery, conversation: Conversation): void => {
-  const results = automations.receiveEvent({
+  automations.receiveEvent({
     workspaceId: conversation.workspaceId,
     eventType: "delivery.merged",
     eventId: `delivery.merged:${delivery.id}:${delivery.mergedAt ?? delivery.revision}`,
@@ -98,16 +111,9 @@ const dispatchMergedEvent = (delivery: Delivery, conversation: Conversation): vo
       changeUrl: delivery.changeUrl,
       baseBranch: delivery.baseBranch,
       deploymentStatus: delivery.deploymentStatus,
+      deploymentTargetId: delivery.deploymentTargetId,
     },
   });
-  const deployment = results.find((result) => {
-    if (result.status !== "started") return false;
-    const automation = store.getAutomation(result.automationId);
-    return automation?.purpose === "verification" && automation.outputMode === "run";
-  });
-  if (delivery.deploymentStatus === "pending" && deployment?.status === "started") {
-    deliveries.beginAutomatedDeployment(delivery, deployment.run.id);
-  }
 };
 
 const dispatchMergeReadyEvent = (delivery: Delivery, conversation: Conversation): void => {
@@ -143,6 +149,7 @@ deliveries.onTransition = (before, after) => {
 
 // 飞书入口（可选）：配置齐才挂；审批卡片/结果回报都走它
 const feishuEntries: FeishuEntry[] = [];
+const startedFeishuEntries = new Set<FeishuEntry>();
 const profiles = feishuBotProfiles();
 if (profiles.length > 0) {
   const { FeishuChannel } = await import("@sm/channel-feishu");
@@ -172,16 +179,9 @@ if (profiles.length > 0) {
         botMode: profile.mode,
         ...(workspace ? { workspaceId: workspace.id } : {}),
       },
+      writesBlocked,
     );
     feishuEntries.push(entry);
-    entry.start().catch((error) => {
-      console.error(
-        `[harbor-server] ${profile.mode} 飞书入口启动失败（其他入口继续）：`,
-        error,
-      );
-      const index = feishuEntries.indexOf(entry);
-      if (index >= 0) feishuEntries.splice(index, 1);
-    });
   }
   approvals.sink = {
     onApprovalCreated: (approval, run, conv) =>
@@ -196,6 +196,18 @@ if (profiles.length > 0) {
     "[harbor-server] 飞书未配置（~/.harbor.yaml feishu 块），入口关闭",
   );
 }
+const startFeishu = () => {
+  if (writesBlocked()) return;
+  for (const entry of feishuEntries) {
+    if (startedFeishuEntries.has(entry)) continue;
+    startedFeishuEntries.add(entry);
+    entry.start().catch((error) => {
+      startedFeishuEntries.delete(entry);
+      console.error("[harbor-server] 飞书入口启动失败（其他入口继续）：", error);
+    });
+  }
+};
+startFeishu();
 
 // run 终态 hook：审批作废 + 飞书回报
 coordinator.onRunFinished = (run, conv) => {
@@ -225,46 +237,6 @@ coordinator.onRunFinished = (run, conv) => {
       },
     });
   }
-  const triggerPayload = run.triggerContext.payload;
-  const deliveryId =
-    run.sourceType === "automation" &&
-    run.triggerContext.eventType === "delivery.merged" &&
-    triggerPayload &&
-    typeof triggerPayload === "object" &&
-    !Array.isArray(triggerPayload) &&
-    typeof (triggerPayload as Record<string, unknown>).deliveryId === "string"
-      ? (triggerPayload as Record<string, unknown>).deliveryId as string
-      : null;
-  if (deliveryId) {
-    const delivery = store.getDelivery(deliveryId);
-    const deploymentEvent = store
-      .listDeliveryEvents(deliveryId)
-      .filter((event) => event.kind === "deployment_started")
-      .at(-1);
-    const deploymentRunId =
-      deploymentEvent?.data &&
-      typeof deploymentEvent.data === "object" &&
-      !Array.isArray(deploymentEvent.data) &&
-      typeof (deploymentEvent.data as Record<string, unknown>).runId === "string"
-        ? (deploymentEvent.data as Record<string, unknown>).runId
-        : null;
-    if (delivery?.deploymentStatus === "running" && deploymentRunId === run.id) {
-      try {
-        deliveries.finishDeployment(
-          delivery,
-          run.status === "succeeded" ? "succeeded" : "failed",
-          Date.now(),
-          "agent",
-        );
-        finalizeDelivery(delivery.id);
-      } catch (error) {
-        console.error(
-          `[automation] deployment Run ${run.id} 收尾失败：`,
-          error instanceof Error ? error.message : error,
-        );
-      }
-    }
-  }
 };
 
 const app = buildRest(
@@ -289,14 +261,32 @@ const app = buildRest(
       )
       .filter((id): id is string => !!id),
   ),
+  maintenance,
 );
+
+// worker 直接把 durable result 写回 SQLite；server 在运行或重启后确定性推进 Issue/收尾 worktree。
+const finalizeDeployments = async () => {
+  try {
+    if ((await maintenance.current()).active) return;
+  } catch {
+    return;
+  }
+  reconcileCompletedDeployments(store, coordinator);
+};
+void finalizeDeployments();
+setInterval(() => void finalizeDeployments(), 1_000);
 
 Bun.serve<WsData>({
   port,
   idleTimeout: 0, // SSE 长挂（模型思考期无数据），禁用 HTTP 空闲超时；WS 保活靠心跳+sweep
-  fetch(req, server) {
+  async fetch(req, server) {
     const url = new URL(req.url);
     if (url.pathname === "/ws") {
+      let blocked = true;
+      try { blocked = (await maintenance.current()).active; } catch { /* fail-closed */ }
+      if (blocked) {
+        return new Response("deployment maintenance", { status: 503, headers: { "Retry-After": "1" } });
+      }
       const ok = server.upgrade(req, {
         data: {
           deviceId: null,
@@ -316,41 +306,77 @@ Bun.serve<WsData>({
   },
 });
 hub.startSweeper();
-approvals.startSweeper();
-automations.start();
 // crash-safe reconciliation：领域事实先落库，boot 时用稳定 eventId 重放；Trigger delivery 表负责去重。
-for (const conversation of store.listConversations({ kind: "issue", status: "review" })) {
-  if (store.activeRunForConversation(conversation.id)) continue;
-  const delivery = store.getDeliveryForConversation(conversation.id);
-  if (delivery?.mergeStatus === "merged" && delivery.deploymentStatus === "pending") {
-    dispatchMergedEvent(delivery, conversation);
-  } else if (delivery?.status === "merge_ready") {
-    dispatchMergeReadyEvent(delivery, conversation);
-  }
-  if (!delivery || delivery.reviewStatus === "pending") {
-    const implementation = store
-      .listRunsByConversation(conversation.id)
-      .filter((run) => run.purpose === "implementation" && run.status === "succeeded")
-      .at(-1);
-    if (implementation) {
-      automations.receiveEvent({
-        workspaceId: conversation.workspaceId,
-        eventType: "issue.review_ready",
-        eventId: `issue.review_ready:${implementation.id}`,
-        payload: {
-          conversationId: conversation.id,
-          runId: implementation.id,
-          repositoryId: conversation.repositoryId,
-          assigneeAgentId: conversation.agentId,
-        },
-      });
+const reconcileDomainEvents = () => {
+  for (const conversation of store.listConversations({ kind: "issue", status: "review" })) {
+    if (store.activeRunForConversation(conversation.id)) continue;
+    const delivery = store.getDeliveryForConversation(conversation.id);
+    if (delivery?.mergeStatus === "merged" && delivery.deploymentStatus === "pending") {
+      dispatchMergedEvent(delivery, conversation);
+    } else if (delivery?.status === "merge_ready") {
+      dispatchMergeReadyEvent(delivery, conversation);
+    }
+    if (!delivery || delivery.reviewStatus === "pending") {
+      const implementation = store
+        .listRunsByConversation(conversation.id)
+        .filter((run) => run.purpose === "implementation" && run.status === "succeeded")
+        .at(-1);
+      if (implementation) {
+        automations.receiveEvent({
+          workspaceId: conversation.workspaceId,
+          eventType: "issue.review_ready",
+          eventId: `issue.review_ready:${implementation.id}`,
+          payload: {
+            conversationId: conversation.id,
+            runId: implementation.id,
+            repositoryId: conversation.repositoryId,
+            assigneeAgentId: conversation.agentId,
+          },
+        });
+      }
     }
   }
+};
+
+const startControlPlane = () => {
+  approvals.startSweeper();
+  automations.start();
+  reconcileDomainEvents();
+  skillSync.start();
+  startFeishu();
+};
+
+const stopControlPlane = () => {
+  approvals.stopSweeper();
+  automations.stop();
+  skillSync.stop();
+};
+
+if (!maintenanceActive) {
+  startControlPlane();
 }
-skillSync.start();
+
+setInterval(() => {
+  void maintenance.current().then((snapshot) => {
+    if (snapshot.active === maintenanceActive) return;
+    maintenanceActive = snapshot.active;
+    hub.setMaintenance(maintenanceActive);
+    if (maintenanceActive) {
+      stopControlPlane();
+    } else {
+      startControlPlane();
+    }
+  }).catch((error) => {
+    maintenanceActive = true;
+    hub.setMaintenance(true);
+    stopControlPlane();
+    console.error("[harbor-server] maintenance sentinel 不可判定，已 fail-closed：", error);
+  });
+}, 250);
 
 // run_events 7 天滚动 prune（boot 一次 + 每小时）
 const prune = () => {
+  if (writesBlocked()) return;
   const n = store.pruneRunEvents(Date.now() - RUN_EVENTS_RETENTION_MS);
   if (n > 0)
     console.log(`[harbor-server] run_events prune：清理 ${n} 行（>7 天）`);

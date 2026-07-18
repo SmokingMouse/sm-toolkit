@@ -26,10 +26,12 @@ export class DeviceHub implements DeviceTransport {
   coordinator!: RunCoordinator;
   approvals!: ApprovalService;
   private sweeper: ReturnType<typeof setInterval> | null = null;
+  private maintenance = false;
 
   constructor(
     private store: HarborStore,
     private expectedToken: string,
+    private readonly durableMaintenanceActive: () => boolean = () => false,
   ) {}
 
   startSweeper(): void {
@@ -43,14 +45,15 @@ export class DeviceHub implements DeviceTransport {
   // ---- DeviceTransport ----
 
   isOnline(deviceId: string): boolean {
-    return this.conns.has(deviceId);
+    return !this.blocked() && this.conns.has(deviceId);
   }
 
   onlineIds(): Set<string> {
-    return new Set(this.conns.keys());
+    return this.blocked() ? new Set() : new Set(this.conns.keys());
   }
 
   send(deviceId: string, msg: ServerMsg): boolean {
+    if (this.blocked()) return false;
     const ws = this.conns.get(deviceId);
     if (!ws) return false;
     return ws.send(JSON.stringify(msg)) > 0;
@@ -59,10 +62,14 @@ export class DeviceHub implements DeviceTransport {
   // ---- Bun.serve websocket handlers ----
 
   handleOpen(_ws: ServerWebSocket<WsData>): void {
-    // 注册发生在 hello 消息，open 时什么都不做
+    if (this.blocked()) _ws.close(1013, "deployment maintenance");
   }
 
   handleMessage(ws: ServerWebSocket<WsData>, raw: string | Buffer): void {
+    if (this.blocked()) {
+      ws.close(1013, "deployment maintenance");
+      return;
+    }
     let msg: DaemonMsg;
     try {
       msg = JSON.parse(typeof raw === "string" ? raw : raw.toString("utf-8")) as DaemonMsg;
@@ -108,6 +115,19 @@ export class DeviceHub implements DeviceTransport {
       this.conns.delete(id);
       console.log(`[hub] device 离线：${ws.data.deviceName}（${id}）`);
     }
+  }
+
+  setMaintenance(active: boolean): void {
+    if (this.maintenance === active) return;
+    this.maintenance = active;
+    if (active) {
+      for (const ws of this.conns.values()) ws.close(1013, "deployment maintenance");
+      this.conns.clear();
+    }
+  }
+
+  private blocked(): boolean {
+    return this.maintenance || this.durableMaintenanceActive();
   }
 
   // ---- 内部 ----

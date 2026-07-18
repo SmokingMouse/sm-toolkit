@@ -15,6 +15,13 @@ import {
   showDaemonLogs,
   uninstallDaemonService,
 } from "../daemon/service.js";
+import {
+  deploymentWorkerServiceStatus,
+  setupDeploymentWorkerService,
+  showDeploymentWorkerLogs,
+  uninstallDeploymentWorkerService,
+} from "../deployment-worker/service.js";
+import { acknowledgeLegacyLocalDeployment, recoverLocalDeployment } from "../deployment-worker/recovery.js";
 
 const USAGE = `${c.bold}harbor${c.reset} — 个人多设备 agent 调度
 
@@ -47,6 +54,14 @@ ${c.bold}设备 daemon${c.reset}
   harbor daemon status
   harbor daemon logs [--lines 100] [--follow]
   harbor daemon uninstall                                  卸服务，保留配置与日志
+
+${c.bold}部署 host worker（独立 LaunchAgent）${c.reset}
+  harbor deploy-worker setup
+  harbor deploy-worker status
+  harbor deploy-worker logs [--lines 100] [--follow]
+  harbor deploy-worker recover <job-id> --target <target-id> --confirm <job-id>
+  harbor deploy-worker acknowledge <legacy-job-id> --baseline-revision <exact-sha> --confirm <legacy-job-id>
+  harbor deploy-worker uninstall
 
 ${c.bold}审批${c.reset}（permission=default 的 agent 用工具时上抛）
   harbor approvals [--status pending]                      审批列表
@@ -173,6 +188,49 @@ async function main(): Promise<number> {
       return 0;
     }
     throw new Error("用法：harbor daemon setup|status|logs|uninstall");
+  }
+
+  if (domain === "deploy-worker") {
+    if (verb === "setup") {
+      const status = setupDeploymentWorkerService();
+      console.log(`${c.green}✓${c.reset} deployment worker LaunchAgent 已安装并启动`);
+      console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
+      return 0;
+    }
+    if (verb === "status") {
+      const status = deploymentWorkerServiceStatus();
+      console.log(`${status.running ? c.green : c.yellow}${status.running ? "● running" : "○ stopped"}${c.reset} ${status.state}${status.pid ? ` pid=${status.pid}` : ""}`);
+      console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
+      return status.running ? 0 : 1;
+    }
+    if (verb === "logs") {
+      const lines = typeof flags.lines === "string" ? Number(flags.lines) : 100;
+      if (!Number.isFinite(lines) || lines <= 0) throw new Error("--lines 必须是正整数");
+      return showDeploymentWorkerLogs(lines, flags.follow === true);
+    }
+    if (verb === "recover") {
+      const jobId = pos[2];
+      if (!jobId) throw new Error("用法：harbor deploy-worker recover <job-id> --target <target-id> --confirm <job-id>");
+      if (flags.confirm !== jobId) throw new Error("recovery 会操作 host service/rollback anchor；--confirm 必须精确重复完整 job-id");
+      await recoverLocalDeployment(jobId, req(flags, "target"));
+      console.log(`${c.green}✓${c.reset} deployment ${jobId} 已恢复并验证旧 baseline；现在可从 Delivery 执行普通 Retry`);
+      return 0;
+    }
+    if (verb === "acknowledge") {
+      const jobId = pos[2];
+      if (!jobId) throw new Error("用法：harbor deploy-worker acknowledge <legacy-job-id> --baseline-revision <exact-sha> --confirm <legacy-job-id>");
+      if (flags.confirm !== jobId) throw new Error("legacy ack 会解除不可执行的旧 gate；--confirm 必须精确重复完整 job-id");
+      await acknowledgeLegacyLocalDeployment(jobId, req(flags, "baseline-revision"));
+      console.log(`${c.yellow}!${c.reset} legacy deployment ${jobId} 已记为 failed；必须先 bootstrap trusted baseline manifest 才能 Retry`);
+      return 0;
+    }
+    if (verb === "uninstall") {
+      const status = uninstallDeploymentWorkerService();
+      console.log(`${c.green}✓${c.reset} deployment worker LaunchAgent 已卸载（配置与日志保留）`);
+      console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
+      return 0;
+    }
+    throw new Error("用法：harbor deploy-worker setup|status|logs|recover|acknowledge|uninstall");
   }
 
   const workspace = typeof flags.workspace === "string" ? flags.workspace : configuredWorkspace();

@@ -15,6 +15,8 @@ const PREFIXES = {
   approval: "ap",
   skill: "sk",
   delivery: "del",
+  deploymentJob: "depjob",
+  deploymentLease: "lease",
   workspace: "ws",
   repository: "repo",
   repositoryMount: "mount",

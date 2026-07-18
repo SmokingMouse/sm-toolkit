@@ -5,8 +5,8 @@
  */
 
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { chmodSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 
 /** Exported for migration-lineage regression fixtures; application code should use openDb. */
 export const MIGRATIONS: string[] = [
@@ -1021,7 +1021,7 @@ export const MIGRATIONS: string[] = [
     SET review_status = 'pending', review_approved_at = NULL, check_status = 'pending'
     WHERE provider = 'github' AND (latest_head_sha IS NULL OR approved_head_sha IS NULL);
   `,
-  // v16 —— Agent team：Harbor 内部领域事件驱动 review/deploy Automation
+  // v16 —— Agent team：Harbor 内部领域事件、event Automation 与 Run-scoped actions
   `
   CREATE TABLE IF NOT EXISTS automation_webhook_deliveries (
     trigger_id TEXT NOT NULL REFERENCES automation_triggers(id) ON DELETE CASCADE,
@@ -1172,6 +1172,299 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX idx_automation_triggers_automation ON automation_triggers(automation_id, type);
   CREATE INDEX idx_automation_trigger_deliveries_ts ON automation_trigger_deliveries(received_at);
   `,
+  // v17（Provider branch phase 1 / 原 v14）—— SCM 与 Deployment Provider 正交；durable queue
+  `
+  CREATE TABLE deliveries_v14 (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id),
+    provider TEXT NOT NULL,
+    change_url TEXT,
+    external_id TEXT,
+    head_branch TEXT,
+    base_branch TEXT,
+    latest_head_sha TEXT,
+    approved_head_sha TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending' CHECK (review_status IN ('pending','approved')),
+    check_status TEXT NOT NULL DEFAULT 'unknown' CHECK (check_status IN ('unknown','pending','passed','failed')),
+    merge_status TEXT NOT NULL DEFAULT 'open' CHECK (merge_status IN ('open','closed','merged')),
+    deployment_status TEXT NOT NULL DEFAULT 'not_required'
+      CHECK (deployment_status IN ('not_required','pending','queued','running','succeeded','failed')),
+    deployment_target_id TEXT,
+    merged_revision TEXT,
+    deployment_revision TEXT,
+    deployment_generation INTEGER NOT NULL DEFAULT 0,
+    active_deployment_job_id TEXT,
+    deployment_error TEXT,
+    review_approved_at INTEGER,
+    merged_at INTEGER,
+    deployed_at INTEGER,
+    revision INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  INSERT INTO deliveries_v14
+    (id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+     latest_head_sha, approved_head_sha, review_status, check_status, merge_status,
+     deployment_status, review_approved_at, merged_at, deployed_at, revision, created_at, updated_at)
+    SELECT id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+           latest_head_sha, approved_head_sha, review_status, check_status, merge_status,
+           deployment_status, review_approved_at, merged_at, deployed_at, revision, created_at, updated_at
+    FROM deliveries;
+  DROP TABLE deliveries;
+  ALTER TABLE deliveries_v14 RENAME TO deliveries;
+  CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
+  CREATE INDEX idx_deliveries_deployment_status ON deliveries(deployment_status, updated_at);
+
+  CREATE TABLE deployment_jobs (
+    id TEXT PRIMARY KEY,
+    delivery_id TEXT NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL,
+    target_id TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','running','succeeded','failed')),
+    attempt INTEGER NOT NULL DEFAULT 0,
+    lease_token TEXT,
+    lease_expires_at INTEGER,
+    checkpoint TEXT NOT NULL DEFAULT 'queued',
+    log TEXT,
+    error TEXT,
+    rollback_complete INTEGER,
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (delivery_id, generation)
+  );
+  CREATE INDEX idx_deployment_jobs_claim ON deployment_jobs(status, lease_expires_at, created_at);
+  `,
+  // v18（Provider branch phase 2 / 原 v15）—— fail-closed recovery；冻结 target 与 rollback anchor
+  `
+  DROP TABLE IF EXISTS deployment_maintenance;
+  CREATE TABLE deliveries_v15 (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id),
+    provider TEXT NOT NULL,
+    change_url TEXT,
+    external_id TEXT,
+    head_branch TEXT,
+    base_branch TEXT,
+    latest_head_sha TEXT,
+    approved_head_sha TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending' CHECK (review_status IN ('pending','approved')),
+    check_status TEXT NOT NULL DEFAULT 'unknown' CHECK (check_status IN ('unknown','pending','passed','failed')),
+    merge_status TEXT NOT NULL DEFAULT 'open' CHECK (merge_status IN ('open','closed','merged')),
+    deployment_status TEXT NOT NULL DEFAULT 'not_required'
+      CHECK (deployment_status IN ('not_required','pending','queued','running','succeeded','failed','needs_recovery')),
+    deployment_target_id TEXT,
+    merged_revision TEXT,
+    deployment_revision TEXT,
+    deployment_generation INTEGER NOT NULL DEFAULT 0,
+    active_deployment_job_id TEXT,
+    deployment_error TEXT,
+    review_approved_at INTEGER,
+    merged_at INTEGER,
+    deployed_at INTEGER,
+    revision INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  INSERT INTO deliveries_v15
+    SELECT id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+           latest_head_sha, approved_head_sha, review_status, check_status, merge_status,
+           CASE WHEN deployment_status IN ('queued','running') THEN 'needs_recovery' ELSE deployment_status END,
+           deployment_target_id, merged_revision, deployment_revision, deployment_generation,
+           active_deployment_job_id,
+           CASE WHEN deployment_status IN ('queued','running')
+                THEN 'v17 active deployment 缺少 target fingerprint/maintenance anchor；需要管理员 recovery'
+                ELSE deployment_error END,
+           review_approved_at, merged_at, deployed_at, revision, created_at, updated_at
+    FROM deliveries;
+
+  CREATE TABLE deployment_jobs_v15 (
+    id TEXT PRIMARY KEY,
+    delivery_id TEXT NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL,
+    target_id TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    target_fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued'
+      CHECK (status IN ('queued','running','recovering','succeeded','failed','needs_recovery')),
+    attempt INTEGER NOT NULL DEFAULT 0,
+    lease_token TEXT,
+    lease_expires_at INTEGER,
+    checkpoint TEXT NOT NULL DEFAULT 'queued',
+    log TEXT,
+    error TEXT,
+    rollback_complete INTEGER,
+    rollback_attempt INTEGER,
+    baseline_revision TEXT,
+    new_service_pid INTEGER,
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (delivery_id, generation)
+  );
+  INSERT INTO deployment_jobs_v15
+    (id, delivery_id, generation, target_id, revision, target_fingerprint, status, attempt,
+     lease_token, lease_expires_at, checkpoint, log, error, rollback_complete,
+     rollback_attempt, baseline_revision, new_service_pid, created_at, started_at, finished_at, updated_at)
+    SELECT id, delivery_id, generation, target_id, revision, '',
+           CASE WHEN status IN ('queued','running') THEN 'needs_recovery' ELSE status END,
+           attempt, NULL, NULL,
+           CASE WHEN status IN ('queued','running') THEN 'rollback_incomplete' ELSE checkpoint END,
+           log,
+           CASE WHEN status IN ('queued','running')
+                THEN 'v17 active deployment 无可证明 rollback anchor；需要管理员 recovery'
+                ELSE error END,
+           CASE WHEN status IN ('queued','running') THEN 0 ELSE rollback_complete END,
+           NULL, NULL, NULL, created_at, started_at, finished_at, updated_at
+    FROM deployment_jobs;
+
+  DROP TABLE deployment_jobs;
+  DROP TABLE deliveries;
+  ALTER TABLE deliveries_v15 RENAME TO deliveries;
+  ALTER TABLE deployment_jobs_v15 RENAME TO deployment_jobs;
+  CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
+  CREATE INDEX idx_deliveries_deployment_status ON deliveries(deployment_status, updated_at);
+  CREATE INDEX idx_deployment_jobs_claim ON deployment_jobs(status, lease_expires_at, created_at);
+
+  CREATE TABLE deployment_maintenance (
+    target_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL UNIQUE REFERENCES deployment_jobs(id) ON DELETE CASCADE,
+    delivery_id TEXT NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL,
+    revision TEXT NOT NULL,
+    target_fingerprint TEXT NOT NULL,
+    rollback_attempt INTEGER NOT NULL,
+    baseline_revision TEXT NOT NULL,
+    expected_revision TEXT NOT NULL,
+    phase TEXT NOT NULL CHECK (phase IN ('deploying','healthy','rolling_back','needs_recovery')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  `,
+  // v19（Provider branch phase 3 / 原 v16）—— host-global gate + monotonic fence + durable identity
+  `
+  CREATE TABLE deployment_jobs_v16 (
+    id TEXT PRIMARY KEY,
+    delivery_id TEXT NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL,
+    target_id TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    target_fingerprint TEXT NOT NULL,
+    target_manifest_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued'
+      CHECK (status IN ('queued','running','recovering','succeeded','failed','needs_recovery')),
+    attempt INTEGER NOT NULL DEFAULT 0,
+    fence_epoch INTEGER,
+    fence_nonce TEXT,
+    lease_token TEXT,
+    lease_expires_at INTEGER,
+    checkpoint TEXT NOT NULL DEFAULT 'queued',
+    log TEXT,
+    error TEXT,
+    failure_kind TEXT CHECK (failure_kind IS NULL OR failure_kind IN
+      ('config_drift','bootstrap_required','deployment_failed','rollback_incomplete','legacy_ack_required')),
+    rollback_complete INTEGER,
+    rollback_attempt INTEGER,
+    baseline_revision TEXT,
+    baseline_fingerprint TEXT,
+    baseline_manifest_hash TEXT,
+    baseline_health_fingerprint TEXT,
+    database_backup_created INTEGER NOT NULL DEFAULT 0 CHECK (database_backup_created IN (0,1)),
+    new_service_pids TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (delivery_id, generation)
+  );
+  INSERT INTO deployment_jobs_v16
+    (id, delivery_id, generation, target_id, revision, target_fingerprint, target_manifest_hash,
+     status, attempt, lease_token, lease_expires_at, checkpoint, log, error, failure_kind,
+     rollback_complete, rollback_attempt, baseline_revision, database_backup_created, new_service_pids,
+     created_at, started_at, finished_at, updated_at)
+    SELECT id, delivery_id, generation, target_id, revision, target_fingerprint, '',
+           status, attempt, NULL, NULL, checkpoint, log, error,
+           CASE WHEN target_fingerprint = '' OR rollback_attempt IS NULL AND status = 'needs_recovery'
+                THEN 'legacy_ack_required' ELSE NULL END,
+           rollback_complete, rollback_attempt, baseline_revision, 0,
+           CASE WHEN new_service_pid IS NULL THEN '{}' ELSE printf('{"legacy":%d}', new_service_pid) END,
+           created_at, started_at, finished_at, updated_at
+    FROM deployment_jobs;
+
+  CREATE TABLE deployment_maintenance_v15_copy AS SELECT * FROM deployment_maintenance;
+  DROP TABLE deployment_maintenance;
+  DROP TABLE deployment_jobs;
+  ALTER TABLE deployment_jobs_v16 RENAME TO deployment_jobs;
+  CREATE INDEX idx_deployment_jobs_claim ON deployment_jobs(status, lease_expires_at, created_at);
+
+  DROP TABLE IF EXISTS deployment_host_fence;
+  CREATE TABLE deployment_host_fence (
+    lock_id INTEGER PRIMARY KEY CHECK (lock_id = 1),
+    epoch INTEGER NOT NULL
+  );
+  INSERT INTO deployment_host_fence(lock_id, epoch) VALUES (1, 0);
+
+  CREATE TABLE deployment_maintenance (
+    lock_id INTEGER PRIMARY KEY CHECK (lock_id = 1),
+    fence_epoch INTEGER NOT NULL,
+    fence_nonce TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    job_id TEXT NOT NULL UNIQUE REFERENCES deployment_jobs(id) ON DELETE CASCADE,
+    delivery_id TEXT NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL,
+    revision TEXT NOT NULL,
+    target_fingerprint TEXT NOT NULL,
+    target_manifest_hash TEXT NOT NULL,
+    rollback_attempt INTEGER NOT NULL,
+    baseline_revision TEXT NOT NULL,
+    baseline_fingerprint TEXT NOT NULL,
+    baseline_manifest_hash TEXT NOT NULL,
+    baseline_health_fingerprint TEXT NOT NULL,
+    expected_revision TEXT NOT NULL,
+    expected_fingerprint TEXT NOT NULL,
+    phase TEXT NOT NULL CHECK (phase IN ('deploying','healthy','rolling_back','releasing','needs_recovery')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  INSERT INTO deployment_maintenance
+    (lock_id, fence_epoch, fence_nonce, target_id, job_id, delivery_id, generation, revision,
+     target_fingerprint, target_manifest_hash, rollback_attempt, baseline_revision,
+     baseline_fingerprint, baseline_manifest_hash, baseline_health_fingerprint,
+     expected_revision, expected_fingerprint, phase, created_at, updated_at)
+    SELECT 1, 1, 'legacy-v18', target_id, job_id, delivery_id, generation, revision,
+           target_fingerprint, '', rollback_attempt, baseline_revision,
+           '', '', '', expected_revision, target_fingerprint, 'needs_recovery', created_at, updated_at
+    FROM deployment_maintenance_v15_copy LIMIT 1;
+  UPDATE deployment_host_fence SET epoch = CASE WHEN EXISTS(SELECT 1 FROM deployment_maintenance) THEN 1 ELSE 0 END WHERE lock_id = 1;
+  UPDATE deployment_jobs
+    SET status = 'needs_recovery', checkpoint = 'rollback_incomplete', failure_kind = 'legacy_ack_required',
+        rollback_complete = 0, fence_epoch = 1, fence_nonce = 'legacy-v18', lease_token = NULL, lease_expires_at = NULL,
+        error = 'v18 active deployment 必须由管理员验证 host baseline 后 ack/bootstrap'
+    WHERE id IN (SELECT job_id FROM deployment_maintenance);
+  UPDATE deliveries
+    SET deployment_status = 'needs_recovery',
+        deployment_error = 'v18 active deployment 必须由管理员验证 host baseline 后 ack/bootstrap'
+    WHERE active_deployment_job_id IN (SELECT job_id FROM deployment_maintenance);
+  DROP TABLE deployment_maintenance_v15_copy;
+
+  -- v18 误把没有 automatic target/job 的 manual/GitHub running delivery 锁死；恢复原人工语义。
+  UPDATE deliveries
+    SET deployment_status = 'running', deployment_error = NULL
+    WHERE deployment_status = 'needs_recovery'
+      AND deployment_target_id IS NULL AND active_deployment_job_id IS NULL
+      AND deployment_error LIKE 'v17 active deployment 缺少 target fingerprint/maintenance anchor%';
+
+  -- v17 legacy automatic rows没有可信 fingerprint/anchor，必须显式 ack，不能给永远不可执行的 recover。
+  UPDATE deliveries
+    SET deployment_error = 'legacy automatic deployment 缺少可信 baseline；请执行管理员 ack 后重新 bootstrap'
+    WHERE active_deployment_job_id IN (
+      SELECT id FROM deployment_jobs WHERE failure_kind = 'legacy_ack_required'
+    );
+  `,
 ];
 
 function hasTable(db: Database, table: string): boolean {
@@ -1201,6 +1494,8 @@ function ensureGitHubDeliveryColumns(db: Database): void {
   }
 }
 
+export const LATEST_SCHEMA_VERSION = MIGRATIONS.length;
+
 function normalizeLegacyRepositoryNames(db: Database): void {
   const rows = db
     .query<{ id: string; workspace_id: string; name: string }, []>(
@@ -1225,8 +1520,9 @@ function normalizeLegacyRepositoryNames(db: Database): void {
 }
 
 export function openDb(path: string): Database {
-  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new Database(path, { create: true });
+  if (path !== ":memory:") chmodSync(path, 0o600);
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA foreign_keys = ON;");
 
@@ -1250,9 +1546,25 @@ export function openDb(path: string): Database {
   }
 
   while (version < MIGRATIONS.length) {
+    // deployment phase 3（当前 MIGRATIONS[18]）收敛 host-global gate 前拒绝多重 legacy gate。
+    if (version === 18) {
+      const active = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM deployment_maintenance").get()?.count ?? 0;
+      if (active > 1) {
+        db.close();
+        throw new Error("deployment convergence migration 拒绝多个 legacy maintenance gates；请先离线恢复到唯一 baseline");
+      }
+    }
     const sql = MIGRATIONS[version]!;
     const rebuildsReferencedTables =
-      version === 8 || version === 9 || version === 11 || version === 12 || version === 14 || version === 15;
+      version === 8 ||
+      version === 9 ||
+      version === 11 ||
+      version === 12 ||
+      version === 14 ||
+      version === 15 ||
+      version === 16 ||
+      version === 17 ||
+      version === 18;
     if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = OFF;");
     try {
       db.transaction(() => {
@@ -1266,5 +1578,41 @@ export function openDb(path: string): Database {
     version++;
   }
   normalizeLegacyRepositoryNames(db);
+  const foreignKeyFailures = db.query<Record<string, unknown>, []>("PRAGMA foreign_key_check").all();
+  if (foreignKeyFailures.length > 0) {
+    db.close();
+    throw new Error(`SQLite migration foreign_key_check 失败（${foreignKeyFailures.length} rows）`);
+  }
   return db;
+}
+
+/** deploy worker 只打开已 bootstrap 的 queue；绝不创建 DB、绝不运行应用 migration。 */
+export function openDeploymentDb(path: string): Database {
+  assertPrivateDeploymentDatabase(path);
+  const db = new Database(path, { create: false, readwrite: true });
+  db.exec("PRAGMA journal_mode = WAL;");
+  db.exec("PRAGMA foreign_keys = ON;");
+  const row = db.query<{ user_version: number }, []>("PRAGMA user_version").get();
+  const version = row?.user_version ?? 0;
+  if (version !== LATEST_SCHEMA_VERSION) {
+    db.close();
+    throw new Error(`deployment worker 拒绝 schema v${version}；需要 server/admin bootstrap 到 v${LATEST_SCHEMA_VERSION}`);
+  }
+  return db;
+}
+
+function assertPrivateDeploymentDatabase(path: string): void {
+  if (!isAbsolute(path) || resolve(path) !== path) throw new Error("deployment worker DB 必须是 canonical 绝对路径");
+  const metadata = lstatSync(path);
+  const uid = process.getuid?.();
+  if (metadata.isSymbolicLink() || !metadata.isFile()) throw new Error("deployment worker DB 必须是 non-symlink regular file");
+  if (uid !== undefined && metadata.uid !== uid) throw new Error("deployment worker DB owner 不是当前 uid");
+  if ((metadata.mode & 0o777) !== 0o600) throw new Error("deployment worker DB 权限必须精确为 0600");
+  if (realpathSync(path) !== path) throw new Error("deployment worker DB 路径包含 symlink component");
+  const parent = dirname(path);
+  const parentMetadata = lstatSync(parent);
+  if (parentMetadata.isSymbolicLink() || !parentMetadata.isDirectory()
+    || (uid !== undefined && parentMetadata.uid !== uid) || realpathSync(parent) !== parent) {
+    throw new Error("deployment worker DB 父目录必须由当前 uid 拥有且不能包含 symlink");
+  }
 }
