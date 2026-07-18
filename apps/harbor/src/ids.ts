@@ -11,12 +11,21 @@ const PREFIXES = {
   conversation: "c",
   run: "r",
   automation: "auto",
+  automationTrigger: "trg",
   approval: "ap",
   skill: "sk",
   delivery: "del",
   workspace: "ws",
   repository: "repo",
   repositoryMount: "mount",
+  member: "mem",
+  token: "tok",
+  label: "lbl",
+  message: "msg",
+  external: "ext",
+  larkBinding: "lark",
+  skillGroup: "skg",
+  runActionToken: "rat",
 } as const;
 
 export function newId(kind: keyof typeof PREFIXES): string {

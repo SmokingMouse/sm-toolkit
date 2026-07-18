@@ -119,6 +119,7 @@ export class ClaudeBackend implements Backend {
     }
     if (opts.workspace) {
       args.push("--add-dir", opts.workspace);
+      for (const directory of opts.additionalWorkspaces ?? []) args.push("--add-dir", directory);
       args.push(...claudePermissionArgs(opts.permission ?? "auto-edit")); // variadic 放末尾
     }
 

@@ -36,6 +36,17 @@ export interface DeliveryChangeInput {
   checkStatus?: DeliveryCheckStatus;
 }
 
+export interface DeliveryProviderSnapshot {
+  changeUrl?: string | null;
+  externalId?: string | null;
+  headBranch?: string | null;
+  baseBranch?: string | null;
+  reviewStatus?: Delivery["reviewStatus"];
+  checkStatus?: Delivery["checkStatus"];
+  mergeStatus?: Delivery["mergeStatus"];
+  providerData?: unknown;
+}
+
 export interface DeliveryProviderSyncResult extends DeliveryProviderResult {
   metadata: {
     changeUrl: string;
@@ -64,6 +75,7 @@ export interface DeliveryProvider {
     input: DeliveryProviderAction,
     context: DeliveryProviderContext,
   ): Promise<DeliveryProviderResult>;
+  refresh?(delivery: Delivery, context: DeliveryProviderContext): Promise<DeliveryProviderSnapshot>;
 }
 
 /**
@@ -123,12 +135,23 @@ export class DeliveryService {
     }
     if (this.store.activeRunForConversation(conv.id)) throw new Error("仍有 Run 进行中，不能创建 Delivery");
     if (this.store.getDeliveryForConversation(conv.id)) throw new Error("当前 Issue 已有 Delivery");
-    const providerKind = input.provider ?? "manual";
+    const repository = conv.repositoryId ? this.store.getRepository(conv.repositoryId) : null;
+    const providerKind = input.provider ?? (repository?.scmProvider === "codebase" ? "codebase" : "manual");
     const provider = this.configuredProvider(providerKind);
     if (providerKind === "manual" && !input.changeUrl?.trim()) {
       throw new Error("manual provider 需要填写 MR/PR URL");
     }
-    const changeInput: DeliveryChangeInput = input;
+    let changeInput: DeliveryChangeInput = input;
+    if (providerKind === "codebase") {
+      if (repository?.scmProvider !== "codebase" || !repository.scmRepository) {
+        throw new Error("Codebase Delivery 需要 Repository 配置 Codebase repository path");
+      }
+      const externalId = input.externalId?.trim() || /\/merge_requests\/(\d+)/.exec(input.changeUrl ?? "")?.[1];
+      if (!externalId || !/^\d+$/.test(externalId)) {
+        throw new Error("Codebase Delivery 需要 MR number（externalId）");
+      }
+      changeInput = { ...input, externalId };
+    }
     const prepared: DeliveryChangeInput = provider.prepareChange?.(this.context(conv), changeInput) ?? changeInput;
     const delivery = this.store.createDelivery(
       {
@@ -170,7 +193,11 @@ export class DeliveryService {
   ): Delivery {
     if (delivery.mergeStatus === "merged") throw new Error("已合并的 Delivery 不能再修改变更或 CI 事实");
     if (delivery.provider !== "manual") {
-      throw new Error("GitHub Delivery 的 PR、branch 与 CI 事实只能通过 Sync from GitHub 更新");
+      throw new Error(
+        delivery.provider === "github"
+          ? "GitHub Delivery 的 PR、branch 与 CI 事实只能通过 Sync from GitHub 更新"
+          : `${delivery.provider} Delivery 的变更与 CI 事实只能通过对应 Provider 同步`,
+      );
     }
     if (delivery.provider === "manual" && input.changeUrl !== undefined && !clean(input.changeUrl)) {
       throw new Error("manual provider 需要保留 MR/PR URL");
@@ -400,6 +427,43 @@ export class DeliveryService {
       delivery.id,
       "deployment_started",
       { message: result.message, data: result.data },
+      "provider",
+      now,
+    );
+    return this.store.getDelivery(delivery.id)!;
+  }
+
+  async refresh(delivery: Delivery, now = Date.now()): Promise<Delivery> {
+    const provider = this.provider(delivery);
+    if (!provider.refresh) throw new Error(`delivery provider "${delivery.provider}" 不支持主动刷新`);
+    const conv = this.requireConversation(delivery);
+    const snapshot = await provider.refresh(delivery, this.context(conv));
+    return this.applyProviderSnapshot(delivery, snapshot, now);
+  }
+
+  applyProviderSnapshot(delivery: Delivery, snapshot: DeliveryProviderSnapshot, now = Date.now()): Delivery {
+    const metadata = {
+      ...(snapshot.changeUrl !== undefined ? { changeUrl: clean(snapshot.changeUrl) } : {}),
+      ...(snapshot.externalId !== undefined ? { externalId: clean(snapshot.externalId) } : {}),
+      ...(snapshot.headBranch !== undefined ? { headBranch: clean(snapshot.headBranch) } : {}),
+      ...(snapshot.baseBranch !== undefined ? { baseBranch: clean(snapshot.baseBranch) } : {}),
+    };
+    this.store.updateDeliveryMetadata(delivery.id, metadata, now);
+    this.store.updateDeliveryState(delivery.id, {
+      ...(snapshot.reviewStatus !== undefined ? {
+        reviewStatus: snapshot.reviewStatus,
+        reviewApprovedAt: snapshot.reviewStatus === "approved" ? (delivery.reviewApprovedAt ?? now) : null,
+      } : {}),
+      ...(snapshot.checkStatus !== undefined ? { checkStatus: snapshot.checkStatus } : {}),
+      ...(snapshot.mergeStatus !== undefined ? {
+        mergeStatus: snapshot.mergeStatus,
+        mergedAt: snapshot.mergeStatus === "merged" ? (delivery.mergedAt ?? now) : null,
+      } : {}),
+    }, now);
+    this.store.appendDeliveryEvent(
+      delivery.id,
+      "provider_refreshed",
+      { snapshot, providerData: snapshot.providerData },
       "provider",
       now,
     );

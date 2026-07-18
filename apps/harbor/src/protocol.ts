@@ -24,7 +24,7 @@ export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancele
 /** implementation 推进 Issue；triage 只读分诊草稿；review/verification 不覆盖 Assignee。 */
 export type RunPurpose = "implementation" | "triage" | "review" | "verification";
 export const RUN_PURPOSES: RunPurpose[] = ["implementation", "triage", "review", "verification"];
-export type Origin = "cli" | "feishu" | "web" | "automation";
+export type Origin = "cli" | "feishu" | "web" | "automation" | "codebase" | "agent";
 export type PromptSource = "issue" | "chat" | "automation";
 export type PromptBlockPhase = "context" | "event";
 export type PromptContextBlockKey = "session.issue.context" | "session.chat.context";
@@ -34,7 +34,8 @@ export type PromptEventBlockKey =
   | "event.issue.message_created"
   | "event.chat.message_created"
   | "event.automation.schedule"
-  | "event.automation.manual";
+  | "event.automation.manual"
+  | "event.automation.webhook";
 export type PromptBlockKey = PromptContextBlockKey | PromptEventBlockKey;
 
 /** daemon 从本机 Runtime 配置目录发现、可同步进 Workspace 的 Skill。 */
@@ -46,6 +47,9 @@ export interface InstalledSkillCapability {
   runtimes: BackendKind[];
   /** 仅 daemon → server hello 携带；GET /api/devices 会移除正文，避免列表接口膨胀。 */
   instruction?: string;
+  /** SKILL.md 及其同目录文本资源；仅 daemon → server hello 携带。 */
+  files?: { path: string; content: string }[];
+  dependencies?: SkillDependency[];
 }
 
 /** 某个 coding runtime 真正可执行的模型路由（claude 来自 endpoints.yaml，codex 来自本机 models cache）。 */
@@ -99,6 +103,13 @@ export interface HarborRepository {
   name: string;
   remoteUrl: string | null;
   defaultBranch: string;
+  /** local 只有 checkout；codebase 同时接收 Issue/MR/CI 事件并可执行交付动作。 */
+  scmProvider: "local" | "codebase";
+  /** Codebase 项目标识（项目名、路径或服务端可解析的 repository id）。 */
+  scmRepository: string | null;
+  /** 外部 Issue/评论进入时使用的默认 Agent；null = 只同步不派活。 */
+  scmAgentId: string | null;
+  scmAutoDispatch: boolean;
   createdAt: number;
   archivedAt: number | null;
 }
@@ -124,7 +135,18 @@ export interface HarborAgent {
   permission: PermissionPolicy;
   /** 必选主 Repository；Issue / Chat 指派给 Agent 后继承它，不单独选择。 */
   repositoryId: string;
+  /** Agent 可见的仓库集合；repositoryId 始终是本次默认执行仓库。 */
+  repositoryIds: string[];
   isolation: IsolationKind;
+  /** Agent 自身并发闸；Device 仍有独立的总并发上限。 */
+  concurrency: number;
+  visibility: "workspace" | "private";
+  /** 仅在 daemon 下发时作为进程 env，绝不进入 prompt/run event。 */
+  environment: Record<string, string>;
+  /** checkout/worktree 第一次使用该版本配置前执行；成功后由 daemon 按 hash 缓存。 */
+  setupScript: string | null;
+  reuseDeviceCli: boolean;
+  createdByMemberId: string | null;
   /** systemPrompt 注入 */
   instruction: string | null;
   /** 当前绑定的 Workspace Skill，顺序即 system prompt 注入顺序。 */
@@ -133,7 +155,27 @@ export interface HarborAgent {
   archivedAt: number | null;
 }
 
-export type SkillSource = "manual" | "runtime";
+export type SkillSource = "manual" | "runtime" | "codebase" | "github" | "upload";
+
+export interface SkillFile {
+  path: string;
+  content: string;
+  sha256: string;
+}
+
+export interface SkillDependency {
+  name: string;
+  spec: string | null;
+  required: boolean;
+}
+
+export interface SkillGroup {
+  id: string;
+  workspaceId: string;
+  name: string;
+  position: number;
+  createdAt: number;
+}
 
 /** Workspace 级 Skill 配置；manual 可跨设备，runtime 绑定其来源 Device。 */
 export interface HarborSkill {
@@ -148,6 +190,14 @@ export interface HarborSkill {
   sourcePath: string | null;
   /** runtime 来源可执行的 Runtime；manual 默认 claude + codex。 */
   runtimes: BackendKind[];
+  groupId: string | null;
+  originUrl: string | null;
+  sourceRef: string | null;
+  entryHash: string;
+  bundleHash: string;
+  autoSync: boolean;
+  files: SkillFile[];
+  dependencies: SkillDependency[];
   createdAt: number;
   updatedAt: number;
   archivedAt: number | null;
@@ -172,12 +222,15 @@ export interface Conversation {
   claudeSessionId: string | null;
   origin: Origin;
   originRef: string | null;
+  creatorMemberId: string | null;
+  ownerMemberId: string | null;
+  labelIds: string[];
   createdAt: number;
   updatedAt: number;
 }
 
 /** Delivery policy 与外部 SCM 适配分离；manual 始终作为无 API 系统的诚实 fallback。 */
-export type DeliveryProviderKind = "manual" | "github";
+export type DeliveryProviderKind = "manual" | "github" | "codebase";
 export type DeliveryReviewStatus = "pending" | "approved";
 export type DeliveryCheckStatus = "unknown" | "pending" | "passed" | "failed";
 export const DELIVERY_CHECK_STATUSES: DeliveryCheckStatus[] = ["unknown", "pending", "passed", "failed"];
@@ -231,6 +284,87 @@ export interface DeliveryEvent {
   ts: number;
 }
 
+export type WorkspaceRole = "owner" | "admin" | "member";
+
+export interface WorkspaceMember {
+  id: string;
+  workspaceId: string;
+  name: string;
+  email: string | null;
+  externalProvider: "local" | "feishu" | "codebase";
+  externalId: string | null;
+  role: WorkspaceRole;
+  status: "active" | "invited" | "disabled";
+  createdAt: number;
+}
+
+export interface IssueLabel {
+  id: string;
+  workspaceId: string;
+  name: string;
+  color: string;
+}
+
+export interface ConversationMessage {
+  id: string;
+  conversationId: string;
+  authorType: "member" | "agent" | "external" | "system";
+  authorId: string | null;
+  authorName: string | null;
+  body: string;
+  externalId: string | null;
+  createdAt: number;
+}
+
+export type ScmObjectKind = "issue" | "change";
+
+export interface ScmExternalObject {
+  id: string;
+  workspaceId: string;
+  repositoryId: string;
+  provider: "codebase";
+  kind: ScmObjectKind;
+  externalId: string;
+  url: string | null;
+  title: string;
+  description: string | null;
+  authorId: string | null;
+  authorName: string | null;
+  state: string;
+  conversationId: string | null;
+  deliveryId: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ScmEvent {
+  id: string;
+  provider: "codebase";
+  workspaceId: string;
+  repositoryId: string | null;
+  eventType: string;
+  action: string | null;
+  objectKind: ScmObjectKind | null;
+  externalId: string | null;
+  outcome: "received" | "applied" | "ignored" | "failed";
+  error: string | null;
+  receivedAt: number;
+  processedAt: number | null;
+}
+
+export interface LarkWorkspaceBinding {
+  id: string;
+  workspaceId: string;
+  chatId: string;
+  defaultAgentId: string;
+  responseMode: "thread" | "message";
+  listenMode: "mention" | "all";
+  botMode: "global" | "custom";
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface RunCost {
   usd: number | null;
   inputTokens: number;
@@ -241,7 +375,11 @@ export interface RunCost {
 export interface Run {
   id: string;
   workspaceId: string;
-  conversationId: string;
+  /** Run 的一等来源。Issue/Chat 指向 Conversation；Automation 直跑不伪造 Conversation。 */
+  sourceType: RunSourceType;
+  sourceId: string;
+  /** 仅 sourceType=issue/chat 时有值；保留独立字段方便既有 Conversation 查询。 */
+  conversationId: string | null;
   /** 快照，不 FK 约束（agent 可归档） */
   agentId: string;
   deviceId: string;
@@ -255,6 +393,10 @@ export interface Run {
   promptEvent: PromptEventBlockKey;
   /** 触发对象引用（如 Automation ID）；append 到既有会话时不能从 Conversation 反推。 */
   triggerRef: string | null;
+  /** webhook/schedule/manual 的规范化触发上下文；执行时快照，不从外部事件事后重建。 */
+  triggerContext: Record<string, unknown>;
+  /** 非空时同 key 的 Run 串行；Automation overlap=queue 用它防并发启动。 */
+  concurrencyKey: string | null;
   status: RunStatus;
   claudeSessionId: string | null;
   error: string | null;
@@ -297,6 +439,38 @@ export interface Approval {
   createdAt: number;
 }
 
+export type RunSourceType = "issue" | "chat" | "automation";
+export type AutomationOutputMode = "run" | "chat" | "issue" | "append";
+export type AutomationOverlapMode = "skip" | "queue";
+export type AutomationTriggerType = "schedule" | "webhook";
+export type AutomationWebhookScalar = string | number | boolean | null;
+
+/** webhook filter 同一 Trigger 内按 OR 语义匹配；path 使用点号读取 JSON 字段。 */
+export interface AutomationWebhookFilter {
+  path: string;
+  equals: AutomationWebhookScalar;
+}
+
+export interface AutomationTrigger {
+  id: string;
+  automationId: string;
+  type: AutomationTriggerType;
+  enabled: boolean;
+  /** type=schedule 时必填。 */
+  cron: string | null;
+  /** type=webhook 时标记来源适配器；首期 generic/codebase 共用规范化入口。 */
+  provider: string | null;
+  /** 空数组接受任意事件；非空时匹配规范化 eventType。 */
+  events: string[];
+  filters: AutomationWebhookFilter[];
+  /** 仅创建/轮换时返回明文；持久化对象永不包含 secret。 */
+  webhookPath: string | null;
+  lastFiredAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 旧 CLI/API create body 的兼容输入；领域对象使用 AutomationOutputMode。 */
 export type AutomationMode = "new_issue" | "append";
 
 export interface Automation {
@@ -306,22 +480,31 @@ export interface Automation {
   agentId: string;
   /** 兼容/审计快照；不是配置项，触发时以 Agent 当前 Repository 为准。 */
   repositoryId: string | null;
-  cron: string;
   prompt: string;
-  mode: AutomationMode;
-  /** mode=append 时必填：追加到的固定 conversation */
+  outputMode: AutomationOutputMode;
+  overlapMode: AutomationOverlapMode;
+  /** outputMode=append 时必填：追加到的固定 conversation */
   targetConversationId: string | null;
   /** 完成播报的飞书群（须在 server 白名单内才真正发送） */
   notifyChatId: string | null;
   enabled: boolean;
   lastFiredAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+  triggers: AutomationTrigger[];
+  /** 旧客户端展示兼容；等于首个 schedule Trigger 的 cron。 */
+  cron: string | null;
+  /** 旧客户端展示兼容；issue 映射为 new_issue。 */
+  mode: AutomationMode;
 }
 
 export interface AutomationLogRow {
   automationId: string;
-  kind: "fired" | "missed";
+  kind: "fired" | "missed" | "skipped" | "rejected";
   ts: number;
   runId: string | null;
+  triggerId: string | null;
+  eventId: string | null;
   note: string | null;
 }
 
@@ -368,16 +551,30 @@ export interface RunSpec {
   repositoryRoot: string | null;
   /** 本轮实际执行目录快照；worktree ready 后指向 linked worktree，与 Repository mount 独立。 */
   executionRoot: string | null;
+  /** 同一 Agent 额外可见的 Repository checkout。 */
+  additionalRepositoryRoots?: string[];
   permission: PermissionPolicy;
   systemPrompt: string | null;
   /** 上一轮 claude_session_id，多轮续接 */
   resume: string | null;
-  /** 所属 conversation（worktree 按 issue 粒度建，daemon 需要 id 派生路径/分支名） */
-  conversationId: string;
+  /** 所属 conversation；Automation 直跑为 null，且当前只允许 isolation=none。 */
+  conversationId: string | null;
   isolation: IsolationKind;
   /** issue 已有 worktree 则复用（conversations.worktree_path 回填值）；null = daemon 首跑时创建 */
   worktreePath: string | null;
   envOverrides?: Record<string, string>;
+  setupScript?: string | null;
+  setupKey?: string | null;
+  /** 飞书等入口随本次 Run 下发的附件；server 只保存受限快照，daemon 落临时文件。 */
+  attachments?: RunAttachment[];
+  /** 仅允许当前 Run 创建 follow-up Issue 的短期凭证，不进入 Agent 配置或 prompt。 */
+  agentActionToken?: string;
+}
+
+export interface RunAttachment {
+  name: string;
+  mime: string;
+  dataBase64: string;
 }
 
 // ── WS 协议（JSON 行；daemon 主动外连 server） ──────────

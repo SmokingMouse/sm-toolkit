@@ -13,7 +13,7 @@
 
 import type { DaemonMsg, ServerMsg } from "../protocol.js";
 import { HEARTBEAT_INTERVAL_MS } from "../protocol.js";
-import { deviceName, serverWsUrl, token } from "../config.js";
+import { deviceName, serverUrl, serverWsUrl, token } from "../config.js";
 import { detectCapabilities } from "./capabilities.js";
 import { Executor } from "./executor.js";
 import { removeWorktree } from "./worktree.js";
@@ -53,7 +53,7 @@ function sendOrQueue(msg: DaemonMsg): void {
   if (MUST_DELIVER.has(msg.type)) outbox.push(msg);
 }
 
-const executor = new Executor(sendOrQueue);
+const executor = new Executor(sendOrQueue, `${serverUrl().replace(/\/$/, "")}/hooks/agent-actions/issues`);
 
 /** daemon 侧还认账的 run：执行中 + outbox 里有待送达消息的（见文件头对账口径） */
 function ownedRunIds(): string[] {

@@ -37,10 +37,10 @@ test("manual automation run persists the manual prompt event even when schedule 
 
   expect(run.promptEvent).toBe("event.automation.manual");
   expect(run.triggerRef).toBe(automation.id);
-  expect(store.getConversation(run.conversationId)).toEqual(
+  expect(run.conversationId && store.getConversation(run.conversationId)).toEqual(
     expect.objectContaining({ origin: "automation", originRef: automation.id }),
   );
   expect(store.listAutomationLog(automation.id).at(-1)).toEqual(
-    expect.objectContaining({ kind: "fired", runId: run.id, note: "manual" }),
+    expect.objectContaining({ kind: "fired", runId: run.id, note: "manual:issue" }),
   );
 });

@@ -3,12 +3,12 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openDb } from "./db.js";
+import { MIGRATIONS, openDb } from "./db.js";
 import { DeliveryService } from "./delivery.js";
 import { renderRunPrompt } from "./prompt-wrapper.js";
 import { HarborStore } from "./store.js";
 
-test("legacy v3 database migrates through v13 without losing conversations, runs, or prompts", () => {
+test("legacy database migrates through latest schema without losing conversations, runs, or prompts", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v4-"));
   const path = join(dir, "legacy.db");
   try {
@@ -51,6 +51,9 @@ test("legacy v3 database migrates through v13 without losing conversations, runs
         target_conversation_id TEXT, notify_chat_id TEXT, enabled INTEGER NOT NULL DEFAULT 1,
         last_fired_at INTEGER
       );
+      CREATE TABLE automation_log (
+        automation_id TEXT NOT NULL, kind TEXT NOT NULL, ts INTEGER NOT NULL, run_id TEXT, note TEXT
+      );
       CREATE TABLE prompt_templates (
         source TEXT PRIMARY KEY CHECK (source IN ('issue','chat','automation')),
         enabled INTEGER NOT NULL DEFAULT 1,
@@ -67,17 +70,19 @@ test("legacy v3 database migrates through v13 without losing conversations, runs
     legacy.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(13);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
     expect(
       migrated.query<{ agent_id: string | null; description: string | null; priority: string; status: string }, []>(
         "SELECT agent_id, description, priority, status FROM conversations WHERE id = 'conversation_1'",
       ).get(),
     ).toEqual({ agent_id: "agent_1", description: null, priority: "medium", status: "review" });
     expect(
-      migrated.query<{ purpose: string; prompt: string; prompt_event: string; trigger_ref: string | null }, []>(
-        "SELECT purpose, prompt, prompt_event, trigger_ref FROM runs WHERE id = 'run_1'",
+      migrated.query<{ source_type: string; source_id: string; purpose: string; prompt: string; prompt_event: string; trigger_ref: string | null }, []>(
+        "SELECT source_type, source_id, purpose, prompt, prompt_event, trigger_ref FROM runs WHERE id = 'run_1'",
       ).get(),
     ).toEqual({
+      source_type: "issue",
+      source_id: "conversation_1",
       purpose: "implementation",
       prompt: "legacy prompt",
       prompt_event: "event.issue.message_created",
@@ -130,8 +135,10 @@ test("legacy v3 database migrates through v13 without losing conversations, runs
     );
     migrated.run(
       `INSERT INTO runs
-       (id, conversation_id, agent_id, device_id, prompt, purpose, status, queued_at)
-       VALUES ('triage_1', 'draft_1', 'agent_1', 'device_1', 'triage me', 'triage', 'queued', 10)`,
+       (id, workspace_id, source_type, source_id, conversation_id, agent_id, device_id,
+        prompt, purpose, prompt_event, status, queued_at)
+       VALUES ('triage_1', 'ws_personal', 'issue', 'draft_1', 'draft_1', 'agent_1', 'device_1',
+        'triage me', 'triage', 'event.issue.message_created', 'queued', 10)`,
     );
     expect(migrated.query<{ kind: string }, []>("SELECT kind FROM conversations WHERE id = 'draft_1'").get()).toEqual({ kind: "issue_draft" });
     expect(migrated.query<{ purpose: string }, []>("SELECT purpose FROM runs WHERE id = 'triage_1'").get()).toEqual({ purpose: "triage" });
@@ -144,7 +151,7 @@ test("legacy v3 database migrates through v13 without losing conversations, runs
   }
 });
 
-test("v13 upgrades an already-running v9 database and preserves Agent, Delivery, and event data", () => {
+test("latest schema upgrades an already-running v9 database and preserves unbound Agents", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v9-"));
   const path = join(dir, "v9.db");
   try {
@@ -184,6 +191,9 @@ test("v13 upgrades an already-running v9 database and preserves Agent, Delivery,
         cron TEXT NOT NULL, prompt TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'new_issue',
         target_conversation_id TEXT, notify_chat_id TEXT, enabled INTEGER NOT NULL DEFAULT 1,
         last_fired_at INTEGER
+      );
+      CREATE TABLE automation_log (
+        automation_id TEXT NOT NULL, kind TEXT NOT NULL, ts INTEGER NOT NULL, run_id TEXT, note TEXT
       );
       CREATE TABLE runs (
         id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id), conversation_id TEXT NOT NULL,
@@ -238,7 +248,7 @@ test("v13 upgrades an already-running v9 database and preserves Agent, Delivery,
     v9.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(13);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
     const agent = migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM agents WHERE id = 'agent_1'").get();
     expect(agent?.repository_id).toStartWith("repo_unconfigured_");
     expect(migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM conversations WHERE id = 'conversation_1'").get()).toEqual(agent);
@@ -280,7 +290,7 @@ test("v13 upgrades an already-running v9 database and preserves Agent, Delivery,
   }
 });
 
-test("v13 preserves v11 Delivery rows and audit events while adding closed PR state and SHA evidence", () => {
+test("v15 preserves Delivery rows and audit events while adding closed PR state and SHA evidence", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v11-delivery-"));
   const path = join(dir, "v11.db");
   try {
@@ -327,12 +337,12 @@ test("v13 preserves v11 Delivery rows and audit events while adding closed PR st
       DROP TABLE deliveries;
       ALTER TABLE deliveries_v11 RENAME TO deliveries;
       CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
-      PRAGMA user_version = 11;
+      PRAGMA user_version = 14;
     `);
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(13);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
     expect(migrated.query<{ provider: string; change_url: string }, [string]>("SELECT provider, change_url FROM deliveries WHERE id = ?").get(delivery.id)).toEqual({
       provider: "manual",
       change_url: "https://github.com/acme/repo/pull/1",
@@ -352,7 +362,7 @@ test("v13 preserves v11 Delivery rows and audit events while adding closed PR st
   }
 });
 
-test("v13 invalidates unbound GitHub evidence from v12 while preserving Delivery and event data", () => {
+test("v15 invalidates unbound GitHub evidence while preserving Delivery and event data", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v12-delivery-"));
   const path = join(dir, "v12.db");
   try {
@@ -405,12 +415,12 @@ test("v13 invalidates unbound GitHub evidence from v12 while preserving Delivery
       DROP TABLE deliveries;
       ALTER TABLE deliveries_v12_fixture RENAME TO deliveries;
       CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
-      PRAGMA user_version = 12;
+      PRAGMA user_version = 14;
     `);
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(13);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
     expect(
       migrated.query<{
         provider: string;
@@ -437,6 +447,111 @@ test("v13 invalidates unbound GitHub evidence from v12 while preserving Delivery
     expect(migrated.query<{ kind: string }, [string]>("SELECT kind FROM delivery_events WHERE delivery_id = ?").all(delivery.id)).toEqual([
       { kind: "created" },
     ]);
+    expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
+    migrated.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("v15 converges the historical self-hosting v13 fork without losing GitHub Delivery data", () => {
+  const dir = mkdtempSync(join(tmpdir(), "harbor-fork-v13-"));
+  const path = join(dir, "fork-v13.db");
+  try {
+    const fork = new Database(path, { create: true });
+    for (let index = 0; index < 11; index++) {
+      const rebuildsReferencedTables = index === 8 || index === 9;
+      if (rebuildsReferencedTables) fork.exec("PRAGMA foreign_keys = OFF;");
+      fork.exec(MIGRATIONS[index]!);
+      fork.exec(`PRAGMA user_version = ${index + 1}`);
+      if (rebuildsReferencedTables) fork.exec("PRAGMA foreign_keys = ON;");
+      if (index === 0) {
+        fork.exec(`
+          INSERT INTO devices VALUES ('device_fork', 'fork-worker', 'hash', '{}', NULL, 1);
+          INSERT INTO agents
+            (id, name, device_id, backend, permission, workdir, isolation, created_at)
+            VALUES ('agent_fork', 'fork-builder', 'device_fork', 'codex', 'auto-edit', '/repo', 'none', 2);
+          INSERT INTO conversations
+            (id, kind, title, agent_id, status, origin, created_at, updated_at)
+            VALUES ('conversation_fork', 'issue', 'Fork issue', 'agent_fork', 'doing', 'web', 3, 3);
+          INSERT INTO runs
+            (id, conversation_id, agent_id, device_id, prompt, status, queued_at)
+            VALUES ('run_fork', 'conversation_fork', 'agent_fork', 'device_fork', 'implement', 'succeeded', 4);
+        `);
+      }
+    }
+
+    fork.exec("PRAGMA foreign_keys = OFF;");
+    fork.exec(`
+      INSERT INTO deliveries
+        (id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+         review_status, check_status, merge_status, deployment_status, review_approved_at,
+         merged_at, deployed_at, created_at, updated_at)
+        VALUES ('delivery_fork', 'conversation_fork', 'github',
+                'https://github.com/acme/repo/pull/13', '13', 'feature', 'main',
+                'approved', 'passed', 'open', 'not_required', 5, NULL, NULL, 5, 5);
+      INSERT INTO delivery_events VALUES ('delivery_fork', 'review_approved', '{}', 'human', 5);
+
+      CREATE TABLE deliveries_v12 (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id),
+        provider TEXT NOT NULL,
+        change_url TEXT,
+        external_id TEXT,
+        head_branch TEXT,
+        base_branch TEXT,
+        review_status TEXT NOT NULL DEFAULT 'pending' CHECK (review_status IN ('pending','approved')),
+        check_status TEXT NOT NULL DEFAULT 'unknown' CHECK (check_status IN ('unknown','pending','passed','failed')),
+        merge_status TEXT NOT NULL DEFAULT 'open' CHECK (merge_status IN ('open','closed','merged')),
+        deployment_status TEXT NOT NULL DEFAULT 'not_required' CHECK (deployment_status IN ('not_required','pending','running','succeeded','failed')),
+        review_approved_at INTEGER,
+        merged_at INTEGER,
+        deployed_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT INTO deliveries_v12 SELECT * FROM deliveries;
+      DROP TABLE deliveries;
+      ALTER TABLE deliveries_v12 RENAME TO deliveries;
+      CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
+      ALTER TABLE deliveries ADD COLUMN latest_head_sha TEXT;
+      ALTER TABLE deliveries ADD COLUMN approved_head_sha TEXT;
+      ALTER TABLE deliveries ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
+      UPDATE deliveries
+        SET review_status = 'pending', review_approved_at = NULL, check_status = 'pending'
+        WHERE provider = 'github';
+      PRAGMA user_version = 13;
+    `);
+    fork.exec("PRAGMA foreign_keys = ON;");
+    fork.close();
+
+    const migrated = openDb(path);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
+    expect(
+      migrated.query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'automation_triggers'",
+      ).get(),
+    ).toEqual({ name: "automation_triggers" });
+    expect(
+      migrated.query<{ source_type: string; source_id: string }, []>(
+        "SELECT source_type, source_id FROM runs WHERE id = 'run_fork'",
+      ).get(),
+    ).toEqual({ source_type: "issue", source_id: "conversation_fork" });
+    expect(
+      migrated.query<{
+        provider: string;
+        review_status: string;
+        check_status: string;
+        revision: number;
+      }, []>(
+        "SELECT provider, review_status, check_status, revision FROM deliveries WHERE id = 'delivery_fork'",
+      ).get(),
+    ).toEqual({ provider: "github", review_status: "pending", check_status: "pending", revision: 0 });
+    expect(
+      migrated.query<{ kind: string }, []>(
+        "SELECT kind FROM delivery_events WHERE delivery_id = 'delivery_fork'",
+      ).all(),
+    ).toEqual([{ kind: "review_approved" }]);
     expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
     migrated.close();
   } finally {

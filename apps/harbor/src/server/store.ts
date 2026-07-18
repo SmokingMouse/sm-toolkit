@@ -5,6 +5,7 @@
 
 import type { Database } from "bun:sqlite";
 import type { AgentEvent, Cost } from "@sm/agent";
+import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import type {
   Approval,
@@ -12,9 +13,15 @@ import type {
   Automation,
   AutomationLogRow,
   AutomationMode,
+  AutomationOutputMode,
+  AutomationOverlapMode,
+  AutomationTrigger,
+  AutomationTriggerType,
+  AutomationWebhookFilter,
   BackendKind,
   Conversation,
   ConversationKind,
+  ConversationMessage,
   ConversationStatus,
   Delivery,
   DeliveryCheckStatus,
@@ -32,16 +39,28 @@ import type {
   HarborWorkspace,
   IsolationKind,
   IssuePriority,
+  IssueLabel,
+  LarkWorkspaceBinding,
   Origin,
   PromptBlockKey,
   PromptEventBlockKey,
   Run,
+  RunAttachment,
   RunEventRow,
   RunPurpose,
+  RunSourceType,
   RunStatus,
   RepositoryMount,
+  ScmEvent,
+  ScmExternalObject,
+  ScmObjectKind,
+  SkillDependency,
+  SkillFile,
+  SkillGroup,
   SkillSource,
   UsageRow,
+  WorkspaceMember,
+  WorkspaceRole,
 } from "../protocol.js";
 import { DEFAULT_WORKSPACE_ID } from "../protocol.js";
 import type { PermissionPolicy } from "@sm/agent";
@@ -70,6 +89,12 @@ interface AgentRow {
   repository_id: string;
   isolation: string;
   instruction: string | null;
+  concurrency: number;
+  visibility: string;
+  environment: string;
+  setup_script: string | null;
+  reuse_device_cli: number;
+  created_by_member_id: string | null;
   created_at: number;
   archived_at: number | null;
 }
@@ -84,6 +109,12 @@ interface SkillRow {
   device_id: string | null;
   source_path: string | null;
   runtimes: string;
+  group_id: string | null;
+  origin_url: string | null;
+  source_ref: string | null;
+  entry_hash: string;
+  bundle_hash: string;
+  auto_sync: number;
   created_at: number;
   updated_at: number;
   archived_at: number | null;
@@ -104,6 +135,8 @@ interface ConversationRow {
   claude_session_id: string | null;
   origin: string;
   origin_ref: string | null;
+  creator_member_id: string | null;
+  owner_member_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -141,7 +174,9 @@ interface DeliveryEventRow {
 interface RunRow {
   id: string;
   workspace_id: string;
-  conversation_id: string;
+  source_type: string;
+  source_id: string;
+  conversation_id: string | null;
   agent_id: string;
   device_id: string;
   repository_id: string | null;
@@ -151,6 +186,8 @@ interface RunRow {
   purpose: string;
   prompt_event: string;
   trigger_ref: string | null;
+  trigger_context: string;
+  concurrency_key: string | null;
   status: string;
   claude_session_id: string | null;
   error: string | null;
@@ -190,13 +227,30 @@ interface AutomationRow {
   name: string;
   agent_id: string;
   repository_id: string | null;
-  cron: string;
   prompt: string;
-  mode: string;
+  output_mode: string;
+  overlap_mode: string;
   target_conversation_id: string | null;
   notify_chat_id: string | null;
   enabled: number;
   last_fired_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface AutomationTriggerRow {
+  id: string;
+  automation_id: string;
+  type: string;
+  enabled: number;
+  cron: string | null;
+  provider: string | null;
+  events: string;
+  filters: string;
+  secret_hash: string | null;
+  last_fired_at: number | null;
+  created_at: number;
+  updated_at: number;
 }
 
 interface PromptBlockRow {
@@ -222,6 +276,10 @@ interface RepositoryRow {
   name: string;
   remote_url: string | null;
   default_branch: string;
+  scm_provider: string;
+  scm_repository: string | null;
+  scm_agent_id: string | null;
+  scm_auto_dispatch: number;
   created_at: number;
   archived_at: number | null;
 }
@@ -232,6 +290,31 @@ interface RepositoryMountRow {
   device_id: string;
   path: string;
   created_at: number;
+}
+
+function parseStringRecord(value: string): Record<string, string> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function normalizeSkillFiles(instruction: string, files?: { path: string; content: string }[]): SkillFile[] {
+  const source = files?.length ? files : [{ path: "SKILL.md", content: instruction }];
+  return source.map((file) => ({ ...file, sha256: sha256(file.content) }));
+}
+
+function hashSkillBundle(files: SkillFile[]): string {
+  return sha256(files.map((file) => `${file.path}\0${file.sha256}`).join("\n"));
 }
 
 export interface PromptBlockOverride {
@@ -272,6 +355,10 @@ function toRepository(r: RepositoryRow): HarborRepository {
     name: r.name,
     remoteUrl: r.remote_url,
     defaultBranch: r.default_branch,
+    scmProvider: r.scm_provider as HarborRepository["scmProvider"],
+    scmRepository: r.scm_repository,
+    scmAgentId: r.scm_agent_id,
+    scmAutoDispatch: r.scm_auto_dispatch === 1,
     createdAt: r.created_at,
     archivedAt: r.archived_at,
   };
@@ -298,7 +385,14 @@ function toAgent(r: AgentRow): HarborAgent {
     model: r.model,
     permission: r.permission as PermissionPolicy,
     repositoryId: r.repository_id,
+    repositoryIds: [],
     isolation: r.isolation as IsolationKind,
+    concurrency: r.concurrency,
+    visibility: r.visibility as HarborAgent["visibility"],
+    environment: parseStringRecord(r.environment),
+    setupScript: r.setup_script,
+    reuseDeviceCli: r.reuse_device_cli === 1,
+    createdByMemberId: r.created_by_member_id,
     instruction: r.instruction,
     skillIds: [],
     createdAt: r.created_at,
@@ -317,6 +411,14 @@ function toSkill(r: SkillRow): HarborSkill {
     deviceId: r.device_id,
     sourcePath: r.source_path,
     runtimes: JSON.parse(r.runtimes) as BackendKind[],
+    groupId: r.group_id,
+    originUrl: r.origin_url,
+    sourceRef: r.source_ref,
+    entryHash: r.entry_hash,
+    bundleHash: r.bundle_hash,
+    autoSync: r.auto_sync === 1,
+    files: [],
+    dependencies: [],
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     archivedAt: r.archived_at,
@@ -339,6 +441,9 @@ function toConversation(r: ConversationRow): Conversation {
     claudeSessionId: r.claude_session_id,
     origin: r.origin as Origin,
     originRef: r.origin_ref,
+    creatorMemberId: r.creator_member_id,
+    ownerMemberId: r.owner_member_id,
+    labelIds: [],
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -410,6 +515,8 @@ function toRun(r: RunRow): Run {
   return {
     id: r.id,
     workspaceId: r.workspace_id,
+    sourceType: r.source_type as RunSourceType,
+    sourceId: r.source_id,
     conversationId: r.conversation_id,
     agentId: r.agent_id,
     deviceId: r.device_id,
@@ -420,6 +527,8 @@ function toRun(r: RunRow): Run {
     purpose: r.purpose as RunPurpose,
     promptEvent: r.prompt_event as PromptEventBlockKey,
     triggerRef: r.trigger_ref,
+    triggerContext: parseJsonRecord(r.trigger_context),
+    concurrencyKey: r.concurrency_key,
     status: r.status as RunStatus,
     claudeSessionId: r.claude_session_id,
     error: r.error,
@@ -455,21 +564,64 @@ function toApproval(r: ApprovalRow): Approval {
   };
 }
 
-function toAutomation(r: AutomationRow): Automation {
+function toAutomationTrigger(r: AutomationTriggerRow): AutomationTrigger {
+  return {
+    id: r.id,
+    automationId: r.automation_id,
+    type: r.type as AutomationTriggerType,
+    enabled: r.enabled === 1,
+    cron: r.cron,
+    provider: r.provider,
+    events: parseJsonArray<string>(r.events),
+    filters: parseJsonArray<AutomationWebhookFilter>(r.filters),
+    webhookPath: r.type === "webhook" ? `/hooks/automations/${r.id}` : null,
+    lastFiredAt: r.last_fired_at,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+function toAutomation(r: AutomationRow, triggers: AutomationTrigger[]): Automation {
+  const outputMode = r.output_mode as AutomationOutputMode;
   return {
     id: r.id,
     workspaceId: r.workspace_id,
     name: r.name,
     agentId: r.agent_id,
     repositoryId: r.repository_id,
-    cron: r.cron,
     prompt: r.prompt,
-    mode: r.mode as AutomationMode,
+    outputMode,
+    overlapMode: r.overlap_mode as AutomationOverlapMode,
     targetConversationId: r.target_conversation_id,
     notifyChatId: r.notify_chat_id,
     enabled: r.enabled === 1,
     lastFiredAt: r.last_fired_at,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    triggers,
+    cron: triggers.find((trigger) => trigger.type === "schedule")?.cron ?? null,
+    mode: outputMode === "append" ? "append" : "new_issue",
   };
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function parseJsonArray<T>(value: string): T[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed as T[] : [];
+  } catch {
+    return [];
+  }
 }
 
 // ── Store ───────────────────────────────────────────────
@@ -486,15 +638,132 @@ export class HarborStore {
   }
 
   createWorkspace(
-    input: { name: string; slug: string; description?: string | null },
+    input: { name: string; slug: string; description?: string | null; ownerName?: string },
     now: number,
   ): HarborWorkspace {
     const id = newId("workspace");
-    this.db.run(
-      "INSERT INTO workspaces (id, name, slug, description, created_at) VALUES (?,?,?,?,?)",
-      [id, input.name, input.slug, input.description ?? null, now],
-    );
+    this.db.transaction(() => {
+      this.db.run(
+        "INSERT INTO workspaces (id, name, slug, description, created_at) VALUES (?,?,?,?,?)",
+        [id, input.name, input.slug, input.description ?? null, now],
+      );
+      this.createWorkspaceMember({
+        workspaceId: id,
+        name: input.ownerName ?? "Local owner",
+        role: "owner",
+        externalProvider: "local",
+      }, now);
+    })();
     return this.getWorkspace(id)!;
+  }
+
+  createWorkspaceMember(input: {
+    workspaceId: string;
+    name: string;
+    email?: string | null;
+    externalProvider?: WorkspaceMember["externalProvider"];
+    externalId?: string | null;
+    role?: WorkspaceRole;
+    status?: WorkspaceMember["status"];
+  }, now: number): WorkspaceMember {
+    const id = newId("member");
+    this.db.run(
+      `INSERT INTO workspace_members
+       (id, workspace_id, name, email, external_provider, external_id, role, status, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+      [id, input.workspaceId, input.name, input.email ?? null, input.externalProvider ?? "local",
+       input.externalId ?? null, input.role ?? "member", input.status ?? "active", now],
+    );
+    return this.getWorkspaceMember(id)!;
+  }
+
+  getWorkspaceMember(id: string): WorkspaceMember | null {
+    const row = this.db.query<{
+      id: string; workspace_id: string; name: string; email: string | null; external_provider: string;
+      external_id: string | null; role: string; status: string; created_at: number;
+    }, [string]>("SELECT * FROM workspace_members WHERE id = ?").get(id);
+    return row ? {
+      id: row.id,
+      workspaceId: row.workspace_id,
+      name: row.name,
+      email: row.email,
+      externalProvider: row.external_provider as WorkspaceMember["externalProvider"],
+      externalId: row.external_id,
+      role: row.role as WorkspaceRole,
+      status: row.status as WorkspaceMember["status"],
+      createdAt: row.created_at,
+    } : null;
+  }
+
+  listWorkspaceMembers(workspaceId: string): WorkspaceMember[] {
+    return this.db.query<{ id: string }, [string]>(
+      "SELECT id FROM workspace_members WHERE workspace_id = ? ORDER BY created_at",
+    ).all(workspaceId).map((row) => this.getWorkspaceMember(row.id)!);
+  }
+
+  updateWorkspaceMember(id: string, patch: { role?: WorkspaceRole; status?: WorkspaceMember["status"] }): void {
+    const sets: string[] = [];
+    const params: string[] = [];
+    if (patch.role !== undefined) { sets.push("role = ?"); params.push(patch.role); }
+    if (patch.status !== undefined) { sets.push("status = ?"); params.push(patch.status); }
+    if (!sets.length) return;
+    params.push(id);
+    this.db.run(`UPDATE workspace_members SET ${sets.join(", ")} WHERE id = ?`, params);
+  }
+
+  createWorkspaceApiToken(workspaceId: string, memberId: string, label: string, tokenHash: string, now: number): string {
+    const id = newId("token");
+    this.db.run(
+      `INSERT INTO workspace_api_tokens
+       (id, workspace_id, member_id, label, token_hash, created_at) VALUES (?,?,?,?,?,?)`,
+      [id, workspaceId, memberId, label, tokenHash, now],
+    );
+    return id;
+  }
+
+  memberForApiToken(tokenHash: string, now: number): WorkspaceMember | null {
+    const row = this.db.query<{ id: string }, [string]>(
+      `SELECT m.id FROM workspace_api_tokens t JOIN workspace_members m ON m.id = t.member_id
+       WHERE t.token_hash = ? AND t.revoked_at IS NULL AND m.status = 'active'`,
+    ).get(tokenHash);
+    if (!row) return null;
+    this.db.run("UPDATE workspace_api_tokens SET last_used_at = ? WHERE token_hash = ?", [now, tokenHash]);
+    return this.getWorkspaceMember(row.id);
+  }
+
+  revokeWorkspaceApiToken(id: string, now: number): void {
+    this.db.run("UPDATE workspace_api_tokens SET revoked_at = ? WHERE id = ?", [now, id]);
+  }
+
+  listWorkspaceApiTokens(workspaceId: string): {
+    id: string;
+    workspaceId: string;
+    memberId: string;
+    label: string;
+    createdAt: number;
+    lastUsedAt: number | null;
+    revokedAt: number | null;
+  }[] {
+    return this.db.query<{
+      id: string; workspace_id: string; member_id: string; label: string;
+      created_at: number; last_used_at: number | null; revoked_at: number | null;
+    }, [string]>(
+      "SELECT id, workspace_id, member_id, label, created_at, last_used_at, revoked_at FROM workspace_api_tokens WHERE workspace_id = ? ORDER BY created_at DESC",
+    ).all(workspaceId).map((row) => ({
+      id: row.id,
+      workspaceId: row.workspace_id,
+      memberId: row.member_id,
+      label: row.label,
+      createdAt: row.created_at,
+      lastUsedAt: row.last_used_at,
+      revokedAt: row.revoked_at,
+    }));
+  }
+
+  countActiveWorkspaceOwners(workspaceId: string): number {
+    return this.db.query<{ count: number }, [string]>(
+      "SELECT COUNT(*) AS count FROM workspace_members WHERE workspace_id = ? AND role = 'owner' AND status = 'active'",
+    ).get(workspaceId)?.count ?? 0;
   }
 
   getWorkspace(id: string): HarborWorkspace | null {
@@ -536,14 +805,36 @@ export class HarborStore {
   }
 
   createRepository(
-    input: { workspaceId: string; name: string; remoteUrl?: string | null; defaultBranch?: string },
+    input: {
+      workspaceId: string;
+      name: string;
+      remoteUrl?: string | null;
+      defaultBranch?: string;
+      scmProvider?: HarborRepository["scmProvider"];
+      scmRepository?: string | null;
+      scmAgentId?: string | null;
+      scmAutoDispatch?: boolean;
+    },
     now: number,
   ): HarborRepository {
     const id = newId("repository");
     this.db.run(
-      `INSERT INTO repositories (id, workspace_id, name, remote_url, default_branch, created_at)
-       VALUES (?,?,?,?,?,?)`,
-      [id, input.workspaceId, input.name, input.remoteUrl ?? null, input.defaultBranch ?? "main", now],
+      `INSERT INTO repositories
+       (id, workspace_id, name, remote_url, default_branch, scm_provider, scm_repository,
+        scm_agent_id, scm_auto_dispatch, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      [
+        id,
+        input.workspaceId,
+        input.name,
+        input.remoteUrl ?? null,
+        input.defaultBranch ?? "main",
+        input.scmProvider ?? "local",
+        input.scmRepository ?? null,
+        input.scmAgentId ?? null,
+        input.scmAutoDispatch ? 1 : 0,
+        now,
+      ],
     );
     return this.getRepository(id)!;
   }
@@ -579,7 +870,16 @@ export class HarborStore {
 
   updateRepository(
     id: string,
-    patch: { name?: string; remoteUrl?: string | null; defaultBranch?: string; archived?: boolean },
+    patch: {
+      name?: string;
+      remoteUrl?: string | null;
+      defaultBranch?: string;
+      scmProvider?: HarborRepository["scmProvider"];
+      scmRepository?: string | null;
+      scmAgentId?: string | null;
+      scmAutoDispatch?: boolean;
+      archived?: boolean;
+    },
     now: number,
   ): void {
     const sets: string[] = [];
@@ -587,6 +887,10 @@ export class HarborStore {
     if (patch.name !== undefined) { sets.push("name = ?"); params.push(patch.name); }
     if (patch.remoteUrl !== undefined) { sets.push("remote_url = ?"); params.push(patch.remoteUrl); }
     if (patch.defaultBranch !== undefined) { sets.push("default_branch = ?"); params.push(patch.defaultBranch); }
+    if (patch.scmProvider !== undefined) { sets.push("scm_provider = ?"); params.push(patch.scmProvider); }
+    if (patch.scmRepository !== undefined) { sets.push("scm_repository = ?"); params.push(patch.scmRepository); }
+    if (patch.scmAgentId !== undefined) { sets.push("scm_agent_id = ?"); params.push(patch.scmAgentId); }
+    if (patch.scmAutoDispatch !== undefined) { sets.push("scm_auto_dispatch = ?"); params.push(patch.scmAutoDispatch ? 1 : 0); }
     if (patch.archived !== undefined) { sets.push("archived_at = ?"); params.push(patch.archived ? now : null); }
     if (sets.length === 0) return;
     params.push(id);
@@ -678,14 +982,37 @@ export class HarborStore {
         "UPDATE devices SET token_hash = ?, capabilities = ?, last_seen_at = ? WHERE id = ?",
         [tokenHash, JSON.stringify(capabilities), now, existing.id],
       );
-      return toDevice({ ...existing, capabilities: JSON.stringify(capabilities), last_seen_at: now }, true);
+      const device = toDevice({ ...existing, capabilities: JSON.stringify(capabilities), last_seen_at: now }, true);
+      this.autoSyncRuntimeSkills(device, now);
+      return device;
     }
     const id = newId("device");
     this.db.run(
       "INSERT INTO devices (id, name, token_hash, capabilities, last_seen_at, created_at) VALUES (?,?,?,?,?,?)",
       [id, name, tokenHash, JSON.stringify(capabilities), now, now],
     );
-    return this.getDevice(id, true)!;
+    const device = this.getDevice(id, true)!;
+    this.autoSyncRuntimeSkills(device, now);
+    return device;
+  }
+
+  private autoSyncRuntimeSkills(device: Device, now: number): void {
+    for (const local of device.capabilities.installedSkills ?? []) {
+      const rows = this.db.query<SkillRow, [string, string]>(
+        `SELECT * FROM skills WHERE source = 'runtime' AND device_id = ? AND source_path = ?
+         AND auto_sync = 1 AND archived_at IS NULL`,
+      ).all(device.id, local.path);
+      for (const row of rows) {
+        this.updateSkill(row.id, {
+          name: local.name,
+          description: local.description,
+          instruction: local.instruction ?? row.instruction,
+          runtimes: local.runtimes,
+          files: local.files,
+          dependencies: local.dependencies ?? [],
+        }, now);
+      }
+    }
   }
 
   touchDevice(id: string, now: number): void {
@@ -724,6 +1051,13 @@ export class HarborStore {
     workdir?: string;
     isolation?: IsolationKind;
     instruction?: string | null;
+    repositoryIds?: string[];
+    concurrency?: number;
+    visibility?: HarborAgent["visibility"];
+    environment?: Record<string, string>;
+    setupScript?: string | null;
+    reuseDeviceCli?: boolean;
+    createdByMemberId?: string | null;
   }, now: number): HarborAgent {
     const id = newId("agent");
     const workspaceId = a.workspaceId ?? DEFAULT_WORKSPACE_ID;
@@ -732,25 +1066,40 @@ export class HarborStore {
         ? this.ensureRepositoryForPath(workspaceId, a.deviceId, a.workdir, now).id
         : a.repositoryId;
     if (!repositoryId) throw new Error(`Agent "${a.name}" 必须绑定 Repository`);
-    this.db.run(
-      `INSERT INTO agents
-       (id, workspace_id, name, description, device_id, backend, model, permission, repository_id, isolation, instruction, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [
-        id,
-        workspaceId,
-        a.name,
-        a.description ?? null,
-        a.deviceId,
-        a.backend,
-        a.model ?? null,
-        a.permission ?? "auto-edit",
-        repositoryId,
-        a.isolation ?? "none",
-        a.instruction ?? null,
-        now,
-      ],
-    );
+    const repositoryIds = [...new Set([repositoryId, ...(a.repositoryIds ?? [])])];
+    this.db.transaction(() => {
+      this.db.run(
+        `INSERT INTO agents
+         (id, workspace_id, name, description, device_id, backend, model, permission, repository_id,
+          isolation, instruction, concurrency, visibility, environment, setup_script, reuse_device_cli,
+          created_by_member_id, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          id,
+          workspaceId,
+          a.name,
+          a.description ?? null,
+          a.deviceId,
+          a.backend,
+          a.model ?? null,
+          a.permission ?? "auto-edit",
+          repositoryId,
+          a.isolation ?? "none",
+          a.instruction ?? null,
+          a.concurrency ?? 1,
+          a.visibility ?? "workspace",
+          JSON.stringify(a.environment ?? {}),
+          a.setupScript ?? null,
+          a.reuseDeviceCli === false ? 0 : 1,
+          a.createdByMemberId ?? null,
+          now,
+        ],
+      );
+      const insert = this.db.prepare(
+        "INSERT INTO agent_repositories (agent_id, repository_id, position, is_primary, created_at) VALUES (?,?,?,?,?)",
+      );
+      repositoryIds.forEach((candidate, position) => insert.run(id, candidate, position, candidate === repositoryId ? 1 : 0, now));
+    })();
     return this.getAgent(id)!;
   }
 
@@ -778,7 +1127,63 @@ export class HarborStore {
   }
 
   setAgentRepository(id: string, repositoryId: string): void {
-    this.db.run("UPDATE agents SET repository_id = ? WHERE id = ?", [repositoryId, id]);
+    this.db.transaction(() => {
+      this.db.run("UPDATE agents SET repository_id = ? WHERE id = ?", [repositoryId, id]);
+      this.db.run("UPDATE agent_repositories SET is_primary = 0 WHERE agent_id = ?", [id]);
+      this.db.run(
+        `INSERT INTO agent_repositories (agent_id, repository_id, position, is_primary, created_at)
+         VALUES (?, ?, COALESCE((SELECT MAX(position) + 1 FROM agent_repositories WHERE agent_id = ?), 0), 1,
+                 CAST(strftime('%s','now') AS INTEGER) * 1000)
+         ON CONFLICT(agent_id, repository_id) DO UPDATE SET is_primary = 1`,
+        [id, repositoryId, id],
+      );
+    })();
+  }
+
+  setAgentRepositories(id: string, repositoryIds: string[], primaryRepositoryId: string, now: number): void {
+    const ids = [...new Set([primaryRepositoryId, ...repositoryIds])];
+    this.db.transaction(() => {
+      this.db.run("UPDATE agents SET repository_id = ? WHERE id = ?", [primaryRepositoryId, id]);
+      this.db.run("DELETE FROM agent_repositories WHERE agent_id = ?", [id]);
+      const insert = this.db.prepare(
+        "INSERT INTO agent_repositories (agent_id, repository_id, position, is_primary, created_at) VALUES (?,?,?,?,?)",
+      );
+      ids.forEach((repositoryId, position) =>
+        insert.run(id, repositoryId, position, repositoryId === primaryRepositoryId ? 1 : 0, now));
+    })();
+  }
+
+  updateAgentConfig(
+    id: string,
+    patch: {
+      description?: string | null;
+      model?: string | null;
+      permission?: PermissionPolicy;
+      isolation?: IsolationKind;
+      instruction?: string | null;
+      concurrency?: number;
+      visibility?: HarborAgent["visibility"];
+      environment?: Record<string, string>;
+      setupScript?: string | null;
+      reuseDeviceCli?: boolean;
+    },
+  ): void {
+    const sets: string[] = [];
+    const params: (string | number | null)[] = [];
+    const add = (column: string, value: string | number | null) => { sets.push(`${column} = ?`); params.push(value); };
+    if (patch.description !== undefined) add("description", patch.description);
+    if (patch.model !== undefined) add("model", patch.model);
+    if (patch.permission !== undefined) add("permission", patch.permission);
+    if (patch.isolation !== undefined) add("isolation", patch.isolation);
+    if (patch.instruction !== undefined) add("instruction", patch.instruction);
+    if (patch.concurrency !== undefined) add("concurrency", patch.concurrency);
+    if (patch.visibility !== undefined) add("visibility", patch.visibility);
+    if (patch.environment !== undefined) add("environment", JSON.stringify(patch.environment));
+    if (patch.setupScript !== undefined) add("setup_script", patch.setupScript);
+    if (patch.reuseDeviceCli !== undefined) add("reuse_device_cli", patch.reuseDeviceCli ? 1 : 0);
+    if (sets.length === 0) return;
+    params.push(id);
+    this.db.run(`UPDATE agents SET ${sets.join(", ")} WHERE id = ?`, params);
   }
 
   /**
@@ -838,6 +1243,12 @@ export class HarborStore {
       )
       .all(agent.id)
       .map((row) => row.skill_id);
+    agent.repositoryIds = this.db
+      .query<{ repository_id: string }, [string]>(
+        "SELECT repository_id FROM agent_repositories WHERE agent_id = ? ORDER BY position, created_at",
+      )
+      .all(agent.id)
+      .map((row) => row.repository_id);
     return agent;
   }
 
@@ -854,6 +1265,42 @@ export class HarborStore {
 
   // ---- skills ----
 
+  createSkillGroup(workspaceId: string, name: string, position: number, now: number): SkillGroup {
+    const id = newId("skillGroup");
+    this.db.run(
+      "INSERT INTO skill_groups (id, workspace_id, name, position, created_at) VALUES (?,?,?,?,?)",
+      [id, workspaceId, name, position, now],
+    );
+    return this.getSkillGroup(id)!;
+  }
+
+  getSkillGroup(id: string): SkillGroup | null {
+    const row = this.db.query<{ id: string; workspace_id: string; name: string; position: number; created_at: number }, [string]>(
+      "SELECT * FROM skill_groups WHERE id = ?",
+    ).get(id);
+    return row ? { id: row.id, workspaceId: row.workspace_id, name: row.name, position: row.position, createdAt: row.created_at } : null;
+  }
+
+  listSkillGroups(workspaceId: string): SkillGroup[] {
+    return this.db.query<{ id: string }, [string]>(
+      "SELECT id FROM skill_groups WHERE workspace_id = ? ORDER BY position, created_at",
+    ).all(workspaceId).map((row) => this.getSkillGroup(row.id)!);
+  }
+
+  updateSkillGroup(id: string, patch: { name?: string; position?: number }): void {
+    const sets: string[] = [];
+    const params: (string | number)[] = [];
+    if (patch.name !== undefined) { sets.push("name = ?"); params.push(patch.name); }
+    if (patch.position !== undefined) { sets.push("position = ?"); params.push(patch.position); }
+    if (!sets.length) return;
+    params.push(id);
+    this.db.run(`UPDATE skill_groups SET ${sets.join(", ")} WHERE id = ?`, params);
+  }
+
+  deleteSkillGroup(id: string): void {
+    this.db.run("DELETE FROM skill_groups WHERE id = ?", [id]);
+  }
+
   createSkill(
     skill: {
       workspaceId?: string;
@@ -864,41 +1311,60 @@ export class HarborStore {
       deviceId?: string | null;
       sourcePath?: string | null;
       runtimes?: BackendKind[];
+      groupId?: string | null;
+      originUrl?: string | null;
+      sourceRef?: string | null;
+      autoSync?: boolean;
+      files?: { path: string; content: string }[];
+      dependencies?: SkillDependency[];
     },
     now: number,
   ): HarborSkill {
     const id = newId("skill");
-    this.db.run(
-      `INSERT INTO skills
-       (id, workspace_id, name, description, source, instruction, device_id, source_path, runtimes, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-      [
-        id,
-        skill.workspaceId ?? DEFAULT_WORKSPACE_ID,
-        skill.name,
-        skill.description ?? "",
-        skill.source,
-        skill.instruction,
-        skill.deviceId ?? null,
-        skill.sourcePath ?? null,
-        JSON.stringify(skill.runtimes ?? ["claude", "codex"]),
-        now,
-        now,
-      ],
-    );
+    const files = normalizeSkillFiles(skill.instruction, skill.files);
+    const entry = files.find((file) => file.path === "SKILL.md") ?? files[0]!;
+    this.db.transaction(() => {
+      this.db.run(
+        `INSERT INTO skills
+         (id, workspace_id, name, description, source, instruction, device_id, source_path, runtimes,
+          group_id, origin_url, source_ref, entry_hash, bundle_hash, auto_sync, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          id,
+          skill.workspaceId ?? DEFAULT_WORKSPACE_ID,
+          skill.name,
+          skill.description ?? "",
+          skill.source,
+          skill.instruction,
+          skill.deviceId ?? null,
+          skill.sourcePath ?? null,
+          JSON.stringify(skill.runtimes ?? ["claude", "codex"]),
+          skill.groupId ?? null,
+          skill.originUrl ?? null,
+          skill.sourceRef ?? null,
+          entry.sha256,
+          hashSkillBundle(files),
+          skill.autoSync ? 1 : 0,
+          now,
+          now,
+        ],
+      );
+      this.replaceSkillFiles(id, files);
+      this.replaceSkillDependencies(id, skill.dependencies ?? []);
+    })();
     return this.getSkill(id)!;
   }
 
   getSkill(id: string): HarborSkill | null {
     const row = this.db.query<SkillRow, [string]>("SELECT * FROM skills WHERE id = ?").get(id);
-    return row ? toSkill(row) : null;
+    return row ? this.withSkillBundle(toSkill(row)) : null;
   }
 
   getSkillByName(name: string, workspaceId = DEFAULT_WORKSPACE_ID): HarborSkill | null {
     const row = this.db
       .query<SkillRow, [string, string]>("SELECT * FROM skills WHERE workspace_id = ? AND name = ?")
       .get(workspaceId, name);
-    return row ? toSkill(row) : null;
+    return row ? this.withSkillBundle(toSkill(row)) : null;
   }
 
   getRuntimeSkill(workspaceId: string, deviceId: string, sourcePath: string): HarborSkill | null {
@@ -907,7 +1373,7 @@ export class HarborStore {
         "SELECT * FROM skills WHERE workspace_id = ? AND source = 'runtime' AND device_id = ? AND source_path = ?",
       )
       .get(workspaceId, deviceId, sourcePath);
-    return row ? toSkill(row) : null;
+    return row ? this.withSkillBundle(toSkill(row)) : null;
   }
 
   listSkills(includeArchived = false, workspaceId?: string): HarborSkill[] {
@@ -919,7 +1385,7 @@ export class HarborStore {
     return this.db
       .query<SkillRow, string[]>(`SELECT * FROM skills ${where} ORDER BY updated_at DESC, name`)
       .all(...params)
-      .map(toSkill);
+      .map((row) => this.withSkillBundle(toSkill(row)));
   }
 
   listSkillsForAgent(agentId: string): HarborSkill[] {
@@ -931,7 +1397,7 @@ export class HarborStore {
          ORDER BY a.position, a.created_at`,
       )
       .all(agentId)
-      .map(toSkill);
+      .map((row) => this.withSkillBundle(toSkill(row)));
   }
 
   listAgentsForSkill(skillId: string): HarborAgent[] {
@@ -948,11 +1414,22 @@ export class HarborStore {
 
   updateSkill(
     id: string,
-    patch: { name?: string; description?: string; instruction?: string; runtimes?: BackendKind[] },
+    patch: {
+      name?: string;
+      description?: string;
+      instruction?: string;
+      runtimes?: BackendKind[];
+      groupId?: string | null;
+      originUrl?: string | null;
+      sourceRef?: string | null;
+      autoSync?: boolean;
+      files?: { path: string; content: string }[];
+      dependencies?: SkillDependency[];
+    },
     now: number,
   ): void {
     const sets: string[] = [];
-    const params: (string | number)[] = [];
+    const params: (string | number | null)[] = [];
     if (patch.name !== undefined) {
       sets.push("name = ?");
       params.push(patch.name);
@@ -969,10 +1446,64 @@ export class HarborStore {
       sets.push("runtimes = ?");
       params.push(JSON.stringify(patch.runtimes));
     }
-    if (sets.length === 0) return;
+    if (patch.groupId !== undefined) { sets.push("group_id = ?"); params.push(patch.groupId); }
+    if (patch.originUrl !== undefined) { sets.push("origin_url = ?"); params.push(patch.originUrl); }
+    if (patch.sourceRef !== undefined) { sets.push("source_ref = ?"); params.push(patch.sourceRef); }
+    if (patch.autoSync !== undefined) { sets.push("auto_sync = ?"); params.push(patch.autoSync ? 1 : 0); }
+    const current = this.getSkill(id);
+    const files = patch.files !== undefined
+      ? normalizeSkillFiles(patch.instruction ?? current?.instruction ?? "", patch.files)
+      : patch.instruction !== undefined
+        ? normalizeSkillFiles(patch.instruction, current?.files.map((file) => ({
+            path: file.path,
+            content: file.path === "SKILL.md" ? patch.instruction! : file.content,
+          })))
+        : null;
+    if (files) {
+      const entry = files.find((file) => file.path === "SKILL.md") ?? files[0]!;
+      sets.push("entry_hash = ?", "bundle_hash = ?");
+      params.push(entry.sha256, hashSkillBundle(files));
+    }
+    if (sets.length === 0 && patch.dependencies === undefined) return;
     sets.push("updated_at = ?");
     params.push(now, id);
-    this.db.run(`UPDATE skills SET ${sets.join(", ")} WHERE id = ?`, params);
+    this.db.transaction(() => {
+      this.db.run(`UPDATE skills SET ${sets.join(", ")} WHERE id = ?`, params);
+      if (files) this.replaceSkillFiles(id, files);
+      if (patch.dependencies !== undefined) this.replaceSkillDependencies(id, patch.dependencies);
+    })();
+  }
+
+  private withSkillBundle(skill: HarborSkill): HarborSkill {
+    skill.files = this.db
+      .query<{ path: string; content: string; sha256: string }, [string]>(
+        "SELECT path, content, sha256 FROM skill_files WHERE skill_id = ? ORDER BY position, path",
+      )
+      .all(skill.id);
+    skill.dependencies = this.db
+      .query<{ name: string; spec: string | null; required: number }, [string]>(
+        "SELECT name, spec, required FROM skill_dependencies WHERE skill_id = ? ORDER BY name",
+      )
+      .all(skill.id)
+      .map((row) => ({ name: row.name, spec: row.spec, required: row.required === 1 }));
+    return skill;
+  }
+
+  private replaceSkillFiles(skillId: string, files: SkillFile[]): void {
+    this.db.run("DELETE FROM skill_files WHERE skill_id = ?", [skillId]);
+    const insert = this.db.prepare(
+      "INSERT INTO skill_files (skill_id, path, content, sha256, position) VALUES (?,?,?,?,?)",
+    );
+    files.forEach((file, position) => insert.run(skillId, file.path, file.content, file.sha256, position));
+  }
+
+  private replaceSkillDependencies(skillId: string, dependencies: SkillDependency[]): void {
+    this.db.run("DELETE FROM skill_dependencies WHERE skill_id = ?", [skillId]);
+    const insert = this.db.prepare(
+      "INSERT INTO skill_dependencies (skill_id, name, spec, required) VALUES (?,?,?,?)",
+    );
+    dependencies.forEach((dependency) =>
+      insert.run(skillId, dependency.name, dependency.spec, dependency.required ? 1 : 0));
   }
 
   /** 归档即停止生效并解除全部 Agent 绑定；恢复不会隐式重新绑定。 */
@@ -999,32 +1530,41 @@ export class HarborStore {
     repositoryId?: string | null;
     origin?: Origin;
     originRef?: string | null;
+    creatorMemberId?: string | null;
+    ownerMemberId?: string | null;
+    labelIds?: string[];
   }, now: number): Conversation {
     const id = newId("conversation");
     const status: ConversationStatus = c.kind === "issue" ? "backlog" : "open";
     const agent = c.agentId ? this.getAgent(c.agentId) : null;
     const workspaceId = c.workspaceId ?? agent?.workspaceId ?? DEFAULT_WORKSPACE_ID;
     const repositoryId = c.repositoryId === undefined ? (agent?.repositoryId ?? null) : c.repositoryId;
-    this.db.run(
-      `INSERT INTO conversations
-       (id, workspace_id, kind, title, agent_id, description, priority, status, repository_id, origin, origin_ref, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [
-        id,
-        workspaceId,
-        c.kind,
-        c.title ?? null,
-        c.agentId ?? null,
-        c.description ?? null,
-        c.priority ?? "medium",
-        status,
-        repositoryId,
-        c.origin ?? "cli",
-        c.originRef ?? null,
-        now,
-        now,
-      ],
-    );
+    this.db.transaction(() => {
+      this.db.run(
+        `INSERT INTO conversations
+         (id, workspace_id, kind, title, agent_id, description, priority, status, repository_id, origin,
+          origin_ref, creator_member_id, owner_member_id, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          id,
+          workspaceId,
+          c.kind,
+          c.title ?? null,
+          c.agentId ?? null,
+          c.description ?? null,
+          c.priority ?? "medium",
+          status,
+          repositoryId,
+          c.origin ?? "cli",
+          c.originRef ?? null,
+          c.creatorMemberId ?? null,
+          c.ownerMemberId ?? null,
+          now,
+          now,
+        ],
+      );
+      this.setConversationLabels(id, c.labelIds ?? [], now);
+    })();
     return this.getConversation(id)!;
   }
 
@@ -1032,7 +1572,7 @@ export class HarborStore {
     const r = this.db
       .query<ConversationRow, [string]>("SELECT * FROM conversations WHERE id = ?")
       .get(id);
-    return r ? toConversation(r) : null;
+    return r ? this.withConversationMetadata(toConversation(r)) : null;
   }
 
   /** CLI 短 id：前缀唯一匹配；0 命中 → null，多命中 → throw */
@@ -1041,7 +1581,7 @@ export class HarborStore {
       .query<ConversationRow, [string]>("SELECT * FROM conversations WHERE id LIKE ? || '%' LIMIT 2")
       .all(prefix);
     if (rows.length > 1) throw new Error(`conversation id 前缀 "${prefix}" 有多个匹配，请给更长前缀`);
-    return rows[0] ? toConversation(rows[0]) : null;
+    return rows[0] ? this.withConversationMetadata(toConversation(rows[0])) : null;
   }
 
   listConversations(filter: { workspaceId?: string; kind?: ConversationKind; status?: ConversationStatus }): Conversation[] {
@@ -1063,7 +1603,7 @@ export class HarborStore {
     return this.db
       .query<ConversationRow, string[]>(`SELECT * FROM conversations ${where} ORDER BY updated_at DESC`)
       .all(...params)
-      .map(toConversation);
+      .map((row) => this.withConversationMetadata(toConversation(row)));
   }
 
   setConversationStatus(id: string, status: ConversationStatus, now: number): void {
@@ -1072,7 +1612,13 @@ export class HarborStore {
 
   updateConversation(
     id: string,
-    patch: { title?: string | null; description?: string | null; priority?: IssuePriority },
+    patch: {
+      title?: string | null;
+      description?: string | null;
+      priority?: IssuePriority;
+      ownerMemberId?: string | null;
+      labelIds?: string[];
+    },
     now: number,
   ): void {
     const sets: string[] = [];
@@ -1089,10 +1635,104 @@ export class HarborStore {
       sets.push("priority = ?");
       params.push(patch.priority ?? "medium");
     }
-    if (sets.length === 0) return;
-    sets.push("updated_at = ?");
-    params.push(now, id);
-    this.db.run(`UPDATE conversations SET ${sets.join(", ")} WHERE id = ?`, params);
+    if ("ownerMemberId" in patch) {
+      sets.push("owner_member_id = ?");
+      params.push(patch.ownerMemberId ?? null);
+    }
+    if (sets.length === 0 && patch.labelIds === undefined) return;
+    this.db.transaction(() => {
+      if (sets.length > 0) {
+        sets.push("updated_at = ?");
+        params.push(now, id);
+        this.db.run(`UPDATE conversations SET ${sets.join(", ")} WHERE id = ?`, params);
+      }
+      if (patch.labelIds !== undefined) this.setConversationLabels(id, patch.labelIds, now);
+    })();
+  }
+
+  private withConversationMetadata(conversation: Conversation): Conversation {
+    conversation.labelIds = this.db
+      .query<{ label_id: string }, [string]>(
+        "SELECT label_id FROM conversation_labels WHERE conversation_id = ? ORDER BY created_at, label_id",
+      )
+      .all(conversation.id)
+      .map((row) => row.label_id);
+    return conversation;
+  }
+
+  setConversationLabels(conversationId: string, labelIds: string[], now: number): void {
+    this.db.run("DELETE FROM conversation_labels WHERE conversation_id = ?", [conversationId]);
+    const insert = this.db.prepare(
+      "INSERT INTO conversation_labels (conversation_id, label_id, created_at) VALUES (?,?,?)",
+    );
+    [...new Set(labelIds)].forEach((labelId) => insert.run(conversationId, labelId, now));
+  }
+
+  createIssueLabel(workspaceId: string, name: string, color: string): IssueLabel {
+    const id = newId("label");
+    this.db.run("INSERT INTO issue_labels (id, workspace_id, name, color) VALUES (?,?,?,?)", [id, workspaceId, name, color]);
+    return { id, workspaceId, name, color };
+  }
+
+  listIssueLabels(workspaceId: string): IssueLabel[] {
+    return this.db
+      .query<{ id: string; workspace_id: string; name: string; color: string }, [string]>(
+        "SELECT * FROM issue_labels WHERE workspace_id = ? ORDER BY name",
+      )
+      .all(workspaceId)
+      .map((row) => ({ id: row.id, workspaceId: row.workspace_id, name: row.name, color: row.color }));
+  }
+
+  getIssueLabel(id: string): IssueLabel | null {
+    const row = this.db.query<{ id: string; workspace_id: string; name: string; color: string }, [string]>(
+      "SELECT * FROM issue_labels WHERE id = ?",
+    ).get(id);
+    return row ? { id: row.id, workspaceId: row.workspace_id, name: row.name, color: row.color } : null;
+  }
+
+  appendConversationMessage(
+    conversationId: string,
+    input: Omit<ConversationMessage, "id" | "conversationId" | "createdAt">,
+    now: number,
+  ): ConversationMessage {
+    const existing = input.externalId
+      ? this.db.query<{ id: string }, [string, string]>(
+          "SELECT id FROM conversation_messages WHERE conversation_id = ? AND external_id = ?",
+        ).get(conversationId, input.externalId)
+      : null;
+    if (existing) return this.getConversationMessage(existing.id)!;
+    const id = newId("message");
+    this.db.run(
+      `INSERT INTO conversation_messages
+       (id, conversation_id, author_type, author_id, author_name, body, external_id, created_at)
+       VALUES (?,?,?,?,?,?,?,?)`,
+      [id, conversationId, input.authorType, input.authorId, input.authorName, input.body, input.externalId, now],
+    );
+    this.db.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, conversationId]);
+    return this.getConversationMessage(id)!;
+  }
+
+  getConversationMessage(id: string): ConversationMessage | null {
+    const row = this.db.query<{
+      id: string; conversation_id: string; author_type: string; author_id: string | null;
+      author_name: string | null; body: string; external_id: string | null; created_at: number;
+    }, [string]>("SELECT * FROM conversation_messages WHERE id = ?").get(id);
+    return row ? {
+      id: row.id,
+      conversationId: row.conversation_id,
+      authorType: row.author_type as ConversationMessage["authorType"],
+      authorId: row.author_id,
+      authorName: row.author_name,
+      body: row.body,
+      externalId: row.external_id,
+      createdAt: row.created_at,
+    } : null;
+  }
+
+  listConversationMessages(conversationId: string): ConversationMessage[] {
+    return this.db.query<{ id: string }, [string]>(
+      "SELECT id FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at, rowid",
+    ).all(conversationId).map((row) => this.getConversationMessage(row.id)!);
   }
 
   /** AI 分诊草稿在人工确认时才进入 Issue 看板；保留 triage Run 与 session 作为来源证据。 */
@@ -1166,7 +1806,7 @@ export class HarborStore {
         "SELECT * FROM conversations WHERE origin = ? AND origin_ref = ? ORDER BY created_at DESC LIMIT 1",
       )
       .get(origin, originRef);
-    return r ? toConversation(r) : null;
+    return r ? this.withConversationMetadata(toConversation(r)) : null;
   }
 
   /** 该设备上「已终结但 worktree 还挂着」的 issue（设备离线时 cleanup 丢失 → 重连补发） */
@@ -1178,7 +1818,7 @@ export class HarborStore {
       )
       .all(deviceId);
     return rows.flatMap((r) => {
-      const conv = toConversation(r);
+      const conv = this.withConversationMetadata(toConversation(r));
       const mount = conv.worktreeMountId ? this.getRepositoryMount(conv.worktreeMountId) : null;
       return mount ? [{ conversation: conv, mount }] : [];
     });
@@ -1195,6 +1835,248 @@ export class HarborStore {
       "INSERT INTO status_log (conversation_id, from_status, to_status, actor, ts) VALUES (?,?,?,?,?)",
       [conversationId, from, to, actor, now],
     );
+  }
+
+  // ---- SCM / workspace integrations ----
+
+  findRepositoryByScm(provider: HarborRepository["scmProvider"], scmRepository: string): HarborRepository | null {
+    const row = this.db.query<RepositoryRow, [string, string]>(
+      "SELECT * FROM repositories WHERE scm_provider = ? AND scm_repository = ?",
+    ).get(provider, scmRepository);
+    return row ? toRepository(row) : null;
+  }
+
+  insertScmEvent(input: {
+    id: string;
+    provider: "codebase";
+    workspaceId: string;
+    repositoryId?: string | null;
+    eventType: string;
+    action?: string | null;
+    objectKind?: ScmObjectKind | null;
+    externalId?: string | null;
+    payload: unknown;
+  }, now: number): boolean {
+    const result = this.db.run(
+      `INSERT OR IGNORE INTO scm_events
+       (id, provider, workspace_id, repository_id, event_type, action, object_kind, external_id, payload, received_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      [input.id, input.provider, input.workspaceId, input.repositoryId ?? null, input.eventType,
+       input.action ?? null, input.objectKind ?? null, input.externalId ?? null, JSON.stringify(input.payload), now],
+    );
+    return result.changes > 0;
+  }
+
+  finishScmEvent(id: string, outcome: ScmEvent["outcome"], error: string | null, now: number): void {
+    this.db.run(
+      "UPDATE scm_events SET outcome = ?, error = ?, processed_at = ? WHERE id = ?",
+      [outcome, error, now, id],
+    );
+  }
+
+  getScmEvent(id: string): ScmEvent | null {
+    const row = this.db.query<{
+      id: string; provider: string; workspace_id: string; repository_id: string | null; event_type: string;
+      action: string | null; object_kind: string | null; external_id: string | null; outcome: string;
+      error: string | null; received_at: number; processed_at: number | null;
+    }, [string]>("SELECT * FROM scm_events WHERE id = ?").get(id);
+    return row ? {
+      id: row.id,
+      provider: row.provider as "codebase",
+      workspaceId: row.workspace_id,
+      repositoryId: row.repository_id,
+      eventType: row.event_type,
+      action: row.action,
+      objectKind: row.object_kind as ScmObjectKind | null,
+      externalId: row.external_id,
+      outcome: row.outcome as ScmEvent["outcome"],
+      error: row.error,
+      receivedAt: row.received_at,
+      processedAt: row.processed_at,
+    } : null;
+  }
+
+  listScmEvents(workspaceId: string, limit = 100): ScmEvent[] {
+    return this.db.query<{ id: string }, [string, number]>(
+      "SELECT id FROM scm_events WHERE workspace_id = ? ORDER BY received_at DESC LIMIT ?",
+    ).all(workspaceId, limit).map((row) => this.getScmEvent(row.id)!);
+  }
+
+  upsertScmExternalObject(input: {
+    workspaceId: string;
+    repositoryId: string;
+    provider: "codebase";
+    kind: ScmObjectKind;
+    externalId: string;
+    url?: string | null;
+    title: string;
+    description?: string | null;
+    authorId?: string | null;
+    authorName?: string | null;
+    state: string;
+    payload?: unknown;
+  }, now: number): ScmExternalObject {
+    const existing = this.getScmExternalObject(input.provider, input.repositoryId, input.kind, input.externalId);
+    if (existing) {
+      this.db.run(
+        `UPDATE scm_external_objects SET url = ?, title = ?, description = ?, author_id = ?, author_name = ?,
+         state = ?, payload = ?, updated_at = ? WHERE id = ?`,
+        [input.url ?? null, input.title, input.description ?? null, input.authorId ?? null, input.authorName ?? null,
+         input.state, JSON.stringify(input.payload ?? {}), now, existing.id],
+      );
+      return this.getScmExternalObjectById(existing.id)!;
+    }
+    const id = newId("external");
+    this.db.run(
+      `INSERT INTO scm_external_objects
+       (id, workspace_id, repository_id, provider, kind, external_id, url, title, description,
+        author_id, author_name, state, payload, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, input.workspaceId, input.repositoryId, input.provider, input.kind, input.externalId,
+       input.url ?? null, input.title, input.description ?? null, input.authorId ?? null, input.authorName ?? null,
+       input.state, JSON.stringify(input.payload ?? {}), now, now],
+    );
+    return this.getScmExternalObjectById(id)!;
+  }
+
+  getScmExternalObject(
+    provider: "codebase",
+    repositoryId: string,
+    kind: ScmObjectKind,
+    externalId: string,
+  ): ScmExternalObject | null {
+    const row = this.db.query<{ id: string }, [string, string, string, string]>(
+      `SELECT id FROM scm_external_objects
+       WHERE provider = ? AND repository_id = ? AND kind = ? AND external_id = ?`,
+    ).get(provider, repositoryId, kind, externalId);
+    return row ? this.getScmExternalObjectById(row.id) : null;
+  }
+
+  getScmExternalObjectById(id: string): ScmExternalObject | null {
+    const row = this.db.query<{
+      id: string; workspace_id: string; repository_id: string; provider: string; kind: string;
+      external_id: string; url: string | null; title: string; description: string | null;
+      author_id: string | null; author_name: string | null; state: string; conversation_id: string | null;
+      delivery_id: string | null; created_at: number; updated_at: number;
+    }, [string]>("SELECT * FROM scm_external_objects WHERE id = ?").get(id);
+    return row ? {
+      id: row.id,
+      workspaceId: row.workspace_id,
+      repositoryId: row.repository_id,
+      provider: row.provider as "codebase",
+      kind: row.kind as ScmObjectKind,
+      externalId: row.external_id,
+      url: row.url,
+      title: row.title,
+      description: row.description,
+      authorId: row.author_id,
+      authorName: row.author_name,
+      state: row.state,
+      conversationId: row.conversation_id,
+      deliveryId: row.delivery_id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    } : null;
+  }
+
+  linkScmExternalObject(id: string, links: { conversationId?: string | null; deliveryId?: string | null }, now: number): void {
+    const sets: string[] = [];
+    const params: (string | number | null)[] = [];
+    if (links.conversationId !== undefined) { sets.push("conversation_id = ?"); params.push(links.conversationId); }
+    if (links.deliveryId !== undefined) { sets.push("delivery_id = ?"); params.push(links.deliveryId); }
+    if (!sets.length) return;
+    sets.push("updated_at = ?");
+    params.push(now, id);
+    this.db.run(`UPDATE scm_external_objects SET ${sets.join(", ")} WHERE id = ?`, params);
+  }
+
+  listScmExternalObjects(workspaceId: string, kind?: ScmObjectKind): ScmExternalObject[] {
+    const rows = kind
+      ? this.db.query<{ id: string }, [string, string]>(
+          "SELECT id FROM scm_external_objects WHERE workspace_id = ? AND kind = ? ORDER BY updated_at DESC",
+        ).all(workspaceId, kind)
+      : this.db.query<{ id: string }, [string]>(
+          "SELECT id FROM scm_external_objects WHERE workspace_id = ? ORDER BY updated_at DESC",
+        ).all(workspaceId);
+    return rows.map((row) => this.getScmExternalObjectById(row.id)!);
+  }
+
+  getScmExternalObjectForConversation(conversationId: string): ScmExternalObject | null {
+    const row = this.db.query<{ id: string }, [string]>(
+      `SELECT id FROM scm_external_objects WHERE conversation_id = ?
+       ORDER BY CASE kind WHEN 'issue' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1`,
+    ).get(conversationId);
+    return row ? this.getScmExternalObjectById(row.id) : null;
+  }
+
+  upsertLarkWorkspaceBinding(input: {
+    workspaceId: string;
+    chatId: string;
+    defaultAgentId: string;
+    responseMode?: LarkWorkspaceBinding["responseMode"];
+    listenMode?: LarkWorkspaceBinding["listenMode"];
+    botMode?: LarkWorkspaceBinding["botMode"];
+    enabled?: boolean;
+  }, now: number): LarkWorkspaceBinding {
+    const existing = this.getLarkWorkspaceBinding(input.chatId);
+    const id = existing?.id ?? newId("larkBinding");
+    this.db.run(
+      `INSERT INTO lark_workspace_bindings
+       (id, workspace_id, chat_id, default_agent_id, response_mode, listen_mode, bot_mode, enabled, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(chat_id) DO UPDATE SET workspace_id = excluded.workspace_id,
+         default_agent_id = excluded.default_agent_id, response_mode = excluded.response_mode,
+         listen_mode = excluded.listen_mode, bot_mode = excluded.bot_mode, enabled = excluded.enabled,
+         updated_at = excluded.updated_at`,
+      [id, input.workspaceId, input.chatId, input.defaultAgentId, input.responseMode ?? "thread",
+       input.listenMode ?? "mention", input.botMode ?? "global", input.enabled === false ? 0 : 1,
+       existing?.createdAt ?? now, now],
+    );
+    return this.getLarkWorkspaceBinding(input.chatId)!;
+  }
+
+  getLarkWorkspaceBinding(chatId: string): LarkWorkspaceBinding | null {
+    const row = this.db.query<{
+      id: string; workspace_id: string; chat_id: string; default_agent_id: string; response_mode: string;
+      listen_mode: string; bot_mode: string; enabled: number; created_at: number; updated_at: number;
+    }, [string]>("SELECT * FROM lark_workspace_bindings WHERE chat_id = ?").get(chatId);
+    return row ? {
+      id: row.id,
+      workspaceId: row.workspace_id,
+      chatId: row.chat_id,
+      defaultAgentId: row.default_agent_id,
+      responseMode: row.response_mode as LarkWorkspaceBinding["responseMode"],
+      listenMode: row.listen_mode as LarkWorkspaceBinding["listenMode"],
+      botMode: row.bot_mode as LarkWorkspaceBinding["botMode"],
+      enabled: row.enabled === 1,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    } : null;
+  }
+
+  listLarkWorkspaceBindings(workspaceId: string): LarkWorkspaceBinding[] {
+    return this.db.query<{ chat_id: string }, [string]>(
+      "SELECT chat_id FROM lark_workspace_bindings WHERE workspace_id = ? ORDER BY created_at",
+    ).all(workspaceId).map((row) => this.getLarkWorkspaceBinding(row.chat_id)!);
+  }
+
+  deleteLarkWorkspaceBinding(id: string): void {
+    this.db.run("DELETE FROM lark_workspace_bindings WHERE id = ?", [id]);
+  }
+
+  linkLarkMessage(messageId: string, conversationId: string, now: number): void {
+    this.db.run(
+      `INSERT INTO lark_message_links (message_id, conversation_id, created_at) VALUES (?,?,?)
+       ON CONFLICT(message_id) DO UPDATE SET conversation_id = excluded.conversation_id`,
+      [messageId, conversationId, now],
+    );
+  }
+
+  getConversationForLarkMessage(messageId: string): Conversation | null {
+    const row = this.db.query<{ conversation_id: string }, [string]>(
+      "SELECT conversation_id FROM lark_message_links WHERE message_id = ?",
+    ).get(messageId);
+    return row ? this.getConversation(row.conversation_id) : null;
   }
 
   // ---- delivery ----
@@ -1416,7 +2298,9 @@ export class HarborStore {
   createRun(
     r: {
       workspaceId?: string;
-      conversationId: string;
+      sourceType?: RunSourceType;
+      sourceId?: string;
+      conversationId?: string | null;
       agentId: string;
       deviceId: string;
       repositoryId?: string | null;
@@ -1426,21 +2310,36 @@ export class HarborStore {
       purpose?: RunPurpose;
       promptEvent: PromptEventBlockKey;
       triggerRef?: string | null;
+      triggerContext?: Record<string, unknown>;
+      concurrencyKey?: string | null;
+      attachments?: RunAttachment[];
     },
     now: number,
   ): Run {
     const id = newId("run");
-    const conversation = this.getConversation(r.conversationId);
+    const conversation = r.conversationId ? this.getConversation(r.conversationId) : null;
     const workspaceId = r.workspaceId ?? conversation?.workspaceId ?? DEFAULT_WORKSPACE_ID;
+    const sourceType = r.sourceType ?? (conversation?.kind === "chat" ? "chat" : "issue");
+    const sourceId = r.sourceId ?? conversation?.id;
+    if (!sourceId) throw new Error("Run sourceId 不能为空");
+    if (sourceType === "automation" && r.conversationId) {
+      throw new Error("Automation-source Run 不能绑定 Conversation");
+    }
+    if (sourceType !== "automation" && !conversation) {
+      throw new Error(`${sourceType}-source Run 必须绑定 Conversation`);
+    }
     this.db.run(
       `INSERT INTO runs
-       (id, workspace_id, conversation_id, agent_id, device_id, repository_id, repository_mount_id, execution_root,
-        prompt, purpose, prompt_event, trigger_ref, status, queued_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'queued',?)`,
+       (id, workspace_id, source_type, source_id, conversation_id, agent_id, device_id, repository_id,
+        repository_mount_id, execution_root, prompt, purpose, prompt_event, trigger_ref, trigger_context,
+        concurrency_key, status, queued_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?)`,
       [
         id,
         workspaceId,
-        r.conversationId,
+        sourceType,
+        sourceId,
+        r.conversationId ?? null,
         r.agentId,
         r.deviceId,
         r.repositoryId ?? null,
@@ -1450,11 +2349,62 @@ export class HarborStore {
         r.purpose ?? "implementation",
         r.promptEvent,
         r.triggerRef ?? null,
+        JSON.stringify(r.triggerContext ?? {}),
+        r.concurrencyKey ?? null,
         now,
       ],
     );
-    this.db.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, r.conversationId]);
+    const insertAttachment = this.db.prepare(
+      `INSERT INTO run_attachments (run_id, position, name, mime, data_base64) VALUES (?,?,?,?,?)`,
+    );
+    (r.attachments ?? []).forEach((attachment, position) => {
+      insertAttachment.run(id, position, attachment.name, attachment.mime, attachment.dataBase64);
+    });
+    if (r.conversationId) {
+      this.db.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, r.conversationId]);
+    }
     return this.getRun(id)!;
+  }
+
+  listRunAttachments(runId: string): RunAttachment[] {
+    return this.db
+      .query<{
+        name: string;
+        mime: string;
+        data_base64: string;
+      }, [string]>(
+        "SELECT name, mime, data_base64 FROM run_attachments WHERE run_id = ? ORDER BY position",
+      )
+      .all(runId)
+      .map((row) => ({ name: row.name, mime: row.mime, dataBase64: row.data_base64 }));
+  }
+
+  createRunActionToken(runId: string, tokenHash: string, expiresAt: number, now: number): string {
+    const id = newId("runActionToken");
+    this.db.run(
+      `INSERT INTO run_action_tokens (id, run_id, token_hash, expires_at, created_at)
+       VALUES (?,?,?,?,?)`,
+      [id, runId, tokenHash, expiresAt, now],
+    );
+    return id;
+  }
+
+  runForActionToken(tokenHash: string, now: number): Run | null {
+    const row = this.db
+      .query<{ run_id: string }, [string, number]>(
+        `SELECT run_id FROM run_action_tokens
+         WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(tokenHash, now);
+    return row ? this.getRun(row.run_id) : null;
+  }
+
+  revokeRunActionTokens(runId: string, now: number): void {
+    this.db.run(
+      "UPDATE run_action_tokens SET revoked_at = ? WHERE run_id = ? AND revoked_at IS NULL",
+      [now, runId],
+    );
   }
 
   getRun(id: string): Run | null {
@@ -1477,6 +2427,15 @@ export class HarborStore {
       .map(toRun);
   }
 
+  listRunsBySource(sourceType: RunSourceType, sourceId: string): Run[] {
+    return this.db
+      .query<RunRow, [string, string]>(
+        "SELECT * FROM runs WHERE source_type = ? AND source_id = ? ORDER BY queued_at",
+      )
+      .all(sourceType, sourceId)
+      .map(toRun);
+  }
+
   latestRunForConversation(conversationId: string): Run | null {
     const r = this.db
       .query<RunRow, [string]>("SELECT * FROM runs WHERE conversation_id = ? ORDER BY queued_at DESC LIMIT 1")
@@ -1484,11 +2443,23 @@ export class HarborStore {
     return r ? toRun(r) : null;
   }
 
-  /** 该设备最老的一条 queued run（FIFO 调度） */
+  /** 该设备最老且未撞 Agent/Automation 并发闸的 queued run（避免单个 Agent 阻塞整台 Device）。 */
   oldestQueuedForDevice(deviceId: string): Run | null {
     const r = this.db
       .query<RunRow, [string]>(
-        "SELECT * FROM runs WHERE device_id = ? AND status = 'queued' ORDER BY queued_at LIMIT 1",
+        `SELECT queued.* FROM runs queued
+         WHERE queued.device_id = ? AND queued.status = 'queued'
+           AND (
+             queued.concurrency_key IS NULL OR NOT EXISTS (
+               SELECT 1 FROM runs running
+               WHERE running.status = 'running' AND running.concurrency_key = queued.concurrency_key
+             )
+           )
+           AND (
+             SELECT COUNT(*) FROM runs agent_running
+             WHERE agent_running.agent_id = queued.agent_id AND agent_running.status = 'running'
+           ) < COALESCE((SELECT concurrency FROM agents WHERE id = queued.agent_id), 1)
+         ORDER BY queued.queued_at LIMIT 1`,
       )
       .get(deviceId);
     return r ? toRun(r) : null;
@@ -1501,6 +2472,12 @@ export class HarborStore {
       )
       .get(deviceId);
     return r?.n ?? 0;
+  }
+
+  countRunningForAgent(agentId: string): number {
+    return this.db.query<{ n: number }, [string]>(
+      "SELECT COUNT(*) AS n FROM runs WHERE agent_id = ? AND status = 'running'",
+    ).get(agentId)?.n ?? 0;
   }
 
   runningRunsForDevice(deviceId: string): Run[] {
@@ -1517,6 +2494,15 @@ export class HarborStore {
         "SELECT * FROM runs WHERE conversation_id = ? AND status IN ('queued','running') LIMIT 1",
       )
       .get(conversationId);
+    return r ? toRun(r) : null;
+  }
+
+  activeRunForTriggerRef(triggerRef: string): Run | null {
+    const r = this.db
+      .query<RunRow, [string]>(
+        "SELECT * FROM runs WHERE trigger_ref = ? AND status IN ('queued','running') ORDER BY queued_at LIMIT 1",
+      )
+      .get(triggerRef);
     return r ? toRun(r) : null;
   }
 
@@ -1696,38 +2682,58 @@ export class HarborStore {
       name: string;
       agentId: string;
       repositoryId?: string | null;
-      cron: string;
       prompt: string;
-      mode: AutomationMode;
+      outputMode?: AutomationOutputMode;
+      overlapMode?: AutomationOverlapMode;
+      /** 旧调用兼容：new_issue → issue。 */
+      mode?: AutomationMode;
+      /** 旧调用兼容：自动创建一个 schedule Trigger。 */
+      cron?: string;
+      triggers?: {
+        type: AutomationTriggerType;
+        cron?: string | null;
+        provider?: string | null;
+        events?: string[];
+        filters?: AutomationWebhookFilter[];
+        secretHash?: string | null;
+      }[];
       targetConversationId?: string | null;
       notifyChatId?: string | null;
     },
-    _now: number,
+    now: number,
   ): Automation {
     const id = newId("automation");
-    this.db.run(
-      `INSERT INTO automations
-       (id, workspace_id, name, agent_id, repository_id, cron, prompt, mode, target_conversation_id, notify_chat_id, enabled)
-       VALUES (?,?,?,?,?,?,?,?,?,?,1)`,
-      [
-        id,
-        a.workspaceId ?? DEFAULT_WORKSPACE_ID,
-        a.name,
-        a.agentId,
-        a.repositoryId ?? null,
-        a.cron,
-        a.prompt,
-        a.mode,
-        a.targetConversationId ?? null,
-        a.notifyChatId ?? null,
-      ],
-    );
+    const outputMode = a.outputMode ?? (a.mode === "append" ? "append" : "issue");
+    const triggers = a.triggers ?? (a.cron ? [{ type: "schedule" as const, cron: a.cron }] : []);
+    this.db.transaction(() => {
+      this.db.run(
+        `INSERT INTO automations
+         (id, workspace_id, name, agent_id, repository_id, prompt, output_mode, overlap_mode,
+          target_conversation_id, notify_chat_id, enabled, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?)`,
+        [
+          id,
+          a.workspaceId ?? DEFAULT_WORKSPACE_ID,
+          a.name,
+          a.agentId,
+          a.repositoryId ?? null,
+          a.prompt,
+          outputMode,
+          a.overlapMode ?? "skip",
+          a.targetConversationId ?? null,
+          a.notifyChatId ?? null,
+          now,
+          now,
+        ],
+      );
+      for (const trigger of triggers) this.insertAutomationTrigger(id, trigger, now);
+    })();
     return this.getAutomation(id)!;
   }
 
   getAutomation(id: string): Automation | null {
     const r = this.db.query<AutomationRow, [string]>("SELECT * FROM automations WHERE id = ?").get(id);
-    return r ? toAutomation(r) : null;
+    return r ? toAutomation(r, this.listAutomationTriggers(id)) : null;
   }
 
   resolveAutomationPrefix(prefix: string, workspaceId?: string): Automation | null {
@@ -1739,52 +2745,182 @@ export class HarborStore {
         "SELECT * FROM automations WHERE id LIKE ? || '%' OR name = ? LIMIT 2",
       ).all(prefix, prefix);
     if (rows.length > 1) throw new Error(`automation "${prefix}" 有多个匹配，请给更长前缀或用完整 id`);
-    return rows[0] ? toAutomation(rows[0]) : null;
+    return rows[0] ? toAutomation(rows[0], this.listAutomationTriggers(rows[0].id)) : null;
   }
 
   listAutomations(workspaceId?: string): Automation[] {
-    if (!workspaceId) return this.db.query<AutomationRow, []>("SELECT * FROM automations ORDER BY name").all().map(toAutomation);
-    return this.db
+    const rows = !workspaceId
+      ? this.db.query<AutomationRow, []>("SELECT * FROM automations ORDER BY name").all()
+      : this.db
       .query<AutomationRow, [string]>("SELECT * FROM automations WHERE workspace_id = ? ORDER BY name")
-      .all(workspaceId)
-      .map(toAutomation);
+      .all(workspaceId);
+    return rows.map((row) => toAutomation(row, this.listAutomationTriggers(row.id)));
   }
 
   setAutomationEnabled(id: string, enabled: boolean): void {
-    this.db.run("UPDATE automations SET enabled = ? WHERE id = ?", [enabled ? 1 : 0, id]);
+    this.db.run("UPDATE automations SET enabled = ?, updated_at = ? WHERE id = ?", [enabled ? 1 : 0, Date.now(), id]);
   }
 
   deleteAutomation(id: string): void {
-    this.db.run("DELETE FROM automations WHERE id = ?", [id]);
+    this.db.transaction(() => {
+      this.db.run("DELETE FROM automation_log WHERE automation_id = ?", [id]);
+      this.db.run("DELETE FROM automations WHERE id = ?", [id]);
+    })();
   }
 
   markAutomationFired(id: string, now: number): void {
-    this.db.run("UPDATE automations SET last_fired_at = ? WHERE id = ?", [now, id]);
+    this.db.run("UPDATE automations SET last_fired_at = ?, updated_at = ? WHERE id = ?", [now, now, id]);
   }
 
-  appendAutomationLog(l: { automationId: string; kind: "fired" | "missed"; runId?: string | null; note?: string | null }, now: number): void {
-    this.db.run("INSERT INTO automation_log (automation_id, kind, ts, run_id, note) VALUES (?,?,?,?,?)", [
+  appendAutomationLog(
+    l: {
+      automationId: string;
+      kind: AutomationLogRow["kind"];
+      runId?: string | null;
+      triggerId?: string | null;
+      eventId?: string | null;
+      note?: string | null;
+    },
+    now: number,
+  ): void {
+    this.db.run(
+      `INSERT INTO automation_log
+       (automation_id, kind, ts, run_id, trigger_id, event_id, note) VALUES (?,?,?,?,?,?,?)`, [
       l.automationId,
       l.kind,
       now,
       l.runId ?? null,
+      l.triggerId ?? null,
+      l.eventId ?? null,
       l.note ?? null,
     ]);
   }
 
   listAutomationLog(automationId: string, limit = 50): AutomationLogRow[] {
     return this.db
-      .query<{ automation_id: string; kind: string; ts: number; run_id: string | null; note: string | null }, [string, number]>(
+      .query<{
+        automation_id: string;
+        kind: string;
+        ts: number;
+        run_id: string | null;
+        trigger_id: string | null;
+        event_id: string | null;
+        note: string | null;
+      }, [string, number]>(
         "SELECT * FROM automation_log WHERE automation_id = ? ORDER BY ts DESC LIMIT ?",
       )
       .all(automationId, limit)
       .map((r) => ({
         automationId: r.automation_id,
-        kind: r.kind as "fired" | "missed",
+        kind: r.kind as AutomationLogRow["kind"],
         ts: r.ts,
         runId: r.run_id,
+        triggerId: r.trigger_id,
+        eventId: r.event_id,
         note: r.note,
       }));
+  }
+
+  createAutomationTrigger(
+    automationId: string,
+    input: {
+      type: AutomationTriggerType;
+      cron?: string | null;
+      provider?: string | null;
+      events?: string[];
+      filters?: AutomationWebhookFilter[];
+      secretHash?: string | null;
+    },
+    now: number,
+  ): AutomationTrigger {
+    const id = this.insertAutomationTrigger(automationId, input, now);
+    return this.getAutomationTrigger(id)!;
+  }
+
+  private insertAutomationTrigger(
+    automationId: string,
+    input: {
+      type: AutomationTriggerType;
+      cron?: string | null;
+      provider?: string | null;
+      events?: string[];
+      filters?: AutomationWebhookFilter[];
+      secretHash?: string | null;
+    },
+    now: number,
+  ): string {
+    const id = newId("automationTrigger");
+    this.db.run(
+      `INSERT INTO automation_triggers
+       (id, automation_id, type, cron, provider, events, filters, secret_hash, last_fired_at, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,NULL,?,?)`,
+      [
+        id,
+        automationId,
+        input.type,
+        input.type === "schedule" ? input.cron ?? null : null,
+        input.type === "webhook" ? input.provider ?? "generic" : null,
+        JSON.stringify(input.events ?? []),
+        JSON.stringify(input.filters ?? []),
+        input.type === "webhook" ? input.secretHash ?? null : null,
+        now,
+        now,
+      ],
+    );
+    return id;
+  }
+
+  getAutomationTrigger(id: string): AutomationTrigger | null {
+    const row = this.db
+      .query<AutomationTriggerRow, [string]>("SELECT * FROM automation_triggers WHERE id = ?")
+      .get(id);
+    return row ? toAutomationTrigger(row) : null;
+  }
+
+  getAutomationTriggerSecretHash(id: string): string | null {
+    const row = this.db
+      .query<{ secret_hash: string | null }, [string]>(
+        "SELECT secret_hash FROM automation_triggers WHERE id = ? AND type = 'webhook'",
+      )
+      .get(id);
+    return row?.secret_hash ?? null;
+  }
+
+  listAutomationTriggers(automationId: string): AutomationTrigger[] {
+    return this.db
+      .query<AutomationTriggerRow, [string]>(
+        "SELECT * FROM automation_triggers WHERE automation_id = ? ORDER BY created_at, id",
+      )
+      .all(automationId)
+      .map(toAutomationTrigger);
+  }
+
+  setAutomationTriggerEnabled(id: string, enabled: boolean, now: number): void {
+    this.db.run("UPDATE automation_triggers SET enabled = ?, updated_at = ? WHERE id = ?", [enabled ? 1 : 0, now, id]);
+  }
+
+  markAutomationTriggerFired(id: string, now: number): void {
+    this.db.run("UPDATE automation_triggers SET last_fired_at = ?, updated_at = ? WHERE id = ?", [now, now, id]);
+  }
+
+  deleteAutomationTrigger(id: string): void {
+    this.db.run("DELETE FROM automation_triggers WHERE id = ?", [id]);
+  }
+
+  /** deliveryId 在同一 webhook Trigger 下只接收一次；true 表示本次首次登记。 */
+  recordAutomationWebhookDelivery(triggerId: string, deliveryId: string, now: number): boolean {
+    const result = this.db.run(
+      `INSERT OR IGNORE INTO automation_webhook_deliveries (trigger_id, delivery_id, received_at)
+       VALUES (?,?,?)`,
+      [triggerId, deliveryId, now],
+    );
+    return result.changes === 1;
+  }
+
+  hasAutomationWebhookDelivery(triggerId: string, deliveryId: string): boolean {
+    return Boolean(this.db.query<{ ok: number }, [string, string]>(
+      "SELECT 1 AS ok FROM automation_webhook_deliveries WHERE trigger_id = ? AND delivery_id = ?",
+    ).get(triggerId, deliveryId));
   }
 
   // ---- chat_bindings（飞书群 → 默认 agent） ----

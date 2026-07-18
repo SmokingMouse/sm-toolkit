@@ -1,136 +1,293 @@
 /**
- * AutomationService —— cron 定时派活（P3，croner）。
- * 语义：server 停机期间错过的触发跳过不补跑，boot 时对比 previousRun 与 last_fired_at
- * 记 missed 日志；触发时按 mode 开新 issue（origin=automation）或追加到固定 conversation。
- * 时区：跟 server 本机时区（croner 默认）。
+ * Mew 式 Automation 编排：Automation 是 Run Source，Trigger 是触发配置。
+ *
+ * - schedule/webhook Trigger 可并存，manual 是每条 Automation 都有的即时入口；
+ * - output=run 不创建伪 Conversation，chat/issue/append 保留协作与旧数据兼容；
+ * - overlap=skip 拒绝重叠触发，queue 通过 Run concurrencyKey 串行下发；
+ * - webhook payload 只是低信任触发上下文，prompt wrapper 会明确标注边界。
  */
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import { Cron } from "croner";
-import type { Automation, Conversation, PromptEventBlockKey, Run } from "../protocol.js";
+import type {
+  Automation,
+  AutomationTrigger,
+  AutomationWebhookFilter,
+  Conversation,
+  PromptEventBlockKey,
+  Run,
+} from "../protocol.js";
 import type { HarborStore } from "./store.js";
 import type { RunCoordinator } from "./scheduler.js";
 
+export interface AutomationWebhookInput {
+  secret: string;
+  eventType: string;
+  eventId: string | null;
+  payload: Record<string, unknown>;
+}
+
+export type AutomationWebhookResult =
+  | { status: "started"; run: Run }
+  | { status: "skipped"; reason: string }
+  | { status: "ignored"; reason: string }
+  | { status: "duplicate"; reason: string };
+
+interface ScheduledJob {
+  automationId: string;
+  cron: Cron;
+}
+
 export class AutomationService {
-  private jobs = new Map<string, Cron>();
+  private jobs = new Map<string, ScheduledJob>();
 
   constructor(
     private store: HarborStore,
     private coordinator: RunCoordinator,
   ) {}
 
-  /** boot：missed 检查 + 全部 enabled 排班 */
+  /** boot：missed 检查 + 全部 enabled schedule Trigger 排班。 */
   start(): void {
     const now = Date.now();
-    for (const auto of this.store.listAutomations()) {
-      if (!auto.enabled) continue;
-      // missed 检查：上一个应触发时刻晚于 last_fired_at → server 停机漏掉了。
-      // 注意 croner 的 previousRun() 是「本实例的运行历史」（新实例恒 null），
-      // 模式回溯要用 previousRuns(1)，且它是 croner v10 才有的 API——2026-07-15 实测踩过。
-      if (auto.lastFiredAt) {
-        try {
-          const probe = new Cron(auto.cron);
-          const prev = probe.previousRuns(1)[0];
-          probe.stop();
-          if (prev && prev.getTime() > auto.lastFiredAt) {
-            this.store.appendAutomationLog(
-              { automationId: auto.id, kind: "missed", note: `server 停机错过 ${prev.toISOString()}（跳过不补跑）` },
-              now,
-            );
-            console.log(`[automation] missed：${auto.name} @ ${prev.toISOString()}`);
-          }
-        } catch (e) {
-          // cron 表达式坏了会在 schedule 时报；这里只可能是 previousRuns 探测本身出错
-          console.warn(`[automation] missed 探测失败（${auto.name}）：`, e instanceof Error ? e.message : e);
-        }
+    for (const automation of this.store.listAutomations()) {
+      if (!automation.enabled) continue;
+      for (const trigger of automation.triggers.filter((candidate) => candidate.enabled && candidate.type === "schedule")) {
+        this.recordMissedSchedule(automation, trigger, now);
       }
-      this.schedule(auto);
+      this.schedule(automation);
     }
-    console.log(`[automation] 已排班 ${this.jobs.size} 条`);
+    console.log(`[automation] 已排班 ${this.jobs.size} 个 schedule trigger`);
   }
 
   stop(): void {
-    for (const job of this.jobs.values()) job.stop();
+    for (const job of this.jobs.values()) job.cron.stop();
     this.jobs.clear();
   }
 
-  /** cron 表达式校验（REST create 前置闸）——非法直接 throw */
   static validateCron(expr: string): void {
     const probe = new Cron(expr);
     probe.stop();
   }
 
-  schedule(auto: Automation): void {
-    this.unschedule(auto.id);
-    const job = new Cron(auto.cron, { name: auto.id }, () => this.fire(auto.id));
-    this.jobs.set(auto.id, job);
+  schedule(automation: Automation): void {
+    this.unschedule(automation.id);
+    if (!automation.enabled) return;
+    for (const trigger of automation.triggers) {
+      if (!trigger.enabled || trigger.type !== "schedule" || !trigger.cron) continue;
+      const cron = new Cron(trigger.cron, { name: trigger.id }, () => this.fire(trigger.id));
+      this.jobs.set(trigger.id, { automationId: automation.id, cron });
+    }
   }
 
-  unschedule(id: string): void {
-    this.jobs.get(id)?.stop();
-    this.jobs.delete(id);
+  unschedule(automationId: string): void {
+    for (const [triggerId, job] of this.jobs) {
+      if (job.automationId !== automationId) continue;
+      job.cron.stop();
+      this.jobs.delete(triggerId);
+    }
   }
 
-  /** 即使规则已停用也允许人工单次执行；停用只控制 cron 排班。 */
+  /** 即使已停用也允许人工单次执行；停用只控制自动 Trigger。 */
   runNow(id: string): Run {
-    const auto = this.store.getAutomation(id);
-    if (!auto) throw new Error(`automation "${id}" 不存在`);
-    return this.dispatch(auto, "event.automation.manual");
+    const automation = this.store.getAutomation(id);
+    if (!automation) throw new Error(`automation "${id}" 不存在`);
+    const run = this.dispatch(automation, null, "event.automation.manual", {
+      eventType: "manual",
+      triggeredAt: new Date().toISOString(),
+    });
+    if (!run) throw new Error("automation 已有 queued/running Run，overlap=skip 本次未触发");
+    return run;
   }
 
-  private fire(id: string): void {
-    const now = Date.now();
-    const auto = this.store.getAutomation(id);
-    if (!auto || !auto.enabled) return; // 已删/已停用（stop 竞态兜底）
+  receiveWebhook(triggerId: string, input: AutomationWebhookInput): AutomationWebhookResult {
+    const trigger = this.store.getAutomationTrigger(triggerId);
+    if (!trigger || trigger.type !== "webhook") return { status: "ignored", reason: "webhook trigger 不存在" };
+    const automation = this.store.getAutomation(trigger.automationId);
+    if (!automation || !automation.enabled || !trigger.enabled) {
+      return { status: "ignored", reason: "automation 或 trigger 已停用" };
+    }
+    const expectedHash = this.store.getAutomationTriggerSecretHash(trigger.id);
+    if (!expectedHash || !verifyWebhookSecret(input.secret, expectedHash)) {
+      throw new Error("webhook secret 不正确");
+    }
 
+    const eventType = input.eventType.trim() || "unknown";
+    if (trigger.events.length > 0 && !trigger.events.includes(eventType)) {
+      this.store.appendAutomationLog({
+        automationId: automation.id,
+        kind: "rejected",
+        triggerId: trigger.id,
+        eventId: input.eventId,
+        note: `event ${eventType} 不在允许清单`,
+      }, Date.now());
+      return { status: "ignored", reason: `event ${eventType} 不匹配` };
+    }
+    if (trigger.filters.length > 0 && !trigger.filters.some((filter) => matchesFilter(input.payload, filter))) {
+      this.store.appendAutomationLog({
+        automationId: automation.id,
+        kind: "rejected",
+        triggerId: trigger.id,
+        eventId: input.eventId,
+        note: `event ${eventType} 未命中 filter`,
+      }, Date.now());
+      return { status: "ignored", reason: "event filter 不匹配" };
+    }
+    if (input.eventId && this.store.hasAutomationWebhookDelivery(trigger.id, input.eventId)) {
+      return { status: "duplicate", reason: `delivery ${input.eventId} 已处理` };
+    }
+
+    const run = this.dispatch(automation, trigger, "event.automation.webhook", {
+      eventType,
+      eventId: input.eventId,
+      provider: trigger.provider ?? "generic",
+      triggerId: trigger.id,
+      receivedAt: new Date().toISOString(),
+      payload: input.payload,
+    }, input.eventId);
+    if (input.eventId) this.store.recordAutomationWebhookDelivery(trigger.id, input.eventId, Date.now());
+    if (!run) return { status: "skipped", reason: "已有 queued/running Run，overlap=skip" };
+    return { status: "started", run };
+  }
+
+  private fire(triggerId: string): void {
+    const trigger = this.store.getAutomationTrigger(triggerId);
+    if (!trigger || trigger.type !== "schedule" || !trigger.enabled) return;
+    const automation = this.store.getAutomation(trigger.automationId);
+    if (!automation || !automation.enabled) return;
     try {
-      this.dispatch(auto, "event.automation.schedule", now);
+      this.dispatch(automation, trigger, "event.automation.schedule", {
+        eventType: "schedule",
+        triggerId: trigger.id,
+        scheduledAt: new Date().toISOString(),
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.store.appendAutomationLog({ automationId: id, kind: "missed", note: message }, now);
-      console.warn(`[automation] ${auto.name} 触发失败：${message}`);
+      this.store.appendAutomationLog({
+        automationId: automation.id,
+        kind: "missed",
+        triggerId: trigger.id,
+        note: message,
+      }, Date.now());
+      console.warn(`[automation] ${automation.name} 触发失败：${message}`);
     }
   }
 
-  private dispatch(auto: Automation, promptEvent: PromptEventBlockKey, now = Date.now()): Run {
-    const agent = this.store.getAgent(auto.agentId);
-    if (!agent || agent.archivedAt) {
-      throw new Error("agent 不存在或已归档，未触发");
-    }
-    if (agent.workspaceId !== auto.workspaceId) {
+  private dispatch(
+    automation: Automation,
+    trigger: AutomationTrigger | null,
+    promptEvent: PromptEventBlockKey,
+    triggerContext: Record<string, unknown>,
+    eventId: string | null = null,
+  ): Run | null {
+    const agent = this.store.getAgent(automation.agentId);
+    if (!agent || agent.archivedAt) throw new Error("agent 不存在或已归档，未触发");
+    if (agent.workspaceId !== automation.workspaceId) {
       throw new Error("agent 与 automation 不在同一 Workspace，未触发");
     }
 
-    let conv: Conversation;
-    if (auto.mode === "append") {
-      const target = auto.targetConversationId ? this.store.getConversation(auto.targetConversationId) : null;
-      if (!target) {
-        throw new Error(`target conversation ${auto.targetConversationId} 不存在，未触发`);
-      }
-      if (target.repositoryId && target.repositoryId !== agent.repositoryId) {
-        throw new Error("target conversation 与 Agent 绑定的 Repository 不一致，未触发");
-      }
-      conv = target;
-    } else {
-      conv = this.store.createConversation(
-        {
-          workspaceId: auto.workspaceId,
-          kind: "issue",
-          title: `[auto] ${auto.name} ${new Date(now).toLocaleString("sv-SE")}`,
-          description: auto.prompt,
-          agentId: agent.id,
-          repositoryId: agent.repositoryId,
-          origin: "automation",
-          originRef: auto.id,
-        },
-        now,
-      );
+    const active = this.store.activeRunForTriggerRef(automation.id);
+    if (active && automation.overlapMode === "skip") {
+      this.store.appendAutomationLog({
+        automationId: automation.id,
+        kind: "skipped",
+        triggerId: trigger?.id ?? null,
+        eventId,
+        note: `active run ${active.id} (${active.status})`,
+      }, Date.now());
+      return null;
     }
 
-    const run = this.coordinator.enqueueRun(conv, agent, auto.prompt, "implementation", promptEvent, auto.id);
-    this.store.markAutomationFired(auto.id, now);
-    const trigger = promptEvent === "event.automation.manual" ? "manual" : "schedule";
-    this.store.appendAutomationLog({ automationId: auto.id, kind: "fired", runId: run.id, note: trigger }, now);
-    console.log(`[automation] ${trigger}：${auto.name} → run ${run.id}（conv ${conv.id}）`);
+    let conversation: Conversation | null = null;
+    if (automation.outputMode === "append") {
+      conversation = automation.targetConversationId
+        ? this.store.getConversation(automation.targetConversationId)
+        : null;
+      if (!conversation) throw new Error(`target conversation ${automation.targetConversationId} 不存在，未触发`);
+      if (conversation.repositoryId && conversation.repositoryId !== agent.repositoryId) {
+        throw new Error("target conversation 与 Agent 绑定的 Repository 不一致，未触发");
+      }
+    } else if (automation.outputMode === "chat" || automation.outputMode === "issue") {
+      const kind = automation.outputMode;
+      conversation = this.store.createConversation({
+        workspaceId: automation.workspaceId,
+        kind,
+        title: `[auto] ${automation.name} ${new Date().toLocaleString("sv-SE")}`,
+        description: kind === "issue" ? automation.prompt : null,
+        agentId: agent.id,
+        repositoryId: agent.repositoryId,
+        origin: "automation",
+        originRef: automation.id,
+      }, Date.now());
+    }
+
+    const concurrencyKey = `automation:${automation.id}`;
+    const run = conversation
+      ? this.coordinator.enqueueRun(
+          conversation,
+          agent,
+          automation.prompt,
+          "implementation",
+          promptEvent,
+          automation.id,
+          {
+            triggerContext,
+            concurrencyKey,
+            allowQueuedBehindConversation: automation.overlapMode === "queue",
+          },
+        )
+      : this.coordinator.enqueueAutomationRun(automation, agent, automation.prompt, promptEvent, triggerContext);
+
+    this.store.markAutomationFired(automation.id, Date.now());
+    if (trigger) this.store.markAutomationTriggerFired(trigger.id, Date.now());
+    const triggerName = promptEvent.replace("event.automation.", "");
+    this.store.appendAutomationLog({
+      automationId: automation.id,
+      kind: "fired",
+      runId: run.id,
+      triggerId: trigger?.id ?? null,
+      eventId,
+      note: `${triggerName}:${automation.outputMode}`,
+    }, Date.now());
+    console.log(`[automation] ${triggerName}：${automation.name} → run ${run.id}（source ${run.sourceType}:${run.sourceId}）`);
     return run;
   }
+
+  private recordMissedSchedule(automation: Automation, trigger: AutomationTrigger, now: number): void {
+    if (!trigger.lastFiredAt || !trigger.cron) return;
+    try {
+      const probe = new Cron(trigger.cron);
+      const previous = probe.previousRuns(1)[0];
+      probe.stop();
+      if (previous && previous.getTime() > trigger.lastFiredAt) {
+        this.store.appendAutomationLog({
+          automationId: automation.id,
+          kind: "missed",
+          triggerId: trigger.id,
+          note: `server 停机错过 ${previous.toISOString()}（跳过不补跑）`,
+        }, now);
+      }
+    } catch (error) {
+      console.warn(`[automation] missed 探测失败（${automation.name}）：`, error instanceof Error ? error.message : error);
+    }
+  }
+}
+
+export function hashWebhookSecret(secret: string): string {
+  return createHash("sha256").update(secret).digest("hex");
+}
+
+function verifyWebhookSecret(secret: string, expectedHash: string): boolean {
+  const actual = Buffer.from(hashWebhookSecret(secret), "hex");
+  const expected = Buffer.from(expectedHash, "hex");
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function matchesFilter(payload: Record<string, unknown>, filter: AutomationWebhookFilter): boolean {
+  const segments = filter.path.split(".").filter(Boolean);
+  let value: unknown = payload;
+  for (const segment of segments) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    value = (value as Record<string, unknown>)[segment];
+  }
+  return value === filter.equals;
 }

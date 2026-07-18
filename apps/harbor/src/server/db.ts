@@ -8,7 +8,8 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { basename, dirname } from "node:path";
 
-const MIGRATIONS: string[] = [
+/** Exported for migration-lineage regression fixtures; application code should use openDb. */
+export const MIGRATIONS: string[] = [
   // v1 —— 全部领域表
   `
   CREATE TABLE devices (
@@ -556,9 +557,433 @@ const MIGRATIONS: string[] = [
   DROP TABLE workspace_prompt_templates;
   DROP TABLE prompt_templates;
   `,
-  // v12 —— GitHub sync 需要诚实表示 closed-but-unmerged PR；其余 Delivery 事实无损保留
+  // v12 —— Mew parity P0：Run Source 一等化 + Automation Trigger/Output/Overlap
   `
-  CREATE TABLE deliveries_v12 (
+  CREATE TABLE runs_v12 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    source_type TEXT NOT NULL CHECK (source_type IN ('issue','chat','automation')),
+    source_id TEXT NOT NULL,
+    conversation_id TEXT REFERENCES conversations(id),
+    agent_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    repository_id TEXT REFERENCES repositories(id),
+    repository_mount_id TEXT REFERENCES repository_mounts(id),
+    execution_root TEXT,
+    prompt TEXT NOT NULL,
+    purpose TEXT NOT NULL DEFAULT 'implementation' CHECK (purpose IN ('implementation','triage','review','verification')),
+    prompt_event TEXT NOT NULL CHECK (prompt_event IN (
+      'event.issue.assigned','event.issue.mentioned','event.issue.message_created',
+      'event.chat.message_created','event.automation.schedule','event.automation.manual','event.automation.webhook'
+    )),
+    trigger_ref TEXT,
+    trigger_context TEXT NOT NULL DEFAULT '{}',
+    concurrency_key TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    claude_session_id TEXT,
+    error TEXT,
+    cost_usd REAL,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cached_tokens INTEGER,
+    queued_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    CHECK (
+      (source_type = 'automation' AND conversation_id IS NULL) OR
+      (source_type IN ('issue','chat') AND conversation_id IS NOT NULL AND source_id = conversation_id)
+    )
+  );
+  INSERT INTO runs_v12
+    (id, workspace_id, source_type, source_id, conversation_id, agent_id, device_id,
+     repository_id, repository_mount_id, execution_root, prompt, purpose, prompt_event, trigger_ref,
+     trigger_context, concurrency_key, status, claude_session_id, error, cost_usd, input_tokens,
+     output_tokens, cached_tokens, queued_at, started_at, finished_at)
+    SELECT r.id, r.workspace_id,
+      CASE WHEN c.kind = 'chat' THEN 'chat' ELSE 'issue' END,
+      r.conversation_id, r.conversation_id, r.agent_id, r.device_id,
+      r.repository_id, r.repository_mount_id, r.execution_root, r.prompt, r.purpose, r.prompt_event,
+      r.trigger_ref, '{}', NULL, r.status, r.claude_session_id, r.error, r.cost_usd, r.input_tokens,
+      r.output_tokens, r.cached_tokens, r.queued_at, r.started_at, r.finished_at
+    FROM runs r JOIN conversations c ON c.id = r.conversation_id;
+  DROP TABLE runs;
+  ALTER TABLE runs_v12 RENAME TO runs;
+  CREATE INDEX idx_runs_device_status ON runs(device_id, status);
+  CREATE INDEX idx_runs_conversation ON runs(conversation_id);
+  CREATE INDEX idx_runs_workspace ON runs(workspace_id, queued_at);
+  CREATE INDEX idx_runs_source ON runs(source_type, source_id, queued_at);
+  CREATE INDEX idx_runs_trigger_ref ON runs(trigger_ref, status, queued_at);
+  CREATE INDEX idx_runs_concurrency ON runs(concurrency_key, status, queued_at);
+
+  CREATE TABLE automation_legacy_crons_v12 (
+    automation_id TEXT PRIMARY KEY, cron TEXT NOT NULL, last_fired_at INTEGER
+  );
+  INSERT INTO automation_legacy_crons_v12 SELECT id, cron, last_fired_at FROM automations;
+
+  CREATE TABLE automations_v12 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    name TEXT NOT NULL,
+    agent_id TEXT NOT NULL REFERENCES agents(id),
+    repository_id TEXT REFERENCES repositories(id),
+    prompt TEXT NOT NULL,
+    output_mode TEXT NOT NULL DEFAULT 'run' CHECK (output_mode IN ('run','chat','issue','append')),
+    overlap_mode TEXT NOT NULL DEFAULT 'skip' CHECK (overlap_mode IN ('skip','queue')),
+    target_conversation_id TEXT REFERENCES conversations(id),
+    notify_chat_id TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_fired_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, name),
+    CHECK ((output_mode = 'append' AND target_conversation_id IS NOT NULL) OR output_mode <> 'append')
+  );
+  INSERT INTO automations_v12
+    (id, workspace_id, name, agent_id, repository_id, prompt, output_mode, overlap_mode,
+     target_conversation_id, notify_chat_id, enabled, last_fired_at, created_at, updated_at)
+    SELECT id, workspace_id, name, agent_id, repository_id, prompt,
+      CASE mode WHEN 'new_issue' THEN 'issue' ELSE 'append' END,
+      'skip', target_conversation_id, notify_chat_id, enabled, last_fired_at,
+      COALESCE(last_fired_at, CAST(strftime('%s','now') AS INTEGER) * 1000),
+      COALESCE(last_fired_at, CAST(strftime('%s','now') AS INTEGER) * 1000)
+    FROM automations;
+  DROP TABLE automations;
+  ALTER TABLE automations_v12 RENAME TO automations;
+  CREATE INDEX idx_automations_workspace ON automations(workspace_id, name);
+
+  CREATE TABLE automation_triggers (
+    id TEXT PRIMARY KEY,
+    automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+    type TEXT NOT NULL CHECK (type IN ('schedule','webhook')),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    cron TEXT,
+    provider TEXT,
+    events TEXT NOT NULL DEFAULT '[]',
+    filters TEXT NOT NULL DEFAULT '[]',
+    secret_hash TEXT,
+    last_fired_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK (
+      (type = 'schedule' AND cron IS NOT NULL AND secret_hash IS NULL) OR
+      (type = 'webhook' AND cron IS NULL AND secret_hash IS NOT NULL)
+    )
+  );
+  INSERT INTO automation_triggers
+    (id, automation_id, type, enabled, cron, events, filters, last_fired_at, created_at, updated_at)
+    SELECT 'trigger_' || automation_id, automation_id, 'schedule', 1, cron, '[]', '[]', last_fired_at,
+      COALESCE(last_fired_at, CAST(strftime('%s','now') AS INTEGER) * 1000),
+      COALESCE(last_fired_at, CAST(strftime('%s','now') AS INTEGER) * 1000)
+    FROM automation_legacy_crons_v12;
+  DROP TABLE automation_legacy_crons_v12;
+  CREATE INDEX idx_automation_triggers_automation ON automation_triggers(automation_id, type);
+
+  CREATE TABLE automation_webhook_deliveries (
+    trigger_id TEXT NOT NULL REFERENCES automation_triggers(id) ON DELETE CASCADE,
+    delivery_id TEXT NOT NULL,
+    received_at INTEGER NOT NULL,
+    PRIMARY KEY (trigger_id, delivery_id)
+  );
+  CREATE INDEX idx_automation_webhook_deliveries_ts ON automation_webhook_deliveries(received_at);
+
+  CREATE TABLE automation_log_v12 (
+    automation_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('fired','missed','skipped','rejected')),
+    ts INTEGER NOT NULL,
+    run_id TEXT,
+    trigger_id TEXT,
+    event_id TEXT,
+    note TEXT
+  );
+  INSERT INTO automation_log_v12 (automation_id, kind, ts, run_id, note)
+    SELECT automation_id, kind, ts, run_id, note FROM automation_log;
+  DROP TABLE automation_log;
+  ALTER TABLE automation_log_v12 RENAME TO automation_log;
+  CREATE INDEX idx_automation_log ON automation_log(automation_id, ts);
+
+  CREATE TABLE workspace_prompt_blocks_v12 (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    block_key TEXT NOT NULL CHECK (block_key IN (
+      'session.issue.context','event.issue.assigned','event.issue.mentioned','event.issue.message_created',
+      'session.chat.context','event.chat.message_created',
+      'event.automation.schedule','event.automation.manual','event.automation.webhook'
+    )),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    template TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, block_key)
+  );
+  INSERT INTO workspace_prompt_blocks_v12 SELECT * FROM workspace_prompt_blocks;
+  DROP TABLE workspace_prompt_blocks;
+  ALTER TABLE workspace_prompt_blocks_v12 RENAME TO workspace_prompt_blocks;
+  `,
+  // v13 —— Mew parity：SCM 事件事实、成员/RBAC、Agent 多仓库与执行配置、Skill bundle、Lark workspace binding
+  `
+  ALTER TABLE repositories ADD COLUMN scm_provider TEXT NOT NULL DEFAULT 'local'
+    CHECK (scm_provider IN ('local','codebase'));
+  ALTER TABLE repositories ADD COLUMN scm_repository TEXT;
+  ALTER TABLE repositories ADD COLUMN scm_agent_id TEXT REFERENCES agents(id);
+  ALTER TABLE repositories ADD COLUMN scm_auto_dispatch INTEGER NOT NULL DEFAULT 0;
+  CREATE UNIQUE INDEX idx_repositories_scm
+    ON repositories(scm_provider, scm_repository)
+    WHERE scm_provider <> 'local' AND scm_repository IS NOT NULL;
+
+  CREATE TABLE workspace_members (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    email TEXT,
+    external_provider TEXT NOT NULL DEFAULT 'local'
+      CHECK (external_provider IN ('local','feishu','codebase')),
+    external_id TEXT,
+    role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('owner','admin','member')),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','invited','disabled')),
+    created_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, email)
+  );
+  CREATE UNIQUE INDEX idx_workspace_members_external
+    ON workspace_members(workspace_id, external_provider, external_id)
+    WHERE external_id IS NOT NULL;
+  INSERT INTO workspace_members
+    (id, workspace_id, name, external_provider, role, status, created_at)
+    SELECT 'member_system_' || id, id, 'Local owner', 'local', 'owner', 'active', created_at
+    FROM workspaces;
+
+  CREATE TABLE workspace_api_tokens (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    member_id TEXT NOT NULL REFERENCES workspace_members(id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER,
+    revoked_at INTEGER
+  );
+  CREATE INDEX idx_workspace_api_tokens_member ON workspace_api_tokens(member_id, revoked_at);
+
+  ALTER TABLE agents ADD COLUMN concurrency INTEGER NOT NULL DEFAULT 1 CHECK (concurrency BETWEEN 1 AND 64);
+  ALTER TABLE agents ADD COLUMN visibility TEXT NOT NULL DEFAULT 'workspace'
+    CHECK (visibility IN ('workspace','private'));
+  ALTER TABLE agents ADD COLUMN environment TEXT NOT NULL DEFAULT '{}';
+  ALTER TABLE agents ADD COLUMN setup_script TEXT;
+  ALTER TABLE agents ADD COLUMN reuse_device_cli INTEGER NOT NULL DEFAULT 1;
+  ALTER TABLE agents ADD COLUMN created_by_member_id TEXT REFERENCES workspace_members(id);
+  CREATE TABLE agent_repositories (
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    is_primary INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (agent_id, repository_id)
+  );
+  INSERT INTO agent_repositories (agent_id, repository_id, position, is_primary, created_at)
+    SELECT id, repository_id, 0, 1, created_at FROM agents;
+  CREATE INDEX idx_agent_repositories_repository ON agent_repositories(repository_id, agent_id);
+
+  -- 一些早期开发库错误地提前写入 user_version、但漏建 v7 表；补齐后再做 bundle rebuild。
+  CREATE TABLE IF NOT EXISTS skills (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL CHECK (source IN ('manual','runtime')),
+    instruction TEXT NOT NULL,
+    device_id TEXT REFERENCES devices(id),
+    source_path TEXT,
+    runtimes TEXT NOT NULL DEFAULT '["claude","codex"]',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    archived_at INTEGER,
+    UNIQUE (workspace_id, name)
+  );
+  CREATE TABLE IF NOT EXISTS agent_skills (
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (agent_id, skill_id)
+  );
+  CREATE TABLE skill_groups (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, name)
+  );
+  CREATE TABLE skills_v13 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL CHECK (source IN ('manual','runtime','codebase','github','upload')),
+    instruction TEXT NOT NULL,
+    device_id TEXT REFERENCES devices(id),
+    source_path TEXT,
+    runtimes TEXT NOT NULL DEFAULT '["claude","codex"]',
+    group_id TEXT REFERENCES skill_groups(id) ON DELETE SET NULL,
+    origin_url TEXT,
+    source_ref TEXT,
+    entry_hash TEXT NOT NULL DEFAULT '',
+    bundle_hash TEXT NOT NULL DEFAULT '',
+    auto_sync INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    archived_at INTEGER,
+    UNIQUE (workspace_id, name),
+    CHECK (
+      (source = 'runtime' AND device_id IS NOT NULL AND source_path IS NOT NULL) OR
+      (source <> 'runtime' AND device_id IS NULL)
+    )
+  );
+  INSERT INTO skills_v13
+    (id, workspace_id, name, description, source, instruction, device_id, source_path, runtimes,
+     created_at, updated_at, archived_at)
+    SELECT id, workspace_id, name, description, source, instruction, device_id, source_path, runtimes,
+           created_at, updated_at, archived_at
+    FROM skills;
+  DROP TABLE skills;
+  ALTER TABLE skills_v13 RENAME TO skills;
+  CREATE UNIQUE INDEX idx_skills_runtime_source ON skills(workspace_id, device_id, source_path)
+    WHERE source = 'runtime';
+  CREATE INDEX idx_skills_workspace ON skills(workspace_id, archived_at, updated_at);
+  CREATE INDEX idx_skills_group ON skills(group_id, updated_at);
+  CREATE TABLE skill_files (
+    skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    content TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (skill_id, path)
+  );
+  INSERT INTO skill_files (skill_id, path, content, sha256, position)
+    SELECT id, 'SKILL.md', instruction, entry_hash, 0 FROM skills;
+  CREATE TABLE skill_dependencies (
+    skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    spec TEXT,
+    required INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (skill_id, name)
+  );
+
+  ALTER TABLE conversations ADD COLUMN creator_member_id TEXT REFERENCES workspace_members(id);
+  ALTER TABLE conversations ADD COLUMN owner_member_id TEXT REFERENCES workspace_members(id);
+  CREATE TABLE issue_labels (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL DEFAULT '#75817b',
+    UNIQUE (workspace_id, name)
+  );
+  CREATE TABLE conversation_labels (
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    label_id TEXT NOT NULL REFERENCES issue_labels(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (conversation_id, label_id)
+  );
+  CREATE TABLE conversation_messages (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    author_type TEXT NOT NULL CHECK (author_type IN ('member','agent','external','system')),
+    author_id TEXT,
+    author_name TEXT,
+    body TEXT NOT NULL,
+    external_id TEXT,
+    created_at INTEGER NOT NULL,
+    UNIQUE (conversation_id, external_id)
+  );
+  CREATE INDEX idx_conversation_messages ON conversation_messages(conversation_id, created_at);
+
+  CREATE TABLE scm_external_objects (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL CHECK (provider IN ('codebase')),
+    kind TEXT NOT NULL CHECK (kind IN ('issue','change')),
+    external_id TEXT NOT NULL,
+    url TEXT,
+    title TEXT NOT NULL,
+    description TEXT,
+    author_id TEXT,
+    author_name TEXT,
+    state TEXT NOT NULL,
+    conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+    delivery_id TEXT REFERENCES deliveries(id) ON DELETE SET NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (provider, repository_id, kind, external_id)
+  );
+  CREATE INDEX idx_scm_external_conversation ON scm_external_objects(conversation_id, kind);
+  CREATE TABLE scm_events (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL CHECK (provider IN ('codebase')),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    repository_id TEXT REFERENCES repositories(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    action TEXT,
+    object_kind TEXT CHECK (object_kind IN ('issue','change')),
+    external_id TEXT,
+    payload TEXT NOT NULL,
+    outcome TEXT NOT NULL DEFAULT 'received' CHECK (outcome IN ('received','applied','ignored','failed')),
+    error TEXT,
+    received_at INTEGER NOT NULL,
+    processed_at INTEGER
+  );
+  CREATE INDEX idx_scm_events_workspace ON scm_events(workspace_id, received_at);
+
+  CREATE TABLE lark_workspace_bindings (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    chat_id TEXT NOT NULL UNIQUE,
+    default_agent_id TEXT NOT NULL REFERENCES agents(id),
+    response_mode TEXT NOT NULL DEFAULT 'thread' CHECK (response_mode IN ('thread','message')),
+    listen_mode TEXT NOT NULL DEFAULT 'mention' CHECK (listen_mode IN ('mention','all')),
+    bot_mode TEXT NOT NULL DEFAULT 'global' CHECK (bot_mode IN ('global','custom')),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS chat_bindings (
+    chat_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agents(id),
+    created_at INTEGER NOT NULL
+  );
+  INSERT INTO lark_workspace_bindings
+    (id, workspace_id, chat_id, default_agent_id, response_mode, listen_mode, bot_mode, enabled, created_at, updated_at)
+    SELECT 'lark_' || lower(substr(hex(randomblob(8)), 1, 16)), a.workspace_id, b.chat_id, b.agent_id,
+           'thread', 'mention', 'global', 1, b.created_at, b.created_at
+    FROM chat_bindings b JOIN agents a ON a.id = b.agent_id;
+  CREATE TABLE lark_message_links (
+    message_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX idx_lark_message_links_conversation ON lark_message_links(conversation_id, created_at);
+  `,
+  // v14 —— 飞书附件随 Run 下发；Agent follow-up Issue 使用短期最小权限 action token
+  `
+  CREATE TABLE run_attachments (
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    data_base64 TEXT NOT NULL,
+    PRIMARY KEY (run_id, position)
+  );
+  CREATE TABLE run_action_tokens (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    revoked_at INTEGER
+  );
+  CREATE INDEX idx_run_action_tokens_run ON run_action_tokens(run_id, expires_at);
+  `,
+  // v15 —— 合流 GitHub Delivery fork：closed 状态、head-bound approval 与并发 revision
+  `
+  CREATE TABLE deliveries_v15 (
     id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id),
     provider TEXT NOT NULL,
@@ -574,32 +999,56 @@ const MIGRATIONS: string[] = [
     merged_at INTEGER,
     deployed_at INTEGER,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    latest_head_sha TEXT,
+    approved_head_sha TEXT,
+    revision INTEGER NOT NULL DEFAULT 0
   );
-  INSERT INTO deliveries_v12
+  INSERT INTO deliveries_v15
     (id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
      review_status, check_status, merge_status, deployment_status, review_approved_at,
-     merged_at, deployed_at, created_at, updated_at)
+     merged_at, deployed_at, created_at, updated_at, latest_head_sha, approved_head_sha, revision)
     SELECT id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
            review_status, check_status, merge_status, deployment_status, review_approved_at,
-           merged_at, deployed_at, created_at, updated_at
+           merged_at, deployed_at, created_at, updated_at, latest_head_sha, approved_head_sha, revision
     FROM deliveries;
   DROP TABLE deliveries;
-  ALTER TABLE deliveries_v12 RENAME TO deliveries;
+  ALTER TABLE deliveries_v15 RENAME TO deliveries;
   CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
-  `,
-  // v13 —— GitHub approval 绑定 head SHA；revision 防异步外部动作覆盖期间发生的证据变更
-  `
-  ALTER TABLE deliveries ADD COLUMN latest_head_sha TEXT;
-  ALTER TABLE deliveries ADD COLUMN approved_head_sha TEXT;
-  ALTER TABLE deliveries ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
 
-  -- 旧 GitHub approval/check 没有 head SHA 归属，不能安全沿用；manual 事实不受影响。
+  -- 没有 head SHA 归属的旧 GitHub 证据不能安全沿用；下一次 refresh 会重建事实。
   UPDATE deliveries
     SET review_status = 'pending', review_approved_at = NULL, check_status = 'pending'
-    WHERE provider = 'github';
+    WHERE provider = 'github' AND (latest_head_sha IS NULL OR approved_head_sha IS NULL);
   `,
 ];
+
+function hasTable(db: Database, table: string): boolean {
+  return !!db
+    .query<{ name: string }, [string]>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .get(table);
+}
+
+function hasColumn(db: Database, table: string, column: string): boolean {
+  return db
+    .query<{ name: string }, []>(`PRAGMA table_info(${table})`)
+    .all()
+    .some((entry) => entry.name === column);
+}
+
+function ensureGitHubDeliveryColumns(db: Database): void {
+  if (!hasColumn(db, "deliveries", "latest_head_sha")) {
+    db.exec("ALTER TABLE deliveries ADD COLUMN latest_head_sha TEXT;");
+  }
+  if (!hasColumn(db, "deliveries", "approved_head_sha")) {
+    db.exec("ALTER TABLE deliveries ADD COLUMN approved_head_sha TEXT;");
+  }
+  if (!hasColumn(db, "deliveries", "revision")) {
+    db.exec("ALTER TABLE deliveries ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;");
+  }
+}
 
 function normalizeLegacyRepositoryNames(db: Database): void {
   const rows = db
@@ -632,12 +1081,31 @@ export function openDb(path: string): Database {
 
   const row = db.query<{ user_version: number }, []>("PRAGMA user_version").get();
   let version = row?.user_version ?? 0;
+
+  // codex/harbor-self-hosting 曾把 GitHub migrations 占用了 v12/v13。按结构识别该 lineage，
+  // 先补跑 canonical Mew parity v12/v13，再从 v14 汇合；不能只信 user_version。
+  if (version >= 12 && version <= 13 && !hasTable(db, "automation_triggers")) {
+    db.exec("PRAGMA foreign_keys = OFF;");
+    try {
+      db.transaction(() => {
+        db.exec(MIGRATIONS[11]!);
+        db.exec(MIGRATIONS[12]!);
+        db.exec("PRAGMA user_version = 13");
+      })();
+    } finally {
+      db.exec("PRAGMA foreign_keys = ON;");
+    }
+    version = 13;
+  }
+
   while (version < MIGRATIONS.length) {
     const sql = MIGRATIONS[version]!;
-    const rebuildsReferencedTables = version === 8 || version === 9 || version === 11;
+    const rebuildsReferencedTables =
+      version === 8 || version === 9 || version === 11 || version === 12 || version === 14;
     if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = OFF;");
     try {
       db.transaction(() => {
+        if (version === 14) ensureGitHubDeliveryColumns(db);
         db.exec(sql);
         db.exec(`PRAGMA user_version = ${version + 1}`);
       })();

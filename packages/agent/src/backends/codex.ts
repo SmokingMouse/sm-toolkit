@@ -55,6 +55,7 @@ export class CodexBackend implements Backend {
       additionalWritableDirs: opts.additionalWritableDirs ?? [],
       imagePaths: (opts.attachments ?? []).map((a) => a.path),
       prompt: finalPrompt,
+      additionalDirs: opts.additionalWorkspaces ?? [],
     });
 
     let sid: string | null = opts.resume ?? null;
@@ -138,9 +139,14 @@ export function buildCodexArgs(o: {
   additionalWritableDirs: string[];
   imagePaths: string[];
   prompt: string;
+  additionalDirs?: string[];
 }): string[] {
   const common = ["--json", "--skip-git-repo-check"];
   if (o.model) common.push("-m", o.model);
+  // `codex exec resume` 当前没有 --add-dir；新会话才显式开放额外 Repository。
+  if (!o.resume) {
+    for (const directory of o.additionalDirs ?? []) common.push("--add-dir", directory);
+  }
   const imageArgs = o.imagePaths.flatMap((p) => ["--image", p]);
   // default/readonly 都不能仅凭调用方传参扩大额外可写范围；Executor 另有领域闸，这里再做参数层防御。
   const writableDirs =

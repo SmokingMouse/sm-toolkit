@@ -7,11 +7,16 @@
  */
 
 import { existsSync } from "node:fs";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { join, resolve } from "node:path";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type {
   BackendKind,
+  AutomationOutputMode,
+  AutomationOverlapMode,
+  AutomationTriggerType,
+  AutomationWebhookFilter,
   ConversationKind,
   ConversationStatus,
   Delivery,
@@ -25,6 +30,8 @@ import type {
   Run,
   RunPurpose,
   RunStreamFrame,
+  WorkspaceMember,
+  WorkspaceRole,
 } from "../protocol.js";
 import {
   DELIVERY_CHECK_STATUSES,
@@ -39,9 +46,11 @@ import type { RunBus } from "./bus.js";
 import type { DeviceHub } from "./ws.js";
 import type { RunCoordinator } from "./scheduler.js";
 import type { ApprovalService } from "./approvals.js";
-import { AutomationService } from "./automation.js";
+import { AutomationService, hashWebhookSecret } from "./automation.js";
 import { transitionConversation } from "./statemachine.js";
 import { DeliveryService } from "./delivery.js";
+import type { ScmService } from "./scm.js";
+import { importedSkillMetadata, SkillImportService } from "./skill-import.js";
 import {
   getPromptBlockConfig,
   listPromptBlockConfigs,
@@ -51,6 +60,7 @@ import {
 
 const PERMISSIONS = ["readonly", "auto-edit", "full", "default"];
 const MAX_SKILL_INSTRUCTION = 128 * 1024;
+const MAX_AGENT_SETUP = 64 * 1024;
 const ISSUE_TRIAGE_PROMPT = `You are triaging a request before an Issue is created.
 Read the repository only as needed to replace ambiguity with concrete evidence. Do not edit files, create branches, commit, push, or implement the request.
 
@@ -83,11 +93,96 @@ function validateDeliveryUrl(value: string | null | undefined): void {
   if (!value?.trim()) return;
   try {
     const url = new URL(value);
-    if (url.protocol !== "http:" && url.protocol !== "https:") bad("MR/PR URL 只支持 http/https");
+    if (url.protocol !== "http:" && url.protocol !== "https:")
+      bad("MR/PR URL 只支持 http/https");
   } catch (error) {
     if (error instanceof HTTPException) throw error;
     bad("MR/PR URL 格式不正确");
   }
+}
+
+function safeSecretEqual(actual: string, expected: string): boolean {
+  if (!actual || !expected) return false;
+  const left = createHash("sha256").update(actual).digest();
+  const right = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(left, right);
+}
+
+function parseAgentEnvironment(value: unknown): Record<string, string> {
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    bad("environment 需要是 key/value object");
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 64) bad("environment 最多 64 项");
+  const result: Record<string, string> = {};
+  let bytes = 0;
+  for (const [key, raw] of entries) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
+      bad(`environment key "${key}" 不是合法变量名`);
+    if (typeof raw !== "string") bad(`environment.${key} 必须是 string`);
+    bytes += key.length + raw.length;
+    if (bytes > 64 * 1024) bad("environment 总大小不能超过 64KB");
+    result[key] = raw;
+  }
+  return result;
+}
+
+function parseSkillFiles(
+  value: unknown,
+  instruction: string,
+): { path: string; content: string }[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64)
+    bad("files 需要是 1–64 个 Skill 文件");
+  const files = value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item))
+      bad("每个 Skill file 需要 path/content");
+    const record = item as Record<string, unknown>;
+    if (typeof record.path !== "string" || typeof record.content !== "string")
+      bad("每个 Skill file 需要 string path/content");
+    const path = record.path.replace(/\\/g, "/").replace(/^\.\//, "");
+    if (
+      !path ||
+      path.startsWith("/") ||
+      path.split("/").includes("..") ||
+      path.includes("\0")
+    )
+      bad(`非法 Skill file path：${path}`);
+    if (record.content.length > 128 * 1024)
+      bad(`Skill file ${path} 不能超过 128KB`);
+    return { path, content: record.content };
+  });
+  if (new Set(files.map((file) => file.path)).size !== files.length)
+    bad("Skill file path 不能重复");
+  if (files.reduce((sum, file) => sum + file.content.length, 0) > 512 * 1024)
+    bad("Skill bundle 不能超过 512KB");
+  if (!files.some((file) => file.path === "SKILL.md"))
+    files.unshift({ path: "SKILL.md", content: instruction });
+  return files;
+}
+
+function parseSkillDependencies(value: unknown) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 64)
+    bad("dependencies 需要是最多 64 项的数组");
+  return value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item))
+      bad("dependency 需要 name/spec/required");
+    const record = item as Record<string, unknown>;
+    if (typeof record.name !== "string" || !record.name.trim())
+      bad("dependency.name 不能为空");
+    if (
+      record.spec !== undefined &&
+      record.spec !== null &&
+      typeof record.spec !== "string"
+    )
+      bad("dependency.spec 需要 string/null");
+    return {
+      name: record.name.trim(),
+      spec: typeof record.spec === "string" ? record.spec : null,
+      required: record.required !== false,
+    };
+  });
 }
 
 export function buildRest(
@@ -99,8 +194,17 @@ export function buildRest(
   automations: AutomationService,
   expectedToken: string,
   deliveries = new DeliveryService(store),
+  scm: ScmService | null = null,
+  codebaseWebhookSecret = "",
+  skillImports = new SkillImportService(),
+  customLarkWorkspaceIds: ReadonlySet<string> = new Set(),
 ): Hono {
   const app = new Hono();
+  type ApiActor =
+    { kind: "system" } | { kind: "member"; member: WorkspaceMember };
+  const actors = new WeakMap<Request, ApiActor>();
+  const requestActor = (c: Context): ApiActor =>
+    actors.get(c.req.raw) ?? { kind: "system" };
 
   // 调度冲突（已有 active Run、阶段不符、Reviewer 看不到 worktree）是可修正的请求错误，
   // 不应泄漏成 500。统一收口，保证 Web / CLI 都拿到可读的 400 提示。
@@ -113,49 +217,160 @@ export function buildRest(
   };
 
   const currentWorkspace = (c: Context) => {
-    const key = c.req.header("X-Harbor-Workspace")?.trim() || DEFAULT_WORKSPACE_ID;
+    const actor = requestActor(c);
+    const key =
+      c.req.header("X-Harbor-Workspace")?.trim() ||
+      (actor.kind === "member"
+        ? actor.member.workspaceId
+        : DEFAULT_WORKSPACE_ID);
     const workspace = store.resolveWorkspace(key);
-    if (!workspace || workspace.archivedAt) bad(`workspace "${key}" 不存在或已归档`);
+    if (!workspace || workspace.archivedAt)
+      bad(`workspace "${key}" 不存在或已归档`);
+    if (actor.kind === "member" && actor.member.workspaceId !== workspace.id) {
+      throw new HTTPException(403, {
+        message: "当前 token 不属于该 Workspace",
+      });
+    }
     return workspace;
   };
 
-  const scopedAgent = (workspaceId: string, key: string | null | undefined) => {
+  const requireRole = (
+    c: Context,
+    workspaceId: string,
+    minimum: "member" | "admin" | "owner",
+  ) => {
+    const actor = requestActor(c);
+    if (actor.kind === "system") return null;
+    if (
+      actor.member.workspaceId !== workspaceId ||
+      actor.member.status !== "active"
+    ) {
+      throw new HTTPException(403, { message: "Workspace 访问被拒绝" });
+    }
+    const rank: Record<WorkspaceRole, number> = {
+      member: 1,
+      admin: 2,
+      owner: 3,
+    };
+    if (rank[actor.member.role] < rank[minimum]) {
+      throw new HTTPException(403, {
+        message: `需要 ${minimum} 权限（当前 ${actor.member.role}）`,
+      });
+    }
+    return actor.member;
+  };
+
+  const requireSystem = (c: Context) => {
+    if (requestActor(c).kind !== "system") {
+      throw new HTTPException(403, {
+        message: "该操作只允许 Harbor server owner token",
+      });
+    }
+  };
+
+  const canSeeAgent = (
+    c: Context,
+    agent: NonNullable<ReturnType<HarborStore["getAgent"]>>,
+  ) => {
+    if (agent.visibility === "workspace") return true;
+    const actor = requestActor(c);
+    return (
+      actor.kind === "system" ||
+      actor.member.role === "owner" ||
+      actor.member.role === "admin" ||
+      actor.member.id === agent.createdByMemberId
+    );
+  };
+  const agentView = (
+    agent: NonNullable<ReturnType<HarborStore["getAgent"]>>,
+  ) => ({
+    ...agent,
+    // Environment value 是 secret；REST 永远只回 key 和掩码，真实值只在 server → daemon 下发。
+    environment: Object.fromEntries(
+      Object.keys(agent.environment).map((key) => [key, "••••••"]),
+    ),
+  });
+  const appendRequestMessage = (
+    c: Context,
+    conversationId: string,
+    body: string,
+  ) => {
+    const actor = requestActor(c);
+    return store.appendConversationMessage(
+      conversationId,
+      {
+        authorType: actor.kind === "member" ? "member" : "system",
+        authorId: actor.kind === "member" ? actor.member.id : null,
+        authorName: actor.kind === "member" ? actor.member.name : "Local owner",
+        body,
+        externalId: null,
+      },
+      Date.now(),
+    );
+  };
+
+  const scopedAgent = (
+    c: Context,
+    workspaceId: string,
+    key: string | null | undefined,
+  ) => {
     if (!key) return null;
-    const agent = store.getAgent(key) ?? store.getAgentByNameInWorkspace(workspaceId, key);
-    if (agent && agent.workspaceId !== workspaceId) bad(`agent "${key}" 不属于当前 Workspace`);
+    const agent =
+      store.getAgent(key) ?? store.getAgentByNameInWorkspace(workspaceId, key);
+    if (agent && agent.workspaceId !== workspaceId)
+      bad(`agent "${key}" 不属于当前 Workspace`);
+    if (agent && !canSeeAgent(c, agent))
+      throw new HTTPException(404, { message: `agent "${key}" 不存在` });
     return agent;
   };
 
-  const scopedRepository = (workspaceId: string, key: string | null | undefined) => {
+  const scopedRepository = (
+    workspaceId: string,
+    key: string | null | undefined,
+  ) => {
     if (!key) return null;
     const repository = store.resolveRepository(workspaceId, key);
-    if (!repository || repository.archivedAt) bad(`repository "${key}" 不存在或已归档`);
+    if (!repository || repository.archivedAt)
+      bad(`repository "${key}" 不存在或已归档`);
     return repository;
   };
 
   const assertConversationWorkspace = (workspaceId: string, id: string) => {
     const conversation = store.resolveConversationPrefix(id);
-    if (!conversation) throw new HTTPException(404, { message: `conversation "${id}" 不存在` });
-    if (conversation.workspaceId !== workspaceId) throw new HTTPException(404, { message: `conversation "${id}" 不存在于当前 Workspace` });
+    if (!conversation)
+      throw new HTTPException(404, { message: `conversation "${id}" 不存在` });
+    if (conversation.workspaceId !== workspaceId)
+      throw new HTTPException(404, {
+        message: `conversation "${id}" 不存在于当前 Workspace`,
+      });
     return conversation;
   };
 
   const assertRunWorkspace = (workspaceId: string, id: string) => {
     const run = store.resolveRunPrefix(id);
-    if (!run || run.workspaceId !== workspaceId) throw new HTTPException(404, { message: `run "${id}" 不存在于当前 Workspace` });
+    if (!run || run.workspaceId !== workspaceId)
+      throw new HTTPException(404, {
+        message: `run "${id}" 不存在于当前 Workspace`,
+      });
     return run;
   };
 
   const assertDeliveryWorkspace = (workspaceId: string, id: string) => {
     const delivery = store.getDelivery(id);
-    const conversation = delivery ? store.getConversation(delivery.conversationId) : null;
+    const conversation = delivery
+      ? store.getConversation(delivery.conversationId)
+      : null;
     if (!delivery || conversation?.workspaceId !== workspaceId) {
-      throw new HTTPException(404, { message: `delivery "${id}" 不存在于当前 Workspace` });
+      throw new HTTPException(404, {
+        message: `delivery "${id}" 不存在于当前 Workspace`,
+      });
     }
     return { delivery, conversation };
   };
 
-  const deliveryAction = async <T>(action: () => T | Promise<T>): Promise<T> => {
+  const deliveryAction = async <T>(
+    action: () => T | Promise<T>,
+  ): Promise<T> => {
     try {
       return await action();
     } catch (error) {
@@ -166,28 +381,526 @@ export function buildRest(
   const finalizeDelivery = (delivery: Delivery): void => {
     if (!deliveries.isComplete(delivery)) return;
     const conv = store.getConversation(delivery.conversationId);
-    if (!conv || conv.kind !== "issue" || conv.status === "done" || conv.status === "canceled") return;
+    if (
+      !conv ||
+      conv.kind !== "issue" ||
+      conv.status === "done" ||
+      conv.status === "canceled"
+    )
+      return;
     transitionConversation(store, conv, "done", "system", Date.now());
     coordinator.requestWorktreeCleanup(store.getConversation(conv.id)!);
   };
 
   app.onError((err, c) => {
-    if (err instanceof HTTPException) return c.json({ error: err.message }, err.status);
+    if (err instanceof HTTPException)
+      return c.json({ error: err.message }, err.status);
     console.error("[rest]", err);
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      500,
+    );
+  });
+
+  /** 外部 Trigger 入口：不走 Harbor Bearer auth，只认每个 webhook Trigger 的独立 secret。 */
+  app.post("/hooks/automations/:triggerId", async (c) => {
+    const contentLength = Number(c.req.header("content-length") ?? "0");
+    if (Number.isFinite(contentLength) && contentLength > 256 * 1024) {
+      return c.json({ error: "webhook payload 超过 256KB" }, 413);
+    }
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return c.json({ error: "webhook body 必须是 JSON object" }, 400);
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return c.json({ error: "webhook body 必须是 JSON object" }, 400);
+    }
+    const payload = raw as Record<string, unknown>;
+    if (JSON.stringify(payload).length > 256 * 1024) {
+      return c.json({ error: "webhook payload 超过 256KB" }, 413);
+    }
+    const authorization = c.req.header("authorization") ?? "";
+    const secret =
+      c.req.header("x-harbor-webhook-secret") ??
+      (authorization.startsWith("Bearer ")
+        ? authorization.slice("Bearer ".length)
+        : "");
+    const eventType =
+      c.req.header("x-harbor-event") ??
+      c.req.header("x-codebase-event") ??
+      (typeof payload.event === "string" ? payload.event : null) ??
+      (typeof payload.type === "string" ? payload.type : "unknown");
+    const eventId =
+      c.req.header("x-harbor-delivery") ??
+      c.req.header("x-codebase-delivery") ??
+      c.req.header("x-request-id") ??
+      (typeof payload.delivery_id === "string" ? payload.delivery_id : null);
+    if (
+      secret.length > 512 ||
+      eventType.length > 200 ||
+      (eventId?.length ?? 0) > 512
+    ) {
+      return c.json({ error: "webhook header 超过长度限制" }, 400);
+    }
+    try {
+      const result = automations.receiveWebhook(c.req.param("triggerId"), {
+        secret,
+        eventType,
+        eventId,
+        payload,
+      });
+      if (result.status === "started") return c.json(result, 202);
+      if (
+        result.status === "ignored" &&
+        result.reason === "webhook trigger 不存在"
+      ) {
+        return c.json({ error: result.reason }, 404);
+      }
+      return c.json(result, 200);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === "webhook secret 不正确")
+        return c.json({ error: message }, 401);
+      throw error;
+    }
+  });
+
+  /** Codebase 独立入口：Repository id 定作用域，独立 secret 定授权，event id 定幂等。 */
+  app.post("/hooks/scm/codebase/:repositoryId", async (c) => {
+    if (!scm || !codebaseWebhookSecret)
+      return c.json({ error: "not found" }, 404);
+    const authorization = c.req.header("authorization") ?? "";
+    const secret =
+      c.req.header("x-harbor-webhook-secret") ??
+      c.req.header("x-codebase-token") ??
+      (authorization.startsWith("Bearer ") ? authorization.slice(7) : "");
+    if (!safeSecretEqual(secret, codebaseWebhookSecret))
+      return c.json({ error: "webhook secret 不正确" }, 401);
+    const contentLength = Number(c.req.header("content-length") ?? "0");
+    if (Number.isFinite(contentLength) && contentLength > 512 * 1024) {
+      return c.json({ error: "webhook payload 超过 512KB" }, 413);
+    }
+    let payload: unknown;
+    try {
+      payload = await c.req.json();
+    } catch {
+      return c.json({ error: "webhook body 必须是 JSON object" }, 400);
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return c.json({ error: "webhook body 必须是 JSON object" }, 400);
+    }
+    const eventType =
+      c.req.header("x-codebase-event") ??
+      c.req.header("x-harbor-event") ??
+      String(
+        (payload as Record<string, unknown>).event_type ??
+          (payload as Record<string, unknown>).event ??
+          "unknown",
+      );
+    const eventId =
+      c.req.header("x-codebase-delivery") ??
+      c.req.header("x-harbor-delivery") ??
+      c.req.header("x-request-id") ??
+      null;
+    try {
+      const result = scm.receiveCodebase(c.req.param("repositoryId"), {
+        eventId,
+        eventType,
+        payload: payload as Record<string, unknown>,
+      });
+      return c.json(result, result.status === "applied" ? 202 : 200);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/不存在|未启用/.test(message)) return c.json({ error: message }, 404);
+      return c.json({ error: message }, 400);
+    }
+  });
+
+  /**
+   * Run-scoped control-plane action：凭证只在单次 Run 下发，权限仅限创建 follow-up Issue。
+   * 不复用 HARBOR_TOKEN，也不允许改当前 Issue 状态、派活或触发执行。
+   */
+  app.post("/hooks/agent-actions/issues", async (c) => {
+    const authorization = c.req.header("authorization") ?? "";
+    const raw = authorization.startsWith("Bearer ")
+      ? authorization.slice(7)
+      : "";
+    if (!raw || raw.length > 512)
+      return c.json({ error: "run action token 不正确" }, 401);
+    const now = Date.now();
+    const run = store.runForActionToken(
+      createHash("sha256").update(raw).digest("hex"),
+      now,
+    );
+    if (!run || run.status !== "running")
+      return c.json({ error: "run action token 已失效" }, 401);
+    const agent = store.getAgent(run.agentId);
+    if (!agent || agent.workspaceId !== run.workspaceId)
+      return c.json({ error: "run agent 不存在" }, 409);
+    const parent = run.conversationId
+      ? store.getConversation(run.conversationId)
+      : null;
+    const body = (await c.req.json()) as {
+      title?: string;
+      description?: string;
+      priority?: IssuePriority;
+      assignee?: "unassigned" | "self";
+      labels?: unknown;
+    };
+    const title = body.title?.trim() ?? "";
+    const description = body.description?.trim() ?? "";
+    if (!title || title.length > 160)
+      return c.json({ error: "title 需要 1–160 字符" }, 400);
+    if (description.length > 64 * 1024)
+      return c.json({ error: "description 不能超过 64KB" }, 400);
+    if (
+      body.priority !== undefined &&
+      !ISSUE_PRIORITIES.includes(body.priority)
+    ) {
+      return c.json(
+        { error: `priority 可选 ${ISSUE_PRIORITIES.join("/")}` },
+        400,
+      );
+    }
+    if (
+      body.assignee !== undefined &&
+      body.assignee !== "unassigned" &&
+      body.assignee !== "self"
+    ) {
+      return c.json({ error: "assignee 可选 unassigned/self" }, 400);
+    }
+    if (
+      body.labels !== undefined &&
+      (!Array.isArray(body.labels) ||
+        body.labels.some((label) => typeof label !== "string"))
+    ) {
+      return c.json({ error: "labels 需要是现有 label name 数组" }, 400);
+    }
+    const labelsByName = new Map(
+      store
+        .listIssueLabels(run.workspaceId)
+        .map((label) => [label.name, label]),
+    );
+    const requestedLabels = [
+      ...new Set((body.labels as string[] | undefined) ?? []),
+    ];
+    const unknownLabels = requestedLabels.filter(
+      (name) => !labelsByName.has(name),
+    );
+    if (unknownLabels.length)
+      return c.json(
+        { error: `label 不存在：${unknownLabels.join(", ")}` },
+        400,
+      );
+    const selfAssigned = body.assignee === "self";
+    const issue = store.createConversation(
+      {
+        workspaceId: run.workspaceId,
+        kind: "issue",
+        title,
+        description: description || null,
+        priority: body.priority ?? "medium",
+        agentId: selfAssigned ? agent.id : null,
+        repositoryId: selfAssigned ? run.repositoryId : null,
+        origin: "agent",
+        originRef: `run:${run.id}`,
+        ownerMemberId: parent?.ownerMemberId ?? null,
+        labelIds: requestedLabels.map((name) => labelsByName.get(name)!.id),
+      },
+      now,
+    );
+    store.appendConversationMessage(
+      issue.id,
+      {
+        authorType: "agent",
+        authorId: agent.id,
+        authorName: agent.name,
+        body: `Created as follow-up from run ${run.id}${parent ? ` on ${parent.id}` : ""}.`,
+        externalId: null,
+      },
+      now,
+    );
+    if (parent) {
+      store.appendConversationMessage(
+        parent.id,
+        {
+          authorType: "agent",
+          authorId: agent.id,
+          authorName: agent.name,
+          body: `Created follow-up Issue ${issue.id}: ${issue.title}`,
+          externalId: null,
+        },
+        now,
+      );
+    }
+    return c.json(issue, 201);
   });
 
   app.use("/api/*", async (c, next) => {
     const auth = c.req.header("Authorization");
-    if (auth !== `Bearer ${expectedToken}`) {
-      return c.json({ error: "unauthorized（Authorization: Bearer <HARBOR_TOKEN>）" }, 401);
+    const raw = auth?.startsWith("Bearer ") ? auth.slice(7) : "";
+    if (raw === expectedToken) {
+      actors.set(c.req.raw, { kind: "system" });
+    } else {
+      const member = raw
+        ? store.memberForApiToken(
+            createHash("sha256").update(raw).digest("hex"),
+            Date.now(),
+          )
+        : null;
+      if (member) actors.set(c.req.raw, { kind: "member", member });
+    }
+    if (!actors.has(c.req.raw)) {
+      return c.json(
+        { error: "unauthorized（Authorization: Bearer <HARBOR_TOKEN>）" },
+        401,
+      );
     }
     await next();
   });
 
   app.get("/api/health", (c) => c.json({ ok: true }));
 
-  const resolveAgentSkills = (value: unknown, workspaceId: string, deviceId: string, backend: BackendKind) => {
+  app.get("/api/me", (c) => {
+    const actor = requestActor(c);
+    if (actor.kind === "system")
+      return c.json({ kind: "system", role: "owner" });
+    return c.json({ kind: "member", member: actor.member });
+  });
+
+  app.get("/api/members", (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "member");
+    return c.json(store.listWorkspaceMembers(workspace.id));
+  });
+
+  app.post("/api/members", async (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const b = (await c.req.json()) as {
+      name?: string;
+      email?: string;
+      role?: WorkspaceRole;
+      externalProvider?: WorkspaceMember["externalProvider"];
+      externalId?: string;
+    };
+    if (!b.name?.trim()) bad("缺少 member name");
+    if (b.role !== undefined && !["owner", "admin", "member"].includes(b.role))
+      bad("role 可选 owner/admin/member");
+    if (b.role === "owner") requireRole(c, workspace.id, "owner");
+    return c.json(
+      store.createWorkspaceMember(
+        {
+          workspaceId: workspace.id,
+          name: b.name.trim(),
+          email: b.email?.trim() || null,
+          role: b.role ?? "member",
+          externalProvider: b.externalProvider ?? "local",
+          externalId: b.externalId?.trim() || null,
+        },
+        Date.now(),
+      ),
+      201,
+    );
+  });
+
+  app.patch("/api/members/:id", async (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const member = store.getWorkspaceMember(c.req.param("id"));
+    if (!member || member.workspaceId !== workspace.id)
+      throw new HTTPException(404, { message: "member 不存在" });
+    const b = (await c.req.json()) as {
+      role?: WorkspaceRole;
+      status?: WorkspaceMember["status"];
+    };
+    if (b.role !== undefined && !["owner", "admin", "member"].includes(b.role))
+      bad("role 可选 owner/admin/member");
+    if (
+      b.status !== undefined &&
+      !["active", "invited", "disabled"].includes(b.status)
+    )
+      bad("status 可选 active/invited/disabled");
+    const removesOwner =
+      member.role === "owner" &&
+      ((b.role && b.role !== "owner") || (b.status && b.status !== "active"));
+    if (b.role === "owner" || removesOwner)
+      requireRole(c, workspace.id, "owner");
+    if (removesOwner && store.countActiveWorkspaceOwners(workspace.id) <= 1)
+      bad("Workspace 必须保留至少一个 active owner");
+    store.updateWorkspaceMember(member.id, b);
+    return c.json(store.getWorkspaceMember(member.id));
+  });
+
+  app.get("/api/member-tokens", (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    return c.json(store.listWorkspaceApiTokens(workspace.id));
+  });
+
+  app.post("/api/members/:id/tokens", async (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const member = store.getWorkspaceMember(c.req.param("id"));
+    if (
+      !member ||
+      member.workspaceId !== workspace.id ||
+      member.status !== "active"
+    )
+      bad("只能给当前 Workspace 的 active member 创建 token");
+    const b = (await c.req.json()) as { label?: string };
+    const raw = `harbor_${randomBytes(24).toString("base64url")}`;
+    const id = store.createWorkspaceApiToken(
+      workspace.id,
+      member.id,
+      b.label?.trim() || "Personal access token",
+      createHash("sha256").update(raw).digest("hex"),
+      Date.now(),
+    );
+    return c.json({ id, token: raw }, 201);
+  });
+
+  app.delete("/api/member-tokens/:id", (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const token = store
+      .listWorkspaceApiTokens(workspace.id)
+      .find((candidate) => candidate.id === c.req.param("id"));
+    if (!token) throw new HTTPException(404, { message: "token 不存在" });
+    store.revokeWorkspaceApiToken(token.id, Date.now());
+    return c.json({ ok: true });
+  });
+
+  app.get("/api/integrations/lark", (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "member");
+    return c.json({
+      bindings: store.listLarkWorkspaceBindings(workspace.id),
+      customBotConfigured: customLarkWorkspaceIds.has(workspace.id),
+    });
+  });
+
+  app.post("/api/integrations/lark/bindings", async (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const b = (await c.req.json()) as {
+      chatId?: string;
+      defaultAgent?: string;
+      responseMode?: "thread" | "message";
+      listenMode?: "mention" | "all";
+      botMode?: "global" | "custom";
+      enabled?: boolean;
+    };
+    if (!b.chatId?.trim()) bad("缺少 Lark chatId");
+    const agent = scopedAgent(c, workspace.id, b.defaultAgent);
+    if (!agent) bad("缺少有效 defaultAgent");
+    if (
+      b.responseMode !== undefined &&
+      b.responseMode !== "thread" &&
+      b.responseMode !== "message"
+    )
+      bad("responseMode 可选 thread/message");
+    if (
+      b.listenMode !== undefined &&
+      b.listenMode !== "mention" &&
+      b.listenMode !== "all"
+    )
+      bad("listenMode 可选 mention/all");
+    if (
+      b.botMode !== undefined &&
+      b.botMode !== "global" &&
+      b.botMode !== "custom"
+    )
+      bad("botMode 可选 global/custom");
+    if (b.botMode === "custom" && !customLarkWorkspaceIds.has(workspace.id))
+      bad("当前 Workspace 未在 ~/.harbor.yaml 配置 feishu.custom_bots profile");
+    return c.json(
+      store.upsertLarkWorkspaceBinding(
+        {
+          workspaceId: workspace.id,
+          chatId: b.chatId.trim(),
+          defaultAgentId: agent.id,
+          responseMode: b.responseMode,
+          listenMode: b.listenMode,
+          botMode: b.botMode,
+          enabled: b.enabled,
+        },
+        Date.now(),
+      ),
+      201,
+    );
+  });
+
+  app.patch("/api/integrations/lark/bindings/:id", async (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const current = store
+      .listLarkWorkspaceBindings(workspace.id)
+      .find((binding) => binding.id === c.req.param("id"));
+    if (!current)
+      throw new HTTPException(404, { message: "Lark binding 不存在" });
+    const b = (await c.req.json()) as {
+      defaultAgent?: string;
+      responseMode?: "thread" | "message";
+      listenMode?: "mention" | "all";
+      botMode?: "global" | "custom";
+      enabled?: boolean;
+    };
+    const agent = b.defaultAgent
+      ? scopedAgent(c, workspace.id, b.defaultAgent)
+      : store.getAgent(current.defaultAgentId);
+    if (!agent) bad("defaultAgent 不存在");
+    if (b.botMode === "custom" && !customLarkWorkspaceIds.has(workspace.id))
+      bad("当前 Workspace 未配置 custom Bot profile");
+    return c.json(
+      store.upsertLarkWorkspaceBinding(
+        {
+          workspaceId: workspace.id,
+          chatId: current.chatId,
+          defaultAgentId: agent.id,
+          responseMode: b.responseMode ?? current.responseMode,
+          listenMode: b.listenMode ?? current.listenMode,
+          botMode: b.botMode ?? current.botMode,
+          enabled: b.enabled ?? current.enabled,
+        },
+        Date.now(),
+      ),
+    );
+  });
+
+  app.delete("/api/integrations/lark/bindings/:id", (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const current = store
+      .listLarkWorkspaceBindings(workspace.id)
+      .find((binding) => binding.id === c.req.param("id"));
+    if (!current)
+      throw new HTTPException(404, { message: "Lark binding 不存在" });
+    store.deleteLarkWorkspaceBinding(current.id);
+    return c.json({ ok: true });
+  });
+
+  app.get("/api/scm/events", (c) => {
+    const workspace = currentWorkspace(c);
+    return c.json(store.listScmEvents(workspace.id));
+  });
+
+  app.get("/api/scm/objects", (c) => {
+    const workspace = currentWorkspace(c);
+    const kind = c.req.query("kind");
+    if (kind !== undefined && kind !== "issue" && kind !== "change")
+      bad("kind 可选 issue/change");
+    return c.json(store.listScmExternalObjects(workspace.id, kind));
+  });
+
+  const resolveAgentSkills = (
+    value: unknown,
+    workspaceId: string,
+    deviceId: string,
+    backend: BackendKind,
+  ) => {
     if (value === undefined) return [];
     if (!Array.isArray(value) || value.some((id) => typeof id !== "string")) {
       bad("skills 需要是 Skill id 数组");
@@ -196,12 +909,15 @@ export function buildRest(
     return ids.map((id) => {
       const skill = store.getSkill(id);
       if (!skill || skill.archivedAt) bad(`skill "${id}" 不存在或已归档`);
-      if (skill.workspaceId !== workspaceId) bad(`skill "${skill.name}" 不属于当前 Workspace`);
+      if (skill.workspaceId !== workspaceId)
+        bad(`skill "${skill.name}" 不属于当前 Workspace`);
       if (skill.source === "runtime" && skill.deviceId !== deviceId) {
         bad(`runtime skill "${skill.name}" 只能绑定来源设备上的 Agent`);
       }
       if (!skill.runtimes.includes(backend)) {
-        bad(`skill "${skill.name}" 不支持 ${backend} Runtime（可用：${skill.runtimes.join(", ")}）`);
+        bad(
+          `skill "${skill.name}" 不支持 ${backend} Runtime（可用：${skill.runtimes.join(", ")}）`,
+        );
       }
       return skill;
     });
@@ -245,10 +961,22 @@ export function buildRest(
 
   // ---- workspaces / repositories ----
 
-  app.get("/api/workspaces", (c) => c.json(store.listWorkspaces()));
+  app.get("/api/workspaces", (c) => {
+    const actor = requestActor(c);
+    return c.json(
+      actor.kind === "system"
+        ? store.listWorkspaces()
+        : [store.getWorkspace(actor.member.workspaceId)!],
+    );
+  });
 
   app.post("/api/workspaces", async (c) => {
-    const b = (await c.req.json()) as { name?: string; slug?: string; description?: string };
+    requireSystem(c);
+    const b = (await c.req.json()) as {
+      name?: string;
+      slug?: string;
+      description?: string;
+    };
     const name = b.name?.trim() ?? "";
     if (!name) bad("缺少 Workspace name");
     if (name.length > 80) bad("Workspace name 最多 80 字符");
@@ -258,21 +986,44 @@ export function buildRest(
       .replace(/^-|-$/g, "")
       .slice(0, 48);
     if (!slug) slug = `workspace-${Date.now().toString(36)}`;
-    if (store.resolveWorkspace(name) || store.resolveWorkspace(slug)) bad(`Workspace name/slug "${name}" / "${slug}" 已存在`);
-    return c.json(store.createWorkspace({ name, slug, description: b.description?.trim() || null }, Date.now()), 201);
+    if (store.resolveWorkspace(name) || store.resolveWorkspace(slug))
+      bad(`Workspace name/slug "${name}" / "${slug}" 已存在`);
+    return c.json(
+      store.createWorkspace(
+        { name, slug, description: b.description?.trim() || null },
+        Date.now(),
+      ),
+      201,
+    );
   });
 
   app.patch("/api/workspaces/:id", async (c) => {
     const workspace = store.resolveWorkspace(c.req.param("id"));
-    if (!workspace) throw new HTTPException(404, { message: `workspace "${c.req.param("id")}" 不存在` });
-    const b = (await c.req.json()) as { name?: string; slug?: string; description?: string | null; archived?: boolean };
-    if (workspace.id === DEFAULT_WORKSPACE_ID && b.archived) bad("Personal 默认 Workspace 不能归档");
-    store.updateWorkspace(workspace.id, {
-      ...(b.name !== undefined ? { name: b.name.trim() } : {}),
-      ...(b.slug !== undefined ? { slug: b.slug.trim() } : {}),
-      ...(b.description !== undefined ? { description: b.description?.trim() || null } : {}),
-      ...(b.archived !== undefined ? { archived: b.archived } : {}),
-    }, Date.now());
+    if (!workspace)
+      throw new HTTPException(404, {
+        message: `workspace "${c.req.param("id")}" 不存在`,
+      });
+    requireRole(c, workspace.id, "admin");
+    const b = (await c.req.json()) as {
+      name?: string;
+      slug?: string;
+      description?: string | null;
+      archived?: boolean;
+    };
+    if (workspace.id === DEFAULT_WORKSPACE_ID && b.archived)
+      bad("Personal 默认 Workspace 不能归档");
+    store.updateWorkspace(
+      workspace.id,
+      {
+        ...(b.name !== undefined ? { name: b.name.trim() } : {}),
+        ...(b.slug !== undefined ? { slug: b.slug.trim() } : {}),
+        ...(b.description !== undefined
+          ? { description: b.description?.trim() || null }
+          : {}),
+        ...(b.archived !== undefined ? { archived: b.archived } : {}),
+      },
+      Date.now(),
+    );
     return c.json(store.getWorkspace(workspace.id));
   });
 
@@ -283,85 +1034,216 @@ export function buildRest(
       ...repository,
       mounts: store.listRepositoryMounts(id).map((mount) => ({
         ...mount,
-        deviceName: store.getDevice(mount.deviceId, hub.isOnline(mount.deviceId))?.name ?? mount.deviceId,
+        deviceName:
+          store.getDevice(mount.deviceId, hub.isOnline(mount.deviceId))?.name ??
+          mount.deviceId,
       })),
     };
   };
 
   app.get("/api/repositories", (c) => {
     const workspace = currentWorkspace(c);
-    return c.json(store.listRepositories(workspace.id).map((repository) => repositoryView(repository.id)));
+    return c.json(
+      store
+        .listRepositories(workspace.id)
+        .map((repository) => repositoryView(repository.id)),
+    );
   });
 
   app.post("/api/repositories", async (c) => {
     const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
     const b = (await c.req.json()) as {
       name?: string;
       remoteUrl?: string;
       defaultBranch?: string;
+      scmProvider?: "local" | "codebase";
+      scmRepository?: string;
+      scmAgent?: string;
+      scmAutoDispatch?: boolean;
       device?: string;
       path?: string;
     };
     const name = b.name?.trim() ?? "";
     if (!name) bad("缺少 Repository name");
-    if (store.getRepositoryByName(workspace.id, name)) bad(`repository 名 "${name}" 已存在于当前 Workspace`);
-    if ((b.device && !b.path) || (!b.device && b.path)) bad("首次 mount 需要同时提供 device 与 path");
+    if (
+      b.scmProvider !== undefined &&
+      b.scmProvider !== "local" &&
+      b.scmProvider !== "codebase"
+    ) {
+      bad("scmProvider 可选 local/codebase");
+    }
+    if (b.scmProvider === "codebase" && !b.scmRepository?.trim())
+      bad("Codebase Repository 缺少 scmRepository path");
+    const scmAgent = b.scmAgent
+      ? scopedAgent(c, workspace.id, b.scmAgent)
+      : null;
+    if (b.scmAgent && !scmAgent) bad(`scmAgent "${b.scmAgent}" 不存在`);
+    if (b.scmAutoDispatch && !scmAgent)
+      bad("scmAutoDispatch 需要配置 scmAgent");
+    if (store.getRepositoryByName(workspace.id, name))
+      bad(`repository 名 "${name}" 已存在于当前 Workspace`);
+    if ((b.device && !b.path) || (!b.device && b.path))
+      bad("首次 mount 需要同时提供 device 与 path");
     let device = null;
     if (b.device) {
-      device = store.getDeviceByName(b.device, hub.isOnline(b.device)) ?? store.getDevice(b.device, hub.isOnline(b.device));
+      device =
+        store.getDeviceByName(b.device, hub.isOnline(b.device)) ??
+        store.getDevice(b.device, hub.isOnline(b.device));
       if (!device) bad(`device "${b.device}" 不存在`);
-      if (!b.path!.startsWith("/") && !b.path!.startsWith("~")) bad("Repository mount path 必须是绝对路径");
+      if (!b.path!.startsWith("/") && !b.path!.startsWith("~"))
+        bad("Repository mount path 必须是绝对路径");
     }
-    const repository = store.createRepository({
-      workspaceId: workspace.id,
-      name,
-      remoteUrl: b.remoteUrl?.trim() || null,
-      defaultBranch: b.defaultBranch?.trim() || "main",
-    }, Date.now());
-    if (device && b.path) store.setRepositoryMount(repository.id, device.id, b.path.trim(), Date.now());
+    const repository = store.createRepository(
+      {
+        workspaceId: workspace.id,
+        name,
+        remoteUrl: b.remoteUrl?.trim() || null,
+        defaultBranch: b.defaultBranch?.trim() || "main",
+        scmProvider: b.scmProvider ?? "local",
+        scmRepository:
+          b.scmProvider === "codebase" ? b.scmRepository?.trim() || null : null,
+        scmAgentId: scmAgent?.id ?? null,
+        scmAutoDispatch: b.scmAutoDispatch ?? false,
+      },
+      Date.now(),
+    );
+    if (device && b.path)
+      store.setRepositoryMount(
+        repository.id,
+        device.id,
+        b.path.trim(),
+        Date.now(),
+      );
     return c.json(repositoryView(repository.id), 201);
   });
 
   app.patch("/api/repositories/:id", async (c) => {
     const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
     const repository = scopedRepository(workspace.id, c.req.param("id"))!;
-    const b = (await c.req.json()) as { name?: string; remoteUrl?: string | null; defaultBranch?: string; archived?: boolean };
-    store.updateRepository(repository.id, {
-      ...(b.name !== undefined ? { name: b.name.trim() } : {}),
-      ...(b.remoteUrl !== undefined ? { remoteUrl: b.remoteUrl?.trim() || null } : {}),
-      ...(b.defaultBranch !== undefined ? { defaultBranch: b.defaultBranch.trim() } : {}),
-      ...(b.archived !== undefined ? { archived: b.archived } : {}),
-    }, Date.now());
+    const b = (await c.req.json()) as {
+      name?: string;
+      remoteUrl?: string | null;
+      defaultBranch?: string;
+      scmProvider?: "local" | "codebase";
+      scmRepository?: string | null;
+      scmAgent?: string | null;
+      scmAutoDispatch?: boolean;
+      archived?: boolean;
+    };
+    if (
+      b.scmProvider !== undefined &&
+      b.scmProvider !== "local" &&
+      b.scmProvider !== "codebase"
+    ) {
+      bad("scmProvider 可选 local/codebase");
+    }
+    const targetProvider = b.scmProvider ?? repository.scmProvider;
+    const targetScmRepository =
+      b.scmRepository === undefined
+        ? repository.scmRepository
+        : b.scmRepository?.trim() || null;
+    if (targetProvider === "codebase" && !targetScmRepository)
+      bad("Codebase Repository 缺少 scmRepository path");
+    const targetScmAgent =
+      b.scmAgent === undefined
+        ? repository.scmAgentId
+          ? scopedAgent(c, workspace.id, repository.scmAgentId)
+          : null
+        : b.scmAgent
+          ? scopedAgent(c, workspace.id, b.scmAgent)
+          : null;
+    if (b.scmAgent && !targetScmAgent) bad(`scmAgent "${b.scmAgent}" 不存在`);
+    const targetAutoDispatch = b.scmAutoDispatch ?? repository.scmAutoDispatch;
+    if (targetAutoDispatch && !targetScmAgent)
+      bad("scmAutoDispatch 需要配置 scmAgent");
+    store.updateRepository(
+      repository.id,
+      {
+        ...(b.name !== undefined ? { name: b.name.trim() } : {}),
+        ...(b.remoteUrl !== undefined
+          ? { remoteUrl: b.remoteUrl?.trim() || null }
+          : {}),
+        ...(b.defaultBranch !== undefined
+          ? { defaultBranch: b.defaultBranch.trim() }
+          : {}),
+        ...(b.scmProvider !== undefined ? { scmProvider: b.scmProvider } : {}),
+        ...(b.scmRepository !== undefined || b.scmProvider === "local"
+          ? {
+              scmRepository:
+                targetProvider === "codebase" ? targetScmRepository : null,
+            }
+          : {}),
+        ...(b.scmAgent !== undefined || b.scmProvider === "local"
+          ? {
+              scmAgentId:
+                targetProvider === "codebase"
+                  ? (targetScmAgent?.id ?? null)
+                  : null,
+            }
+          : {}),
+        ...(b.scmAutoDispatch !== undefined || b.scmProvider === "local"
+          ? {
+              scmAutoDispatch:
+                targetProvider === "codebase" ? targetAutoDispatch : false,
+            }
+          : {}),
+        ...(b.archived !== undefined ? { archived: b.archived } : {}),
+      },
+      Date.now(),
+    );
     return c.json(repositoryView(repository.id));
   });
 
   app.post("/api/repositories/:id/mounts", async (c) => {
     const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
     const repository = scopedRepository(workspace.id, c.req.param("id"))!;
     const b = (await c.req.json()) as { device?: string; path?: string };
     if (!b.device || !b.path?.trim()) bad("mount 需要 device 与 path");
-    if (!b.path.startsWith("/") && !b.path.startsWith("~")) bad("Repository mount path 必须是绝对路径");
-    const device = store.getDeviceByName(b.device, hub.isOnline(b.device)) ?? store.getDevice(b.device, hub.isOnline(b.device));
+    if (!b.path.startsWith("/") && !b.path.startsWith("~"))
+      bad("Repository mount path 必须是绝对路径");
+    const device =
+      store.getDeviceByName(b.device, hub.isOnline(b.device)) ??
+      store.getDevice(b.device, hub.isOnline(b.device));
     if (!device) bad(`device "${b.device}" 不存在`);
-    const existing = store.getRepositoryMountForDevice(repository.id, device.id);
+    const existing = store.getRepositoryMountForDevice(
+      repository.id,
+      device.id,
+    );
     if (existing && existing.path !== b.path.trim()) {
       const usage = store.repositoryMountUsage(existing.id);
       if (usage.activeRuns || usage.worktrees) {
-        bad(`mount 正被 ${usage.activeRuns} 个 active Run / ${usage.worktrees} 个 worktree 使用，不能移动路径`);
+        bad(
+          `mount 正被 ${usage.activeRuns} 个 active Run / ${usage.worktrees} 个 worktree 使用，不能移动路径`,
+        );
       }
     }
-    store.setRepositoryMount(repository.id, device.id, b.path.trim(), Date.now());
+    store.setRepositoryMount(
+      repository.id,
+      device.id,
+      b.path.trim(),
+      Date.now(),
+    );
     return c.json(repositoryView(repository.id));
   });
 
   app.delete("/api/repositories/:repositoryId/mounts/:mountId", (c) => {
     const workspace = currentWorkspace(c);
-    const repository = scopedRepository(workspace.id, c.req.param("repositoryId"))!;
+    requireRole(c, workspace.id, "admin");
+    const repository = scopedRepository(
+      workspace.id,
+      c.req.param("repositoryId"),
+    )!;
     const mount = store.getRepositoryMount(c.req.param("mountId"));
-    if (!mount || mount.repositoryId !== repository.id) throw new HTTPException(404, { message: "mount 不存在" });
+    if (!mount || mount.repositoryId !== repository.id)
+      throw new HTTPException(404, { message: "mount 不存在" });
     const usage = store.repositoryMountUsage(mount.id);
     if (usage.runs || usage.worktrees || usage.agents || usage.conversations) {
-      bad(`mount 已被 ${usage.runs} 个 Run / ${usage.worktrees} 个 worktree / ${usage.agents} 个 Agent / ${usage.conversations} 个任务引用，不能删除；可归档 Repository`);
+      bad(
+        `mount 已被 ${usage.runs} 个 Run / ${usage.worktrees} 个 worktree / ${usage.agents} 个 Agent / ${usage.conversations} 个任务引用，不能删除；可归档 Repository`,
+      );
     }
     store.deleteRepositoryMount(mount.id);
     return c.json({ ok: true });
@@ -376,7 +1258,12 @@ export function buildRest(
 
   app.patch("/api/settings/prompt-blocks", async (c) => {
     const workspace = currentWorkspace(c);
-    const b = (await c.req.json()) as { key?: string; enabled?: boolean; template?: string };
+    requireRole(c, workspace.id, "admin");
+    const b = (await c.req.json()) as {
+      key?: string;
+      enabled?: boolean;
+      template?: string;
+    };
     if (!PROMPT_BLOCK_KEYS.includes(b.key as PromptBlockKey)) {
       bad(`key 可选 ${PROMPT_BLOCK_KEYS.join("/")}（收到 "${b.key}"）`);
     }
@@ -384,14 +1271,24 @@ export function buildRest(
     if (typeof b.template !== "string") bad("需要 template: string");
     const invalid = validatePromptTemplate(b.key as PromptBlockKey, b.template);
     if (invalid) bad(invalid);
-    store.setPromptBlock(workspace.id, b.key as PromptBlockKey, b.enabled, b.template, Date.now());
-    return c.json(getPromptBlockConfig(store, workspace.id, b.key as PromptBlockKey));
+    store.setPromptBlock(
+      workspace.id,
+      b.key as PromptBlockKey,
+      b.enabled,
+      b.template,
+      Date.now(),
+    );
+    return c.json(
+      getPromptBlockConfig(store, workspace.id, b.key as PromptBlockKey),
+    );
   });
 
   app.delete("/api/settings/prompt-blocks/:key", (c) => {
     const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
     const key = c.req.param("key") as PromptBlockKey;
-    if (!PROMPT_BLOCK_KEYS.includes(key)) bad(`key 可选 ${PROMPT_BLOCK_KEYS.join("/")}`);
+    if (!PROMPT_BLOCK_KEYS.includes(key))
+      bad(`key 可选 ${PROMPT_BLOCK_KEYS.join("/")}`);
     store.resetPromptBlock(workspace.id, key);
     return c.json(getPromptBlockConfig(store, workspace.id, key));
   });
@@ -404,7 +1301,9 @@ export function buildRest(
         ...device,
         capabilities: {
           ...device.capabilities,
-          installedSkills: device.capabilities.installedSkills?.map(({ instruction: _instruction, ...skill }) => skill),
+          installedSkills: device.capabilities.installedSkills?.map(
+            ({ instruction: _instruction, ...skill }) => skill,
+          ),
         },
       })),
     ),
@@ -417,25 +1316,99 @@ export function buildRest(
     if (!skill) return null;
     return {
       ...skill,
-      agents: store.listAgentsForSkill(id).map((agent) => ({ id: agent.id, name: agent.name })),
+      agents: store
+        .listAgentsForSkill(id)
+        .map((agent) => ({ id: agent.id, name: agent.name })),
     };
   };
 
   app.get("/api/skills", (c) => {
     const workspace = currentWorkspace(c);
-    return c.json(store.listSkills(false, workspace.id).map((skill) => skillView(skill.id)));
+    return c.json(
+      store.listSkills(false, workspace.id).map((skill) => skillView(skill.id)),
+    );
+  });
+
+  app.get("/api/skill-groups", (c) => {
+    const workspace = currentWorkspace(c);
+    return c.json(store.listSkillGroups(workspace.id));
+  });
+
+  app.post("/api/skill-groups", async (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const b = (await c.req.json()) as { name?: string; position?: number };
+    const name = b.name?.trim() ?? "";
+    if (!name || name.length > 80) bad("Skill group name 需要 1–80 字符");
+    if (
+      store.listSkillGroups(workspace.id).some((group) => group.name === name)
+    )
+      bad(`Skill group "${name}" 已存在`);
+    return c.json(
+      store.createSkillGroup(
+        workspace.id,
+        name,
+        b.position ?? store.listSkillGroups(workspace.id).length,
+        Date.now(),
+      ),
+      201,
+    );
+  });
+
+  app.patch("/api/skill-groups/:id", async (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const group = store.getSkillGroup(c.req.param("id"));
+    if (!group || group.workspaceId !== workspace.id)
+      throw new HTTPException(404, { message: "Skill group 不存在" });
+    const b = (await c.req.json()) as { name?: string; position?: number };
+    if (b.name !== undefined && (!b.name.trim() || b.name.trim().length > 80))
+      bad("Skill group name 需要 1–80 字符");
+    if (
+      b.position !== undefined &&
+      (!Number.isInteger(b.position) || b.position < 0)
+    )
+      bad("position 需要非负整数");
+    store.updateSkillGroup(group.id, {
+      ...(b.name !== undefined ? { name: b.name.trim() } : {}),
+      ...(b.position !== undefined ? { position: b.position } : {}),
+    });
+    return c.json(store.getSkillGroup(group.id));
+  });
+
+  app.delete("/api/skill-groups/:id", (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const group = store.getSkillGroup(c.req.param("id"));
+    if (!group || group.workspaceId !== workspace.id)
+      throw new HTTPException(404, { message: "Skill group 不存在" });
+    store.deleteSkillGroup(group.id);
+    return c.json({ ok: true });
   });
 
   app.post("/api/skills", async (c) => {
     const workspace = currentWorkspace(c);
-    const b = (await c.req.json()) as { name?: string; description?: string; instruction?: string };
+    requireRole(c, workspace.id, "admin");
+    const b = (await c.req.json()) as {
+      name?: string;
+      description?: string;
+      instruction?: string;
+      groupId?: string | null;
+      files?: unknown;
+      dependencies?: unknown;
+    };
     const name = b.name?.trim() ?? "";
     const instruction = b.instruction?.trim() ?? "";
     if (!name) bad("缺少 Skill name");
     if (name.length > 80) bad("Skill name 最多 80 字符");
     if (!instruction) bad("缺少 Skill instruction（SKILL.md 正文）");
-    if (instruction.length > MAX_SKILL_INSTRUCTION) bad("Skill instruction 不能超过 128KB");
-    if (store.getSkillByName(name, workspace.id)) bad(`skill 名 "${name}" 已存在`);
+    if (instruction.length > MAX_SKILL_INSTRUCTION)
+      bad("Skill instruction 不能超过 128KB");
+    if (store.getSkillByName(name, workspace.id))
+      bad(`skill 名 "${name}" 已存在`);
+    const group = b.groupId ? store.getSkillGroup(b.groupId) : null;
+    if (b.groupId && group?.workspaceId !== workspace.id)
+      bad("groupId 不属于当前 Workspace");
     const skill = store.createSkill(
       {
         workspaceId: workspace.id,
@@ -444,6 +1417,9 @@ export function buildRest(
         source: "manual",
         instruction,
         runtimes: ["claude", "codex"],
+        groupId: group?.id ?? null,
+        files: parseSkillFiles(b.files, instruction),
+        dependencies: parseSkillDependencies(b.dependencies),
       },
       Date.now(),
     );
@@ -453,9 +1429,14 @@ export function buildRest(
   /** Mew 式 local runtime sync：只接受 daemon hello 中真实探测到的 path，不信任客户端自报正文。 */
   app.post("/api/skills/import", async (c) => {
     const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
     const b = (await c.req.json()) as { device?: string; paths?: string[] };
     if (!b.device) bad("缺少 device");
-    if (!Array.isArray(b.paths) || b.paths.length === 0 || b.paths.some((path) => typeof path !== "string")) {
+    if (
+      !Array.isArray(b.paths) ||
+      b.paths.length === 0 ||
+      b.paths.some((path) => typeof path !== "string")
+    ) {
       bad("paths 需要是非空的本地 Skill 路径数组");
     }
     const device =
@@ -466,50 +1447,186 @@ export function buildRest(
     const imported = [];
     for (const path of [...new Set(b.paths)]) {
       const local = installed.find((skill) => skill.path === path);
-      if (!local?.instruction) bad(`device "${device.name}" 未上报可导入的 Skill：${path}（重启 harbord 后重试）`);
+      if (!local?.instruction)
+        bad(
+          `device "${device.name}" 未上报可导入的 Skill：${path}（重启 harbord 后重试）`,
+        );
       const existing = store.getRuntimeSkill(workspace.id, device.id, path);
       const owner = store.getSkillByName(local.name, workspace.id);
       if (owner && owner.id !== existing?.id) {
-        bad(`skill 名 "${local.name}" 已被占用；请先重命名现有 Skill 或本地 SKILL.md`);
+        bad(
+          `skill 名 "${local.name}" 已被占用；请先重命名现有 Skill 或本地 SKILL.md`,
+        );
       }
       if (existing) {
-        store.updateSkill(existing.id, {
-          name: local.name,
-          description: local.description,
-          instruction: local.instruction,
-          runtimes: local.runtimes,
-        }, Date.now());
+        store.updateSkill(
+          existing.id,
+          {
+            name: local.name,
+            description: local.description,
+            instruction: local.instruction,
+            runtimes: local.runtimes,
+            files: local.files,
+            dependencies: local.dependencies ?? [],
+            autoSync: true,
+          },
+          Date.now(),
+        );
         store.setSkillArchived(existing.id, false, Date.now());
         imported.push(skillView(existing.id));
       } else {
-        const skill = store.createSkill({
-          workspaceId: workspace.id,
-          name: local.name,
-          description: local.description,
-          source: "runtime",
-          instruction: local.instruction,
-          deviceId: device.id,
-          sourcePath: local.path,
-          runtimes: local.runtimes,
-        }, Date.now());
+        const skill = store.createSkill(
+          {
+            workspaceId: workspace.id,
+            name: local.name,
+            description: local.description,
+            source: "runtime",
+            instruction: local.instruction,
+            deviceId: device.id,
+            sourcePath: local.path,
+            runtimes: local.runtimes,
+            files: local.files,
+            dependencies: local.dependencies ?? [],
+            autoSync: true,
+          },
+          Date.now(),
+        );
         imported.push(skillView(skill.id));
       }
     }
     return c.json({ imported });
   });
 
+  app.post("/api/skills/import-source", async (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const b = (await c.req.json()) as {
+      source?: "codebase" | "github" | "upload";
+      repository?: string;
+      path?: string;
+      ref?: string;
+      url?: string;
+      zipBase64?: string;
+      files?: unknown;
+      name?: string;
+      groupId?: string | null;
+      autoSync?: boolean;
+    };
+    if (
+      b.source !== "codebase" &&
+      b.source !== "github" &&
+      b.source !== "upload"
+    ) {
+      bad("source 可选 codebase/github/upload");
+    }
+    let bundle;
+    if (b.source === "codebase") {
+      if (!b.repository?.trim()) bad("Codebase import 缺少 repository");
+      bundle = await skillImports.fromCodebase(
+        b.repository,
+        b.path ?? ".",
+        b.ref ?? "main",
+      );
+    } else if (b.source === "github") {
+      if (!b.url?.trim()) bad("GitHub import 缺少 url");
+      bundle = await skillImports.fromGitHub(b.url, b.ref);
+    } else if (b.zipBase64) {
+      bundle = await skillImports.fromZip(b.zipBase64);
+    } else {
+      const files = parseSkillFiles(b.files, "") ?? [];
+      bundle = {
+        source: "upload" as const,
+        originUrl: null,
+        sourceRef: null,
+        files,
+      };
+    }
+    const fallbackName =
+      b.name?.trim() ||
+      b.path?.split("/").filter(Boolean).at(-1) ||
+      "imported-skill";
+    const metadata = importedSkillMetadata(bundle.files, fallbackName);
+    const name = b.name?.trim() || metadata.name;
+    if (!name || name.length > 80) bad("导入 Skill name 需要 1–80 字符");
+    if (store.getSkillByName(name, workspace.id))
+      bad(`skill 名 "${name}" 已存在`);
+    const group = b.groupId ? store.getSkillGroup(b.groupId) : null;
+    if (b.groupId && group?.workspaceId !== workspace.id)
+      bad("groupId 不属于当前 Workspace");
+    const skill = store.createSkill(
+      {
+        workspaceId: workspace.id,
+        name,
+        description: metadata.description,
+        source: bundle.source,
+        instruction: metadata.instruction,
+        sourcePath: b.source === "codebase" ? (b.path ?? ".") : null,
+        originUrl: bundle.originUrl,
+        sourceRef: bundle.sourceRef,
+        autoSync:
+          (bundle.source === "codebase" || bundle.source === "github") &&
+          b.autoSync === true,
+        groupId: group?.id ?? null,
+        files: bundle.files,
+        dependencies: metadata.dependencies,
+        runtimes: ["claude", "codex"],
+      },
+      Date.now(),
+    );
+    return c.json(skillView(skill.id), 201);
+  });
+
+  app.post("/api/skills/:id/sync", async (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const skill = store.getSkill(c.req.param("id"));
+    if (!skill || skill.workspaceId !== workspace.id)
+      throw new HTTPException(404, { message: "Skill 不存在" });
+    if (
+      (skill.source !== "codebase" && skill.source !== "github") ||
+      !skill.originUrl
+    ) {
+      bad("只有 Codebase/GitHub source Skill 支持远端同步");
+    }
+    const bundle = await skillImports.refresh({
+      source: skill.source,
+      originUrl: skill.originUrl,
+      sourcePath: skill.sourcePath,
+      sourceRef: skill.sourceRef,
+    });
+    const metadata = importedSkillMetadata(bundle.files, skill.name);
+    store.updateSkill(
+      skill.id,
+      {
+        description: metadata.description,
+        instruction: metadata.instruction,
+        files: bundle.files,
+        dependencies: metadata.dependencies,
+        sourceRef: bundle.sourceRef,
+      },
+      Date.now(),
+    );
+    return c.json(skillView(skill.id));
+  });
+
   app.patch("/api/skills/:id", async (c) => {
     const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
     const id = c.req.param("id");
     const skill = store.getSkill(id);
-    if (!skill || skill.workspaceId !== workspace.id) throw new HTTPException(404, { message: `skill "${id}" 不存在` });
+    if (!skill || skill.workspaceId !== workspace.id)
+      throw new HTTPException(404, { message: `skill "${id}" 不存在` });
     const b = (await c.req.json()) as {
       name?: string;
       description?: string;
       instruction?: string;
       archived?: boolean;
+      groupId?: string | null;
+      files?: unknown;
+      dependencies?: unknown;
+      autoSync?: boolean;
     };
-    const patch: { name?: string; description?: string; instruction?: string } = {};
+    const patch: Parameters<HarborStore["updateSkill"]>[1] = {};
     if (b.name !== undefined) {
       const name = b.name.trim();
       if (!name || name.length > 80) bad("Skill name 需要 1–80 字符");
@@ -519,27 +1636,67 @@ export function buildRest(
     }
     if (b.description !== undefined) patch.description = b.description.trim();
     if (b.instruction !== undefined) {
-      if (skill.source === "runtime") bad("runtime Skill 的正文由本机同步管理；请使用 Sync local skills 刷新");
+      if (skill.source === "runtime")
+        bad(
+          "runtime Skill 的正文由本机同步管理；请使用 Sync local skills 刷新",
+        );
       const instruction = b.instruction.trim();
       if (!instruction) bad("Skill instruction 不能为空");
-      if (instruction.length > MAX_SKILL_INSTRUCTION) bad("Skill instruction 不能超过 128KB");
+      if (instruction.length > MAX_SKILL_INSTRUCTION)
+        bad("Skill instruction 不能超过 128KB");
       patch.instruction = instruction;
+    }
+    if (b.groupId !== undefined) {
+      const group = b.groupId ? store.getSkillGroup(b.groupId) : null;
+      if (b.groupId && group?.workspaceId !== workspace.id)
+        bad("groupId 不属于当前 Workspace");
+      patch.groupId = group?.id ?? null;
+    }
+    if (b.files !== undefined) {
+      if (skill.source === "runtime")
+        bad("runtime Skill bundle 由本机同步管理");
+      patch.files = parseSkillFiles(
+        b.files,
+        patch.instruction ?? skill.instruction,
+      );
+    }
+    if (b.dependencies !== undefined)
+      patch.dependencies = parseSkillDependencies(b.dependencies);
+    if (b.autoSync !== undefined) {
+      if (
+        skill.source !== "runtime" &&
+        skill.source !== "codebase" &&
+        skill.source !== "github"
+      ) {
+        bad("只有 runtime/codebase/github Skill 支持 autoSync");
+      }
+      patch.autoSync = b.autoSync;
     }
     if (Object.keys(patch).length > 0) store.updateSkill(id, patch, Date.now());
     if (b.archived !== undefined) {
       if (typeof b.archived !== "boolean") bad("archived 需要 true/false");
       store.setSkillArchived(id, b.archived, Date.now());
     }
-    if (Object.keys(patch).length === 0 && b.archived === undefined) bad("没有可更新的字段");
+    if (Object.keys(patch).length === 0 && b.archived === undefined)
+      bad("没有可更新的字段");
     return c.json(skillView(id));
   });
 
   // ---- agents ----
 
-  app.get("/api/agents", (c) => c.json(store.listAgents(false, currentWorkspace(c).id)));
+  app.get("/api/agents", (c) => {
+    const workspace = currentWorkspace(c);
+    return c.json(
+      store
+        .listAgents(false, workspace.id)
+        .filter((agent) => canSeeAgent(c, agent))
+        .map(agentView),
+    );
+  });
 
   app.post("/api/agents", async (c) => {
     const workspace = currentWorkspace(c);
+    const creator = requireRole(c, workspace.id, "admin");
     const b = (await c.req.json()) as {
       name?: string;
       description?: string;
@@ -548,48 +1705,151 @@ export function buildRest(
       model?: string;
       permission?: string;
       repository?: string;
+      repositories?: unknown;
       /** legacy CLI compatibility */
       workdir?: string;
       isolation?: string;
       instruction?: string;
       skills?: unknown;
+      concurrency?: number;
+      visibility?: "workspace" | "private";
+      environment?: unknown;
+      setupScript?: string;
+      reuseDeviceCli?: boolean;
     };
     if (!b.name) bad("缺少 name");
     if (!b.device) bad("缺少 device（设备名或 id）");
     if (b.workdir && !b.workdir.startsWith("/") && !b.workdir.startsWith("~")) {
       bad(`workdir 必须是绝对路径（收到 "${b.workdir}"）`);
     }
-    if (b.backend !== undefined && b.backend !== "claude" && b.backend !== "codex") {
+    if (
+      b.backend !== undefined &&
+      b.backend !== "claude" &&
+      b.backend !== "codex"
+    ) {
       bad(`backend 只支持 claude/codex（收到 "${b.backend}"）`);
     }
     const permission = b.permission ?? "auto-edit";
-    if (!PERMISSIONS.includes(permission)) bad(`permission 可选 ${PERMISSIONS.join("/")}（收到 "${b.permission}"）`);
+    if (!PERMISSIONS.includes(permission))
+      bad(`permission 可选 ${PERMISSIONS.join("/")}（收到 "${b.permission}"）`);
     const isolation = (b.isolation ?? "none") as IsolationKind;
-    if (isolation !== "none" && isolation !== "worktree") bad(`isolation 可选 none/worktree（收到 "${b.isolation}"）`);
+    if (isolation !== "none" && isolation !== "worktree")
+      bad(`isolation 可选 none/worktree（收到 "${b.isolation}"）`);
+    const concurrency = b.concurrency ?? 1;
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 64)
+      bad("concurrency 需要是 1–64 的整数");
+    if (
+      b.visibility !== undefined &&
+      b.visibility !== "workspace" &&
+      b.visibility !== "private"
+    ) {
+      bad("visibility 可选 workspace/private");
+    }
+    if (b.setupScript !== undefined && b.setupScript.length > MAX_AGENT_SETUP)
+      bad("setupScript 不能超过 64KB");
+    if (b.reuseDeviceCli === false) {
+      bad(
+        "个人部署版没有 Mew managed runtime；reuseDeviceCli 必须开启，Agent 使用所选 Device 的 CLI 登录态",
+      );
+    }
+    const environment = parseAgentEnvironment(b.environment);
+    if (
+      b.repositories !== undefined &&
+      (!Array.isArray(b.repositories) ||
+        b.repositories.some((item) => typeof item !== "string"))
+    ) {
+      bad("repositories 需要是 Repository id/name 数组");
+    }
 
     const device =
       store.getDeviceByName(b.device, hub.isOnline(b.device)) ??
       store.getDevice(b.device, hub.isOnline(b.device));
     if (!device) bad(`device "${b.device}" 未注册（先在该设备上启动 harbord）`);
-    if (store.getAgentByNameInWorkspace(workspace.id, b.name)) bad(`agent 名 "${b.name}" 已存在于当前 Workspace`);
+    if (store.getAgentByNameInWorkspace(workspace.id, b.name))
+      bad(`agent 名 "${b.name}" 已存在于当前 Workspace`);
 
     const installed = (["claude", "codex"] as BackendKind[]).filter(
       (provider) => !!device.capabilities.clis?.[provider],
     );
-    const backend = (b.backend ?? (installed.includes("claude") ? "claude" : installed[0])) as BackendKind | undefined;
-    if (!backend) bad(`设备 "${device.name}" 没有可用 provider（请先安装 claude 或 codex CLI 并重启 harbord）`);
-    validateAgentRuntimeForDevice(device, backend, permission, b.model ?? null);
+    const backend = (b.backend ??
+      (installed.includes("claude") ? "claude" : installed[0])) as
+      BackendKind | undefined;
+    if (!backend || !installed.includes(backend)) {
+      bad(
+        `provider "${b.backend ?? backend ?? "(默认)"}" 在设备 "${device.name}" 上不可用。` +
+          `可用 provider：${installed.length ? installed.join(", ") : "无（请先安装 claude 或 codex CLI 并重启 harbord）"}`,
+      );
+    }
+    if (backend === "codex" && permission === "default") {
+      bad(
+        'codex CLI 不支持 Harbor 动态审批；permission 请选 readonly/auto-edit/full（"default" 仅 Claude 可用）',
+      );
+    }
+
+    // Claude 接入 endpoints.yaml，需前置校验；CodexBackend 不接 endpoints，model 由 codex CLI 校验。
+    if (b.model && backend === "claude") {
+      const bare = b.model.startsWith("claude-")
+        ? b.model.slice("claude-".length)
+        : b.model;
+      const isNativeTier = NATIVE_TIER_ALIASES.includes(bare);
+      const eps = device.capabilities.endpoints ?? [];
+      // 只认 claude routes：codex 清单同存于 modelRoutes，不能为 claude 校验放行/报错
+      const routes = (device.capabilities.modelRoutes ?? []).filter(
+        (candidate) => candidate.runtime === "claude",
+      );
+      const route = routes.find(
+        (candidate) => candidate.id === b.model || candidate.model === b.model,
+      );
+      const invalidStructuredRoute =
+        routes.length > 0 && (!route || !route.ready);
+      const invalidLegacyRoute = routes.length === 0 && !eps.includes(b.model);
+      if (!isNativeTier && (invalidStructuredRoute || invalidLegacyRoute)) {
+        const readyRoutes = routes
+          .filter((candidate) => candidate.ready)
+          .map((candidate) => candidate.id);
+        bad(
+          `model "${b.model}" 不在设备 "${device.name}" 的能力清单内。` +
+            `可用：${NATIVE_TIER_ALIASES.join("/")}（Claude 原生）${readyRoutes.length ? "，sm-toolkit routes：" + readyRoutes.join(", ") : eps.length ? "，" + eps.join(", ") : "（该设备未上报 sm-toolkit routes，检查 endpoints.yaml 后重启 harbord）"}`,
+        );
+      }
+    }
 
     let repository = scopedRepository(workspace.id, b.repository);
     if (!repository && b.workdir) {
-      repository = store.ensureRepositoryForPath(workspace.id, device.id, b.workdir, Date.now());
+      repository = store.ensureRepositoryForPath(
+        workspace.id,
+        device.id,
+        b.workdir,
+        Date.now(),
+      );
     }
-    if (!repository) bad("Agent 必须绑定 Repository；请在 Agent 表单选择已有仓库或创建新仓库");
+    if (!repository)
+      bad("Agent 必须绑定 Repository；请在 Agent 表单选择已有仓库或创建新仓库");
     if (!store.getRepositoryMountForDevice(repository.id, device.id)) {
       bad(`Repository "${repository.name}" 尚未挂载到设备 "${device.name}"`);
     }
+    const repositories = [
+      ...new Set([
+        repository.id,
+        ...((b.repositories as string[] | undefined) ?? []).map((key) => {
+          const candidate = scopedRepository(workspace.id, key);
+          if (!candidate) bad(`repository "${key}" 不存在`);
+          if (!store.getRepositoryMountForDevice(candidate.id, device.id)) {
+            bad(
+              `Repository "${candidate.name}" 尚未挂载到设备 "${device.name}"`,
+            );
+          }
+          return candidate.id;
+        }),
+      ]),
+    ];
 
-    const skills = resolveAgentSkills(b.skills, workspace.id, device.id, backend);
+    const skills = resolveAgentSkills(
+      b.skills,
+      workspace.id,
+      device.id,
+      backend,
+    );
     const agent = store.createAgent(
       {
         workspaceId: workspace.id,
@@ -600,82 +1860,248 @@ export function buildRest(
         model: b.model ?? null,
         permission: permission as import("@sm/agent").PermissionPolicy,
         repositoryId: repository.id,
+        repositoryIds: repositories,
         isolation,
         instruction: b.instruction ?? null,
+        concurrency,
+        visibility: b.visibility ?? "workspace",
+        environment,
+        setupScript: b.setupScript?.trim() || null,
+        reuseDeviceCli: true,
+        createdByMemberId: creator?.id ?? null,
       },
       Date.now(),
     );
-    if (skills.length > 0) store.setAgentSkills(agent.id, skills.map((skill) => skill.id), Date.now());
-    return c.json(store.getAgent(agent.id), 201);
+    if (skills.length > 0)
+      store.setAgentSkills(
+        agent.id,
+        skills.map((skill) => skill.id),
+        Date.now(),
+      );
+    return c.json(agentView(store.getAgent(agent.id)!), 201);
   });
 
   app.patch("/api/agents/:id", async (c) => {
     const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
     const key = c.req.param("id");
-    const agent = scopedAgent(workspace.id, key);
-    if (!agent) throw new HTTPException(404, { message: `agent "${key}" 不存在` });
+    const agent = scopedAgent(c, workspace.id, key);
+    if (!agent)
+      throw new HTTPException(404, { message: `agent "${key}" 不存在` });
     const b = (await c.req.json()) as {
       archived?: boolean;
       skills?: unknown;
       repository?: string;
+      repositories?: unknown;
+      description?: string | null;
+      model?: string | null;
+      permission?: string;
+      isolation?: string;
+      instruction?: string | null;
+      concurrency?: number;
+      visibility?: "workspace" | "private";
+      environment?: unknown;
+      setupScript?: string | null;
+      reuseDeviceCli?: boolean;
       device?: string;
       dropIncompatibleSkills?: boolean;
     };
-    if (b.archived === undefined && b.skills === undefined && b.repository === undefined && b.device === undefined) {
-      bad("需要 archived、skills、repository 或 device");
-    }
-    if (b.dropIncompatibleSkills !== undefined && typeof b.dropIncompatibleSkills !== "boolean") {
+    if (Object.keys(b).length === 0) bad("没有可更新的 Agent 字段");
+    if (
+      b.dropIncompatibleSkills !== undefined &&
+      typeof b.dropIncompatibleSkills !== "boolean"
+    ) {
       bad("dropIncompatibleSkills 需要 true/false");
     }
 
-    const targetDevice = b.device === undefined
-      ? store.getDevice(agent.deviceId, hub.isOnline(agent.deviceId))
-      : store.getDeviceByName(b.device, hub.isOnline(b.device)) ?? store.getDevice(b.device, hub.isOnline(b.device));
+    const targetDevice =
+      b.device === undefined
+        ? store.getDevice(agent.deviceId, hub.isOnline(agent.deviceId))
+        : (store.getDeviceByName(b.device, hub.isOnline(b.device)) ??
+          store.getDevice(b.device, hub.isOnline(b.device)));
     if (!targetDevice) bad(`device "${b.device ?? agent.deviceId}" 未注册`);
-    const targetRepository = b.repository === undefined
-      ? store.getRepository(agent.repositoryId)
-      : scopedRepository(workspace.id, b.repository);
-    if (!targetRepository) bad("Agent 必须绑定 Repository");
-
-    const deviceChanged = targetDevice.id !== agent.deviceId;
-    const repositoryChanged = targetRepository.id !== agent.repositoryId;
-    if (deviceChanged) {
-      validateAgentRuntimeForDevice(targetDevice, agent.backend, agent.permission, agent.model);
+    const primary =
+      b.repository === undefined
+        ? store.getRepository(agent.repositoryId)
+        : scopedRepository(workspace.id, b.repository);
+    if (!primary) bad("Agent 必须绑定 Repository");
+    const requested =
+      b.repositories === undefined ? agent.repositoryIds : b.repositories;
+    const bindingRequested =
+      b.device !== undefined ||
+      b.repository !== undefined ||
+      b.repositories !== undefined;
+    if (
+      !Array.isArray(requested) ||
+      requested.some((item) => typeof item !== "string")
+    ) {
+      bad("repositories 需要是 Repository id/name 数组");
     }
+    const repositoryIds = [
+      ...new Set([
+        primary.id,
+        ...requested.map((key) => {
+          const repository = scopedRepository(workspace.id, key);
+          if (!repository) bad(`repository "${key}" 不存在`);
+          return repository.id;
+        }),
+      ]),
+    ];
+    const deviceChanged = targetDevice.id !== agent.deviceId;
+    const repositoryChanged = primary.id !== agent.repositoryId;
     if (deviceChanged || repositoryChanged) {
-      if (!store.getRepositoryMountForDevice(targetRepository.id, targetDevice.id)) {
-        bad(`Repository "${targetRepository.name}" 尚未挂载到设备 "${targetDevice.name}"`);
-      }
       const blocker = store.agentExecutionBindingChangeBlocker(agent.id);
       if (blocker) bad(`${blocker}，暂不能更换执行绑定`);
     }
-
-    const skills = b.skills !== undefined
-      ? resolveAgentSkills(b.skills, workspace.id, targetDevice.id, agent.backend)
-      : null;
-    const incompatibleRuntimeSkills = deviceChanged && !skills
-      ? store.listSkillsForAgent(agent.id).filter(
-          (skill) => skill.source === "runtime" && skill.deviceId !== targetDevice.id,
-        )
-      : [];
+    if (deviceChanged || b.permission !== undefined || b.model !== undefined) {
+      validateAgentRuntimeForDevice(
+        targetDevice,
+        agent.backend,
+        b.permission ?? agent.permission,
+        b.model === undefined ? agent.model : b.model?.trim() || null,
+      );
+    }
+    if (bindingRequested) {
+      for (const repositoryId of repositoryIds) {
+        const repository = store.getRepository(repositoryId)!;
+        if (
+          !store.getRepositoryMountForDevice(repository.id, targetDevice.id)
+        ) {
+          bad(
+            `Repository "${repository.name}" 尚未挂载到设备 "${targetDevice.name}"`,
+          );
+        }
+      }
+    }
+    const skills =
+      b.skills !== undefined
+        ? resolveAgentSkills(
+            b.skills,
+            workspace.id,
+            targetDevice.id,
+            agent.backend,
+          )
+        : null;
+    const incompatibleRuntimeSkills =
+      deviceChanged && !skills
+        ? store
+            .listSkillsForAgent(agent.id)
+            .filter(
+              (skill) =>
+                skill.source === "runtime" &&
+                skill.deviceId !== targetDevice.id,
+            )
+        : [];
     if (incompatibleRuntimeSkills.length > 0 && !b.dropIncompatibleSkills) {
       bad(
         `迁移到 "${targetDevice.name}" 会解除旧 Device 的 runtime Skills：` +
           `${incompatibleRuntimeSkills.map((skill) => skill.name).join("、")}；确认后请传 dropIncompatibleSkills: true`,
       );
     }
-
-    if (b.archived !== undefined) {
-      if (typeof b.archived !== "boolean") bad("archived 需要 true/false");
+    if (b.archived !== undefined && typeof b.archived !== "boolean")
+      bad("archived 需要 true/false");
+    if (b.reuseDeviceCli === false) {
+      bad("个人部署版没有 Mew managed runtime；reuseDeviceCli 必须开启");
+    }
+    if (b.permission !== undefined && !PERMISSIONS.includes(b.permission))
+      bad(`permission 可选 ${PERMISSIONS.join("/")}`);
+    if (
+      b.isolation !== undefined &&
+      b.isolation !== "none" &&
+      b.isolation !== "worktree"
+    )
+      bad("isolation 可选 none/worktree");
+    if (
+      b.concurrency !== undefined &&
+      (!Number.isInteger(b.concurrency) ||
+        b.concurrency < 1 ||
+        b.concurrency > 64)
+    ) {
+      bad("concurrency 需要是 1–64 的整数");
+    }
+    if (
+      b.visibility !== undefined &&
+      b.visibility !== "workspace" &&
+      b.visibility !== "private"
+    ) {
+      bad("visibility 可选 workspace/private");
+    }
+    if (
+      b.setupScript !== undefined &&
+      (b.setupScript?.length ?? 0) > MAX_AGENT_SETUP
+    )
+      bad("setupScript 不能超过 64KB");
+    const configPatch = {
+      ...(b.description !== undefined
+        ? { description: b.description?.trim() || null }
+        : {}),
+      ...(b.model !== undefined ? { model: b.model?.trim() || null } : {}),
+      ...(b.permission !== undefined
+        ? { permission: b.permission as import("@sm/agent").PermissionPolicy }
+        : {}),
+      ...(b.isolation !== undefined
+        ? { isolation: b.isolation as IsolationKind }
+        : {}),
+      ...(b.instruction !== undefined
+        ? { instruction: b.instruction?.trim() || null }
+        : {}),
+      ...(b.concurrency !== undefined ? { concurrency: b.concurrency } : {}),
+      ...(b.visibility !== undefined ? { visibility: b.visibility } : {}),
+      ...(b.environment !== undefined
+        ? { environment: parseAgentEnvironment(b.environment) }
+        : {}),
+      ...(b.setupScript !== undefined
+        ? { setupScript: b.setupScript?.trim() || null }
+        : {}),
+      ...(b.reuseDeviceCli !== undefined ? { reuseDeviceCli: true } : {}),
+    };
+    if (b.archived !== undefined)
       store.setAgentArchived(agent.id, b.archived, Date.now());
-    }
+    store.updateAgentConfig(agent.id, configPatch);
     if (deviceChanged) {
-      store.moveAgentToDevice(agent.id, targetDevice.id, targetRepository.id);
-    } else if (repositoryChanged) {
-      store.setAgentRepository(agent.id, targetRepository.id);
+      store.moveAgentToDevice(agent.id, targetDevice.id, primary.id);
     }
-    if (skills) store.setAgentSkills(agent.id, skills.map((skill) => skill.id), Date.now());
-    return c.json(store.getAgent(agent.id));
+    if (
+      deviceChanged ||
+      b.repository !== undefined ||
+      b.repositories !== undefined
+    ) {
+      store.setAgentRepositories(
+        agent.id,
+        repositoryIds,
+        primary.id,
+        Date.now(),
+      );
+    }
+    if (skills)
+      store.setAgentSkills(
+        agent.id,
+        skills.map((skill) => skill.id),
+        Date.now(),
+      );
+    return c.json(agentView(store.getAgent(agent.id)!));
+  });
+
+  // ---- issue labels ----
+
+  app.get("/api/labels", (c) => {
+    const workspace = currentWorkspace(c);
+    return c.json(store.listIssueLabels(workspace.id));
+  });
+
+  app.post("/api/labels", async (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const b = (await c.req.json()) as { name?: string; color?: string };
+    const name = b.name?.trim() ?? "";
+    if (!name || name.length > 40) bad("label name 需要 1–40 字符");
+    const color = b.color?.trim() || "#75817b";
+    if (!/^#[0-9a-fA-F]{6}$/.test(color)) bad("label color 需要 #RRGGBB");
+    if (
+      store.listIssueLabels(workspace.id).some((label) => label.name === name)
+    )
+      bad(`label "${name}" 已存在`);
+    return c.json(store.createIssueLabel(workspace.id, name, color), 201);
   });
 
   // ---- conversations ----
@@ -685,12 +2111,18 @@ export function buildRest(
     const kind = c.req.query("kind") as ConversationKind | undefined;
     const status = c.req.query("status") as ConversationStatus | undefined;
     // AI draft 是创建器内部态；正式发布前不进入 Chats / Issues / Automation target 列表。
-    const convs = store.listConversations({ workspaceId: workspace.id, kind, status }).filter((conversation) => conversation.kind !== "issue_draft");
-    const agentNames = new Map(store.listAgents(true, workspace.id).map((a) => [a.id, a.name]));
+    const convs = store
+      .listConversations({ workspaceId: workspace.id, kind, status })
+      .filter((conversation) => conversation.kind !== "issue_draft");
+    const agentNames = new Map(
+      store.listAgents(true, workspace.id).map((a) => [a.id, a.name]),
+    );
     return c.json(
       convs.map((cv) => ({
         ...cv,
-        agentName: cv.agentId ? (agentNames.get(cv.agentId) ?? cv.agentId) : null,
+        agentName: cv.agentId
+          ? (agentNames.get(cv.agentId) ?? cv.agentId)
+          : null,
         latestRun: store.latestRunForConversation(cv.id),
       })),
     );
@@ -698,6 +2130,7 @@ export function buildRest(
 
   app.post("/api/conversations", async (c) => {
     const workspace = currentWorkspace(c);
+    const creator = requireRole(c, workspace.id, "member");
     const b = (await c.req.json()) as {
       kind?: string;
       agent?: string;
@@ -706,17 +2139,49 @@ export function buildRest(
       priority?: string;
       origin?: Origin;
       originRef?: string;
+      ownerMemberId?: string | null;
+      labelIds?: unknown;
       repository?: unknown;
     };
-    if (b.repository !== undefined) bad("Conversation 的 Repository 由 Agent 决定，请修改 Agent 配置");
-    if (b.kind !== "chat" && b.kind !== "issue") bad(`kind 只支持 chat/issue（收到 "${b.kind}"）`);
+    if (b.repository !== undefined)
+      bad("Conversation 的 Repository 由 Agent 决定，请修改 Agent 配置");
+    if (b.kind !== "chat" && b.kind !== "issue")
+      bad(`kind 只支持 chat/issue（收到 "${b.kind}"）`);
     if (b.kind === "chat" && !b.agent) bad("chat 缺少 agent（agent 名或 id）");
-    if (b.priority !== undefined && !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)) {
-      bad(`priority 可选 ${ISSUE_PRIORITIES.join("/")}（收到 "${b.priority}"）`);
+    if (
+      b.priority !== undefined &&
+      !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)
+    ) {
+      bad(
+        `priority 可选 ${ISSUE_PRIORITIES.join("/")}（收到 "${b.priority}"）`,
+      );
     }
-    const agent = scopedAgent(workspace.id, b.agent);
-    if (b.agent && !agent) bad(`agent "${b.agent}" 不存在（harbor agent ls 查看）`);
+    const agent = scopedAgent(c, workspace.id, b.agent);
+    if (b.agent && !agent)
+      bad(`agent "${b.agent}" 不存在（harbor agent ls 查看）`);
     if (agent?.archivedAt) bad(`agent "${agent.name}" 已归档`);
+    if (b.ownerMemberId !== undefined && b.ownerMemberId !== null) {
+      const owner = store.getWorkspaceMember(b.ownerMemberId);
+      if (
+        !owner ||
+        owner.workspaceId !== workspace.id ||
+        owner.status !== "active"
+      )
+        bad("ownerMemberId 必须是当前 Workspace 的 active member");
+    }
+    if (
+      b.labelIds !== undefined &&
+      (!Array.isArray(b.labelIds) ||
+        b.labelIds.some((id) => typeof id !== "string"))
+    )
+      bad("labelIds 需要是 label id 数组");
+    const labelIds = b.labelIds as string[] | undefined;
+    if (
+      labelIds?.some(
+        (id) => store.getIssueLabel(id)?.workspaceId !== workspace.id,
+      )
+    )
+      bad("labelIds 包含其他 Workspace 或不存在的 label");
     const repository = agent ? store.getRepository(agent.repositoryId) : null;
     const conv = store.createConversation(
       {
@@ -729,6 +2194,12 @@ export function buildRest(
         repositoryId: repository?.id ?? null,
         origin: b.origin ?? "cli",
         originRef: b.originRef ?? null,
+        creatorMemberId: creator?.id ?? null,
+        ownerMemberId:
+          b.ownerMemberId === undefined
+            ? (creator?.id ?? null)
+            : b.ownerMemberId,
+        labelIds: labelIds ?? [],
       },
       Date.now(),
     );
@@ -738,14 +2209,26 @@ export function buildRest(
   /** Mew AI draft：先用只读 Agent 分诊，人工确认标题/正文后才发布到 Issue 看板。 */
   app.post("/api/issue-drafts", async (c) => {
     const workspace = currentWorkspace(c);
-    const b = (await c.req.json()) as { request?: string; agent?: string; priority?: string; repository?: unknown };
-    if (b.repository !== undefined) bad("Issue draft 的 Repository 由 Agent 决定，请修改 Agent 配置");
+    const creator = requireRole(c, workspace.id, "member");
+    const b = (await c.req.json()) as {
+      request?: string;
+      agent?: string;
+      priority?: string;
+      repository?: unknown;
+    };
+    if (b.repository !== undefined)
+      bad("Issue draft 的 Repository 由 Agent 决定，请修改 Agent 配置");
     if (!b.request?.trim()) bad("请描述要 Agent 分诊的请求");
     if (!b.agent) bad("请选择负责分诊的 Agent");
-    if (b.priority !== undefined && !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)) {
-      bad(`priority 可选 ${ISSUE_PRIORITIES.join("/")}（收到 "${b.priority}"）`);
+    if (
+      b.priority !== undefined &&
+      !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)
+    ) {
+      bad(
+        `priority 可选 ${ISSUE_PRIORITIES.join("/")}（收到 "${b.priority}"）`,
+      );
     }
-    const agent = scopedAgent(workspace.id, b.agent);
+    const agent = scopedAgent(c, workspace.id, b.agent);
     if (!agent) bad(`agent "${b.agent}" 不存在`);
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
     const repository = store.getRepository(agent.repositoryId);
@@ -759,10 +2242,17 @@ export function buildRest(
         priority: (b.priority as IssuePriority | undefined) ?? "medium",
         origin: "web",
         originRef: "ai-draft",
+        creatorMemberId: creator?.id ?? null,
+        ownerMemberId: creator?.id ?? null,
       },
       Date.now(),
     );
-    const run = enqueue(conv, agent, `${ISSUE_TRIAGE_PROMPT}${b.request.trim()}`, "triage");
+    const run = enqueue(
+      conv,
+      agent,
+      `${ISSUE_TRIAGE_PROMPT}${b.request.trim()}`,
+      "triage",
+    );
     return c.json({ conversation: conv, run }, 201);
   });
 
@@ -770,11 +2260,18 @@ export function buildRest(
     const workspace = currentWorkspace(c);
     const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
     if (!conv || conv.kind !== "issue_draft") {
-      throw new HTTPException(404, { message: `issue draft "${c.req.param("id")}" 不存在` });
+      throw new HTTPException(404, {
+        message: `issue draft "${c.req.param("id")}" 不存在`,
+      });
     }
-    if (store.activeRunForConversation(conv.id)) bad("Agent 仍在分诊，请等待完成后再创建 Issue");
+    if (store.activeRunForConversation(conv.id))
+      bad("Agent 仍在分诊，请等待完成后再创建 Issue");
     const latest = store.latestRunForConversation(conv.id);
-    if (!latest || latest.purpose !== "triage" || latest.status !== "succeeded") {
+    if (
+      !latest ||
+      latest.purpose !== "triage" ||
+      latest.status !== "succeeded"
+    ) {
       bad("AI 分诊尚未成功完成；可关闭草稿后改用普通模式创建 Issue");
     }
     const b = (await c.req.json()) as {
@@ -788,7 +2285,8 @@ export function buildRest(
     if (!ISSUE_PRIORITIES.includes(b.priority as IssuePriority)) {
       bad(`priority 可选 ${ISSUE_PRIORITIES.join("/")}`);
     }
-    if (b.status !== "backlog" && b.status !== "todo") bad("初始阶段只支持 backlog/todo");
+    if (b.status !== "backlog" && b.status !== "todo")
+      bad("初始阶段只支持 backlog/todo");
     return c.json(
       store.publishIssueDraft(
         conv.id,
@@ -806,20 +2304,36 @@ export function buildRest(
   app.get("/api/conversations/:id", (c) => {
     const workspace = currentWorkspace(c);
     const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
-    const agent = conv.agentId ? store.getAgent(conv.agentId) : null;
-    const repository = conv.repositoryId ? store.getRepository(conv.repositoryId) : null;
+    const rawAgent = conv.agentId ? store.getAgent(conv.agentId) : null;
+    const agent =
+      rawAgent && canSeeAgent(c, rawAgent) ? agentView(rawAgent) : null;
+    const repository = conv.repositoryId
+      ? store.getRepository(conv.repositoryId)
+      : null;
     return c.json({
       conversation: conv,
       agent,
       repository,
       // resultText：Chat/Issue 历史渲染用；run_events 7 天 prune 后为 null（UI 显示「记录已过期」）
-      runs: store.listRunsByConversation(conv.id).map((r) => ({ ...r, resultText: store.getRunResultText(r.id) })),
+      runs: store
+        .listRunsByConversation(conv.id)
+        .map((r) => ({ ...r, resultText: store.getRunResultText(r.id) })),
       statusLog: store.listStatusLog(conv.id),
       delivery: store.getDeliveryForConversation(conv.id),
       deliveryEvents: (() => {
         const delivery = store.getDeliveryForConversation(conv.id);
         return delivery ? store.listDeliveryEvents(delivery.id) : [];
       })(),
+      messages: store.listConversationMessages(conv.id),
+      labels: conv.labelIds
+        .map((id) => store.getIssueLabel(id))
+        .filter(Boolean),
+      creator: conv.creatorMemberId
+        ? store.getWorkspaceMember(conv.creatorMemberId)
+        : null,
+      owner: conv.ownerMemberId
+        ? store.getWorkspaceMember(conv.ownerMemberId)
+        : null,
     });
   });
 
@@ -833,25 +2347,63 @@ export function buildRest(
       priority?: string;
       agent?: string | null;
       repository?: unknown;
+      ownerMemberId?: string | null;
+      labelIds?: unknown;
     };
-    if (b.repository !== undefined) bad("Conversation 的 Repository 由 Assignee 决定，请修改 Agent 配置");
-    if (b.priority !== undefined && !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)) {
-      bad(`priority 可选 ${ISSUE_PRIORITIES.join("/")}（收到 "${b.priority}"）`);
+    if (b.repository !== undefined)
+      bad("Conversation 的 Repository 由 Assignee 决定，请修改 Agent 配置");
+    if (
+      b.priority !== undefined &&
+      !ISSUE_PRIORITIES.includes(b.priority as IssuePriority)
+    ) {
+      bad(
+        `priority 可选 ${ISSUE_PRIORITIES.join("/")}（收到 "${b.priority}"）`,
+      );
     }
+    if (b.ownerMemberId !== undefined && b.ownerMemberId !== null) {
+      const owner = store.getWorkspaceMember(b.ownerMemberId);
+      if (
+        !owner ||
+        owner.workspaceId !== workspace.id ||
+        owner.status !== "active"
+      )
+        bad("ownerMemberId 必须是当前 Workspace 的 active member");
+    }
+    if (
+      b.labelIds !== undefined &&
+      (!Array.isArray(b.labelIds) ||
+        b.labelIds.some((id) => typeof id !== "string"))
+    ) {
+      bad("labelIds 需要是 label id 数组");
+    }
+    const labelIds = b.labelIds as string[] | undefined;
+    if (
+      labelIds?.some(
+        (id) => store.getIssueLabel(id)?.workspaceId !== workspace.id,
+      )
+    )
+      bad("labelIds 包含其他 Workspace 或不存在的 label");
     store.updateConversation(
       conv.id,
       {
         ...(b.title !== undefined ? { title: b.title } : {}),
         ...(b.description !== undefined ? { description: b.description } : {}),
-        ...(b.priority !== undefined ? { priority: b.priority as IssuePriority } : {}),
+        ...(b.priority !== undefined
+          ? { priority: b.priority as IssuePriority }
+          : {}),
+        ...(b.ownerMemberId !== undefined
+          ? { ownerMemberId: b.ownerMemberId }
+          : {}),
+        ...(labelIds !== undefined ? { labelIds } : {}),
       },
       Date.now(),
     );
     if (b.agent !== undefined) {
-      const agent = scopedAgent(workspace.id, b.agent);
+      const agent = scopedAgent(c, workspace.id, b.agent);
       if (b.agent && !agent) bad(`agent "${b.agent}" 不存在`);
       if (agent?.archivedAt) bad(`agent "${agent.name}" 已归档`);
-      if (store.activeRunForConversation(conv.id)) bad("Run 进行中，不能更换 Assignee；请先停止 Run");
+      if (store.activeRunForConversation(conv.id))
+        bad("Run 进行中，不能更换 Assignee；请先停止 Run");
       if (conv.worktreePath && agent?.repositoryId !== conv.repositoryId) {
         bad("Issue 已有 worktree，不能换到绑定其他 Repository 的 Agent");
       }
@@ -862,20 +2414,27 @@ export function buildRest(
         bad(`status 可选 ${ISSUE_STATUSES.join("/")}（收到 "${b.status}"）`);
       }
       if (conv.kind !== "issue") bad("chat 状态恒为 open");
-      if (store.activeRunForConversation(conv.id)) bad("Run 进行中，不能手动调整阶段；请先停止 Run");
+      if (store.activeRunForConversation(conv.id))
+        bad("Run 进行中，不能手动调整阶段；请先停止 Run");
       const current = store.getConversation(conv.id)!;
       const to = b.status as ConversationStatus;
-      if (to === "doing" || to === "review") bad(`${to} 由 Run 生命周期自动推进，不能手动设置`);
-      if (to === "done" && current.status !== "review") bad("只有 Review 中的 Issue 才能验收完成");
+      if (to === "doing" || to === "review")
+        bad(`${to} 由 Run 生命周期自动推进，不能手动设置`);
+      if (to === "done" && current.status !== "review")
+        bad("只有 Review 中的 Issue 才能验收完成");
       if (to === "done" && store.getDeliveryForConversation(current.id)) {
-        bad("当前 Issue 已建立 Delivery，请完成合并/部署流程，不能绕过交付策略直接 Done");
+        bad(
+          "当前 Issue 已建立 Delivery，请完成合并/部署流程，不能绕过交付策略直接 Done",
+        );
       }
       if (to === "backlog" || to === "todo") {
-        if (current.status === "done" || current.status === "canceled") bad(`${current.status} 是终态，不能直接重新打开`);
+        if (current.status === "done" || current.status === "canceled")
+          bad(`${current.status} 是终态，不能直接重新打开`);
       }
       transitionConversation(store, current, to, "human", Date.now());
       const fresh = store.getConversation(conv.id)!;
-      if (to === "done" || to === "canceled") coordinator.requestWorktreeCleanup(fresh);
+      if (to === "done" || to === "canceled")
+        coordinator.requestWorktreeCleanup(fresh);
     }
     return c.json(store.getConversation(conv.id));
   });
@@ -883,14 +2442,20 @@ export function buildRest(
   app.post("/api/conversations/:id/runs", async (c) => {
     const workspace = currentWorkspace(c);
     const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
-    const b = (await c.req.json()) as { prompt?: string; agent?: string; purpose?: string };
+    const b = (await c.req.json()) as {
+      prompt?: string;
+      agent?: string;
+      purpose?: string;
+    };
     if (!b.prompt?.trim()) bad("缺少 prompt");
     const purpose = (b.purpose ?? "implementation") as RunPurpose;
-    if (!RUN_PURPOSES.includes(purpose)) bad(`purpose 可选 ${RUN_PURPOSES.join("/")}`);
+    if (!RUN_PURPOSES.includes(purpose))
+      bad(`purpose 可选 ${RUN_PURPOSES.join("/")}`);
     const agentKey = b.agent ?? conv.agentId;
-    const agent = scopedAgent(workspace.id, agentKey);
+    const agent = scopedAgent(c, workspace.id, agentKey);
     if (!agent) bad("Issue 尚未指派 Agent，请先选择 Assignee");
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
+    appendRequestMessage(c, conv.id, b.prompt.trim());
     const run = enqueue(conv, agent, b.prompt.trim(), purpose);
     return c.json(run, 201);
   });
@@ -902,41 +2467,82 @@ export function buildRest(
     if (conv.kind !== "issue") bad("dispatch 只适用于 Issue");
     const b = (await c.req.json()) as { agent?: string; prompt?: string };
     const agentKey = b.agent ?? conv.agentId;
-    const agent = scopedAgent(workspace.id, agentKey);
+    const agent = scopedAgent(c, workspace.id, agentKey);
     if (!agent) bad("请选择要执行的 Agent");
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
     const prompt = b.prompt?.trim() || conv.description?.trim();
     if (!prompt) bad("Issue 缺少任务描述，无法派发");
+    appendRequestMessage(c, conv.id, prompt);
     return c.json(enqueue(conv, agent, prompt, "implementation"), 201);
   });
 
   app.post("/api/conversations/:id/request-changes", async (c) => {
     const workspace = currentWorkspace(c);
     const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
-    if (conv.kind !== "issue" || conv.status !== "review") bad("只有 Review 中的 Issue 可以要求修改");
+    if (conv.kind !== "issue" || conv.status !== "review")
+      bad("只有 Review 中的 Issue 可以要求修改");
     const b = (await c.req.json()) as { feedback?: string; agent?: string };
     if (!b.feedback?.trim()) bad("请填写修改意见");
     const agentKey = b.agent ?? conv.agentId;
-    const agent = scopedAgent(workspace.id, agentKey);
+    const agent = scopedAgent(c, workspace.id, agentKey);
     if (!agent) bad("请选择返工 Agent");
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
-    return c.json(enqueue(conv, agent, b.feedback.trim(), "implementation"), 201);
+    appendRequestMessage(c, conv.id, b.feedback.trim());
+    return c.json(
+      enqueue(conv, agent, b.feedback.trim(), "implementation"),
+      201,
+    );
   });
 
   app.post("/api/conversations/:id/review", async (c) => {
     const workspace = currentWorkspace(c);
     const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
-    if (conv.kind !== "issue" || conv.status !== "review") bad("AI Review 只能在 Review 阶段启动");
+    if (conv.kind !== "issue" || conv.status !== "review")
+      bad("AI Review 只能在 Review 阶段启动");
     const b = (await c.req.json()) as { agent?: string; prompt?: string };
-    const agent = scopedAgent(workspace.id, b.agent);
+    const agent = scopedAgent(c, workspace.id, b.agent);
     if (!agent) bad("请选择 Reviewer Agent");
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
-    const prompt = b.prompt?.trim() || "请独立审查本 Issue 的实现结果、代码改动和测试证据，指出阻塞问题与改进建议；不要直接宣告 Issue 完成。";
+    const prompt =
+      b.prompt?.trim() ||
+      "请独立审查本 Issue 的实现结果、代码改动和测试证据，指出阻塞问题与改进建议；不要直接宣告 Issue 完成。";
+    appendRequestMessage(c, conv.id, prompt);
     return c.json(enqueue(conv, agent, prompt, "review"), 201);
   });
 
+  app.post("/api/conversations/:id/messages", async (c) => {
+    const workspace = currentWorkspace(c);
+    const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
+    const b = (await c.req.json()) as {
+      body?: string;
+      agent?: string;
+      dispatch?: boolean;
+    };
+    const body = b.body?.trim() ?? "";
+    if (!body) bad("message body 不能为空");
+    const message = appendRequestMessage(c, conv.id, body);
+    if (b.dispatch === false) return c.json({ message }, 201);
+    const agent = scopedAgent(c, workspace.id, b.agent ?? conv.agentId);
+    if (!agent) bad("请选择响应消息的 Agent");
+    const purpose: RunPurpose =
+      conv.kind === "issue" && conv.status === "review"
+        ? "review"
+        : "implementation";
+    const promptEvent =
+      /@[\w.-]+/.test(body) && conv.kind === "issue"
+        ? ("event.issue.mentioned" as const)
+        : conv.kind === "chat"
+          ? ("event.chat.message_created" as const)
+          : ("event.issue.message_created" as const);
+    const run = enqueue(conv, agent, body, purpose, promptEvent, message.id);
+    return c.json({ message, run }, 201);
+  });
+
   app.post("/api/conversations/:id/delivery", async (c) => {
-    const conv = assertConversationWorkspace(currentWorkspace(c).id, c.req.param("id"));
+    const conv = assertConversationWorkspace(
+      currentWorkspace(c).id,
+      c.req.param("id"),
+    );
     const b = (await c.req.json()) as {
       provider?: DeliveryProviderKind;
       changeUrl?: string;
@@ -951,7 +2557,10 @@ export function buildRest(
   });
 
   app.patch("/api/deliveries/:id", async (c) => {
-    const { delivery } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
+    const { delivery } = assertDeliveryWorkspace(
+      currentWorkspace(c).id,
+      c.req.param("id"),
+    );
     const b = (await c.req.json()) as {
       changeUrl?: string | null;
       externalId?: string | null;
@@ -959,17 +2568,36 @@ export function buildRest(
       baseBranch?: string | null;
       checkStatus?: DeliveryCheckStatus;
     };
-    if (b.checkStatus !== undefined && !DELIVERY_CHECK_STATUSES.includes(b.checkStatus)) {
+    if (
+      b.checkStatus !== undefined &&
+      !DELIVERY_CHECK_STATUSES.includes(b.checkStatus)
+    ) {
       bad(`checkStatus 可选 ${DELIVERY_CHECK_STATUSES.join("/")}`);
     }
-    if (b.changeUrl !== undefined && b.changeUrl !== null) validateDeliveryUrl(b.changeUrl);
+    if (b.changeUrl !== undefined && b.changeUrl !== null)
+      validateDeliveryUrl(b.changeUrl);
     return c.json(await deliveryAction(() => deliveries.update(delivery, b)));
   });
 
   app.post("/api/deliveries/:id/merge", async (c) => {
-    const { delivery, conversation: conv } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
+    const { delivery, conversation: conv } = assertDeliveryWorkspace(
+      currentWorkspace(c).id,
+      c.req.param("id"),
+    );
     const b = (await c.req.json()) as { confirmed?: boolean };
-    const fresh = await deliveryAction(() => deliveries.merge(delivery, conv, b));
+    const fresh = await deliveryAction(() =>
+      deliveries.merge(delivery, conv, b),
+    );
+    finalizeDelivery(fresh);
+    return c.json(store.getDelivery(fresh.id));
+  });
+
+  app.post("/api/deliveries/:id/refresh", async (c) => {
+    const { delivery } = assertDeliveryWorkspace(
+      currentWorkspace(c).id,
+      c.req.param("id"),
+    );
+    const fresh = await deliveryAction(() => deliveries.refresh(delivery));
     finalizeDelivery(fresh);
     return c.json(store.getDelivery(fresh.id));
   });
@@ -982,24 +2610,40 @@ export function buildRest(
   });
 
   app.post("/api/deliveries/:id/deploy", async (c) => {
-    const { delivery, conversation: conv } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
+    const { delivery, conversation: conv } = assertDeliveryWorkspace(
+      currentWorkspace(c).id,
+      c.req.param("id"),
+    );
     const b = (await c.req.json()) as { confirmed?: boolean };
-    return c.json(await deliveryAction(() => deliveries.startDeployment(delivery, conv, b)));
+    return c.json(
+      await deliveryAction(() => deliveries.startDeployment(delivery, conv, b)),
+    );
   });
 
   app.post("/api/deliveries/:id/deployment-result", async (c) => {
-    const { delivery } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
+    const { delivery } = assertDeliveryWorkspace(
+      currentWorkspace(c).id,
+      c.req.param("id"),
+    );
     const b = (await c.req.json()) as { status?: "succeeded" | "failed" };
-    if (b.status !== "succeeded" && b.status !== "failed") bad("status 可选 succeeded/failed");
-    const fresh = await deliveryAction(() => deliveries.finishDeployment(delivery, b.status!));
+    if (b.status !== "succeeded" && b.status !== "failed")
+      bad("status 可选 succeeded/failed");
+    const fresh = await deliveryAction(() =>
+      deliveries.finishDeployment(delivery, b.status!),
+    );
     finalizeDelivery(fresh);
     return c.json(store.getDelivery(fresh.id));
   });
 
   app.post("/api/conversations/:id/approve", (c) => {
-    const conv = assertConversationWorkspace(currentWorkspace(c).id, c.req.param("id"));
-    if (conv.kind !== "issue" || conv.status !== "review") bad("只有 Review 中的 Issue 可以验收完成");
-    if (store.activeRunForConversation(conv.id)) bad("仍有 Run 进行中，不能完成验收");
+    const conv = assertConversationWorkspace(
+      currentWorkspace(c).id,
+      c.req.param("id"),
+    );
+    if (conv.kind !== "issue" || conv.status !== "review")
+      bad("只有 Review 中的 Issue 可以验收完成");
+    if (store.activeRunForConversation(conv.id))
+      bad("仍有 Run 进行中，不能完成验收");
     const delivery = store.getDeliveryForConversation(conv.id);
     if (delivery) {
       try {
@@ -1017,11 +2661,20 @@ export function buildRest(
   });
 
   app.post("/api/conversations/:id/cancel", (c) => {
-    const conv = assertConversationWorkspace(currentWorkspace(c).id, c.req.param("id"));
+    const conv = assertConversationWorkspace(
+      currentWorkspace(c).id,
+      c.req.param("id"),
+    );
     if (conv.kind !== "issue") bad("chat 不能取消为 Issue 终态");
     const active = store.activeRunForConversation(conv.id);
     if (active) coordinator.cancelRun(active.id);
-    transitionConversation(store, store.getConversation(conv.id)!, "canceled", "human", Date.now());
+    transitionConversation(
+      store,
+      store.getConversation(conv.id)!,
+      "canceled",
+      "human",
+      Date.now(),
+    );
     const fresh = store.getConversation(conv.id)!;
     coordinator.requestWorktreeCleanup(fresh);
     return c.json(fresh);
@@ -1043,16 +2696,28 @@ export function buildRest(
 
   app.get("/api/approvals", (c) => {
     const workspace = currentWorkspace(c);
-    const status = c.req.query("status") as import("../protocol.js").ApprovalStatus | undefined;
-    return c.json(store.listApprovals(status).filter((approval) => store.getRun(approval.runId)?.workspaceId === workspace.id));
+    const status = c.req.query("status") as
+      import("../protocol.js").ApprovalStatus | undefined;
+    return c.json(
+      store
+        .listApprovals(status)
+        .filter(
+          (approval) =>
+            store.getRun(approval.runId)?.workspaceId === workspace.id,
+        ),
+    );
   });
 
   app.post("/api/approvals/:id", async (c) => {
     const workspace = currentWorkspace(c);
     const a = store.resolveApprovalPrefix(c.req.param("id"));
-    if (!a || store.getRun(a.runId)?.workspaceId !== workspace.id) throw new HTTPException(404, { message: `approval "${c.req.param("id")}" 不存在` });
+    if (!a || store.getRun(a.runId)?.workspaceId !== workspace.id)
+      throw new HTTPException(404, {
+        message: `approval "${c.req.param("id")}" 不存在`,
+      });
     const b = (await c.req.json()) as { behavior?: string };
-    if (b.behavior !== "allow" && b.behavior !== "deny") bad(`behavior 只支持 allow/deny（收到 "${b.behavior}"）`);
+    if (b.behavior !== "allow" && b.behavior !== "deny")
+      bad(`behavior 只支持 allow/deny（收到 "${b.behavior}"）`);
     const decided = approvals.decide(a.id, b.behavior, "cli");
     return c.json(decided);
   });
@@ -1061,79 +2726,185 @@ export function buildRest(
 
   app.get("/api/automations", (c) => {
     const workspace = currentWorkspace(c);
-    const agentNames = new Map(store.listAgents(true, workspace.id).map((a) => [a.id, a.name]));
+    const agentNames = new Map(
+      store.listAgents(true, workspace.id).map((a) => [a.id, a.name]),
+    );
     return c.json(
-      store.listAutomations(workspace.id).map((a) => ({ ...a, agentName: agentNames.get(a.agentId) ?? a.agentId })),
+      store.listAutomations(workspace.id).map((a) => ({
+        ...a,
+        agentName: agentNames.get(a.agentId) ?? a.agentId,
+      })),
     );
   });
 
   app.post("/api/automations", async (c) => {
     const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
     const b = (await c.req.json()) as {
       name?: string;
       agent?: string;
+      triggerType?: AutomationTriggerType;
       cron?: string;
+      provider?: string;
+      events?: unknown;
+      filters?: unknown;
       prompt?: string;
+      outputMode?: AutomationOutputMode;
+      overlapMode?: AutomationOverlapMode;
+      /** 旧客户端兼容。 */
       mode?: string;
       target?: string;
       notifyChat?: string;
       repository?: unknown;
     };
-    if (b.repository !== undefined) bad("Automation 的 Repository 由 Agent 决定，请修改 Agent 配置");
-    if (!b.name) bad("缺少 name");
-    if (store.listAutomations(workspace.id).some((automation) => automation.name === b.name)) {
-      bad(`automation 名 "${b.name}" 已存在于当前 Workspace`);
+    if (b.repository !== undefined)
+      bad("Automation 的 Repository 由 Agent 决定，请修改 Agent 配置");
+    const name = b.name?.trim() ?? "";
+    if (!name) bad("缺少 name");
+    if (
+      store
+        .listAutomations(workspace.id)
+        .some((automation) => automation.name === name)
+    ) {
+      bad(`automation 名 "${name}" 已存在于当前 Workspace`);
     }
-    if (!b.cron) bad("缺少 cron（5 段标准 cron 表达式，server 本机时区）");
     if (!b.prompt?.trim()) bad("缺少 prompt");
-    try {
-      AutomationService.validateCron(b.cron);
-    } catch (e) {
-      bad(`cron 表达式非法："${b.cron}"（${e instanceof Error ? e.message : e}）`);
-    }
-    const agent = scopedAgent(workspace.id, b.agent);
+    const agent = scopedAgent(c, workspace.id, b.agent);
     if (!agent) bad(`agent "${b.agent}" 不存在（harbor agent ls 查看）`);
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
-    const mode = (b.mode ?? "new_issue") as import("../protocol.js").AutomationMode;
-    if (mode !== "new_issue" && mode !== "append") bad(`mode 可选 new_issue/append（收到 "${b.mode}"）`);
+
+    const triggerType = b.triggerType ?? "schedule";
+    if (triggerType !== "schedule" && triggerType !== "webhook") {
+      bad(`triggerType 可选 schedule/webhook（收到 "${b.triggerType}"）`);
+    }
+    let webhookSecret: string | null = null;
+    let filters: AutomationWebhookFilter[] = [];
+    let events: string[] = [];
+    if (triggerType === "schedule") {
+      if (!b.cron?.trim())
+        bad("schedule trigger 缺少 cron（5 段标准 cron 表达式）");
+      try {
+        AutomationService.validateCron(b.cron.trim());
+      } catch (e) {
+        bad(
+          `cron 表达式非法："${b.cron}"（${e instanceof Error ? e.message : e}）`,
+        );
+      }
+    } else {
+      if (
+        b.events !== undefined &&
+        (!Array.isArray(b.events) ||
+          b.events.some((value) => typeof value !== "string"))
+      ) {
+        bad("events 必须是 string[]");
+      }
+      events = [
+        ...new Set(
+          ((b.events as string[] | undefined) ?? [])
+            .map((event) => event.trim())
+            .filter(Boolean),
+        ),
+      ];
+      if (b.filters !== undefined && !Array.isArray(b.filters))
+        bad("filters 必须是数组");
+      filters = (
+        (b.filters as AutomationWebhookFilter[] | undefined) ?? []
+      ).map((filter) => {
+        if (
+          !filter ||
+          typeof filter !== "object" ||
+          typeof filter.path !== "string" ||
+          !filter.path.trim()
+        ) {
+          bad("每个 webhook filter 都需要非空 path");
+        }
+        if (
+          !["string", "number", "boolean"].includes(typeof filter.equals) &&
+          filter.equals !== null
+        ) {
+          bad("webhook filter.equals 只支持 string/number/boolean/null");
+        }
+        return { path: filter.path.trim(), equals: filter.equals };
+      });
+      webhookSecret = randomBytes(24).toString("base64url");
+    }
+
+    const legacyOutput =
+      b.mode === "append" ? "append" : b.mode === "new_issue" ? "issue" : null;
+    const outputMode = b.outputMode ?? legacyOutput ?? "run";
+    if (!["run", "chat", "issue", "append"].includes(outputMode)) {
+      bad(`outputMode 可选 run/chat/issue/append（收到 "${outputMode}"）`);
+    }
+    const overlapMode = b.overlapMode ?? "skip";
+    if (overlapMode !== "skip" && overlapMode !== "queue") {
+      bad(`overlapMode 可选 skip/queue（收到 "${b.overlapMode}"）`);
+    }
+    if (outputMode === "run" && agent.isolation === "worktree") {
+      bad(
+        "outputMode=run 当前要求 Agent isolation=none；需要 worktree 时请选择 chat/issue 输出",
+      );
+    }
     let targetId: string | null = null;
-    if (mode === "append") {
-      if (!b.target) bad("mode=append 需要 --target <conversation-id>");
+    if (outputMode === "append") {
+      if (!b.target) bad("outputMode=append 需要 target conversation");
       const target = store.resolveConversationPrefix(b.target);
-      if (!target || target.workspaceId !== workspace.id) bad(`target conversation "${b.target}" 不存在于当前 Workspace`);
+      if (!target || target.workspaceId !== workspace.id)
+        bad(`target conversation "${b.target}" 不存在于当前 Workspace`);
       if (target.repositoryId && target.repositoryId !== agent.repositoryId) {
         bad("append target 与 Agent 绑定的 Repository 不一致");
       }
       targetId = target.id;
     }
-    const repository = mode === "append"
-      ? null
-      : store.getRepository(agent.repositoryId);
-    if (repository && !store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
-      bad(`Repository "${repository.name}" 尚未挂载到 Agent "${agent.name}" 的设备`);
+    const repository = store.getRepository(agent.repositoryId);
+    if (!repository || repository.archivedAt)
+      bad(`Agent "${agent.name}" 的 Repository 不存在或已归档`);
+    if (!store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
+      bad(
+        `Repository "${repository.name}" 尚未挂载到 Agent "${agent.name}" 的设备`,
+      );
     }
     const auto = store.createAutomation(
       {
         workspaceId: workspace.id,
-        name: b.name,
+        name,
         agentId: agent.id,
-        repositoryId: repository?.id ?? null,
-        cron: b.cron,
-        prompt: b.prompt,
-        mode,
+        repositoryId: repository.id,
+        prompt: b.prompt.trim(),
+        outputMode,
+        overlapMode,
         targetConversationId: targetId,
         notifyChatId: b.notifyChat ?? null,
+        triggers: [
+          {
+            type: triggerType,
+            cron: triggerType === "schedule" ? b.cron!.trim() : null,
+            provider:
+              triggerType === "webhook"
+                ? b.provider?.trim() || "generic"
+                : null,
+            events,
+            filters,
+            secretHash: webhookSecret ? hashWebhookSecret(webhookSecret) : null,
+          },
+        ],
       },
       Date.now(),
     );
     automations.schedule(auto);
-    return c.json(auto, 201);
+    return c.json(
+      { ...auto, ...(webhookSecret ? { webhookSecret } : {}) },
+      201,
+    );
   });
 
   app.patch("/api/automations/:id", async (c) => {
     const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
     const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
-    if (!auto || auto.workspaceId !== workspace.id) throw new HTTPException(404, { message: `automation "${c.req.param("id")}" 不存在` });
+    if (!auto || auto.workspaceId !== workspace.id)
+      throw new HTTPException(404, {
+        message: `automation "${c.req.param("id")}" 不存在`,
+      });
     const b = (await c.req.json()) as { enabled?: boolean };
     if (typeof b.enabled !== "boolean") bad("需要 enabled: true/false");
     store.setAutomationEnabled(auto.id, b.enabled);
@@ -1144,8 +2915,12 @@ export function buildRest(
   });
 
   app.post("/api/automations/:id/run", (c) => {
-    const auto = store.resolveAutomationPrefix(c.req.param("id"));
-    if (!auto) throw new HTTPException(404, { message: `automation "${c.req.param("id")}" 不存在` });
+    const workspace = currentWorkspace(c);
+    const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
+    if (!auto)
+      throw new HTTPException(404, {
+        message: `automation "${c.req.param("id")}" 不存在`,
+      });
     try {
       return c.json(automations.runNow(auto.id), 201);
     } catch (error) {
@@ -1155,8 +2930,12 @@ export function buildRest(
 
   app.delete("/api/automations/:id", (c) => {
     const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
     const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
-    if (!auto || auto.workspaceId !== workspace.id) throw new HTTPException(404, { message: `automation "${c.req.param("id")}" 不存在` });
+    if (!auto || auto.workspaceId !== workspace.id)
+      throw new HTTPException(404, {
+        message: `automation "${c.req.param("id")}" 不存在`,
+      });
     automations.unschedule(auto.id);
     store.deleteAutomation(auto.id);
     return c.json({ ok: true });
@@ -1165,8 +2944,72 @@ export function buildRest(
   app.get("/api/automations/:id/log", (c) => {
     const workspace = currentWorkspace(c);
     const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
-    if (!auto || auto.workspaceId !== workspace.id) throw new HTTPException(404, { message: `automation "${c.req.param("id")}" 不存在` });
+    if (!auto || auto.workspaceId !== workspace.id)
+      throw new HTTPException(404, {
+        message: `automation "${c.req.param("id")}" 不存在`,
+      });
     return c.json(store.listAutomationLog(auto.id));
+  });
+
+  app.post("/api/automations/:id/triggers", async (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
+    if (!auto)
+      throw new HTTPException(404, {
+        message: `automation "${c.req.param("id")}" 不存在`,
+      });
+    const b = (await c.req.json()) as {
+      type?: AutomationTriggerType;
+      cron?: string;
+      provider?: string;
+      events?: string[];
+      filters?: AutomationWebhookFilter[];
+    };
+    if (b.type !== "schedule" && b.type !== "webhook")
+      bad("type 可选 schedule/webhook");
+    if (b.type === "schedule") {
+      if (!b.cron?.trim()) bad("schedule trigger 缺少 cron");
+      try {
+        AutomationService.validateCron(b.cron.trim());
+      } catch (error) {
+        bad(
+          `cron 表达式非法：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    const secret =
+      b.type === "webhook" ? randomBytes(24).toString("base64url") : null;
+    const trigger = store.createAutomationTrigger(
+      auto.id,
+      {
+        type: b.type,
+        cron: b.cron?.trim() ?? null,
+        provider: b.provider?.trim() || "generic",
+        events: b.events ?? [],
+        filters: b.filters ?? [],
+        secretHash: secret ? hashWebhookSecret(secret) : null,
+      },
+      Date.now(),
+    );
+    automations.schedule(store.getAutomation(auto.id)!);
+    return c.json(
+      { ...trigger, ...(secret ? { webhookSecret: secret } : {}) },
+      201,
+    );
+  });
+
+  app.delete("/api/automations/:id/triggers/:triggerId", (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
+    const trigger = store.getAutomationTrigger(c.req.param("triggerId"));
+    if (!auto || !trigger || trigger.automationId !== auto.id) {
+      throw new HTTPException(404, { message: "automation trigger 不存在" });
+    }
+    store.deleteAutomationTrigger(trigger.id);
+    automations.schedule(store.getAutomation(auto.id)!);
+    return c.json({ ok: true });
   });
 
   // ---- usage（P3 报表） ----
@@ -1185,11 +3028,18 @@ export function buildRest(
     const agentQ = c.req.query("agent");
     let agentId: string | undefined;
     if (agentQ) {
-      const agent = scopedAgent(workspace.id, agentQ);
+      const agent = scopedAgent(c, workspace.id, agentQ);
       if (!agent) bad(`agent "${agentQ}" 不存在`);
       agentId = agent.id;
     }
-    return c.json(store.listRunsForUsage({ workspaceId: workspace.id, agentId, day: c.req.query("day"), fromTs }));
+    return c.json(
+      store.listRunsForUsage({
+        workspaceId: workspace.id,
+        agentId,
+        day: c.req.query("day"),
+        fromTs,
+      }),
+    );
   });
 
   // SSE：回放 run_events 已有行 → 实时直播 → run 终态发 done 帧收流。
@@ -1215,7 +3065,9 @@ export function buildRest(
         const send = (frame: RunStreamFrame) => {
           if (closed) return;
           try {
-            controller.enqueue(enc.encode(`data: ${JSON.stringify(frame)}\n\n`));
+            controller.enqueue(
+              enc.encode(`data: ${JSON.stringify(frame)}\n\n`),
+            );
           } catch {
             finish();
           }
@@ -1230,7 +3082,10 @@ export function buildRest(
             if (frame.seq <= maxSeq) return;
             maxSeq = frame.seq;
             send(frame);
-          } else if (frame.kind === "approval" || frame.kind === "approval_decided") {
+          } else if (
+            frame.kind === "approval" ||
+            frame.kind === "approval_decided"
+          ) {
             const key =
               frame.kind === "approval"
                 ? `a:${frame.approval.id}:${frame.approval.status}`
@@ -1299,7 +3154,10 @@ export function buildRest(
       throw new HTTPException(404, { message: "not found" });
     }
     if (!existsSync(WEB_OUT)) {
-      return c.text("harbor-web 未构建：bun run --filter harbor-web build（产物 apps/harbor-web/out/）", 503);
+      return c.text(
+        "harbor-web 未构建：bun run --filter harbor-web build（产物 apps/harbor-web/out/）",
+        503,
+      );
     }
     const target = resolve(WEB_OUT, "." + pathname);
     if (target !== WEB_OUT && !target.startsWith(WEB_OUT + "/")) {
@@ -1310,11 +3168,15 @@ export function buildRest(
       const f = Bun.file(p);
       if (await f.exists()) {
         // 带 hash 的产物永久缓存；html 每次校验（部署新版立即生效）
-        const cache = pathname.startsWith("/_next/") ? "public, max-age=31536000, immutable" : "no-cache";
+        const cache = pathname.startsWith("/_next/")
+          ? "public, max-age=31536000, immutable"
+          : "no-cache";
         return new Response(f, { headers: { "Cache-Control": cache } });
       }
     }
-    return new Response(Bun.file(join(WEB_OUT, "index.html")), { headers: { "Cache-Control": "no-cache" } });
+    return new Response(Bun.file(join(WEB_OUT, "index.html")), {
+      headers: { "Cache-Control": "no-cache" },
+    });
   });
 
   return app;

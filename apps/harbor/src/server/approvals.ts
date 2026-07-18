@@ -53,7 +53,11 @@ export class ApprovalService {
     const approval = this.store.createApproval(msg, Date.now());
     console.log(`[approvals] 待批：${approval.id} run=${run.id} tool=${approval.toolName}`);
     this.bus.emitApproval(approval);
-    this.sink?.onApprovalCreated(approval, run, this.store.getConversation(run.conversationId));
+    this.sink?.onApprovalCreated(
+      approval,
+      run,
+      run.conversationId ? this.store.getConversation(run.conversationId) : null,
+    );
   }
 
   /**

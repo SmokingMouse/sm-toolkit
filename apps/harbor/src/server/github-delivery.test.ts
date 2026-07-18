@@ -228,6 +228,10 @@ describe("GitHub Delivery URL and configuration boundaries", () => {
       name: "harbor",
       remoteUrl: "https://github.com/acme/harbor.git",
       defaultBranch: "main",
+      scmProvider: "local",
+      scmRepository: null,
+      scmAgentId: null,
+      scmAutoDispatch: false,
       createdAt: 1,
       archivedAt: null,
     }, "#42")).toEqual({ owner: "acme", repo: "harbor", number: 42 });
@@ -237,6 +241,10 @@ describe("GitHub Delivery URL and configuration boundaries", () => {
       name: "harbor",
       remoteUrl: "https://github.com/acme/harbor.git",
       defaultBranch: "main",
+      scmProvider: "local",
+      scmRepository: null,
+      scmAgentId: null,
+      scmAutoDispatch: false,
       createdAt: 1,
       archivedAt: null,
     })).toThrow("跨 Repository");

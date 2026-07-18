@@ -52,9 +52,10 @@ ${c.bold}审批${c.reset}（permission=default 的 agent 用工具时上抛）
   harbor approvals [--status pending]                      审批列表
   harbor approve <id> · harbor deny <id>                   批/拒（飞书卡片同步可批）
 
-${c.bold}定时${c.reset}
-  harbor auto create --name <n> --agent <a> --cron "<表达式>" --prompt "<p>"
-                     [--mode new_issue|append --target <conv-id>]
+${c.bold}Automations${c.reset}
+  harbor auto create --name <n> --agent <a> --prompt "<p>"
+                     [--trigger schedule --cron "<表达式>" | --trigger webhook --provider generic --events push,merge]
+                     [--output run|chat|issue|append --target <conv-id>] [--overlap skip|queue]
                      [--notify-chat <oc_xx>]
   harbor auto ls · auto log <id> · auto enable|disable|rm <id>
 
@@ -441,17 +442,28 @@ async function main(): Promise<number> {
   // ── automation ──
   if (domain === "auto") {
     if (verb === "create") {
+      const triggerType = String(flags.trigger ?? "schedule");
       const auto = await client.createAutomation({
         name: req(flags, "name"),
         agent: req(flags, "agent"),
-        cron: req(flags, "cron"),
+        triggerType,
+        ...(triggerType === "schedule" ? { cron: req(flags, "cron") } : {}),
+        ...(triggerType === "webhook" ? {
+          provider: String(flags.provider ?? "generic"),
+          events: typeof flags.events === "string" ? flags.events.split(",").map((value) => value.trim()).filter(Boolean) : [],
+        } : {}),
         prompt: req(flags, "prompt"),
-        mode: flags.mode,
+        outputMode: flags.output ?? (flags.mode === "append" ? "append" : flags.mode === "new_issue" ? "issue" : undefined),
+        overlapMode: flags.overlap,
         target: flags.target,
         notifyChat: flags["notify-chat"],
       });
-      console.log(`${c.green}✓${c.reset} automation ${c.bold}${auto.name}${c.reset}（${auto.id}）已创建并排班`);
-      console.log(`${c.dim}  cron="${auto.cron}"（server 本机时区）mode=${auto.mode}${auto.notifyChatId ? ` notify=${auto.notifyChatId}` : ""}${c.reset}`);
+      console.log(`${c.green}✓${c.reset} automation ${c.bold}${auto.name}${c.reset}（${auto.id}）已创建`);
+      console.log(`${c.dim}  trigger=${auto.triggers.map((trigger) => trigger.type).join(",")} output=${auto.outputMode} overlap=${auto.overlapMode}${auto.notifyChatId ? ` notify=${auto.notifyChatId}` : ""}${c.reset}`);
+      const webhook = auto.triggers.find((trigger) => trigger.type === "webhook");
+      if (webhook && auto.webhookSecret) {
+        console.log(`${c.yellow}  webhook path=${webhook.webhookPath} secret=${auto.webhookSecret}（只显示一次）${c.reset}`);
+      }
       return 0;
     }
     if (verb === "ls") {
@@ -462,11 +474,11 @@ async function main(): Promise<number> {
           a.enabled ? `${c.green}on${c.reset}` : `${c.dim}off${c.reset}`,
           a.name,
           a.agentName,
-          a.cron,
-          a.mode,
+          a.triggers.map((trigger) => trigger.type === "schedule" ? `cron:${trigger.cron}` : `${trigger.provider ?? "generic"}:webhook`).join(", ") || "manual",
+          `${a.outputMode}/${a.overlapMode}`,
           fmtAgo(a.lastFiredAt),
         ]),
-        ["ID", "STATE", "NAME", "AGENT", "CRON", "MODE", "LAST FIRED"],
+        ["ID", "STATE", "NAME", "AGENT", "TRIGGERS", "OUTPUT/OVERLAP", "LAST FIRED"],
       );
       return 0;
     }
@@ -477,7 +489,7 @@ async function main(): Promise<number> {
       table(
         rows.map((l) => [
           new Date(l.ts).toLocaleString("sv-SE"),
-          l.kind === "fired" ? `${c.green}fired${c.reset}` : `${c.yellow}missed${c.reset}`,
+          l.kind === "fired" ? `${c.green}fired${c.reset}` : `${c.yellow}${l.kind}${c.reset}`,
           l.runId ?? "-",
           l.note ?? "",
         ]),
