@@ -599,6 +599,71 @@ const MIGRATIONS: string[] = [
     SET review_status = 'pending', review_approved_at = NULL, check_status = 'pending'
     WHERE provider = 'github';
   `,
+  // v14 —— SCM 与 Deployment Provider 正交；durable deployment queue + generation fencing
+  `
+  CREATE TABLE deliveries_v14 (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id),
+    provider TEXT NOT NULL,
+    change_url TEXT,
+    external_id TEXT,
+    head_branch TEXT,
+    base_branch TEXT,
+    latest_head_sha TEXT,
+    approved_head_sha TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending' CHECK (review_status IN ('pending','approved')),
+    check_status TEXT NOT NULL DEFAULT 'unknown' CHECK (check_status IN ('unknown','pending','passed','failed')),
+    merge_status TEXT NOT NULL DEFAULT 'open' CHECK (merge_status IN ('open','closed','merged')),
+    deployment_status TEXT NOT NULL DEFAULT 'not_required'
+      CHECK (deployment_status IN ('not_required','pending','queued','running','succeeded','failed')),
+    deployment_target_id TEXT,
+    merged_revision TEXT,
+    deployment_revision TEXT,
+    deployment_generation INTEGER NOT NULL DEFAULT 0,
+    active_deployment_job_id TEXT,
+    deployment_error TEXT,
+    review_approved_at INTEGER,
+    merged_at INTEGER,
+    deployed_at INTEGER,
+    revision INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  INSERT INTO deliveries_v14
+    (id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+     latest_head_sha, approved_head_sha, review_status, check_status, merge_status,
+     deployment_status, review_approved_at, merged_at, deployed_at, revision, created_at, updated_at)
+    SELECT id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+           latest_head_sha, approved_head_sha, review_status, check_status, merge_status,
+           deployment_status, review_approved_at, merged_at, deployed_at, revision, created_at, updated_at
+    FROM deliveries;
+  DROP TABLE deliveries;
+  ALTER TABLE deliveries_v14 RENAME TO deliveries;
+  CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
+  CREATE INDEX idx_deliveries_deployment_status ON deliveries(deployment_status, updated_at);
+
+  CREATE TABLE deployment_jobs (
+    id TEXT PRIMARY KEY,
+    delivery_id TEXT NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL,
+    target_id TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','running','succeeded','failed')),
+    attempt INTEGER NOT NULL DEFAULT 0,
+    lease_token TEXT,
+    lease_expires_at INTEGER,
+    checkpoint TEXT NOT NULL DEFAULT 'queued',
+    log TEXT,
+    error TEXT,
+    rollback_complete INTEGER,
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (delivery_id, generation)
+  );
+  CREATE INDEX idx_deployment_jobs_claim ON deployment_jobs(status, lease_expires_at, created_at);
+  `,
 ];
 
 function normalizeLegacyRepositoryNames(db: Database): void {
@@ -634,7 +699,7 @@ export function openDb(path: string): Database {
   let version = row?.user_version ?? 0;
   while (version < MIGRATIONS.length) {
     const sql = MIGRATIONS[version]!;
-    const rebuildsReferencedTables = version === 8 || version === 9 || version === 11;
+    const rebuildsReferencedTables = version === 8 || version === 9 || version === 11 || version === 13;
     if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = OFF;");
     try {
       db.transaction(() => {

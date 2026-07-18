@@ -20,6 +20,8 @@ import type {
   DeliveryCheckStatus,
   DeliveryDeploymentStatus,
   DeliveryEvent,
+  DeploymentJob,
+  DeploymentJobStatus,
   DeliveryMergeStatus,
   DeliveryProviderKind,
   DeliveryReviewStatus,
@@ -122,11 +124,37 @@ interface DeliveryRow {
   check_status: string;
   merge_status: string;
   deployment_status: string;
+  deployment_target_id: string | null;
+  merged_revision: string | null;
+  deployment_revision: string | null;
+  deployment_generation: number;
+  active_deployment_job_id: string | null;
+  deployment_error: string | null;
   review_approved_at: number | null;
   merged_at: number | null;
   deployed_at: number | null;
   revision: number;
   created_at: number;
+  updated_at: number;
+}
+
+interface DeploymentJobRow {
+  id: string;
+  delivery_id: string;
+  generation: number;
+  target_id: string;
+  revision: string;
+  status: string;
+  attempt: number;
+  lease_token: string | null;
+  lease_expires_at: number | null;
+  checkpoint: string;
+  log: string | null;
+  error: string | null;
+  rollback_complete: number | null;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
   updated_at: number;
 }
 
@@ -351,7 +379,7 @@ function deliveryStatus(r: DeliveryRow): DeliveryStatus {
     if (r.check_status === "failed") return "blocked";
     if (r.check_status !== "passed") return "checks_pending";
     if (r.deployment_status === "failed") return "failed";
-    if (r.deployment_status === "running") return "deploying";
+    if (r.deployment_status === "queued" || r.deployment_status === "running") return "deploying";
     if (r.deployment_status === "pending") return "merged";
     return "succeeded";
   }
@@ -378,12 +406,40 @@ function toDelivery(r: DeliveryRow): Delivery {
     checkStatus: r.check_status as DeliveryCheckStatus,
     mergeStatus: r.merge_status as DeliveryMergeStatus,
     deploymentStatus: r.deployment_status as DeliveryDeploymentStatus,
+    deploymentTargetId: r.deployment_target_id,
+    mergedRevision: r.merged_revision,
+    deploymentRevision: r.deployment_revision,
+    deploymentGeneration: r.deployment_generation,
+    activeDeploymentJobId: r.active_deployment_job_id,
+    deploymentError: r.deployment_error,
     status: deliveryStatus(r),
     reviewApprovedAt: r.review_approved_at,
     mergedAt: r.merged_at,
     deployedAt: r.deployed_at,
     revision: r.revision,
     createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+function toDeploymentJob(r: DeploymentJobRow): DeploymentJob {
+  return {
+    id: r.id,
+    deliveryId: r.delivery_id,
+    generation: r.generation,
+    targetId: r.target_id,
+    revision: r.revision,
+    status: r.status as DeploymentJobStatus,
+    attempt: r.attempt,
+    leaseToken: r.lease_token,
+    leaseExpiresAt: r.lease_expires_at,
+    checkpoint: r.checkpoint,
+    log: r.log,
+    error: r.error,
+    rollbackComplete: r.rollback_complete === null ? null : r.rollback_complete === 1,
+    createdAt: r.created_at,
+    startedAt: r.started_at,
+    finishedAt: r.finished_at,
     updatedAt: r.updated_at,
   };
 }
@@ -1208,6 +1264,7 @@ export class HarborStore {
       headBranch?: string | null;
       baseBranch?: string | null;
       deploymentRequired?: boolean;
+      deploymentTargetId?: string | null;
       checkStatus?: DeliveryCheckStatus;
     },
     now: number,
@@ -1215,8 +1272,9 @@ export class HarborStore {
     const id = newId("delivery");
     this.db.run(
       `INSERT INTO deliveries
-       (id, conversation_id, provider, change_url, external_id, head_branch, base_branch, check_status, deployment_status, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?, ?,?,?)`,
+       (id, conversation_id, provider, change_url, external_id, head_branch, base_branch, check_status,
+        deployment_status, deployment_target_id, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?, ?,?,?,?)`,
       [
         id,
         input.conversationId,
@@ -1227,6 +1285,7 @@ export class HarborStore {
         input.baseBranch ?? null,
         input.checkStatus ?? "unknown",
         input.deploymentRequired ? "pending" : "not_required",
+        input.deploymentTargetId ?? null,
         now,
         now,
       ],
@@ -1255,6 +1314,7 @@ export class HarborStore {
       headBranch?: string | null;
       baseBranch?: string | null;
       latestHeadSha?: string | null;
+      mergedRevision?: string | null;
     },
     now: number,
   ): void {
@@ -1266,6 +1326,7 @@ export class HarborStore {
       ["headBranch", "head_branch"],
       ["baseBranch", "base_branch"],
       ["latestHeadSha", "latest_head_sha"],
+      ["mergedRevision", "merged_revision"],
     ];
     for (const [key, column] of fields) {
       if (!(key in patch)) continue;
@@ -1290,6 +1351,11 @@ export class HarborStore {
       approvedHeadSha?: string | null;
       mergedAt?: number | null;
       deployedAt?: number | null;
+      mergedRevision?: string | null;
+      deploymentRevision?: string | null;
+      deploymentGeneration?: number;
+      activeDeploymentJobId?: string | null;
+      deploymentError?: string | null;
     },
     now: number,
   ): void {
@@ -1304,6 +1370,11 @@ export class HarborStore {
       ["approvedHeadSha", "approved_head_sha"],
       ["mergedAt", "merged_at"],
       ["deployedAt", "deployed_at"],
+      ["mergedRevision", "merged_revision"],
+      ["deploymentRevision", "deployment_revision"],
+      ["deploymentGeneration", "deployment_generation"],
+      ["activeDeploymentJobId", "active_deployment_job_id"],
+      ["deploymentError", "deployment_error"],
     ];
     for (const [key, column] of fields) {
       if (!(key in patch)) continue;
@@ -1338,6 +1409,11 @@ export class HarborStore {
       reviewApprovedAt?: number | null;
       mergedAt?: number | null;
       deployedAt?: number | null;
+      mergedRevision?: string | null;
+      deploymentRevision?: string | null;
+      deploymentGeneration?: number;
+      activeDeploymentJobId?: string | null;
+      deploymentError?: string | null;
     },
     events: { kind: string; data: unknown; actor: DeliveryEvent["actor"] }[],
     now: number,
@@ -1356,6 +1432,11 @@ export class HarborStore {
       ["reviewApprovedAt", "review_approved_at"],
       ["mergedAt", "merged_at"],
       ["deployedAt", "deployed_at"],
+      ["mergedRevision", "merged_revision"],
+      ["deploymentRevision", "deployment_revision"],
+      ["deploymentGeneration", "deployment_generation"],
+      ["activeDeploymentJobId", "active_deployment_job_id"],
+      ["deploymentError", "deployment_error"],
     ];
     const sets: string[] = [];
     const params: (string | number | null)[] = [];
@@ -1401,6 +1482,198 @@ export class HarborStore {
       .query<DeliveryEventRow, [string]>("SELECT * FROM delivery_events WHERE delivery_id = ? ORDER BY ts, rowid")
       .all(deliveryId)
       .map(toDeliveryEvent);
+  }
+
+  /**
+   * 首次自动部署和 Retry 共用。generation、active job 与 Delivery 状态在一个事务内推进；
+   * 重复 reconcile 若 active job 的 target/revision 一致，直接返回原 job。
+   */
+  enqueueDeploymentJob(
+    deliveryId: string,
+    targetId: string,
+    revision: string,
+    now: number,
+  ): { job: DeploymentJob; created: boolean } {
+    if (!/^[a-f0-9]{40,64}$/i.test(revision)) throw new Error("deployment revision 必须是完整十六进制 commit id");
+    return this.db.transaction(() => {
+      const delivery = this.db.query<DeliveryRow, [string]>("SELECT * FROM deliveries WHERE id = ?").get(deliveryId);
+      if (!delivery) throw new Error(`Delivery "${deliveryId}" 不存在`);
+      if (delivery.deployment_target_id !== targetId) throw new Error("Delivery deployment target 与 enqueue target 不一致");
+      if (delivery.merge_status !== "merged" || delivery.review_status !== "approved" || delivery.check_status !== "passed") {
+        throw new Error("只有 merge、人工验收与 checks 全部通过后才能 enqueue deployment");
+      }
+      if (delivery.deployment_status === "queued" || delivery.deployment_status === "running") {
+        const active = delivery.active_deployment_job_id
+          ? this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(delivery.active_deployment_job_id)
+          : null;
+        if (active && active.target_id === targetId && active.revision === revision) {
+          return { job: toDeploymentJob(active), created: false };
+        }
+        throw new Error("Delivery 已有 active deployment job，不能重复 enqueue");
+      }
+      if (delivery.deployment_status === "succeeded") throw new Error("Delivery 已部署成功，无需重复 enqueue");
+      if (delivery.deployment_status !== "pending" && delivery.deployment_status !== "failed") {
+        throw new Error(`当前部署状态为 ${delivery.deployment_status}，不能 enqueue`);
+      }
+      const generation = delivery.deployment_generation + 1;
+      const id = newId("deploymentJob");
+      this.db.run(
+        `INSERT INTO deployment_jobs
+         (id, delivery_id, generation, target_id, revision, status, attempt, checkpoint, created_at, updated_at)
+         VALUES (?,?,?,?,?,'queued',0,'queued',?,?)`,
+        [id, deliveryId, generation, targetId, revision.toLowerCase(), now, now],
+      );
+      this.db.run(
+        `UPDATE deliveries
+         SET deployment_status = 'queued', deployment_revision = ?, deployment_generation = ?,
+             active_deployment_job_id = ?, deployment_error = NULL, deployed_at = NULL,
+             updated_at = ?, revision = revision + 1
+         WHERE id = ?`,
+        [revision.toLowerCase(), generation, id, now, deliveryId],
+      );
+      this.db.run(
+        "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
+        [deliveryId, "deployment_enqueued", JSON.stringify({ jobId: id, targetId, generation, revision: revision.toLowerCase() }), "system", now],
+      );
+      this.touchDeliveryConversation(deliveryId, now);
+      return { job: toDeploymentJob(this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id)!), created: true };
+    })();
+  }
+
+  getDeploymentJob(id: string): DeploymentJob | null {
+    const row = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id);
+    return row ? toDeploymentJob(row) : null;
+  }
+
+  listDeploymentJobs(deliveryId: string): DeploymentJob[] {
+    return this.db
+      .query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE delivery_id = ? ORDER BY generation")
+      .all(deliveryId)
+      .map(toDeploymentJob);
+  }
+
+  /** queued 或 lease 已过期的 running job 才能领取；新 token fencing 旧 worker。 */
+  claimDeploymentJob(targetIds: string[], now: number, leaseMs: number): DeploymentJob | null {
+    if (targetIds.length === 0) return null;
+    return this.db.transaction(() => {
+      const placeholders = targetIds.map(() => "?").join(",");
+      const row = this.db
+        .query<DeploymentJobRow, (string | number)[]>(
+          `SELECT j.* FROM deployment_jobs j JOIN deliveries d ON d.id = j.delivery_id
+           WHERE j.target_id IN (${placeholders})
+             AND (j.status = 'queued' OR (j.status = 'running' AND j.lease_expires_at IS NOT NULL AND j.lease_expires_at <= ?))
+             AND d.active_deployment_job_id = j.id
+             AND d.deployment_generation = j.generation
+             AND d.deployment_revision = j.revision
+             AND d.deployment_status IN ('queued','running')
+             AND d.merge_status = 'merged' AND d.review_status = 'approved' AND d.check_status = 'passed'
+           ORDER BY j.created_at, j.generation LIMIT 1`,
+        )
+        .get(...targetIds, now);
+      if (!row) return null;
+      const leaseToken = newId("deploymentLease");
+      const updated = this.db.run(
+        `UPDATE deployment_jobs
+         SET status = 'running', attempt = attempt + 1, lease_token = ?, lease_expires_at = ?,
+             started_at = COALESCE(started_at, ?), updated_at = ?
+         WHERE id = ? AND (status = 'queued' OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?))`,
+        [leaseToken, now + leaseMs, now, now, row.id, now],
+      );
+      if (updated.changes !== 1) return null;
+      const claimed = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(row.id)!;
+      const deliveryUpdated = this.db.run(
+        `UPDATE deliveries SET deployment_status = 'running', deployment_error = NULL, updated_at = ?, revision = revision + 1
+         WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ?`,
+        [now, claimed.delivery_id, claimed.id, claimed.generation, claimed.revision],
+      );
+      if (deliveryUpdated.changes !== 1) throw new Error("deployment job 已不再是 Delivery active generation");
+      this.db.run(
+        "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
+        [claimed.delivery_id, "deployment_claimed", JSON.stringify({ jobId: claimed.id, targetId: claimed.target_id, generation: claimed.generation, attempt: claimed.attempt }), "provider", now],
+      );
+      this.touchDeliveryConversation(claimed.delivery_id, now);
+      return toDeploymentJob(claimed);
+    })();
+  }
+
+  renewDeploymentJob(id: string, leaseToken: string, now: number, leaseMs: number): boolean {
+    return this.db.run(
+      `UPDATE deployment_jobs SET lease_expires_at = ?, updated_at = ?
+       WHERE id = ? AND status = 'running' AND lease_token = ?`,
+      [now + leaseMs, now, id, leaseToken],
+    ).changes === 1;
+  }
+
+  updateDeploymentCheckpoint(id: string, leaseToken: string, checkpoint: string, now: number): boolean {
+    return this.db.run(
+      `UPDATE deployment_jobs SET checkpoint = ?, updated_at = ?
+       WHERE id = ? AND status = 'running' AND lease_token = ?`,
+      [checkpoint, now, id, leaseToken],
+    ).changes === 1;
+  }
+
+  completeDeploymentJob(
+    id: string,
+    leaseToken: string,
+    result: { status: "succeeded" | "failed"; log: string; error?: string | null; rollbackComplete: boolean },
+    now: number,
+  ): { job: DeploymentJob; applied: boolean; duplicate: boolean } {
+    return this.db.transaction(() => {
+      const row = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id);
+      if (!row) throw new Error(`deployment job "${id}" 不存在`);
+      if (row.status === "succeeded" || row.status === "failed") {
+        return { job: toDeploymentJob(row), applied: false, duplicate: true };
+      }
+      if (row.status !== "running" || row.lease_token !== leaseToken) {
+        throw new Error("deployment job lease 已失效；旧 worker 结果已拒绝");
+      }
+      const safeLog = result.log.slice(0, 32_000);
+      const safeError = result.error?.slice(0, 4_000) ?? null;
+      this.db.run(
+        `UPDATE deployment_jobs
+         SET status = ?, log = ?, error = ?, rollback_complete = ?, checkpoint = ?,
+             lease_token = NULL, lease_expires_at = NULL, finished_at = ?, updated_at = ?
+         WHERE id = ? AND status = 'running' AND lease_token = ?`,
+        [result.status, safeLog, safeError, result.rollbackComplete ? 1 : 0,
+          result.status === "succeeded" ? "healthy" : "failed", now, now, id, leaseToken],
+      );
+      const applied = this.db.run(
+        `UPDATE deliveries
+         SET deployment_status = ?, deployed_at = ?, deployment_error = ?, updated_at = ?, revision = revision + 1
+         WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ?`,
+        [result.status, result.status === "succeeded" ? now : null, safeError, now,
+          row.delivery_id, row.id, row.generation, row.revision],
+      ).changes === 1;
+      if (applied) {
+        this.db.run(
+          "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
+          [row.delivery_id, `deployment_${result.status}`, JSON.stringify({
+            jobId: row.id,
+            targetId: row.target_id,
+            generation: row.generation,
+            revision: row.revision,
+            rollbackComplete: result.rollbackComplete,
+            error: safeError,
+            log: safeLog,
+          }), "provider", now],
+        );
+        this.touchDeliveryConversation(row.delivery_id, now);
+      }
+      const fresh = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id)!;
+      return { job: toDeploymentJob(fresh), applied, duplicate: false };
+    })();
+  }
+
+  listDeliveriesReadyToFinalize(): Delivery[] {
+    return this.db
+      .query<DeliveryRow, []>(
+        `SELECT d.* FROM deliveries d JOIN conversations c ON c.id = d.conversation_id
+         WHERE d.deployment_status IN ('not_required','succeeded')
+           AND d.merge_status = 'merged' AND d.review_status = 'approved' AND d.check_status = 'passed'
+           AND c.kind = 'issue' AND c.status = 'review'`,
+      )
+      .all()
+      .map(toDelivery);
   }
 
   private touchDeliveryConversation(deliveryId: string, now: number): void {

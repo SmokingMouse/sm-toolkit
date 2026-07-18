@@ -182,7 +182,7 @@ export type DeliveryReviewStatus = "pending" | "approved";
 export type DeliveryCheckStatus = "unknown" | "pending" | "passed" | "failed";
 export const DELIVERY_CHECK_STATUSES: DeliveryCheckStatus[] = ["unknown", "pending", "passed", "failed"];
 export type DeliveryMergeStatus = "open" | "closed" | "merged";
-export type DeliveryDeploymentStatus = "not_required" | "pending" | "running" | "succeeded" | "failed";
+export type DeliveryDeploymentStatus = "not_required" | "pending" | "queued" | "running" | "succeeded" | "failed";
 /** 只读派生状态；调用方更新正交事实，不能直接写这个字段。 */
 export type DeliveryStatus =
   | "awaiting_change"
@@ -212,6 +212,15 @@ export interface Delivery {
   checkStatus: DeliveryCheckStatus;
   mergeStatus: DeliveryMergeStatus;
   deploymentStatus: DeliveryDeploymentStatus;
+  /** 可空表示沿用人工 deployment；只保存管理员配置 target 的非敏感 id。 */
+  deploymentTargetId: string | null;
+  /** SCM Provider 观察到的 exact merged commit；自动部署没有它就 fail-safe。 */
+  mergedRevision: string | null;
+  /** 当前 active deployment job 冻结的 exact commit。 */
+  deploymentRevision: string | null;
+  deploymentGeneration: number;
+  activeDeploymentJobId: string | null;
+  deploymentError: string | null;
   /** 根据四组事实派生，不在 DB 单独存储。 */
   status: DeliveryStatus;
   reviewApprovedAt: number | null;
@@ -220,6 +229,37 @@ export interface Delivery {
   /** 异步 Provider 动作完成时的 compare-and-set 版本。 */
   revision: number;
   createdAt: number;
+  updatedAt: number;
+}
+
+export type DeploymentProviderKind = "local-launchd";
+
+/** REST 只暴露安全 descriptor；target 的路径、argv、URL、env/凭证只存在 server/worker 配置。 */
+export interface DeploymentTargetDescriptor {
+  id: string;
+  name: string;
+  provider: DeploymentProviderKind;
+}
+
+export type DeploymentJobStatus = "queued" | "running" | "succeeded" | "failed";
+
+export interface DeploymentJob {
+  id: string;
+  deliveryId: string;
+  generation: number;
+  targetId: string;
+  revision: string;
+  status: DeploymentJobStatus;
+  attempt: number;
+  leaseToken: string | null;
+  leaseExpiresAt: number | null;
+  checkpoint: string;
+  log: string | null;
+  error: string | null;
+  rollbackComplete: boolean | null;
+  createdAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
   updatedAt: number;
 }
 

@@ -4,6 +4,7 @@ import type { ApprovalService } from "./approvals.js";
 import type { AutomationService } from "./automation.js";
 import { RunBus } from "./bus.js";
 import { openDb } from "./db.js";
+import { DeliveryService } from "./delivery.js";
 import { buildRest } from "./rest.js";
 import { RunCoordinator, type DeviceTransport } from "./scheduler.js";
 import { HarborStore } from "./store.js";
@@ -236,4 +237,47 @@ test("Delivery policy keeps Issue in Review until checks, merge and deployment a
     "deployment_started",
     "deployment_succeeded",
   ]);
+});
+
+test("Deployment targets expose only safe descriptors and REST rejects request-supplied execution config", async () => {
+  const store = new HarborStore(openDb(":memory:"));
+  const device = store.upsertDevice("target-worker", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
+  const repository = store.createRepository({ workspaceId: store.defaultWorkspace().id, name: "target-repo" }, 2);
+  store.setRepositoryMount(repository.id, device.id, "/repo", 3);
+  const agent = store.createAgent({ name: "target-builder", deviceId: device.id, backend: "claude", repositoryId: repository.id }, 4);
+  const issue = store.createConversation({ kind: "issue", title: "Target", agentId: agent.id, origin: "web" }, 5);
+  store.setConversationStatus(issue.id, "review", 6);
+  const deliveries = new DeliveryService(store, [], [{
+    id: "local-target", name: "Local Target", provider: "local-launchd", repositoryId: repository.id,
+  }]);
+  const coordinator = new RunCoordinator(store, new RunBus(), { isOnline: () => false, send: () => false }, 2, deliveries);
+  const app = buildRest(
+    store, new RunBus(), { onlineIds: () => new Set<string>(), isOnline: () => false } as unknown as DeviceHub,
+    coordinator, {} as ApprovalService, {} as AutomationService, "test-token", deliveries,
+  );
+  const request = (method: string, path: string, body?: unknown) => app.request(path, {
+    method,
+    headers: { Authorization: "Bearer test-token", ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+  const targets = await request("GET", "/api/deployment-targets");
+  expect(await targets.json()).toEqual([{ id: "local-target", name: "Local Target", provider: "local-launchd" }]);
+  const injection = await request("POST", `/api/conversations/${issue.id}/delivery`, {
+    provider: "manual", changeUrl: "https://example.test/mr/1", deploymentRequired: true,
+    deploymentTargetId: "local-target", commands: [["sh", "-c", "anything"]],
+  });
+  expect(injection.status).toBe(400);
+  expect(await injection.json()).toEqual(expect.objectContaining({ error: expect.stringContaining("只能来自 server 管理员配置") }));
+
+  const createdResponse = await request("POST", `/api/conversations/${issue.id}/delivery`, {
+    provider: "manual", changeUrl: "https://example.test/mr/1", deploymentRequired: true,
+    deploymentTargetId: "local-target",
+  });
+  expect(createdResponse.status).toBe(201);
+  const created = (await createdResponse.json()) as Delivery;
+  expect(created).toEqual(expect.objectContaining({ deploymentTargetId: "local-target", deploymentStatus: "pending" }));
+  const forgedResult = await request("POST", `/api/deliveries/${created.id}/deployment-result`, { status: "succeeded" });
+  expect(forgedResult.status).toBe(400);
+  expect(await forgedResult.json()).toEqual(expect.objectContaining({ error: expect.stringContaining("独立 host worker") }));
 });

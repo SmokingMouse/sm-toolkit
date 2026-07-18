@@ -90,6 +90,11 @@ function validateDeliveryUrl(value: string | null | undefined): void {
   }
 }
 
+function rejectUnknownFields(body: Record<string, unknown>, allowed: string[]): void {
+  const unknown = Object.keys(body).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) bad(`不支持字段：${unknown.join(", ")}；部署命令、路径与 health 配置只能来自 server 管理员配置`);
+}
+
 export function buildRest(
   store: HarborStore,
   bus: RunBus,
@@ -184,6 +189,8 @@ export function buildRest(
     }
     await next();
   });
+
+  app.get("/api/deployment-targets", (c) => c.json(deliveries.listDeploymentTargets()));
 
   app.get("/api/health", (c) => c.json({ ok: true }));
 
@@ -944,7 +951,9 @@ export function buildRest(
       headBranch?: string;
       baseBranch?: string;
       deploymentRequired?: boolean;
+      deploymentTargetId?: string | null;
     };
+    rejectUnknownFields(b as Record<string, unknown>, ["provider", "changeUrl", "externalId", "headBranch", "baseBranch", "deploymentRequired", "deploymentTargetId"]);
     validateDeliveryUrl(b.changeUrl);
     const delivery = await deliveryAction(() => deliveries.create(conv, b));
     return c.json(delivery, 201);
@@ -968,7 +977,8 @@ export function buildRest(
 
   app.post("/api/deliveries/:id/merge", async (c) => {
     const { delivery, conversation: conv } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
-    const b = (await c.req.json()) as { confirmed?: boolean };
+    const b = (await c.req.json()) as { confirmed?: boolean; mergedRevision?: string };
+    rejectUnknownFields(b as Record<string, unknown>, ["confirmed", "mergedRevision"]);
     const fresh = await deliveryAction(() => deliveries.merge(delivery, conv, b));
     finalizeDelivery(fresh);
     return c.json(store.getDelivery(fresh.id));
@@ -984,12 +994,14 @@ export function buildRest(
   app.post("/api/deliveries/:id/deploy", async (c) => {
     const { delivery, conversation: conv } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
     const b = (await c.req.json()) as { confirmed?: boolean };
+    rejectUnknownFields(b as Record<string, unknown>, ["confirmed"]);
     return c.json(await deliveryAction(() => deliveries.startDeployment(delivery, conv, b)));
   });
 
   app.post("/api/deliveries/:id/deployment-result", async (c) => {
     const { delivery } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
     const b = (await c.req.json()) as { status?: "succeeded" | "failed" };
+    rejectUnknownFields(b as Record<string, unknown>, ["status"]);
     if (b.status !== "succeeded" && b.status !== "failed") bad("status 可选 succeeded/failed");
     const fresh = await deliveryAction(() => deliveries.finishDeployment(delivery, b.status!));
     finalizeDelivery(fresh);

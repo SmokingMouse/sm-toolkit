@@ -29,6 +29,7 @@ interface GitHubPullResponse {
   state: string;
   merged: boolean;
   merged_at: string | null;
+  merge_commit_sha?: string | null;
   html_url: string;
   head: { ref: string; sha: string };
   base: { ref: string };
@@ -359,9 +360,6 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
   constructor(private readonly client: GitHubRestClient) {}
 
   prepareChange(context: DeliveryProviderContext, input: DeliveryChangeInput): DeliveryChangeInput {
-    if (input.deploymentRequired) {
-      throw new Error("GitHub Delivery 当前不支持 deployment；请关闭“Merge 后需要部署”或使用 manual provider");
-    }
     const ref = resolveGitHubPullRequest(input.changeUrl, context.repository, input.externalId);
     return {
       ...input,
@@ -406,6 +404,7 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
       checkStatus,
       mergeStatus,
       mergedAt,
+      mergedRevision: pull.merged ? pull.merge_commit_sha?.trim() || null : null,
       data: {
         pullRequestState: pull.merged ? "merged" : pull.state,
         observedChecks,
@@ -434,13 +433,19 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
     if (latestChecks !== "passed") {
       throw new Error(`GitHub 最新 CI checks 为 ${latestChecks}；请 Sync 并等待通过后再合并`);
     }
-    if (pull.merged) return { message: `GitHub PR #${ref.number} 已合并` };
+    if (pull.merged) {
+      return {
+        message: `GitHub PR #${ref.number} 已合并`,
+        mergedRevision: pull.merge_commit_sha?.trim() || null,
+      };
+    }
     if (pull.state !== "open") {
       throw new Error(`GitHub PR #${ref.number} 当前不可合并；请 Sync 后检查 PR 状态`);
     }
     const result = await this.client.mergePullRequest(ref, delivery.latestHeadSha);
     return {
       message: result.message,
+      mergedRevision: result.sha,
       data: { expectedHeadSha: delivery.latestHeadSha, ...(result.sha ? { mergeSha: result.sha } : {}) },
     };
   }

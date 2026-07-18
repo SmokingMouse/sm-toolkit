@@ -15,6 +15,12 @@ import {
   showDaemonLogs,
   uninstallDaemonService,
 } from "../daemon/service.js";
+import {
+  deploymentWorkerServiceStatus,
+  setupDeploymentWorkerService,
+  showDeploymentWorkerLogs,
+  uninstallDeploymentWorkerService,
+} from "../deployment-worker/service.js";
 
 const USAGE = `${c.bold}harbor${c.reset} — 个人多设备 agent 调度
 
@@ -47,6 +53,12 @@ ${c.bold}设备 daemon${c.reset}
   harbor daemon status
   harbor daemon logs [--lines 100] [--follow]
   harbor daemon uninstall                                  卸服务，保留配置与日志
+
+${c.bold}部署 host worker（独立 LaunchAgent）${c.reset}
+  harbor deploy-worker setup
+  harbor deploy-worker status
+  harbor deploy-worker logs [--lines 100] [--follow]
+  harbor deploy-worker uninstall
 
 ${c.bold}审批${c.reset}（permission=default 的 agent 用工具时上抛）
   harbor approvals [--status pending]                      审批列表
@@ -172,6 +184,33 @@ async function main(): Promise<number> {
       return 0;
     }
     throw new Error("用法：harbor daemon setup|status|logs|uninstall");
+  }
+
+  if (domain === "deploy-worker") {
+    if (verb === "setup") {
+      const status = setupDeploymentWorkerService();
+      console.log(`${c.green}✓${c.reset} deployment worker LaunchAgent 已安装并启动`);
+      console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
+      return 0;
+    }
+    if (verb === "status") {
+      const status = deploymentWorkerServiceStatus();
+      console.log(`${status.running ? c.green : c.yellow}${status.running ? "● running" : "○ stopped"}${c.reset} ${status.state}${status.pid ? ` pid=${status.pid}` : ""}`);
+      console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
+      return status.running ? 0 : 1;
+    }
+    if (verb === "logs") {
+      const lines = typeof flags.lines === "string" ? Number(flags.lines) : 100;
+      if (!Number.isFinite(lines) || lines <= 0) throw new Error("--lines 必须是正整数");
+      return showDeploymentWorkerLogs(lines, flags.follow === true);
+    }
+    if (verb === "uninstall") {
+      const status = uninstallDeploymentWorkerService();
+      console.log(`${c.green}✓${c.reset} deployment worker LaunchAgent 已卸载（配置与日志保留）`);
+      console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
+      return 0;
+    }
+    throw new Error("用法：harbor deploy-worker setup|status|logs|uninstall");
   }
 
   const workspace = typeof flags.workspace === "string" ? flags.workspace : configuredWorkspace();

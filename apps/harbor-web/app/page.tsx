@@ -17,6 +17,7 @@ import {
   listAgents,
   listConversations,
   listDevices,
+  listDeploymentTargets,
   publishIssueDraft,
   requestIssueChanges,
   reviewIssue,
@@ -31,6 +32,7 @@ import {
   type DeliveryCheckStatus,
   type DeliveryEvent,
   type DeliveryProviderKind,
+  type DeploymentTargetDescriptor,
   type HarborAgent,
   type IssuePriority,
   type Run,
@@ -466,6 +468,7 @@ function parseIssueDraft(text: string, fallback: string): { title: string; descr
 function IssueDrawer({ id, agents, onlineDeviceIds, initialAction, onInitialActionConsumed, onChanged, onClose }: { id: string; agents: HarborAgent[]; onlineDeviceIds: Set<string>; initialAction: IssueAction | null; onInitialActionConsumed: () => void; onChanged: () => void; onClose: () => void }) {
   const toast = useToast();
   const detail = usePoll(() => getConversation(id), 4_000);
+  const deploymentTargets = usePoll(listDeploymentTargets, 30_000);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [action, setAction] = useState<IssueAction | null>(null);
   const [actionAgent, setActionAgent] = useState("");
@@ -582,7 +585,7 @@ function IssueDrawer({ id, agents, onlineDeviceIds, initialAction, onInitialActi
     finally { setBusy(false); }
   };
 
-  const setupDelivery = async (input: { provider: DeliveryProviderKind; changeUrl: string; deploymentRequired: boolean }) => {
+  const setupDelivery = async (input: { provider: DeliveryProviderKind; changeUrl: string; deploymentRequired: boolean; deploymentTargetId?: string | null }) => {
     setBusy(true);
     try {
       await createDelivery(id, input);
@@ -626,13 +629,17 @@ function IssueDrawer({ id, agents, onlineDeviceIds, initialAction, onInitialActi
 
   const confirmDeliveryMerge = async () => {
     if (!delivery) return;
-    const prompt = delivery.provider === "github"
+    const confirmMessage = delivery.provider === "github"
       ? "确认由 Harbor 调用 GitHub 合并该 PR？仍会再次校验人工验收与 CI checks。"
       : "确认该 MR / PR 已在外部 SCM 合并？Harbor 只记录事实，不会替你调用平台。";
-    if (!confirm(prompt)) return;
+    if (!confirm(confirmMessage)) return;
+    const mergedRevision = delivery.provider === "manual" && delivery.deploymentTargetId
+      ? window.prompt("请输入外部 SCM 已合并的完整 commit id（40/64 位十六进制）；worker 会在配置仓库中再次精确验证。")?.trim()
+      : undefined;
+    if (delivery.provider === "manual" && delivery.deploymentTargetId && !mergedRevision) return;
     setBusy(true);
     try {
-      await mergeDelivery(delivery.id);
+      await mergeDelivery(delivery.id, mergedRevision);
       toast(delivery.provider === "github" ? "GitHub PR 已合并" : delivery.deploymentStatus === "not_required" ? "已记录合并，Issue 交付完成" : "已记录合并，等待部署", "success");
       refresh();
     } catch (error) {
@@ -643,11 +650,15 @@ function IssueDrawer({ id, agents, onlineDeviceIds, initialAction, onInitialActi
   };
 
   const startDeployment = async () => {
-    if (!delivery || !confirm("确认外部部署已经开始？这不会主动触发部署。")) return;
+    if (!delivery) return;
+    const prompt = delivery.deploymentTargetId
+      ? `Retry 会为 target ${delivery.deploymentTargetId} 创建新 generation；旧 worker 结果不会覆盖。确认重试？`
+      : "确认外部部署已经开始？这不会主动触发部署。";
+    if (!confirm(prompt)) return;
     setBusy(true);
     try {
       await startDeliveryDeployment(delivery.id);
-      toast("已记录部署开始", "success");
+      toast(delivery.deploymentTargetId ? "自动部署已重新入队" : "已记录部署开始", "success");
       refresh();
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), "error");
@@ -800,7 +811,7 @@ function IssueDrawer({ id, agents, onlineDeviceIds, initialAction, onInitialActi
       </div>
 
       {action === "review" && <ActionModal action="review" agents={agentsForConversation} onlineDeviceIds={onlineDeviceIds} agent={actionAgent} prompt={actionPrompt} busy={busy} onAgent={setActionAgent} onPrompt={setActionPrompt} onClose={() => setAction(null)} onSubmit={submitReview} />}
-      {deliverySetup && <DeliverySetupModal busy={busy} onClose={() => setDeliverySetup(false)} onSubmit={setupDelivery} />}
+      {deliverySetup && <DeliverySetupModal targets={deploymentTargets.data ?? []} busy={busy} onClose={() => setDeliverySetup(false)} onSubmit={setupDelivery} />}
     </div>
   );
 }
@@ -903,8 +914,11 @@ function DeliveryCard({
             {delivery.provider === "manual" && delivery.mergeStatus === "open" ? <select className="h-8 max-w-[126px] rounded-lg border border-transparent bg-bg pl-2 text-[10px] font-semibold hover:border-line" value={delivery.checkStatus} disabled={disabled} onChange={(event) => onChecks(event.target.value as DeliveryCheckStatus)}><option value="unknown">Unknown</option><option value="pending">Pending</option><option value="passed">Passed</option><option value="failed">Failed</option></select> : <span className={`text-[10px] font-semibold ${checksDone ? "text-done" : delivery.checkStatus === "failed" ? "text-canceled" : "text-ink/65"}`}>{delivery.checkStatus}</span>}
           </div>
           <DeliveryFact label="Merge" value={mergeDone ? "Merged" : delivery.mergeStatus === "closed" ? "Closed" : "Open"} ok={mergeDone} />
+          <DeliveryFact label="Target" value={delivery.deploymentTargetId ?? (delivery.deploymentStatus === "not_required" ? "Not required" : "Manual")} ok={!!delivery.deploymentTargetId || delivery.deploymentStatus === "not_required"} />
           <DeliveryFact label="Deploy" value={delivery.deploymentStatus.replace("_", " ")} ok={deployDone && mergeDone} />
         </div>
+
+        {delivery.deploymentError && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[10px] leading-4 text-red-700">{delivery.deploymentError}</p>}
 
         {delivery.provider === "github" ? (
           <p className="mt-3 rounded-lg bg-bg px-3 py-2 text-[10px] leading-4 text-dim"><span className="font-semibold text-ink/70">GitHub provider</span> · PR / checks 以 GitHub sync 为准；merge 仍受人工验收与 CI 闸控制。</p>
@@ -917,8 +931,8 @@ function DeliveryCard({
             {delivery.provider === "github" && <button className={btnGhost} disabled={disabled} onClick={onSync}>Sync from GitHub</button>}
             {!reviewDone && <button className={btnPrimary} disabled={disabled} onClick={onApprove}>Approve implementation</button>}
             {delivery.status === "merge_ready" && <button className={btnPrimary} disabled={disabled} onClick={onMerge}>{delivery.provider === "github" ? "Merge on GitHub" : "Confirm externally merged"}</button>}
-            {(delivery.status === "merged" || delivery.status === "failed") && <button className={delivery.status === "failed" ? btnDanger : btnPrimary} disabled={disabled} onClick={onDeploy}>{delivery.status === "failed" ? "Record deploy retry" : "Record deploy started"}</button>}
-            {delivery.status === "deploying" && <div className="grid grid-cols-2 gap-2"><button className={btnPrimary} disabled={disabled} onClick={() => onDeploymentResult("succeeded")}>Succeeded</button><button className={btnDanger} disabled={disabled} onClick={() => onDeploymentResult("failed")}>Failed</button></div>}
+            {(delivery.status === "merged" || delivery.status === "failed") && <button className={delivery.status === "failed" ? btnDanger : btnPrimary} disabled={disabled} onClick={onDeploy}>{delivery.deploymentTargetId ? "Retry deployment" : delivery.status === "failed" ? "Record deploy retry" : "Record deploy started"}</button>}
+            {delivery.status === "deploying" && !delivery.deploymentTargetId && <div className="grid grid-cols-2 gap-2"><button className={btnPrimary} disabled={disabled} onClick={() => onDeploymentResult("succeeded")}>Succeeded</button><button className={btnDanger} disabled={disabled} onClick={() => onDeploymentResult("failed")}>Failed</button></div>}
           </div>
         )}
 
@@ -942,23 +956,25 @@ function deliveryLinkLabel(value: string | null): string {
   }
 }
 
-function DeliverySetupModal({ busy, onClose, onSubmit }: { busy: boolean; onClose: () => void; onSubmit: (input: { provider: DeliveryProviderKind; changeUrl: string; deploymentRequired: boolean }) => void }) {
+function DeliverySetupModal({ targets, busy, onClose, onSubmit }: { targets: DeploymentTargetDescriptor[]; busy: boolean; onClose: () => void; onSubmit: (input: { provider: DeliveryProviderKind; changeUrl: string; deploymentRequired: boolean; deploymentTargetId?: string | null }) => void }) {
   const [provider, setProvider] = useState<DeliveryProviderKind>("manual");
   const [changeUrl, setChangeUrl] = useState("");
   const [deploymentRequired, setDeploymentRequired] = useState(true);
+  const [deploymentTargetId, setDeploymentTargetId] = useState("");
   return (
     <Modal title="Set up delivery" onClose={onClose}>
       <div className="mb-5 rounded-xl border border-line bg-bg/65 p-4">
         <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-dim">{provider === "github" ? "GitHub provider" : "Manual provider"}</div>
-        <p className="mt-1.5 text-xs leading-5 text-ink/70">{provider === "github" ? "同步已有 GitHub PR 与 checks，并在 Harbor policy 通过后受控合并。server 必须配置 HARBOR_GITHUB_TOKEN；不会自动创建 PR 或触发部署。" : "先把交付事实纳入 Harbor。当前不会自动创建或合并 MR，也不会主动触发部署。"}</p>
+        <p className="mt-1.5 text-xs leading-5 text-ink/70">{provider === "github" ? "同步已有 GitHub PR 与 checks，并在 Harbor policy 通过后受控合并；选择 target 后会自动部署 exact merged revision。" : "先把交付事实纳入 Harbor；未选择 target 时保留人工部署 fallback。"}</p>
       </div>
-      <Field label="Provider"><select autoFocus className={inputCls} value={provider} onChange={(event) => { const next = event.target.value as DeliveryProviderKind; setProvider(next); if (next === "github") setDeploymentRequired(false); }}><option value="manual">Manual</option><option value="github">GitHub</option></select></Field>
+      <Field label="SCM Provider"><select autoFocus className={inputCls} value={provider} onChange={(event) => setProvider(event.target.value as DeliveryProviderKind)}><option value="manual">Manual</option><option value="github">GitHub</option></select></Field>
       <Field label="MR / PR URL"><input className={inputCls} value={changeUrl} onChange={(event) => setChangeUrl(event.target.value)} placeholder="https://github.com/org/repo/pull/123" /></Field>
+      <Field label="Deployment target"><select className={inputCls} value={deploymentTargetId} onChange={(event) => { const target = event.target.value; setDeploymentTargetId(target); if (target) setDeploymentRequired(true); }}><option value="">Manual / none</option>{targets.map((target) => <option key={target.id} value={target.id}>{target.name} · {target.provider}</option>)}</select></Field>
       <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-line p-4 hover:bg-bg/60">
-        <input className="mt-0.5 h-4 w-4 accent-accent" type="checkbox" checked={deploymentRequired} disabled={provider === "github"} onChange={(event) => setDeploymentRequired(event.target.checked)} />
-        <span><span className="block text-xs font-semibold text-ink">Merge 后需要部署</span><span className="mt-1 block text-[11px] leading-5 text-dim">{provider === "github" ? "本 Issue 不实现 GitHub Actions deployment；GitHub provider 固定为无需部署。" : "开启后，部署成功才会把 Issue 推进 Done；关闭则合并即完成。"}</span></span>
+        <input className="mt-0.5 h-4 w-4 accent-accent" type="checkbox" checked={deploymentRequired} disabled={!!deploymentTargetId} onChange={(event) => setDeploymentRequired(event.target.checked)} />
+        <span><span className="block text-xs font-semibold text-ink">Merge 后需要部署</span><span className="mt-1 block text-[11px] leading-5 text-dim">{deploymentTargetId ? "Harbor gates 通过后自动 enqueue；结果只由独立 host worker 写入。" : "开启时使用人工 deployment fallback；关闭则合并即完成。"}</span></span>
       </label>
-      <ModalFooter><button className={btnGhost} onClick={onClose}>取消</button><button className={btnPrimary} disabled={busy || !changeUrl.trim()} onClick={() => onSubmit({ provider, changeUrl: changeUrl.trim(), deploymentRequired })}>{busy ? "Creating…" : "Create delivery"}</button></ModalFooter>
+      <ModalFooter><button className={btnGhost} onClick={onClose}>取消</button><button className={btnPrimary} disabled={busy || !changeUrl.trim()} onClick={() => onSubmit({ provider, changeUrl: changeUrl.trim(), deploymentRequired, deploymentTargetId: deploymentTargetId || null })}>{busy ? "Creating…" : "Create delivery"}</button></ModalFooter>
     </Modal>
   );
 }

@@ -16,6 +16,7 @@ import type {
   DeliveryCheckStatus,
   DeliveryEvent,
   DeliveryProviderKind,
+  DeploymentTargetDescriptor,
   DeliveryStatus,
   Device,
   HarborAgent,
@@ -45,6 +46,7 @@ export type {
   DeliveryCheckStatus,
   DeliveryEvent,
   DeliveryProviderKind,
+  DeploymentTargetDescriptor,
   DeliveryStatus,
   Device,
   HarborAgent,
@@ -235,16 +237,17 @@ export const reviewIssue = (id: string, body: { agent: string; prompt?: string }
   req<Run>("POST", `/api/conversations/${encodeURIComponent(id)}/review`, body);
 export const approveIssue = (id: string) =>
   req<Conversation>("POST", `/api/conversations/${encodeURIComponent(id)}/approve`);
+export const listDeploymentTargets = () => req<DeploymentTargetDescriptor[]>("GET", "/api/deployment-targets");
 export const createDelivery = (
   id: string,
-  body: { provider: DeliveryProviderKind; changeUrl: string; deploymentRequired: boolean },
+  body: { provider: DeliveryProviderKind; changeUrl: string; deploymentRequired: boolean; deploymentTargetId?: string | null },
 ) => req<Delivery>("POST", `/api/conversations/${encodeURIComponent(id)}/delivery`, body);
 export const updateDelivery = (
   id: string,
   body: { changeUrl?: string; externalId?: string; headBranch?: string; baseBranch?: string; checkStatus?: DeliveryCheckStatus },
 ) => req<Delivery>("PATCH", `/api/deliveries/${encodeURIComponent(id)}`, body);
-export const mergeDelivery = (id: string) =>
-  req<Delivery>("POST", `/api/deliveries/${encodeURIComponent(id)}/merge`, { confirmed: true });
+export const mergeDelivery = (id: string, mergedRevision?: string) =>
+  req<Delivery>("POST", `/api/deliveries/${encodeURIComponent(id)}/merge`, { confirmed: true, ...(mergedRevision ? { mergedRevision } : {}) });
 export const syncDelivery = (id: string) =>
   req<Delivery>("POST", `/api/deliveries/${encodeURIComponent(id)}/sync`, {});
 export const startDeliveryDeployment = (id: string) =>

@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-Harbor 自举闭环、P4.16「GitHub Delivery Provider」与 Agent Device 安全迁移已完成：Codex worktree implementation 可在 workspace-write 下安全提交，launchd server/daemon 已用真实 Request changes + resume Run 验证；Agent 可安全切换未来执行 Device，历史 Run 快照不变；已有 GitHub PR 可同步 PR/required+latest checks，并在 human approved + checks passed 后受控 merge。下一步用最小权限 GitHub token 做 acceptance，并实现可回滚 CD Provider与真实双机协同；P5 时间性验证仍等待真飞书 / automation 7 天 / dogfood 一周。
+Harbor 自举闭环、P4.17「Local launchd Deployment Provider」与 Agent Device 安全迁移已完成：Codex worktree implementation 可在 workspace-write 下安全提交；SCM merge 与部署保持正交；merge gate 通过后由独立 host worker 持久化执行 exact revision、构建、SQLite 备份、原子 launchd 切换、健康检查与失败回滚。下一步用管理员配置完成最小权限 GitHub 与 Local launchd 真实 acceptance，并继续自动创建 PR/webhook reconciliation 与真实双机协同；P5 时间性验证仍等待真飞书 / automation 7 天 / dogfood 一周。
 
 ## Goals
 
@@ -24,10 +24,11 @@ Harbor 自举闭环、P4.16「GitHub Delivery Provider」与 Agent Device 安全
 - [x] @sm/channel-feishu：飞书 Channel 适配（从 SelfAgent 移植，薄实现）
 - [x] 根级 `bun run setup` 引导流程（配模型 + 注册 SDK + 注册全局命令 + 按需装 app）
 - [x] agent-gateway 统一配置源（已迁移——见 2026-07-11 session；agent-gateway 独立仓库整体退役，能力拍平进 @sm/agent）
-- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 主方案 `progress/harbor.md`。P1–P4.16、Agent Device 安全迁移与 worktree 自举已完成（Mew 对标、模型路由、敏捷闭环、AI draft、Skill、Delivery control plane、Workspace/Repository scope、event-aware Prompt pipeline 与首个真实 GitHub Provider）。产品机制层下一步是自动创建 PR、webhook reconciliation 与真实 CD Provider；P5 时间性验证仍需真双机、真飞书群、automation 7 天与真实负载一周
+- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 主方案 `progress/harbor.md`。P1–P4.17、Agent Device 安全迁移与 worktree 自举已完成（Mew 对标、模型路由、敏捷闭环、AI draft、Skill、Delivery control plane、Workspace/Repository scope、event-aware Prompt pipeline、GitHub SCM Provider 与 Local launchd Deployment Provider）。产品机制层下一步是自动创建 PR、webhook reconciliation 与真实 SCM/CD acceptance；P5 时间性验证仍需真双机、真飞书群、automation 7 天与真实负载一周
 
 ## Verified Facts
 
+- **Deployment target 是管理员配置的 host capability，不是 Delivery 可编辑命令**（2026-07-19 fake host + durable SQLite 实测）：env/`~/.harbor.yaml` 保存 target 的路径、argv、launchd/health/凭证，DB/REST/Web 只持久化和展示安全 target id/name/provider。merge + human approval + Harbor checks 后 server 幂等 enqueue；独立 `harbor-deploy-worker` 用 generation/revision/lease token fencing 领取，server/daemon 重启不丢任务，旧 generation、过期 lease 与重复 callback 不能污染当前 Delivery。worker 校验 exact committed ref，完成 install/build/test、一致性 SQLite backup、原子 service definition/current release 切换与 health check；失败恢复旧 definition/release/DB，恢复不确定则保持 Deployment failed，绝不由 Agent prompt 或 Agent 自报 Done。完整边界见 ADR `progress/decisions/2026-07-19-harbor-local-launchd-deployment-provider.md`。
 - **Codex worktree Git 写权限是 Run 级 capability，不是 Agent 全局 full access**（2026-07-19 实测）：`RunSpec.repositoryRoot` 永远是 Run 绑定的 Repository mount，`executionRoot/worktreePath` 独立承载实际 cwd；只有 `Codex + implementation + worktree + auto-edit/full` 经本机 Repository common-dir、canonical Issue physical leaf、registry raw absolute leaf 与 `refs/heads/harbor/<Issue ID>` symbolic HEAD 校验后获得 additional writable dirs。初次 exec 用重复 `--add-dir`，resume 用 workspace-write config roots；readonly/default、triage、review、verification、Claude 与非 worktree 均为空，跨 Repository、正/反向跨 Issue symlink、错误 branch、detached HEAD 或路径不一致直接失败。隔离风险见 ADR `progress/decisions/2026-07-18-harbor-codex-worktree-git-metadata.md`。
 - **Daemon service PATH 必须从实际 bun executable 自举**（2026-07-18 实测）：launchd/systemd definition 都把 `dirname(bunPath)` 放在 PATH 首位并去重，避免 ProgramArguments 能启动 bun、Run 子进程却找不到 bun；生成逻辑不写 token，也不在测试中加载真实 service。
 - **GitHub Delivery 的外部真相来自 server-side REST sync，不来自 Agent/调用方自报**（2026-07-18 deferred fake HTTP + REST 实测）：Repository `remoteUrl` 锁定 owner/repo，PR URL 跨仓/非 GitHub/畸形即拒；classic protection + active rulesets + 完整分页 check-runs/combined statuses 合并判定，同名 required context 聚合全部来源，任一 failed/pending 即不通过；check-run/status id 重复、total 漂移/overshoot、跨页 state/SHA 漂移、不完整快照或 combined 顶层状态与本地 passed 矛盾均 fail-safe，unrelated context 不冒充 required failure。protected branch classic 404 权限歧义与 required workflows 同样 fail-safe。latest/approved head SHA 绑定人工验收；每次 implementation 无条件推进 revision，旧 generation 慢 sync 的 CAS 失败后丢弃且不自动重试；外部已 merged 仍需 Harbor policy 才能 Done；缺 token 只禁用 github，manual 正常。
@@ -50,6 +51,13 @@ Harbor 自举闭环、P4.16「GitHub Delivery Provider」与 Agent Device 安全
 - **Next**：Issue 交人工验收；lockfile 双轨问题待决策。
 
 ## Session Log
+
+### 2026-07-19 — P4.17 Local launchd Deployment Provider（Issue c_2axsy792od）
+- **Decision**：SCM Provider 只负责外部合并事实，Deployment target/provider 独立建模；target 全量配置只存在 server/worker 管理员配置，Delivery 仅引用安全 id。部署采用 SQLite durable job + generation/revision/lease fencing，host worker 与 server/daemon 生命周期解耦；完整状态机、信任边界、崩溃恢复与回滚协议见 ADR。
+- **Done**：SQLite v14 无损迁移 Delivery deployment evidence 并新增 durable jobs；merge gate 后自动 enqueue/retry；exact revision checkout、配置化 install/build/test、一致性 DB backup、原子 plist/current release 切换、bootout/bootstrap/health、失败回滚与 checkpoint 恢复；worker launchd 管理 CLI；REST 安全 target descriptor、Web target 选择/进度/错误/Retry；未配置 target 时 manual deployment 行为不变，带 target 的结果禁止由 UI/Issue/Agent 自报。
+- **Verified**：新增纯 fake FS/process/launchd/HTTP/clock/SQLite 覆盖 server restart、lease reclaim、duplicate callback、health failure rollback、backup restore failure、stale revision/generation、crash checkpoint 与 manual fallback；根 `bun test` **205 pass / 0 fail / 965 assertions（38 files）**，root typecheck、Harbor build、harbor-web typecheck、Next production build（12 static pages）、`git diff --check` 全过。
+- **Boundary**：未读取或修改真实 `~/.harbor.yaml`、真实用户 DB/launchd；未配置 token，未 push/merge/deploy。真实 host acceptance 必须由管理员另行配置并显式执行。
+- **Next**：用 0600 管理员 YAML 与隔离测试 service/DB 做真实 acceptance；自动 branch push/PR creation 与 webhook reconciliation 保持后续独立 Issue。
 
 ### 2026-07-18 — Harbor worktree Agent 自举与 daemon PATH
 - **Root cause**：linked worktree 的真实 index/objects/refs 位于 Repository common gitdir，Codex workspace-write 只覆盖 checkout；同时 service 使用绝对 bun ProgramArguments，却原样继承一个可能不含 bun dirname 的 PATH。

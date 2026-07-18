@@ -5,7 +5,6 @@
  * HARBOR_CONCURRENCY=2（per-device 并发闸）；飞书入口走 ~/.harbor.yaml feishu 块（可缺省）。
  */
 
-import { resolve } from "node:path";
 import { openDb } from "./db.js";
 import { HarborStore } from "./store.js";
 import { RunBus } from "./bus.js";
@@ -17,12 +16,13 @@ import { FeishuEntry } from "./feishu.js";
 import { buildRest } from "./rest.js";
 import { DeliveryService } from "./delivery.js";
 import { GitHubDeliveryProvider, GitHubRestClient } from "./github-delivery.js";
-import { feishuConfig, githubConfig, token } from "../config.js";
+import { databasePath, deploymentTargets, feishuConfig, githubConfig, token } from "../config.js";
 import { DEFAULT_DEVICE_CONCURRENCY, DEFAULT_PORT, RUN_EVENTS_RETENTION_MS } from "../protocol.js";
+import { reconcileCompletedDeployments } from "./deployment-reconciler.js";
 
 const authToken = token();
 const port = Number(process.env.HARBOR_PORT ?? DEFAULT_PORT);
-const dbPath = process.env.HARBOR_DB ?? resolve(process.env.HOME ?? "~", ".harbor/harbor.db");
+const dbPath = databasePath();
 const concurrency = Number(process.env.HARBOR_CONCURRENCY ?? DEFAULT_DEVICE_CONCURRENCY);
 
 const db = openDb(dbPath);
@@ -30,9 +30,11 @@ const store = new HarborStore(db);
 const bus = new RunBus();
 const hub = new DeviceHub(store, authToken);
 const gc = githubConfig();
+const configuredDeploymentTargets = deploymentTargets();
 const deliveries = new DeliveryService(
   store,
   gc ? [new GitHubDeliveryProvider(new GitHubRestClient(gc.token))] : [],
+  configuredDeploymentTargets.map(({ id, name, provider, repositoryId }) => ({ id, name, provider, repositoryId })),
 );
 if (!gc) {
   console.log(
@@ -74,6 +76,13 @@ coordinator.onRunFinished = (run, conv) => {
 };
 
 const app = buildRest(store, bus, hub, coordinator, approvals, automations, authToken, deliveries);
+
+// worker 直接把 durable result 写回 SQLite；server 在运行或重启后确定性推进 Issue/收尾 worktree。
+const finalizeDeployments = () => {
+  reconcileCompletedDeployments(store, coordinator);
+};
+finalizeDeployments();
+setInterval(finalizeDeployments, 1_000);
 
 Bun.serve<WsData>({
   port,
