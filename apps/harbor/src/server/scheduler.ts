@@ -441,16 +441,11 @@ export class RunCoordinator {
   }
 }
 
-const AGENT_ACTION_GUIDANCE = `# Harbor control-plane actions
+const AGENT_ACTION_GUIDANCE = `# Harbor control-plane safety
 
 Harbor owns lifecycle state. Do not mutate the current Issue status from the shell.
 All action endpoints require Authorization: Bearer $HARBOR_AGENT_ACTION_TOKEN. Never print, log, persist, or include that token in output.
-
-- Route work: POST JSON to $HARBOR_AGENT_ISSUE_URL. Body: {"title":"...","description":"...","priority":"none|low|medium|high|urgent","assignee":"unassigned|self|<Agent id/name>","dispatch":true|false,"prompt":"...","labels":["existing-label"]}. Use this only for a real tracked work item, never for progress reporting.
-- Register/open a PR from a running implementation: POST JSON to $HARBOR_AGENT_DELIVERY_URL. The head branch must be harbor/<current Issue ID>. Body: {"provider":"github|codebase|manual","changeUrl":"optional existing PR URL","headBranch":"harbor/<Issue ID>","baseBranch":"main","title":"...","body":"...","deploymentRequired":true}. This cannot approve or merge.
-- Submit an independent review decision from a review Run: POST JSON to $HARBOR_AGENT_REVIEW_URL. Body: {"decision":"approve|request_changes","feedback":"...","merge":true,"developer":"optional Agent id/name"}. Harbor re-syncs external facts and enforces head-SHA, CI, merge and deployment policy; request_changes queues the Developer after this review Run.
-
-Only call the endpoint appropriate to the current Run purpose. A rejected action is a control-plane decision; do not bypass it with the owner token or direct database writes.`;
+The built-in harbor Skill defines the supported action shapes and role playbooks. Only call the endpoint appropriate to the current Run purpose. A rejected action is a control-plane decision; do not bypass it with the owner token or direct database writes.`;
 
 function withAgentActionGuidance(systemPrompt: string | null): string {
   return [systemPrompt?.trim(), AGENT_ACTION_GUIDANCE].filter(Boolean).join("\n\n---\n\n");

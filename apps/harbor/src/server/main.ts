@@ -39,6 +39,7 @@ import {
 import { reconcileCompletedDeployments } from "./deployment-reconciler.js";
 import { HostMaintenanceSentinel } from "../deployment-worker/maintenance.js";
 import { DeploymentMaintenanceGuard } from "./maintenance.js";
+import { ensureBuiltinSkills } from "./builtin-skills.js";
 
 const authToken = token();
 const port = Number(process.env.HARBOR_PORT ?? DEFAULT_PORT);
@@ -49,6 +50,7 @@ const concurrency = Number(
 
 const db = openDb(dbPath);
 const store = new HarborStore(db);
+ensureBuiltinSkills(store);
 const bus = new RunBus();
 const hub = new DeviceHub(store, authToken, () => store.listDeploymentMaintenance().length > 0);
 const gc = githubConfig();

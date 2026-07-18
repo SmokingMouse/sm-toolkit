@@ -98,7 +98,7 @@ describe("prompt blocks", () => {
     const version = db
       .query<{ user_version: number }, []>("PRAGMA user_version")
       .get()?.user_version;
-    expect(version).toBe(19);
+    expect(version).toBe(20);
     const store = new HarborStore(db);
     const input = fixtures();
     const rendered = renderRunPrompt(store, input);

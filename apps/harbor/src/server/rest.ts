@@ -54,6 +54,10 @@ import { DeliveryService } from "./delivery.js";
 import type { ScmService } from "./scm.js";
 import { importedSkillMetadata, SkillImportService } from "./skill-import.js";
 import {
+  ensureBuiltinHarborSkill,
+  HARBOR_BUILTIN_SKILL_NAME,
+} from "./builtin-skills.js";
+import {
   getPromptBlockConfig,
   listPromptBlockConfigs,
   PROMPT_BLOCK_KEYS,
@@ -1088,11 +1092,24 @@ export function buildRest(
     deviceId: string,
     backend: BackendKind,
   ) => {
-    if (value === undefined) return [];
-    if (!Array.isArray(value) || value.some((id) => typeof id !== "string")) {
+    if (
+      value !== undefined &&
+      (!Array.isArray(value) || value.some((id) => typeof id !== "string"))
+    ) {
       bad("skills 需要是 Skill id 数组");
     }
-    const ids = [...new Set(value as string[])];
+    const builtin = store.getSkillByName(
+      HARBOR_BUILTIN_SKILL_NAME,
+      workspaceId,
+    );
+    const ids = [
+      ...new Set([
+        ...(builtin?.source === "builtin" && !builtin.archivedAt
+          ? [builtin.id]
+          : []),
+        ...((value as string[] | undefined) ?? []),
+      ]),
+    ];
     return ids.map((id) => {
       const skill = store.getSkill(id);
       if (!skill || skill.archivedAt) bad(`skill "${id}" 不存在或已归档`);
@@ -1175,13 +1192,13 @@ export function buildRest(
     if (!slug) slug = `workspace-${Date.now().toString(36)}`;
     if (store.resolveWorkspace(name) || store.resolveWorkspace(slug))
       bad(`Workspace name/slug "${name}" / "${slug}" 已存在`);
-    return c.json(
-      store.createWorkspace(
-        { name, slug, description: b.description?.trim() || null },
-        Date.now(),
-      ),
-      201,
+    const now = Date.now();
+    const workspace = store.createWorkspace(
+      { name, slug, description: b.description?.trim() || null },
+      now,
     );
+    ensureBuiltinHarborSkill(store, workspace.id, now);
+    return c.json(workspace, 201);
   });
 
   app.patch("/api/workspaces/:id", async (c) => {
@@ -1813,6 +1830,9 @@ export function buildRest(
       dependencies?: unknown;
       autoSync?: boolean;
     };
+    if (skill.source === "builtin") {
+      bad("内置 Skill 由 Harbor 版本管理，不能编辑或归档");
+    }
     const patch: Parameters<HarborStore["updateSkill"]>[1] = {};
     if (b.name !== undefined) {
       const name = b.name.trim();

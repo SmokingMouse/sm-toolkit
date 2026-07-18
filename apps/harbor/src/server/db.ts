@@ -1465,6 +1465,48 @@ export const MIGRATIONS: string[] = [
       SELECT id FROM deployment_jobs WHERE failure_kind = 'legacy_ack_required'
     );
   `,
+  // v20 —— versioned built-in Skills（Harbor control-plane capability）
+  `
+  CREATE TABLE skills_v20 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL CHECK (source IN ('builtin','manual','runtime','codebase','github','upload')),
+    instruction TEXT NOT NULL,
+    device_id TEXT REFERENCES devices(id),
+    source_path TEXT,
+    runtimes TEXT NOT NULL DEFAULT '["claude","codex"]',
+    group_id TEXT REFERENCES skill_groups(id) ON DELETE SET NULL,
+    origin_url TEXT,
+    source_ref TEXT,
+    entry_hash TEXT NOT NULL DEFAULT '',
+    bundle_hash TEXT NOT NULL DEFAULT '',
+    auto_sync INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    archived_at INTEGER,
+    UNIQUE (workspace_id, name),
+    CHECK (
+      (source = 'runtime' AND device_id IS NOT NULL AND source_path IS NOT NULL) OR
+      (source <> 'runtime' AND device_id IS NULL)
+    )
+  );
+  INSERT INTO skills_v20
+    (id, workspace_id, name, description, source, instruction, device_id, source_path, runtimes,
+     group_id, origin_url, source_ref, entry_hash, bundle_hash, auto_sync,
+     created_at, updated_at, archived_at)
+    SELECT id, workspace_id, name, description, source, instruction, device_id, source_path, runtimes,
+           group_id, origin_url, source_ref, entry_hash, bundle_hash, auto_sync,
+           created_at, updated_at, archived_at
+    FROM skills;
+  DROP TABLE skills;
+  ALTER TABLE skills_v20 RENAME TO skills;
+  CREATE UNIQUE INDEX idx_skills_runtime_source ON skills(workspace_id, device_id, source_path)
+    WHERE source = 'runtime';
+  CREATE INDEX idx_skills_workspace ON skills(workspace_id, archived_at, updated_at);
+  CREATE INDEX idx_skills_group ON skills(group_id, updated_at);
+  `,
 ];
 
 function hasTable(db: Database, table: string): boolean {
@@ -1564,7 +1606,8 @@ export function openDb(path: string): Database {
       version === 15 ||
       version === 16 ||
       version === 17 ||
-      version === 18;
+      version === 18 ||
+      version === 19;
     if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = OFF;");
     try {
       db.transaction(() => {

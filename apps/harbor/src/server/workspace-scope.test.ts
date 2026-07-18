@@ -90,7 +90,7 @@ describe("Workspace REST scope", () => {
     expect(productAgents[0]?.workspaceId).toBe(product.id);
 
     expect(((await (await request("/api/repositories")).json()) as { name: string }[]).map((item) => item.name)).toEqual(["app"]);
-    expect(((await (await request("/api/skills", undefined, product.id)).json()) as { name: string }[]).map((item) => item.name)).toEqual(["review"]);
+    expect(((await (await request("/api/skills", undefined, product.id)).json()) as { name: string }[]).map((item) => item.name)).toEqual(["review", "harbor"]);
 
     const hidden = await request(`/api/conversations/${personal.conversation.id}`, undefined, product.id);
     expect(hidden.status).toBe(404);

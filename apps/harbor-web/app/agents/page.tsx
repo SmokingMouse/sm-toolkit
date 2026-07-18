@@ -1091,7 +1091,7 @@ function NewAgentPanel({
           !!skill &&
           !!nextBackend &&
           skill.runtimes.includes(nextBackend) &&
-          (skill.source === "manual" || skill.deviceId === next?.id)
+          (skill.source !== "runtime" || skill.deviceId === next?.id)
         );
       }),
     );
@@ -1123,7 +1123,7 @@ function NewAgentPanel({
         return (
           !!skill &&
           skill.runtimes.includes(value) &&
-          (skill.source === "manual" || skill.deviceId === selectedDevice?.id)
+          (skill.source !== "runtime" || skill.deviceId === selectedDevice?.id)
         );
       }),
     );
@@ -1638,14 +1638,16 @@ function SkillPicker({
     <div>
       <div className="grid gap-2 sm:grid-cols-2">
         {skills.map((skill) => {
-          const active = selected.includes(skill.id);
+          const required = skill.source === "builtin";
+          const active = required || selected.includes(skill.id);
           return (
             <button
               key={skill.id}
               type="button"
               aria-pressed={active}
+              disabled={required}
               className={`flex min-h-[68px] items-start gap-3 rounded-xl border p-3 text-left ${active ? "border-accent bg-accent-soft/55 text-accent-strong" : "border-line bg-white/70 text-ink hover:border-zinc-300 hover:bg-white"}`}
-              onClick={() => toggle(skill.id)}
+              onClick={() => !required && toggle(skill.id)}
             >
               <span
                 className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-md border text-[11px] ${active ? "border-accent bg-accent text-white" : "border-zinc-300 bg-white text-transparent"}`}
@@ -1658,7 +1660,7 @@ function SkillPicker({
                     {skill.name}
                   </span>
                   <span className="rounded-full bg-bg px-1.5 py-0.5 text-[8px] font-semibold uppercase tracking-[0.08em] text-dim">
-                    {skill.source}
+                    {required ? "built-in · required" : skill.source}
                   </span>
                 </span>
                 <span className="mt-1 block line-clamp-2 text-[11px] leading-4 text-dim">

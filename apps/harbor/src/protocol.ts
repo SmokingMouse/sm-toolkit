@@ -156,7 +156,13 @@ export interface HarborAgent {
   archivedAt: number | null;
 }
 
-export type SkillSource = "manual" | "runtime" | "codebase" | "github" | "upload";
+export type SkillSource =
+  | "builtin"
+  | "manual"
+  | "runtime"
+  | "codebase"
+  | "github"
+  | "upload";
 
 export interface SkillFile {
   path: string;

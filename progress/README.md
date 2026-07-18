@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、Agent Device 安全迁移、事件驱动 Agent team 与 Local launchd Deployment Provider 已完成：Orchestrator 负责受控路由，Developer 从固定 Issue branch 创建/登记 PR，Reviewer 使用 Run-scoped capability request changes/approve/merge；Review 由可重放领域事件 Automation 派发，merge 后的 exact revision 部署由独立、确定性的 host worker 执行，不把高权限发布交给 LLM。下一步只做真实环境验收与管理员 bootstrap：最小权限 GitHub token、Device push credential、可信 deployment target、`bitscli codebase`、真双机 checkout、真飞书群、automation 7 天与真实负载一周。
+Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、Agent Device 安全迁移、事件驱动 Agent team、内置 `harbor` control-plane Skill 与 Local launchd Deployment Provider 已完成：Orchestrator 负责受控路由，Developer 从固定 Issue branch 创建/登记 PR，Reviewer 使用 Run-scoped capability request changes/approve/merge；所有 Agent 共享版本化、Device 无关且不可误改的 Harbor Skill，Review 由可重放领域事件 Automation 派发，merge 后的 exact revision 部署由独立、确定性的 host worker 执行，不把高权限发布交给 LLM。下一步只做真实环境验收与管理员 bootstrap：最小权限 GitHub token、Device push credential、可信 deployment target、`bitscli codebase`、真双机 checkout、真飞书群、automation 7 天与真实负载一周。
 
 ## Goals
 
@@ -24,7 +24,7 @@ Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、A
 - [x] @sm/channel-feishu：飞书 Channel 适配（从 SelfAgent 移植，薄实现）
 - [x] 根级 `bun run setup` 引导流程（配模型 + 注册 SDK + 注册全局命令 + 按需装 app）
 - [x] agent-gateway 统一配置源（已迁移——见 2026-07-11 session；agent-gateway 独立仓库整体退役，能力拍平进 @sm/agent）
-- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 主方案 `progress/harbor.md`。个人部署范围内的产品机制已完整实现：敏捷闭环、AI draft、GitHub/Codebase Delivery、event Automation、Workspace RBAC、Agent 多仓/执行配置与 Device 迁移、Skill bundle、Lark Integration、worktree 自举、event-aware Prompt pipeline 与确定性 Local launchd Deployment Provider。仅剩管理员 bootstrap 和 P5 真实环境/时间性验证：外部账号、可信 deployment target、双机 Tailscale、真飞书群、automation 7 天与真实负载一周
+- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 主方案 `progress/harbor.md`。个人部署范围内的产品机制已完整实现：敏捷闭环、AI draft、GitHub/Codebase Delivery、event Automation、Workspace RBAC、Agent 多仓/执行配置与 Device 迁移、版本化内置 Harbor control-plane Skill、Skill bundle、Lark Integration、worktree 自举、event-aware Prompt pipeline 与确定性 Local launchd Deployment Provider。仅剩管理员 bootstrap 和 P5 真实环境/时间性验证：外部账号、可信 deployment target、双机 Tailscale、真飞书群、automation 7 天与真实负载一周
 
 ## Verified Facts
 
@@ -35,7 +35,7 @@ Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、A
 - **GitHub Delivery 的外部真相来自 server-side REST sync，不来自 Agent/调用方自报**（2026-07-18 deferred fake HTTP + REST 实测）：Repository `remoteUrl` 锁定 owner/repo，PR URL 跨仓/非 GitHub/畸形即拒；classic protection + active rulesets + 完整分页 check-runs/combined statuses 合并判定，同名 required context 聚合全部来源，任一 failed/pending 即不通过；check-run/status id 重复、total 漂移/overshoot、跨页 state/SHA 漂移、不完整快照或 combined 顶层状态与本地 passed 矛盾均 fail-safe，unrelated context 不冒充 required failure。protected branch classic 404 权限歧义与 required workflows 同样 fail-safe。latest/approved head SHA 绑定人工验收；每次 implementation 无条件推进 revision，旧 generation 慢 sync 的 CAS 失败后丢弃且不自动重试；外部已 merged 仍需 Harbor policy 才能 Done；缺 token 只禁用 github，manual 正常。
 - **Agent 的 Device 是可迁移的当前执行绑定，不是历史归属**（2026-07-18 实测）：Agent 详情提供 Change Device；目标 Device 必须具备原 Runtime/model 能力，并复用或先登记同一 Repository 的 checkout mount。active Run 或未清理 worktree 会拒绝迁移；确认后只更新未来派发，历史 Run 的 Device/mount/execution root 快照不变，旧 Device 独占的 runtime Skills 自动解除，manual Skills 保留。
 - **Harbor 的 Mew parity 边界是“确定性 control plane + 可替换外部适配器”**（2026-07-19 实测）：Codebase webhook/refresh/CLI 输出先归一化成 SCM events，再投影 Issue/Delivery；Agent 只能用短期、单 Run token 创建同 Workspace backlog follow-up，不能绕过 review/check/merge policy。Workspace RBAC、private Agent、env redaction、Lark binding 和多 Bot ownership 都由 server 判定，外部消息本身不构成权限。
-- **Skill 与 Agent 配置已经是可执行资源，而非展示字段**（2026-07-19 实测）：Skill 保存 group、多文件 bundle、dependencies/hash/source 并支持 runtime/Codebase/GitHub/ZIP import 与 auto-sync；Agent 的 concurrency/visibility/env/setup/多 Repository 在 scheduler/daemon 真正生效，env 不进入 prompt/run event，setup 按配置 hash 缓存。
+- **Skill 与 Agent 配置已经是可执行资源，而非展示字段**（2026-07-19 实测）：Skill 保存 group、多文件 bundle、dependencies/hash/source 并支持 runtime/Codebase/GitHub/ZIP import 与 auto-sync；版本化 `builtin` Harbor Skill 在每个 Workspace 自动创建/升级并强制保留到所有 Agent，Device 无关、REST/UI 不可编辑归档，统一承载 Run/Issue/Delivery/Review/Automation 协议与三类角色 playbook；scheduler 只保留无条件 secret/lifecycle safety。Agent 的 concurrency/visibility/env/setup/多 Repository 在 scheduler/daemon 真正生效，env 不进入 prompt/run event，setup 按配置 hash 缓存。完整决策见 `progress/decisions/2026-07-19-harbor-builtin-control-plane-skill.md`。
 - **Harbor Prompt 配置是 Workspace 级两段式 pipeline**（2026-07-17 实测）：Issue / Chat 在 dispatch 时组合稳定 `session context` 与本次 `event trigger`；Automation 只选 schedule/manual event。Run 持久化 `promptEvent` 与 `triggerRef`，不从可变 Conversation 事后猜触发来源；event block 停用时透传原始请求，旧 wrapper 无损迁移且不会重复拼接。
 - **Repository 的唯一产品配置源是 Agent**（2026-07-17 实测）：Workspace 只隔离 Agents / Skills / Conversations / Automations / prompt settings / Usage，不配置仓库地址；每个 Agent 必须绑定一个 Repository，且该 Repository 在 Agent Device 上必须有 checkout mount。Issue / Chat / AI draft / Automation 拒绝任务级 override，指派时继承 Agent Repository；Run 冻结 repository / mount / execution root，Review Agent 必须绑定实现仓库。
 - **Issue Done 与 Agent 自报完成解耦**（2026-07-17 实测）：代码 Issue 建立 Delivery 后，人工验收只更新 `review_status`，不会直接 Done；只有 CI passed + merged，且无需部署或 deployment succeeded，control plane 才以 system actor 推进 Done 并清理 worktree。新 implementation 或 MR/branch 引用变化都会使未合并 Delivery 的人工验收和 CI 证据失效；merged 后在原 Issue 返工会被调度层拒绝。
@@ -54,6 +54,12 @@ Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、A
 - **Next**：Issue 交人工验收；lockfile 双轨问题待决策。
 
 ## Session Log
+
+### 2026-07-19 — Built-in Harbor control-plane Skill
+- **Decision**：控制面协议属于 Harbor Workspace/server，不属于某台 Device 或某个角色 Agent；因此使用 release-versioned、必选的 `builtin` Skill，Agent instruction 只保留角色判断与责任边界。完整理由见 ADR。
+- **Done**：新增 canonical `harbor/SKILL.md`，覆盖控制面心智模型、action capability、Orchestrator/Developer/Reviewer playbook、状态/交付/部署 gates 与 failure modes；SQLite v20 新增 `builtin` source；startup 和 Workspace create 幂等播种，已有/新 Agent 自动绑定且 API 无法解除；Skills UI 展示 managed source，Agent picker 标为 required；scheduler 删除重复 action schema只保留全局安全闸。
+- **Verified**：Skill quick validation ✓；v19 迁移保留既有 bundle/dependencies/Agent binding ✓；定向 12 tests / 71 assertions ✓；根 typecheck ✓；全量 **337 tests / 1607 assertions** ✓；Next production build 12 static pages ✓；`git diff --check` ✓。
+- **Next**：合并后待当前 production Run 安全结束再迁移真实 DB、重启并验证所有 Agent 的必选绑定。
 
 ### 2026-07-19 — Agent team × deterministic Deployment Provider integration
 - **Decision**：产品层固定为 Orchestrator / Developer / Reviewer 三个 LLM Agent。`issue.review_ready / delivery.merge_ready` 由 event Automation 派 Reviewer；`delivery.merged` 仍可用于通知/验证，但自动发布不再接受 Automation Run 成功作为部署事实，而由管理员 target + 独立 host worker 消费 exact merged revision。

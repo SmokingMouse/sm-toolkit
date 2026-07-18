@@ -218,15 +218,17 @@ function SkillMark({
   large?: boolean;
 }) {
   const style =
-    source === "runtime"
-      ? "border-blue-200 bg-blue-50 text-blue-700"
-      : source === "codebase"
-        ? "border-orange-200 bg-orange-50 text-orange-700"
-        : source === "github"
-          ? "border-zinc-300 bg-zinc-100 text-zinc-700"
-          : source === "upload"
-            ? "border-violet-200 bg-violet-50 text-violet-700"
-            : "border-accent/20 bg-accent-soft text-accent-strong";
+    source === "builtin"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : source === "runtime"
+        ? "border-blue-200 bg-blue-50 text-blue-700"
+        : source === "codebase"
+          ? "border-orange-200 bg-orange-50 text-orange-700"
+          : source === "github"
+            ? "border-zinc-300 bg-zinc-100 text-zinc-700"
+            : source === "upload"
+              ? "border-violet-200 bg-violet-50 text-violet-700"
+              : "border-accent/20 bg-accent-soft text-accent-strong";
   return (
     <span
       className={`${large ? "h-12 w-12 rounded-2xl" : "h-9 w-9 shrink-0 rounded-xl"} grid place-items-center border ${style}`}
@@ -259,6 +261,7 @@ function SkillDetail({
   const [busy, setBusy] = useState(false);
   const device = devices.find((item) => item.id === skill.deviceId);
   const editableBody =
+    skill.source !== "builtin" &&
     skill.source !== "runtime" &&
     skill.source !== "codebase" &&
     skill.source !== "github";
@@ -335,12 +338,20 @@ function SkillDetail({
                 Sync now
               </button>
             )}
-            <button className={btnGhost} onClick={() => setEditing(!editing)}>
-              {editing ? "取消" : "编辑"}
-            </button>
-            <button className={btnDanger} onClick={archive}>
-              归档
-            </button>
+            {skill.source !== "builtin" ? (
+              <>
+                <button className={btnGhost} onClick={() => setEditing(!editing)}>
+                  {editing ? "取消" : "编辑"}
+                </button>
+                <button className={btnDanger} onClick={archive}>
+                  归档
+                </button>
+              </>
+            ) : (
+              <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-emerald-700">
+                Managed by Harbor
+              </span>
+            )}
           </div>
         </div>
         {editing ? (

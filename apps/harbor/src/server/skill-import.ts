@@ -13,7 +13,7 @@ const MAX_FILE_BYTES = 128 * 1024;
 const MAX_BUNDLE_BYTES = 512 * 1024;
 
 export interface ImportedSkillBundle {
-  source: Exclude<SkillSource, "manual" | "runtime">;
+  source: Exclude<SkillSource, "builtin" | "manual" | "runtime">;
   originUrl: string | null;
   sourceRef: string | null;
   files: { path: string; content: string }[];

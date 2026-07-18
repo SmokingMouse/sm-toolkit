@@ -87,7 +87,7 @@ test("legacy database migrates through latest schema without losing conversation
     legacy.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(19);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
     expect(
       migrated.query<{ agent_id: string | null; description: string | null; priority: string; status: string }, []>(
         "SELECT agent_id, description, priority, status FROM conversations WHERE id = 'conversation_1'",
@@ -265,7 +265,7 @@ test("latest schema upgrades an already-running v9 database and preserves unboun
     v9.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(19);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
     const agent = migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM agents WHERE id = 'agent_1'").get();
     expect(agent?.repository_id).toStartWith("repo_unconfigured_");
     expect(migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM conversations WHERE id = 'conversation_1'").get()).toEqual(agent);
@@ -361,7 +361,7 @@ test("latest schema preserves v11 Delivery rows and audit events while adding de
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(19);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
     expect(migrated.query<{ provider: string; change_url: string }, [string]>("SELECT provider, change_url FROM deliveries WHERE id = ?").get(delivery.id)).toEqual({
       provider: "manual",
       change_url: "https://github.com/acme/repo/pull/1",
@@ -441,7 +441,7 @@ test("latest schema invalidates unbound GitHub evidence from v12 while preservin
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(19);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
     expect(
       migrated.query<{
         provider: string;
@@ -547,7 +547,7 @@ test("latest schema converges the historical self-hosting v13 fork without losin
     fork.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(19);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
     expect(
       migrated.query<{ name: string }, []>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'automation_triggers'",
@@ -627,7 +627,7 @@ test("latest schema preserves a legitimate pre-provider manual no-target running
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(19);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
     expect(migrated.query<{
       provider: string; review_status: string; check_status: string; deployment_status: string;
       review_approved_at: number; revision: number; deployment_target_id: null; deployment_generation: number;
@@ -707,7 +707,7 @@ test("latest schema gives an active phase-1 deployment without fingerprint/ancho
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(19);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
     expect(migrated.query<{ deployment_status: string; deployment_error: string }, [string]>(
       "SELECT deployment_status, deployment_error FROM deliveries WHERE id = ?",
     ).get(delivery.id)).toEqual({
@@ -726,6 +726,102 @@ test("latest schema gives an active phase-1 deployment without fingerprint/ancho
       status: "failed", failureKind: "bootstrap_required", rollbackComplete: true,
     }));
     expect(migratedStore.getDeploymentMaintenance()).toBeNull();
+    expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
+    migrated.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("v20 preserves existing Skill bundles, dependencies, and Agent bindings", () => {
+  const dir = mkdtempSync(join(tmpdir(), "harbor-v19-skills-"));
+  const path = join(dir, "v19.db");
+  try {
+    const current = openDb(path);
+    const store = new HarborStore(current);
+    const device = store.upsertDevice(
+      "skill-worker",
+      "hash",
+      { clis: { codex: "1.0" }, endpoints: [] },
+      1,
+    );
+    const agent = store.createAgent(
+      {
+        name: "skill-agent",
+        deviceId: device.id,
+        backend: "codex",
+        workdir: "/repo",
+      },
+      2,
+    );
+    const skill = store.createSkill(
+      {
+        name: "existing-skill",
+        source: "manual",
+        instruction: "Existing instruction",
+        files: [
+          { path: "SKILL.md", content: "Existing instruction" },
+          { path: "reference.md", content: "Existing reference" },
+        ],
+        dependencies: [
+          { name: "rg", spec: ">=14", required: true },
+        ],
+      },
+      3,
+    );
+    store.setAgentSkills(agent.id, [skill.id], 4);
+
+    current.exec("PRAGMA foreign_keys = OFF;");
+    current.exec(`
+      CREATE TABLE skills_v19 (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL CHECK (source IN ('manual','runtime','codebase','github','upload')),
+        instruction TEXT NOT NULL,
+        device_id TEXT REFERENCES devices(id),
+        source_path TEXT,
+        runtimes TEXT NOT NULL DEFAULT '["claude","codex"]',
+        group_id TEXT REFERENCES skill_groups(id) ON DELETE SET NULL,
+        origin_url TEXT,
+        source_ref TEXT,
+        entry_hash TEXT NOT NULL DEFAULT '',
+        bundle_hash TEXT NOT NULL DEFAULT '',
+        auto_sync INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        archived_at INTEGER,
+        UNIQUE (workspace_id, name),
+        CHECK (
+          (source = 'runtime' AND device_id IS NOT NULL AND source_path IS NOT NULL) OR
+          (source <> 'runtime' AND device_id IS NULL)
+        )
+      );
+      INSERT INTO skills_v19 SELECT * FROM skills;
+      DROP TABLE skills;
+      ALTER TABLE skills_v19 RENAME TO skills;
+      CREATE UNIQUE INDEX idx_skills_runtime_source ON skills(workspace_id, device_id, source_path)
+        WHERE source = 'runtime';
+      CREATE INDEX idx_skills_workspace ON skills(workspace_id, archived_at, updated_at);
+      CREATE INDEX idx_skills_group ON skills(group_id, updated_at);
+      PRAGMA user_version = 19;
+    `);
+    current.close();
+
+    const migrated = openDb(path);
+    const migratedStore = new HarborStore(migrated);
+    expect(migratedStore.getSkill(skill.id)).toEqual(
+      expect.objectContaining({
+        source: "manual",
+        files: [
+          expect.objectContaining({ path: "SKILL.md", content: "Existing instruction" }),
+          expect.objectContaining({ path: "reference.md", content: "Existing reference" }),
+        ],
+        dependencies: [{ name: "rg", spec: ">=14", required: true }],
+      }),
+    );
+    expect(migratedStore.getAgent(agent.id)?.skillIds).toEqual([skill.id]);
     expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
     migrated.close();
   } finally {
