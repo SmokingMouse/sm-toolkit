@@ -781,7 +781,25 @@ export class HarborStore {
     this.db.run("UPDATE agents SET repository_id = ? WHERE id = ?", [repositoryId, id]);
   }
 
-  agentRepositoryChangeBlocker(agentId: string): string | null {
+  /**
+   * Device 是 Agent 的当前执行位置，不是历史 Run 的可变引用。
+   * 迁移只更新未来派发，并解除旧 Device 独占的 runtime Skills；历史 Run 快照保持原样。
+   */
+  moveAgentToDevice(id: string, deviceId: string, repositoryId: string): void {
+    this.db.transaction(() => {
+      this.db.run("UPDATE agents SET device_id = ?, repository_id = ? WHERE id = ?", [deviceId, repositoryId, id]);
+      this.db.run(
+        `DELETE FROM agent_skills
+         WHERE agent_id = ? AND skill_id IN (
+           SELECT id FROM skills WHERE source = 'runtime' AND (device_id IS NULL OR device_id <> ?)
+         )`,
+        [id, deviceId],
+      );
+    })();
+  }
+
+  /** Repository 或 Device 会共同改变未来 Run 的 execution binding，使用同一安全闸。 */
+  agentExecutionBindingChangeBlocker(agentId: string): string | null {
     const run = this.db
       .query<{ id: string }, [string]>(
         "SELECT id FROM runs WHERE agent_id = ? AND status IN ('queued','running') LIMIT 1",
@@ -795,6 +813,10 @@ export class HarborStore {
       )
       .get(agentId);
     return conversation ? `Issue ${conversation.id} 仍持有 worktree` : null;
+  }
+
+  agentRepositoryChangeBlocker(agentId: string): string | null {
+    return this.agentExecutionBindingChangeBlocker(agentId);
   }
 
   listAgents(includeArchived = false, workspaceId?: string): HarborAgent[] {

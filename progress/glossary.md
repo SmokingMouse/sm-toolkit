@@ -7,7 +7,8 @@
 - **Repository mount**：Repository 在某台 Device 上的绝对主 checkout 路径，`(repository, device)` 唯一。Agent 绑定 Repository + Device 后确定 mount；`RunSpec.repositoryRoot` 始终保持这个身份锚点，即使 Run 已进入 linked worktree。被 Agent、活跃任务、Run 或 worktree 引用时不能删除。
 - **Execution root**：某一 Run 的实际 cwd 快照。首轮 worktree Run 下发时可先等于 Repository mount，`worktree_ready` 后改为 per-Issue worktree；后续 implementation/reviewer 继续用该 worktree，但不改变 `repositoryRoot` 的 mount 语义。
 - **Device**：运行一个 `harbord` 的真实机器。设备在线状态来自 WebSocket 连接，能力来自 daemon 启动时探测，不是用户手填标签。
-- **Harbor Agent**：固定归属一个 Workspace、一台 Device，并且恰好绑定一个 Repository 的执行配置。Issue、Chat、AI draft 与 Automation 不另选仓库；指派 Agent 时继承其 Repository，具体 cwd 由该 Repository 在 Agent Device 上的 mount 决定。
+- **Harbor Agent**：固定归属一个 Workspace，并且在任一时刻恰好绑定一台 Device 与一个 Repository 的执行配置。Issue、Chat、AI draft 与 Automation 不另选仓库；指派 Agent 时继承其当前 execution binding。Device 可经显式迁移安全切换，不代表历史 Run 会随之改写。
+- **Agent execution binding**：Agent 当前的 `Device + Repository + repository mount` 组合，决定未来 Run 的执行位置。迁移要求目标 Device 具备 Agent Runtime/model 能力与 Repository mount，且 Agent 没有 active Run 或未清理 worktree；历史 Run 继续保留原 Device/mount/execution root 快照，旧 Device 独占的 runtime Skills 在确认后解除。
 - **Provider capability**：某台 Device 上实际可执行的 agent CLI（当前仅 `claude` / `codex`）及其版本。Agent 只能绑定设备已上报的 provider；provider 与模型 endpoint 是两类能力，不能互相代替。
 - **Runtime**：实际执行 coding session 的 CLI，当前是 Claude Code (`claude`) 或 Codex CLI (`codex`)；UI 和代码不再把它称为模型 Provider。
 - **Model route**：Device 从 sm-toolkit `endpoints.yaml` 解析并上报的 `provider:model` 路由。Harbor 只展示该 Runtime 真能消费的 route；当前 sm-toolkit route 由 Claude Code Runtime 消费 anthropic-compatible/native endpoint，Codex CLI 的模型名仍由其本地配置负责。

@@ -17,6 +17,7 @@ import type {
   Delivery,
   DeliveryCheckStatus,
   DeliveryProviderKind,
+  Device,
   IssuePriority,
   IsolationKind,
   Origin,
@@ -204,6 +205,42 @@ export function buildRest(
       }
       return skill;
     });
+  };
+
+  const validateAgentRuntimeForDevice = (
+    device: Device,
+    backend: BackendKind,
+    permission: string,
+    model: string | null,
+  ): void => {
+    const installed = (["claude", "codex"] as BackendKind[]).filter(
+      (provider) => !!device.capabilities.clis?.[provider],
+    );
+    if (!installed.includes(backend)) {
+      bad(
+        `provider "${backend}" 在设备 "${device.name}" 上不可用。` +
+          `可用 provider：${installed.length ? installed.join(", ") : "无（请先安装 claude 或 codex CLI 并重启 harbord）"}`,
+      );
+    }
+    if (backend === "codex" && permission === "default") {
+      bad('codex CLI 不支持 Harbor 动态审批；permission 请选 readonly/auto-edit/full（"default" 仅 Claude 可用）');
+    }
+    if (!model || backend !== "claude") return;
+
+    const bare = model.startsWith("claude-") ? model.slice("claude-".length) : model;
+    const isNativeTier = NATIVE_TIER_ALIASES.includes(bare);
+    const endpoints = device.capabilities.endpoints ?? [];
+    const routes = (device.capabilities.modelRoutes ?? []).filter((candidate) => candidate.runtime === "claude");
+    const route = routes.find((candidate) => candidate.id === model || candidate.model === model);
+    const invalidStructuredRoute = routes.length > 0 && (!route || !route.ready);
+    const invalidLegacyRoute = routes.length === 0 && !endpoints.includes(model);
+    if (!isNativeTier && (invalidStructuredRoute || invalidLegacyRoute)) {
+      const readyRoutes = routes.filter((candidate) => candidate.ready).map((candidate) => candidate.id);
+      bad(
+        `model "${model}" 不在设备 "${device.name}" 的能力清单内。` +
+          `可用：${NATIVE_TIER_ALIASES.join("/")}（Claude 原生）${readyRoutes.length ? "，sm-toolkit routes：" + readyRoutes.join(", ") : endpoints.length ? "，" + endpoints.join(", ") : "（该设备未上报 sm-toolkit routes，检查 endpoints.yaml 后重启 harbord）"}`,
+      );
+    }
   };
 
   // ---- workspaces / repositories ----
@@ -540,34 +577,8 @@ export function buildRest(
       (provider) => !!device.capabilities.clis?.[provider],
     );
     const backend = (b.backend ?? (installed.includes("claude") ? "claude" : installed[0])) as BackendKind | undefined;
-    if (!backend || !installed.includes(backend)) {
-      bad(
-        `provider "${b.backend ?? backend ?? "(默认)"}" 在设备 "${device.name}" 上不可用。` +
-          `可用 provider：${installed.length ? installed.join(", ") : "无（请先安装 claude 或 codex CLI 并重启 harbord）"}`,
-      );
-    }
-    if (backend === "codex" && permission === "default") {
-      bad('codex CLI 不支持 Harbor 动态审批；permission 请选 readonly/auto-edit/full（"default" 仅 Claude 可用）');
-    }
-
-    // Claude 接入 endpoints.yaml，需前置校验；CodexBackend 不接 endpoints，model 由 codex CLI 校验。
-    if (b.model && backend === "claude") {
-      const bare = b.model.startsWith("claude-") ? b.model.slice("claude-".length) : b.model;
-      const isNativeTier = NATIVE_TIER_ALIASES.includes(bare);
-      const eps = device.capabilities.endpoints ?? [];
-      // 只认 claude routes：codex 清单同存于 modelRoutes，不能为 claude 校验放行/报错
-      const routes = (device.capabilities.modelRoutes ?? []).filter((candidate) => candidate.runtime === "claude");
-      const route = routes.find((candidate) => candidate.id === b.model || candidate.model === b.model);
-      const invalidStructuredRoute = routes.length > 0 && (!route || !route.ready);
-      const invalidLegacyRoute = routes.length === 0 && !eps.includes(b.model);
-      if (!isNativeTier && (invalidStructuredRoute || invalidLegacyRoute)) {
-        const readyRoutes = routes.filter((candidate) => candidate.ready).map((candidate) => candidate.id);
-        bad(
-          `model "${b.model}" 不在设备 "${device.name}" 的能力清单内。` +
-            `可用：${NATIVE_TIER_ALIASES.join("/")}（Claude 原生）${readyRoutes.length ? "，sm-toolkit routes：" + readyRoutes.join(", ") : eps.length ? "，" + eps.join(", ") : "（该设备未上报 sm-toolkit routes，检查 endpoints.yaml 后重启 harbord）"}`,
-        );
-      }
-    }
+    if (!backend) bad(`设备 "${device.name}" 没有可用 provider（请先安装 claude 或 codex CLI 并重启 harbord）`);
+    validateAgentRuntimeForDevice(device, backend, permission, b.model ?? null);
 
     let repository = scopedRepository(workspace.id, b.repository);
     if (!repository && b.workdir) {
@@ -603,26 +614,67 @@ export function buildRest(
     const key = c.req.param("id");
     const agent = scopedAgent(workspace.id, key);
     if (!agent) throw new HTTPException(404, { message: `agent "${key}" 不存在` });
-    const b = (await c.req.json()) as { archived?: boolean; skills?: unknown; repository?: string };
-    if (b.archived === undefined && b.skills === undefined && b.repository === undefined) bad("需要 archived、skills 或 repository");
-    const skills = b.skills !== undefined ? resolveAgentSkills(b.skills, workspace.id, agent.deviceId, agent.backend) : null;
+    const b = (await c.req.json()) as {
+      archived?: boolean;
+      skills?: unknown;
+      repository?: string;
+      device?: string;
+      dropIncompatibleSkills?: boolean;
+    };
+    if (b.archived === undefined && b.skills === undefined && b.repository === undefined && b.device === undefined) {
+      bad("需要 archived、skills、repository 或 device");
+    }
+    if (b.dropIncompatibleSkills !== undefined && typeof b.dropIncompatibleSkills !== "boolean") {
+      bad("dropIncompatibleSkills 需要 true/false");
+    }
+
+    const targetDevice = b.device === undefined
+      ? store.getDevice(agent.deviceId, hub.isOnline(agent.deviceId))
+      : store.getDeviceByName(b.device, hub.isOnline(b.device)) ?? store.getDevice(b.device, hub.isOnline(b.device));
+    if (!targetDevice) bad(`device "${b.device ?? agent.deviceId}" 未注册`);
+    const targetRepository = b.repository === undefined
+      ? store.getRepository(agent.repositoryId)
+      : scopedRepository(workspace.id, b.repository);
+    if (!targetRepository) bad("Agent 必须绑定 Repository");
+
+    const deviceChanged = targetDevice.id !== agent.deviceId;
+    const repositoryChanged = targetRepository.id !== agent.repositoryId;
+    if (deviceChanged) {
+      validateAgentRuntimeForDevice(targetDevice, agent.backend, agent.permission, agent.model);
+    }
+    if (deviceChanged || repositoryChanged) {
+      if (!store.getRepositoryMountForDevice(targetRepository.id, targetDevice.id)) {
+        bad(`Repository "${targetRepository.name}" 尚未挂载到设备 "${targetDevice.name}"`);
+      }
+      const blocker = store.agentExecutionBindingChangeBlocker(agent.id);
+      if (blocker) bad(`${blocker}，暂不能更换执行绑定`);
+    }
+
+    const skills = b.skills !== undefined
+      ? resolveAgentSkills(b.skills, workspace.id, targetDevice.id, agent.backend)
+      : null;
+    const incompatibleRuntimeSkills = deviceChanged && !skills
+      ? store.listSkillsForAgent(agent.id).filter(
+          (skill) => skill.source === "runtime" && skill.deviceId !== targetDevice.id,
+        )
+      : [];
+    if (incompatibleRuntimeSkills.length > 0 && !b.dropIncompatibleSkills) {
+      bad(
+        `迁移到 "${targetDevice.name}" 会解除旧 Device 的 runtime Skills：` +
+          `${incompatibleRuntimeSkills.map((skill) => skill.name).join("、")}；确认后请传 dropIncompatibleSkills: true`,
+      );
+    }
+
     if (b.archived !== undefined) {
       if (typeof b.archived !== "boolean") bad("archived 需要 true/false");
       store.setAgentArchived(agent.id, b.archived, Date.now());
     }
-    if (skills) store.setAgentSkills(agent.id, skills.map((skill) => skill.id), Date.now());
-    if (b.repository !== undefined) {
-      const repository = scopedRepository(workspace.id, b.repository);
-      if (!repository) bad("Agent 必须绑定 Repository");
-      if (!store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
-        bad(`Repository "${repository.name}" 尚未挂载到 Agent 设备`);
-      }
-      if (repository.id !== agent.repositoryId) {
-        const blocker = store.agentRepositoryChangeBlocker(agent.id);
-        if (blocker) bad(`${blocker}，暂不能更换 Repository`);
-        store.setAgentRepository(agent.id, repository.id);
-      }
+    if (deviceChanged) {
+      store.moveAgentToDevice(agent.id, targetDevice.id, targetRepository.id);
+    } else if (repositoryChanged) {
+      store.setAgentRepository(agent.id, targetRepository.id);
     }
+    if (skills) store.setAgentSkills(agent.id, skills.map((skill) => skill.id), Date.now());
     return c.json(store.getAgent(agent.id));
   });
 

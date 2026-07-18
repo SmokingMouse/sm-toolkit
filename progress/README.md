@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-Harbor 自举闭环与 P4.16「GitHub Delivery Provider」已完成：Codex worktree implementation 可在保持 workspace-write 的前提下安全提交，launchd server/daemon 已用真实 Request changes + resume Run 验证；已有 GitHub PR 可按 Repository mapping 同步 PR/required+latest checks，并在 human approved + checks passed 后受控 merge，manual fallback 保持不变。下一步把 Agent Device 迁移纳入集成分支，用最小权限 GitHub token 做 acceptance，再实现可回滚 CD Provider；P5 时间性验证仍等待真双机 / 真飞书 / automation 7 天 / dogfood 一周。
+Harbor 自举闭环、P4.16「GitHub Delivery Provider」与 Agent Device 安全迁移已完成：Codex worktree implementation 可在 workspace-write 下安全提交，launchd server/daemon 已用真实 Request changes + resume Run 验证；Agent 可安全切换未来执行 Device，历史 Run 快照不变；已有 GitHub PR 可同步 PR/required+latest checks，并在 human approved + checks passed 后受控 merge。下一步用最小权限 GitHub token 做 acceptance，并实现可回滚 CD Provider与真实双机协同；P5 时间性验证仍等待真飞书 / automation 7 天 / dogfood 一周。
 
 ## Goals
 
@@ -24,13 +24,14 @@ Harbor 自举闭环与 P4.16「GitHub Delivery Provider」已完成：Codex work
 - [x] @sm/channel-feishu：飞书 Channel 适配（从 SelfAgent 移植，薄实现）
 - [x] 根级 `bun run setup` 引导流程（配模型 + 注册 SDK + 注册全局命令 + 按需装 app）
 - [x] agent-gateway 统一配置源（已迁移——见 2026-07-11 session；agent-gateway 独立仓库整体退役，能力拍平进 @sm/agent）
-- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 主方案 `progress/harbor.md`。P1–P4.16 已完成（Mew 对标、模型路由、敏捷闭环、AI draft、Skill、Delivery control plane、Workspace/Repository scope、event-aware Prompt pipeline 与首个真实 GitHub Provider）。产品机制层下一步是自动创建 PR、webhook reconciliation 与真实 CD Provider；P5 时间性验证仍需真双机 Tailscale、真飞书群、automation 7 天与真实负载一周
+- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 主方案 `progress/harbor.md`。P1–P4.16、Agent Device 安全迁移与 worktree 自举已完成（Mew 对标、模型路由、敏捷闭环、AI draft、Skill、Delivery control plane、Workspace/Repository scope、event-aware Prompt pipeline 与首个真实 GitHub Provider）。产品机制层下一步是自动创建 PR、webhook reconciliation 与真实 CD Provider；P5 时间性验证仍需真双机、真飞书群、automation 7 天与真实负载一周
 
 ## Verified Facts
 
 - **Codex worktree Git 写权限是 Run 级 capability，不是 Agent 全局 full access**（2026-07-19 实测）：`RunSpec.repositoryRoot` 永远是 Run 绑定的 Repository mount，`executionRoot/worktreePath` 独立承载实际 cwd；只有 `Codex + implementation + worktree + auto-edit/full` 经本机 Repository common-dir、canonical Issue physical leaf、registry raw absolute leaf 与 `refs/heads/harbor/<Issue ID>` symbolic HEAD 校验后获得 additional writable dirs。初次 exec 用重复 `--add-dir`，resume 用 workspace-write config roots；readonly/default、triage、review、verification、Claude 与非 worktree 均为空，跨 Repository、正/反向跨 Issue symlink、错误 branch、detached HEAD 或路径不一致直接失败。隔离风险见 ADR `progress/decisions/2026-07-18-harbor-codex-worktree-git-metadata.md`。
 - **Daemon service PATH 必须从实际 bun executable 自举**（2026-07-18 实测）：launchd/systemd definition 都把 `dirname(bunPath)` 放在 PATH 首位并去重，避免 ProgramArguments 能启动 bun、Run 子进程却找不到 bun；生成逻辑不写 token，也不在测试中加载真实 service。
 - **GitHub Delivery 的外部真相来自 server-side REST sync，不来自 Agent/调用方自报**（2026-07-18 deferred fake HTTP + REST 实测）：Repository `remoteUrl` 锁定 owner/repo，PR URL 跨仓/非 GitHub/畸形即拒；classic protection + active rulesets + 完整分页 check-runs/combined statuses 合并判定，同名 required context 聚合全部来源，任一 failed/pending 即不通过；check-run/status id 重复、total 漂移/overshoot、跨页 state/SHA 漂移、不完整快照或 combined 顶层状态与本地 passed 矛盾均 fail-safe，unrelated context 不冒充 required failure。protected branch classic 404 权限歧义与 required workflows 同样 fail-safe。latest/approved head SHA 绑定人工验收；每次 implementation 无条件推进 revision，旧 generation 慢 sync 的 CAS 失败后丢弃且不自动重试；外部已 merged 仍需 Harbor policy 才能 Done；缺 token 只禁用 github，manual 正常。
+- **Agent 的 Device 是可迁移的当前执行绑定，不是历史归属**（2026-07-18 实测）：Agent 详情提供 Change Device；目标 Device 必须具备原 Runtime/model 能力，并复用或先登记同一 Repository 的 checkout mount。active Run 或未清理 worktree 会拒绝迁移；确认后只更新未来派发，历史 Run 的 Device/mount/execution root 快照不变，旧 Device 独占的 runtime Skills 自动解除，manual Skills 保留。
 - **Harbor Prompt 配置是 Workspace 级两段式 pipeline**（2026-07-17 实测）：Issue / Chat 在 dispatch 时组合稳定 `session context` 与本次 `event trigger`；Automation 只选 schedule/manual event。Run 持久化 `promptEvent` 与 `triggerRef`，不从可变 Conversation 事后猜触发来源；event block 停用时透传原始请求，旧 wrapper 无损迁移且不会重复拼接。
 - **Repository 的唯一产品配置源是 Agent**（2026-07-17 实测）：Workspace 只隔离 Agents / Skills / Conversations / Automations / prompt settings / Usage，不配置仓库地址；每个 Agent 必须绑定一个 Repository，且该 Repository 在 Agent Device 上必须有 checkout mount。Issue / Chat / AI draft / Automation 拒绝任务级 override，指派时继承 Agent Repository；Run 冻结 repository / mount / execution root，Review Agent 必须绑定实现仓库。
 - **Issue Done 与 Agent 自报完成解耦**（2026-07-17 实测）：代码 Issue 建立 Delivery 后，人工验收只更新 `review_status`，不会直接 Done；只有 CI passed + merged，且无需部署或 deployment succeeded，control plane 才以 system actor 推进 Done 并清理 worktree。新 implementation 或 MR/branch 引用变化都会使未合并 Delivery 的人工验收和 CI 证据失效；merged 后在原 Issue 返工会被调度层拒绝。
@@ -63,6 +64,13 @@ Harbor 自举闭环与 P4.16「GitHub Delivery Provider」已完成：Codex work
 - **Verified**：Harbor server 60 tests / 326 assertions ✓（HTTP 全 fake/deferred，含第 101 条 check-run failure 被重复页隐藏、第 31 条 commit status required failure、两类分页跨/页内重复 id、total/state/SHA 漂移与 overshoot、combined 上界 fail-safe、初始 pending/pending generation 对慢 sync 的 CAS 拒绝，以及既有 token/URL/policy/SHA/concurrency/REST/migration 覆盖）；根与 harbor-web typecheck ✓；Next production build（12 static pages）✓；`git diff --check` ✓。
 - **Note**：原 Issue 的 Agent commit 曾暴露 linked-worktree gitdir 只读问题；该问题已由上述自举修复并完成生产 smoke。
 - **Next**：用用户提供的最小权限 GitHub token 做真实 acceptance（本 Issue 不改生产配置）；自动 branch push/PR creation、webhook reconciliation 与 CD Provider 分立后续 Issue。
+
+### 2026-07-18 — Agent Device 安全迁移
+- **Root cause**：Device 列表反映当前 daemon 注册，Agent 保存的是创建时的稳定 Device id；daemon 重注册不会擅自改写 Agent，因此 `SmokingMouse-Mac` 在线时，既有 Agent 仍可能正确但不可执行地绑定离线 `harbor-preview`。此前 UI/REST 没有迁移入口，用户只能碰数据库。
+- **Decision**：Device 迁移属于 Agent execution binding 变更，只影响未来 Run；与 Repository 切换共用 active Run / worktree 安全闸。目标端必须具备相同 Runtime/model 与 Repository mount；旧 Device runtime Skills 需显式确认后解绑，manual Skills 跨设备保留。
+- **Done**：Store 增加事务化 Agent Device/Repository 更新与旧 runtime Skill 清理；PATCH Agent 支持 `device + dropIncompatibleSkills` 并校验能力、mount、运行中任务；Agent 详情增加 Change Device 面板，展示 Online、Runtime/model 兼容性、checkout，缺 mount 时可先登记目标绝对路径，迁移前给出历史快照/Skill/Offline 提示。
+- **Verified**：新增 3 个迁移测试，覆盖显式 Skill 确认、manual Skill 保留、历史 Run 快照、目标 Runtime/mount、active Run 阻断，以及非迁移 PATCH 不受 mount 闸误伤；根 `bun test` 78 tests / 426 assertions ✓，Harbor build、harbor-web typecheck、Next production build（12 static pages）、`git diff --check` ✓。17777 launchd server 最终重启为 PID 26243；agent-browser 实测 Claude→Codex-only Device 正确禁用、Codex→Codex v0.144.2 + 同 mount 正确启用，1280px 无横向溢出，未替用户执行真实迁移。
+- **Next**：由用户在 Agents → 目标 Agent → Change Device 确认实际迁移；随后创建一个真实 Run 完成单机 dogfood。真双机 checkout/Tailscale 验证仍待第二台在线设备。
 
 ### 2026-07-17 — P4.15 Mew Prompt workflows
 - **Evidence**：只读实测 Mew Prompts 页面与线上 bundle，确认 8 个可见 block：Issue context/assigned/mentioned/message、Chat context/message、Automation schedule/manual；另有当前 Harbor 尚无入口的隐藏 webhook block。

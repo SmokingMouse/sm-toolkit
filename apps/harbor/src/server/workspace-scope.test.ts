@@ -145,6 +145,158 @@ describe("Workspace REST scope", () => {
   });
 });
 
+describe("Agent Device migration", () => {
+  test("does not apply migration mount checks to unrelated Agent patches", async () => {
+    const { store, request } = restHarness();
+    const device = store.upsertDevice("legacy", "hash", { clis: { codex: "1.0" }, endpoints: [] }, 1);
+    const repository = store.createRepository({ workspaceId: "ws_personal", name: "unmounted" }, 2);
+    const agent = store.createAgent({
+      name: "legacy-agent",
+      deviceId: device.id,
+      backend: "codex",
+      permission: "auto-edit",
+      repositoryId: repository.id,
+    }, 3);
+
+    const skillsPatch = await request(`/api/agents/${agent.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ skills: [] }),
+    });
+    expect(skillsPatch.status).toBe(200);
+    const archivePatch = await request(`/api/agents/${agent.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ archived: true }),
+    });
+    expect(archivePatch.status).toBe(200);
+  });
+
+  test("moves only future execution and explicitly drops old Device runtime Skills", async () => {
+    const { store, request } = restHarness();
+    const deviceA = store.upsertDevice("machine-a", "hash-a", { clis: { codex: "1.0" }, endpoints: [] }, 1);
+    const deviceB = store.upsertDevice("machine-b", "hash-b", { clis: { codex: "1.1" }, endpoints: [] }, 1);
+    const repository = store.createRepository({ workspaceId: "ws_personal", name: "app" }, 2);
+    const mountA = store.setRepositoryMount(repository.id, deviceA.id, "/machine-a/app", 2);
+    store.setRepositoryMount(repository.id, deviceB.id, "/machine-b/app", 2);
+    const agent = store.createAgent({
+      name: "builder",
+      deviceId: deviceA.id,
+      backend: "codex",
+      permission: "auto-edit",
+      repositoryId: repository.id,
+    }, 3);
+    const localSkill = store.createSkill({
+      name: "machine-a-local",
+      source: "runtime",
+      instruction: "Use machine A tooling.",
+      deviceId: deviceA.id,
+      sourcePath: "/machine-a/skills/local/SKILL.md",
+      runtimes: ["codex"],
+    }, 3);
+    const manualSkill = store.createSkill({
+      name: "portable",
+      source: "manual",
+      instruction: "Use portable process.",
+      runtimes: ["codex"],
+    }, 3);
+    store.setAgentSkills(agent.id, [localSkill.id, manualSkill.id], 3);
+
+    const conversation = store.createConversation({
+      kind: "chat",
+      agentId: agent.id,
+      repositoryId: repository.id,
+    }, 4);
+    const historicalRun = store.createRun({
+      conversationId: conversation.id,
+      agentId: agent.id,
+      deviceId: deviceA.id,
+      repositoryId: repository.id,
+      repositoryMountId: mountA.id,
+      executionRoot: mountA.path,
+      prompt: "previous work",
+      promptEvent: "event.chat.message_created",
+    }, 4);
+    store.finishRun(historicalRun.id, "succeeded", { claudeSessionId: null, cost: null, error: null }, 5);
+
+    const unconfirmed = await request(`/api/agents/${agent.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ device: deviceB.id }),
+    });
+    expect(unconfirmed.status).toBe(400);
+    expect(((await unconfirmed.json()) as { error: string }).error).toContain("dropIncompatibleSkills");
+
+    const migrated = await request(`/api/agents/${agent.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ device: deviceB.id, dropIncompatibleSkills: true }),
+    });
+    expect(migrated.status).toBe(200);
+    expect(await migrated.json()).toEqual(expect.objectContaining({
+      id: agent.id,
+      deviceId: deviceB.id,
+      repositoryId: repository.id,
+      skillIds: [manualSkill.id],
+    }));
+    expect(store.getRun(historicalRun.id)).toEqual(expect.objectContaining({
+      deviceId: deviceA.id,
+      repositoryMountId: mountA.id,
+      executionRoot: "/machine-a/app",
+    }));
+  });
+
+  test("requires target Runtime and mount, and blocks migration while a Run is active", async () => {
+    const { store, request } = restHarness();
+    const source = store.upsertDevice("source", "hash-source", { clis: { claude: "2.1" }, endpoints: [] }, 1);
+    const target = store.upsertDevice("target", "hash-target", { clis: {}, endpoints: [] }, 1);
+    const repository = store.createRepository({ workspaceId: "ws_personal", name: "app" }, 2);
+    const sourceMount = store.setRepositoryMount(repository.id, source.id, "/source/app", 2);
+    const agent = store.createAgent({
+      name: "builder",
+      deviceId: source.id,
+      backend: "claude",
+      repositoryId: repository.id,
+    }, 3);
+
+    const missingRuntime = await request(`/api/agents/${agent.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ device: target.id }),
+    });
+    expect(missingRuntime.status).toBe(400);
+    expect(((await missingRuntime.json()) as { error: string }).error).toContain("provider \"claude\"");
+
+    store.upsertDevice("target", "hash-target", { clis: { claude: "2.2" }, endpoints: [] }, 4);
+    const missingMount = await request(`/api/agents/${agent.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ device: target.id }),
+    });
+    expect(missingMount.status).toBe(400);
+    expect(((await missingMount.json()) as { error: string }).error).toContain("尚未挂载");
+
+    store.setRepositoryMount(repository.id, target.id, "/target/app", 5);
+    const conversation = store.createConversation({
+      kind: "issue",
+      agentId: agent.id,
+      repositoryId: repository.id,
+      title: "In progress",
+    }, 5);
+    const run = store.createRun({
+      conversationId: conversation.id,
+      agentId: agent.id,
+      deviceId: source.id,
+      repositoryId: repository.id,
+      repositoryMountId: sourceMount.id,
+      executionRoot: sourceMount.path,
+      prompt: "working",
+      promptEvent: "event.issue.assigned",
+    }, 5);
+    const blocked = await request(`/api/agents/${agent.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ device: target.id }),
+    });
+    expect(blocked.status).toBe(400);
+    expect(((await blocked.json()) as { error: string }).error).toContain(`active Run（${run.id}）`);
+    expect(store.getAgent(agent.id)?.deviceId).toBe(source.id);
+  });
+});
+
 describe("Repository mount execution snapshots", () => {
   test("binds a Run and worktree to one Repository mount", () => {
     const store = new HarborStore(openDb(":memory:"));

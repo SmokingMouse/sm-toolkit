@@ -186,6 +186,8 @@ export const setAgentSkills = (id: string, skills: string[]) =>
   req<HarborAgent>("PATCH", `/api/agents/${encodeURIComponent(id)}`, { skills });
 export const setAgentRepository = (id: string, repository: string) =>
   req<HarborAgent>("PATCH", `/api/agents/${encodeURIComponent(id)}`, { repository });
+export const moveAgentToDevice = (id: string, device: string, dropIncompatibleSkills = false) =>
+  req<HarborAgent>("PATCH", `/api/agents/${encodeURIComponent(id)}`, { device, dropIncompatibleSkills });
 
 export const listSkills = () => req<SkillWithAgents[]>("GET", "/api/skills");
 export const createSkill = (body: { name: string; description?: string; instruction: string }) =>

@@ -8,6 +8,7 @@ import {
   listDevices,
   listRepositories,
   listSkills,
+  moveAgentToDevice,
   NATIVE_TIER_ALIASES,
   PERMISSIONS,
   setAgentArchived,
@@ -111,10 +112,11 @@ export default function AgentsPage() {
             <AgentDetail
               agent={selectedAgent}
               device={deviceById.get(selectedAgent.deviceId)}
+              devices={devices.data ?? []}
               repository={selectedAgent.repositoryId ? repositoryById.get(selectedAgent.repositoryId) : undefined}
               repositories={repositories.data ?? []}
               skills={skills.data ?? []}
-              onChanged={() => { agents.reload(); skills.reload(); repositories.reload(); }}
+              onChanged={() => { agents.reload(); devices.reload(); skills.reload(); repositories.reload(); }}
             />
           ) : (
             <div className="p-6"><Empty text="选择一个 Agent，或创建新的执行配置" /></div>
@@ -160,6 +162,7 @@ function AgentListRow({
 function AgentDetail({
   agent,
   device,
+  devices,
   repository,
   repositories,
   skills,
@@ -167,6 +170,7 @@ function AgentDetail({
 }: {
   agent: HarborAgent;
   device: Device | undefined;
+  devices: Device[];
   repository: RepositoryWithMounts | undefined;
   repositories: RepositoryWithMounts[];
   skills: SkillWithAgents[];
@@ -176,7 +180,9 @@ function AgentDetail({
   const [skillIds, setSkillIds] = useState(agent.skillIds);
   const [savingSkills, setSavingSkills] = useState(false);
   const [editingRepository, setEditingRepository] = useState(false);
+  const [editingDevice, setEditingDevice] = useState(false);
   useEffect(() => setSkillIds(agent.skillIds), [agent.id, agent.skillIds]);
+  useEffect(() => setEditingDevice(false), [agent.id, agent.deviceId]);
   const compatibleSkills = skills.filter((skill) =>
     skill.runtimes.includes(agent.backend) && (skill.source === "manual" || skill.deviceId === agent.deviceId),
   );
@@ -221,7 +227,12 @@ function AgentDetail({
               </div>
             </div>
           </div>
-          <button className={btnDanger} onClick={archive}>归档</button>
+          <div className="flex shrink-0 gap-2">
+            <button className={btnGhost} onClick={() => setEditingDevice((value) => !value)}>
+              {editingDevice ? "取消迁移" : "Change Device"}
+            </button>
+            <button className={btnDanger} onClick={archive}>归档</button>
+          </div>
         </div>
 
         {agent.description && <p className="mb-5 max-w-3xl text-sm leading-6 text-dim">{agent.description}</p>}
@@ -234,6 +245,17 @@ function AgentDetail({
           <AgentFact label="Permission" value={agent.permission} />
           <AgentFact label="Isolation" value={agent.isolation} />
         </div>
+
+        {editingDevice && (
+          <AgentDeviceEditor
+            agent={agent}
+            currentDevice={device}
+            devices={devices}
+            repository={repository}
+            skills={skills}
+            onSaved={onChanged}
+          />
+        )}
 
         <div className="grid gap-5 lg:grid-cols-2">
           <div className="rounded-xl border border-line bg-white/55 p-4">
@@ -274,6 +296,149 @@ function AgentFact({ label, value, mono }: { label: string; value: string; mono?
       <div className="mb-1.5 text-[10px] font-medium text-dim">{label}</div>
       <div className={`truncate text-sm font-medium ${mono ? "font-mono text-xs" : ""}`} title={value}>{value}</div>
     </div>
+  );
+}
+
+function AgentDeviceEditor({
+  agent,
+  currentDevice,
+  devices,
+  repository,
+  skills,
+  onSaved,
+}: {
+  agent: HarborAgent;
+  currentDevice: Device | undefined;
+  devices: Device[];
+  repository: RepositoryWithMounts | undefined;
+  skills: SkillWithAgents[];
+  onSaved: () => void;
+}) {
+  const toast = useToast();
+  const candidates = useMemo(
+    () => devices.filter((candidate) => candidate.id !== agent.deviceId),
+    [agent.deviceId, devices],
+  );
+  const defaultDeviceId = candidates.find((candidate) => candidate.online)?.id ?? candidates[0]?.id ?? "";
+  const [deviceId, setDeviceId] = useState(defaultDeviceId);
+  const [checkoutPath, setCheckoutPath] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setDeviceId((selected) => candidates.some((candidate) => candidate.id === selected) ? selected : defaultDeviceId);
+  }, [agent.id, candidates, defaultDeviceId]);
+
+  const targetDevice = candidates.find((candidate) => candidate.id === deviceId);
+  const targetMount = repository?.mounts.find((mount) => mount.deviceId === targetDevice?.id);
+  useEffect(() => {
+    setCheckoutPath(targetMount?.path ?? "");
+  }, [repository?.id, targetDevice?.id, targetMount?.path]);
+
+  const runtimeVersion = targetDevice?.capabilities.clis?.[agent.backend];
+  const bareModel = agent.model?.startsWith("claude-") ? agent.model.slice("claude-".length) : agent.model;
+  const modelRoutes = targetDevice?.capabilities.modelRoutes?.filter((route) => route.runtime === "claude") ?? [];
+  const modelAvailable = !agent.model || agent.backend !== "claude" || NATIVE_TIER_ALIASES.includes(bareModel ?? "") || (
+    modelRoutes.length > 0
+      ? modelRoutes.some((route) => (route.id === agent.model || route.model === agent.model) && route.ready)
+      : (targetDevice?.capabilities.endpoints ?? []).includes(agent.model)
+  );
+  const incompatibleRuntimeSkills = skills.filter((skill) =>
+    agent.skillIds.includes(skill.id) && skill.source === "runtime" && skill.deviceId !== targetDevice?.id,
+  );
+  const ready = !!targetDevice && !!repository && !!runtimeVersion && modelAvailable && !!checkoutPath.trim();
+
+  const migrate = async () => {
+    if (!targetDevice || !repository || !ready) return;
+    const skillNotice = incompatibleRuntimeSkills.length > 0
+      ? `\n将解除旧 Device 的 runtime Skills：${incompatibleRuntimeSkills.map((skill) => skill.name).join("、")}`
+      : "";
+    const offlineNotice = targetDevice.online ? "" : "\n目标 Device 当前 Offline，上线前新 Run 不会执行。";
+    if (!confirm(
+      `将 Agent "${agent.name}" 从 ${currentDevice?.name ?? agent.deviceId} 迁移到 ${targetDevice.name}？` +
+      `\nRepository：${repository.name}` +
+      `\n目标 checkout：${checkoutPath.trim()}` +
+      "\n历史 Run 保留原 Device 快照，仅未来 Run 使用新 Device。" +
+      skillNotice + offlineNotice,
+    )) return;
+
+    setBusy(true);
+    try {
+      if (!targetMount) {
+        await setRepositoryMount(repository.id, { device: targetDevice.name, path: checkoutPath.trim() });
+      }
+      await moveAgentToDevice(agent.id, targetDevice.id, incompatibleRuntimeSkills.length > 0);
+      toast(`已将 ${agent.name} 迁移到 ${targetDevice.name}`, "success");
+      onSaved();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="mb-7 overflow-hidden rounded-2xl border border-accent/25 bg-accent-soft/25">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-accent/15 px-5 py-4">
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-accent">Execution migration</div>
+          <div className="mt-1 text-sm font-semibold">Change Device</div>
+          <p className="mt-1 text-[11px] leading-5 text-dim">只改变未来派发；active Run 或未清理 worktree 会阻止迁移。</p>
+        </div>
+        <div className="rounded-full bg-white/70 px-3 py-1 text-[10px] text-dim">
+          {currentDevice?.name ?? agent.deviceId} <span className="px-1 text-accent">→</span> {targetDevice?.name ?? "Select target"}
+        </div>
+      </div>
+
+      {candidates.length === 0 ? (
+        <div className="px-5 py-6 text-sm text-dim">没有其他已注册 Device。请先在目标机器启动 harbord。</div>
+      ) : (
+        <>
+          <div className="grid gap-x-5 p-5 md:grid-cols-2">
+            <Field label="Target Device">
+              <select className={inputCls} value={deviceId} onChange={(event) => setDeviceId(event.target.value)}>
+                {candidates.map((candidate) => (
+                  <option key={candidate.id} value={candidate.id}>{candidate.name} · {candidate.online ? "Online" : "Offline"}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Runtime compatibility">
+              <div className={`flex h-11 items-center rounded-xl border px-3 text-sm ${runtimeVersion && modelAvailable ? "border-line bg-white/75 text-ink" : "border-red-200 bg-red-50 text-canceled"}`}>
+                {runtimeVersion
+                  ? `${agent.backend === "claude" ? "Claude Code" : "Codex CLI"} v${runtimeVersion}${modelAvailable ? "" : ` · model ${agent.model} unavailable`}`
+                  : `${agent.backend} Runtime unavailable`}
+              </div>
+            </Field>
+            <div className="md:col-span-2">
+              <Field label="Target checkout path">
+                <input
+                  className={`${inputCls} font-mono text-xs`}
+                  value={checkoutPath}
+                  disabled={!!targetMount}
+                  onChange={(event) => setCheckoutPath(event.target.value)}
+                  placeholder="/absolute/path/to/repository"
+                />
+                <p className="mt-2 text-xs leading-5 text-dim">
+                  {targetMount
+                    ? `Repository 已在 ${targetDevice?.name} 挂载，迁移将复用该 checkout。`
+                    : `Repository 尚未在 ${targetDevice?.name} 挂载；填入目标机器上的绝对路径，确认时会先创建 mount。`}
+                </p>
+              </Field>
+            </div>
+            {incompatibleRuntimeSkills.length > 0 && (
+              <div className="md:col-span-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-3 text-xs leading-5 text-amber-900">
+                迁移后将解除旧 Device 独占的 runtime Skills：{incompatibleRuntimeSkills.map((skill) => skill.name).join("、")}。Manual Skills 保留。
+              </div>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-accent/15 bg-white/35 px-5 py-3.5">
+            <p className="text-[11px] leading-5 text-dim">迁移后 Agent 的 Repository 不变，执行 checkout 切换到目标 Device。</p>
+            <button className={btnPrimary} disabled={busy || !ready} onClick={migrate}>
+              {busy ? "迁移中…" : "Migrate Agent"}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
   );
 }
 
