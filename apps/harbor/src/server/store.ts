@@ -22,6 +22,8 @@ import type {
   DeliveryEvent,
   DeploymentJob,
   DeploymentJobStatus,
+  DeploymentMaintenanceGate,
+  DeploymentMaintenancePhase,
   DeliveryMergeStatus,
   DeliveryProviderKind,
   DeliveryReviewStatus,
@@ -144,6 +146,7 @@ interface DeploymentJobRow {
   generation: number;
   target_id: string;
   revision: string;
+  target_fingerprint: string;
   status: string;
   attempt: number;
   lease_token: string | null;
@@ -152,9 +155,27 @@ interface DeploymentJobRow {
   log: string | null;
   error: string | null;
   rollback_complete: number | null;
+  rollback_attempt: number | null;
+  baseline_revision: string | null;
+  new_service_pid: number | null;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
+  updated_at: number;
+}
+
+interface DeploymentMaintenanceRow {
+  target_id: string;
+  job_id: string;
+  delivery_id: string;
+  generation: number;
+  revision: string;
+  target_fingerprint: string;
+  rollback_attempt: number;
+  baseline_revision: string;
+  expected_revision: string;
+  phase: string;
+  created_at: number;
   updated_at: number;
 }
 
@@ -378,7 +399,7 @@ function deliveryStatus(r: DeliveryRow): DeliveryStatus {
     if (r.review_status !== "approved") return "review_pending";
     if (r.check_status === "failed") return "blocked";
     if (r.check_status !== "passed") return "checks_pending";
-    if (r.deployment_status === "failed") return "failed";
+    if (r.deployment_status === "failed" || r.deployment_status === "needs_recovery") return "failed";
     if (r.deployment_status === "queued" || r.deployment_status === "running") return "deploying";
     if (r.deployment_status === "pending") return "merged";
     return "succeeded";
@@ -429,6 +450,7 @@ function toDeploymentJob(r: DeploymentJobRow): DeploymentJob {
     generation: r.generation,
     targetId: r.target_id,
     revision: r.revision,
+    targetFingerprint: r.target_fingerprint,
     status: r.status as DeploymentJobStatus,
     attempt: r.attempt,
     leaseToken: r.lease_token,
@@ -437,11 +459,43 @@ function toDeploymentJob(r: DeploymentJobRow): DeploymentJob {
     log: r.log,
     error: r.error,
     rollbackComplete: r.rollback_complete === null ? null : r.rollback_complete === 1,
+    rollbackAttempt: r.rollback_attempt,
+    baselineRevision: r.baseline_revision,
+    newServicePid: r.new_service_pid,
     createdAt: r.created_at,
     startedAt: r.started_at,
     finishedAt: r.finished_at,
     updatedAt: r.updated_at,
   };
+}
+
+function toDeploymentMaintenance(r: DeploymentMaintenanceRow): DeploymentMaintenanceGate {
+  return {
+    version: 1,
+    targetId: r.target_id,
+    jobId: r.job_id,
+    deliveryId: r.delivery_id,
+    generation: r.generation,
+    revision: r.revision,
+    targetFingerprint: r.target_fingerprint,
+    rollbackAttempt: r.rollback_attempt,
+    baselineRevision: r.baseline_revision,
+    expectedRevision: r.expected_revision,
+    phase: r.phase as DeploymentMaintenancePhase,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+function sameMaintenanceIdentity(left: DeploymentMaintenanceGate, right: DeploymentMaintenanceGate): boolean {
+  return left.targetId === right.targetId
+    && left.jobId === right.jobId
+    && left.deliveryId === right.deliveryId
+    && left.generation === right.generation
+    && left.revision === right.revision
+    && left.targetFingerprint === right.targetFingerprint
+    && left.rollbackAttempt === right.rollbackAttempt
+    && left.baselineRevision === right.baselineRevision;
 }
 
 function toDeliveryEvent(r: DeliveryEventRow): DeliveryEvent {
@@ -1492,9 +1546,11 @@ export class HarborStore {
     deliveryId: string,
     targetId: string,
     revision: string,
+    targetFingerprint: string,
     now: number,
   ): { job: DeploymentJob; created: boolean } {
     if (!/^[a-f0-9]{40,64}$/i.test(revision)) throw new Error("deployment revision 必须是完整十六进制 commit id");
+    if (!/^[a-f0-9]{64}$/.test(targetFingerprint)) throw new Error("deployment target fingerprint 无效");
     return this.db.transaction(() => {
       const delivery = this.db.query<DeliveryRow, [string]>("SELECT * FROM deliveries WHERE id = ?").get(deliveryId);
       if (!delivery) throw new Error(`Delivery "${deliveryId}" 不存在`);
@@ -1506,12 +1562,15 @@ export class HarborStore {
         const active = delivery.active_deployment_job_id
           ? this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(delivery.active_deployment_job_id)
           : null;
-        if (active && active.target_id === targetId && active.revision === revision) {
+        if (active && active.target_id === targetId && active.revision === revision && active.target_fingerprint === targetFingerprint) {
           return { job: toDeploymentJob(active), created: false };
         }
         throw new Error("Delivery 已有 active deployment job，不能重复 enqueue");
       }
       if (delivery.deployment_status === "succeeded") throw new Error("Delivery 已部署成功，无需重复 enqueue");
+      if (delivery.deployment_status === "needs_recovery") {
+        throw new Error("Deployment needs_recovery；必须先由 host 管理员执行 deploy-worker recover，禁止普通 Retry");
+      }
       if (delivery.deployment_status !== "pending" && delivery.deployment_status !== "failed") {
         throw new Error(`当前部署状态为 ${delivery.deployment_status}，不能 enqueue`);
       }
@@ -1519,9 +1578,9 @@ export class HarborStore {
       const id = newId("deploymentJob");
       this.db.run(
         `INSERT INTO deployment_jobs
-         (id, delivery_id, generation, target_id, revision, status, attempt, checkpoint, created_at, updated_at)
-         VALUES (?,?,?,?,?,'queued',0,'queued',?,?)`,
-        [id, deliveryId, generation, targetId, revision.toLowerCase(), now, now],
+         (id, delivery_id, generation, target_id, revision, target_fingerprint, status, attempt, checkpoint, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,'queued',0,'queued',?,?)`,
+        [id, deliveryId, generation, targetId, revision.toLowerCase(), targetFingerprint, now, now],
       );
       this.db.run(
         `UPDATE deliveries
@@ -1533,7 +1592,7 @@ export class HarborStore {
       );
       this.db.run(
         "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
-        [deliveryId, "deployment_enqueued", JSON.stringify({ jobId: id, targetId, generation, revision: revision.toLowerCase() }), "system", now],
+        [deliveryId, "deployment_enqueued", JSON.stringify({ jobId: id, targetId, targetFingerprint, generation, revision: revision.toLowerCase() }), "system", now],
       );
       this.touchDeliveryConversation(deliveryId, now);
       return { job: toDeploymentJob(this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id)!), created: true };
@@ -1553,14 +1612,14 @@ export class HarborStore {
   }
 
   /** queued 或 lease 已过期的 running job 才能领取；新 token fencing 旧 worker。 */
-  claimDeploymentJob(targetIds: string[], now: number, leaseMs: number): DeploymentJob | null {
-    if (targetIds.length === 0) return null;
+  claimDeploymentJob(targets: { id: string; fingerprint: string }[], now: number, leaseMs: number): DeploymentJob | null {
+    if (targets.length === 0) return null;
     return this.db.transaction(() => {
-      const placeholders = targetIds.map(() => "?").join(",");
+      const targetPredicate = targets.map(() => "(j.target_id = ? AND j.target_fingerprint = ?)").join(" OR ");
       const row = this.db
         .query<DeploymentJobRow, (string | number)[]>(
           `SELECT j.* FROM deployment_jobs j JOIN deliveries d ON d.id = j.delivery_id
-           WHERE j.target_id IN (${placeholders})
+           WHERE (${targetPredicate})
              AND (j.status = 'queued' OR (j.status = 'running' AND j.lease_expires_at IS NOT NULL AND j.lease_expires_at <= ?))
              AND d.active_deployment_job_id = j.id
              AND d.deployment_generation = j.generation
@@ -1569,7 +1628,7 @@ export class HarborStore {
              AND d.merge_status = 'merged' AND d.review_status = 'approved' AND d.check_status = 'passed'
            ORDER BY j.created_at, j.generation LIMIT 1`,
         )
-        .get(...targetIds, now);
+        .get(...targets.flatMap((target) => [target.id, target.fingerprint]), now);
       if (!row) return null;
       const leaseToken = newId("deploymentLease");
       const updated = this.db.run(
@@ -1599,24 +1658,167 @@ export class HarborStore {
   renewDeploymentJob(id: string, leaseToken: string, now: number, leaseMs: number): boolean {
     return this.db.run(
       `UPDATE deployment_jobs SET lease_expires_at = ?, updated_at = ?
-       WHERE id = ? AND status = 'running' AND lease_token = ?`,
+       WHERE id = ? AND status IN ('running','recovering') AND lease_token = ?`,
       [now + leaseMs, now, id, leaseToken],
     ).changes === 1;
   }
 
-  updateDeploymentCheckpoint(id: string, leaseToken: string, checkpoint: string, now: number): boolean {
+  updateDeploymentCheckpoint(
+    id: string,
+    leaseToken: string,
+    checkpoint: string,
+    now: number,
+    metadata: { newServicePid?: number | null } = {},
+  ): boolean {
     return this.db.run(
-      `UPDATE deployment_jobs SET checkpoint = ?, updated_at = ?
-       WHERE id = ? AND status = 'running' AND lease_token = ?`,
-      [checkpoint, now, id, leaseToken],
+      `UPDATE deployment_jobs SET checkpoint = ?,
+         new_service_pid = CASE WHEN ? = 1 THEN ? ELSE new_service_pid END,
+         updated_at = ?
+       WHERE id = ? AND status IN ('running','recovering') AND lease_token = ?`,
+      [checkpoint, Object.hasOwn(metadata, "newServicePid") ? 1 : 0, metadata.newServicePid ?? null, now, id, leaseToken],
     ).changes === 1;
+  }
+
+  getDeploymentMaintenance(targetId?: string): DeploymentMaintenanceGate | null {
+    const row = targetId
+      ? this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE target_id = ?").get(targetId)
+      : this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM deployment_maintenance ORDER BY created_at LIMIT 1").get();
+    return row ? toDeploymentMaintenance(row) : null;
+  }
+
+  listDeploymentMaintenance(): DeploymentMaintenanceGate[] {
+    return this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM deployment_maintenance ORDER BY created_at").all().map(toDeploymentMaintenance);
+  }
+
+  activateDeploymentMaintenance(
+    id: string,
+    leaseToken: string,
+    input: { rollbackAttempt: number; baselineRevision: string },
+    now: number,
+  ): DeploymentMaintenanceGate {
+    return this.db.transaction(() => {
+      const job = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id);
+      if (!job || !(["running", "recovering"] as string[]).includes(job.status) || job.lease_token !== leaseToken) throw new Error("deployment job lease 已失效");
+      if (!/^[a-f0-9]{40,64}$/i.test(input.baselineRevision)) throw new Error("baseline revision 不是完整 commit id");
+      const delivery = this.db.query<DeliveryRow, [string]>("SELECT * FROM deliveries WHERE id = ?").get(job.delivery_id);
+      if (!delivery || delivery.active_deployment_job_id !== job.id
+        || delivery.deployment_generation !== job.generation || delivery.deployment_revision !== job.revision
+        || !(delivery.deployment_status === "running" || job.status === "recovering")
+        || delivery.merge_status !== "merged" || delivery.review_status !== "approved" || delivery.check_status !== "passed") {
+        throw new Error("deployment job 已不再是通过 gates 的 active generation；拒绝进入 maintenance/cutover");
+      }
+      if (job.rollback_attempt !== null && job.rollback_attempt !== input.rollbackAttempt) {
+        throw new Error("deployment rollback anchor 已冻结，不能被新 attempt 覆盖");
+      }
+      const existing = this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE target_id = ?").get(job.target_id);
+      if (existing && (existing.job_id !== job.id || existing.generation !== job.generation || existing.revision !== job.revision || existing.target_fingerprint !== job.target_fingerprint)) {
+        throw new Error(`deployment target "${job.target_id}" 已被另一个 maintenance gate 占用`);
+      }
+      this.db.run(
+        `INSERT INTO deployment_maintenance
+         (target_id, job_id, delivery_id, generation, revision, target_fingerprint, rollback_attempt,
+          baseline_revision, expected_revision, phase, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,'deploying',?,?)
+         ON CONFLICT(target_id) DO UPDATE SET updated_at = excluded.updated_at`,
+        [job.target_id, job.id, job.delivery_id, job.generation, job.revision, job.target_fingerprint,
+          input.rollbackAttempt, input.baselineRevision.toLowerCase(), job.revision, now, now],
+      );
+      this.db.run(
+        `UPDATE deployment_jobs SET rollback_attempt = ?, baseline_revision = ?, checkpoint = 'maintenance', updated_at = ?
+         WHERE id = ? AND status IN ('running','recovering') AND lease_token = ?`,
+        [input.rollbackAttempt, input.baselineRevision.toLowerCase(), now, id, leaseToken],
+      );
+      return toDeploymentMaintenance(this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE target_id = ?").get(job.target_id)!);
+    })();
+  }
+
+  updateDeploymentMaintenance(
+    id: string,
+    leaseToken: string,
+    phase: DeploymentMaintenancePhase,
+    expectedRevision: string,
+    now: number,
+    metadata: { checkpoint?: string; newServicePid?: number | null } = {},
+  ): DeploymentMaintenanceGate {
+    return this.db.transaction(() => {
+      const job = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id);
+      if (!job || !(["running", "recovering"] as string[]).includes(job.status) || job.lease_token !== leaseToken) throw new Error("deployment job lease 已失效");
+      const changed = this.db.run(
+        `UPDATE deployment_maintenance SET phase = ?, expected_revision = ?, updated_at = ?
+         WHERE job_id = ? AND generation = ? AND revision = ? AND target_fingerprint = ?`,
+        [phase, expectedRevision.toLowerCase(), now, job.id, job.generation, job.revision, job.target_fingerprint],
+      );
+      if (changed.changes !== 1) throw new Error("maintenance gate 缺失或与当前 job identity 不一致");
+      this.db.run(
+        `UPDATE deployment_jobs SET checkpoint = COALESCE(?, checkpoint),
+           new_service_pid = CASE WHEN ? = 1 THEN ? ELSE new_service_pid END, updated_at = ?
+         WHERE id = ? AND status IN ('running','recovering') AND lease_token = ?`,
+        [metadata.checkpoint ?? null, Object.hasOwn(metadata, "newServicePid") ? 1 : 0,
+          metadata.newServicePid ?? null, now, id, leaseToken],
+      );
+      return toDeploymentMaintenance(this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE job_id = ?").get(id)!);
+    })();
+  }
+
+  /** SQLite restore 可能回退 lease/checkpoint；只凭冻结 gate identity 恢复 maintenance phase，不接受调用方改 job/revision。 */
+  restoreDeploymentMaintenance(gate: DeploymentMaintenanceGate, phase: DeploymentMaintenancePhase, expectedRevision: string, now: number): DeploymentMaintenanceGate {
+    return this.db.transaction(() => {
+      const row = this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE target_id = ?").get(gate.targetId);
+      if (!row || !sameMaintenanceIdentity(toDeploymentMaintenance(row), gate)) throw new Error("restored DB maintenance identity 不匹配");
+      const delivery = this.db.query<DeliveryRow, [string]>("SELECT * FROM deliveries WHERE id = ?").get(gate.deliveryId);
+      if (!delivery || delivery.active_deployment_job_id !== gate.jobId || delivery.deployment_generation !== gate.generation || delivery.deployment_revision !== gate.revision) {
+        throw new Error("restored DB 的 active Delivery generation/revision 不匹配");
+      }
+      this.db.run(
+        "UPDATE deployment_maintenance SET phase = ?, expected_revision = ?, updated_at = ? WHERE target_id = ?",
+        [phase, expectedRevision.toLowerCase(), now, gate.targetId],
+      );
+      return toDeploymentMaintenance(this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE target_id = ?").get(gate.targetId)!);
+    })();
+  }
+
+  claimDeploymentRecovery(id: string, targetId: string, targetFingerprint: string, now: number, leaseMs: number): DeploymentJob {
+    return this.db.transaction(() => {
+      const row = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id);
+      if (!row || row.target_id !== targetId || row.target_fingerprint !== targetFingerprint) throw new Error("recovery job/target fingerprint 不匹配");
+      if (row.rollback_attempt === null || !row.baseline_revision) throw new Error("recovery job 缺少原始 rollback anchor，不能自动恢复");
+      const reclaimable = row.status === "needs_recovery" || (row.status === "recovering" && row.lease_expires_at !== null && row.lease_expires_at <= now);
+      if (!reclaimable) throw new Error(`deployment job 状态 ${row.status} 不能进入管理员 recovery`);
+      const gate = this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE job_id = ?").get(id);
+      if (!gate || gate.target_fingerprint !== targetFingerprint || gate.rollback_attempt !== row.rollback_attempt) throw new Error("recovery maintenance gate/rollback anchor 不匹配");
+      const leaseToken = newId("deploymentLease");
+      this.db.run(
+        `UPDATE deployment_jobs SET status = 'recovering', attempt = attempt + 1, lease_token = ?, lease_expires_at = ?, updated_at = ?
+         WHERE id = ?`,
+        [leaseToken, now + leaseMs, now, id],
+      );
+      return toDeploymentJob(this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id)!);
+    })();
   }
 
   completeDeploymentJob(
     id: string,
     leaseToken: string,
-    result: { status: "succeeded" | "failed"; log: string; error?: string | null; rollbackComplete: boolean },
+    result: { status: "succeeded" | "failed" | "needs_recovery"; log: string; error?: string | null; rollbackComplete: boolean },
     now: number,
+  ): { job: DeploymentJob; applied: boolean; duplicate: boolean } {
+    return this.finishDeploymentJob(id, result, now, { leaseToken });
+  }
+
+  /** rollback restore 后 lease 可能来自 backup；只允许冻结 maintenance identity 完成，供 host worker/recovery CLI 使用。 */
+  completeRecoveredDeploymentJob(
+    gate: DeploymentMaintenanceGate,
+    result: { status: "failed" | "needs_recovery"; log: string; error?: string | null; rollbackComplete: boolean },
+    now: number,
+  ): { job: DeploymentJob; applied: boolean; duplicate: boolean } {
+    return this.finishDeploymentJob(gate.jobId, result, now, { gate });
+  }
+
+  private finishDeploymentJob(
+    id: string,
+    result: { status: "succeeded" | "failed" | "needs_recovery"; log: string; error?: string | null; rollbackComplete: boolean },
+    now: number,
+    proof: { leaseToken?: string; gate?: DeploymentMaintenanceGate },
   ): { job: DeploymentJob; applied: boolean; duplicate: boolean } {
     return this.db.transaction(() => {
       const row = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id);
@@ -1624,18 +1826,63 @@ export class HarborStore {
       if (row.status === "succeeded" || row.status === "failed") {
         return { job: toDeploymentJob(row), applied: false, duplicate: true };
       }
-      if (row.status !== "running" || row.lease_token !== leaseToken) {
+      if (!result.rollbackComplete && result.status !== "needs_recovery") {
+        throw new Error("rollbackComplete=false 必须落为 needs_recovery");
+      }
+      if (result.rollbackComplete && result.status === "needs_recovery") {
+        throw new Error("needs_recovery 不能声称 rollbackComplete=true");
+      }
+      const maintenanceRow = this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE job_id = ?").get(id);
+      const maintenance = maintenanceRow ? toDeploymentMaintenance(maintenanceRow) : null;
+      if (proof.gate) {
+        if (!maintenance || !sameMaintenanceIdentity(maintenance, proof.gate)) throw new Error("recovery completion 的 maintenance identity 不匹配");
+        if (!(["running", "recovering", "needs_recovery"] as string[]).includes(row.status)) throw new Error(`deployment job 状态 ${row.status} 不能 recovery complete`);
+      } else if (row.status !== "running" || row.lease_token !== proof.leaseToken) {
         throw new Error("deployment job lease 已失效；旧 worker 结果已拒绝");
       }
+      if (result.status === "succeeded") {
+        if (!maintenance || maintenance.phase !== "healthy" || maintenance.expectedRevision !== row.revision) {
+          throw new Error("deployment success 缺少 exact revision healthy maintenance proof");
+        }
+      }
       const safeLog = result.log.slice(0, 32_000);
-      const safeError = result.error?.slice(0, 4_000) ?? null;
+      const active = this.db.query<{
+        active_deployment_job_id: string | null; deployment_generation: number; deployment_revision: string | null;
+      }, [string]>(
+        "SELECT active_deployment_job_id, deployment_generation, deployment_revision FROM deliveries WHERE id = ?",
+      ).get(row.delivery_id);
+      const isActive = active?.active_deployment_job_id === row.id
+        && active.deployment_generation === row.generation
+        && active.deployment_revision === row.revision;
+      const verifiedStaleRecovery = !!proof.gate && result.status === "failed" && result.rollbackComplete;
+      if (maintenance && !isActive && !verifiedStaleRecovery) {
+        const staleError = "stale deployment result reached a cutover maintenance gate; administrator recovery required";
+        this.db.run(
+          `UPDATE deployment_jobs SET status = 'needs_recovery', log = ?, error = ?, rollback_complete = 0,
+             checkpoint = 'rollback_incomplete', lease_token = NULL, lease_expires_at = NULL, finished_at = ?, updated_at = ?
+           WHERE id = ?`,
+          [safeLog, staleError, now, now, row.id],
+        );
+        this.db.run("UPDATE deployment_maintenance SET phase = 'needs_recovery', updated_at = ? WHERE job_id = ?", [now, row.id]);
+        this.db.run(
+          "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
+          [row.delivery_id, "deployment_stale_result_needs_recovery", JSON.stringify({
+            jobId: row.id, targetId: row.target_id, targetFingerprint: row.target_fingerprint,
+            generation: row.generation, revision: row.revision, error: staleError, log: safeLog,
+          }), "provider", now],
+        );
+        this.touchDeliveryConversation(row.delivery_id, now);
+        const fresh = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id)!;
+        return { job: toDeploymentJob(fresh), applied: false, duplicate: false };
+      }
+      const safeError = (result.error ?? (result.status === "needs_recovery" ? "rollback incomplete; host administrator recovery required" : null))?.slice(0, 4_000) ?? null;
+      const checkpoint = result.status === "succeeded" ? "healthy" : result.status === "needs_recovery" ? "rollback_incomplete" : "failed";
       this.db.run(
         `UPDATE deployment_jobs
          SET status = ?, log = ?, error = ?, rollback_complete = ?, checkpoint = ?,
              lease_token = NULL, lease_expires_at = NULL, finished_at = ?, updated_at = ?
-         WHERE id = ? AND status = 'running' AND lease_token = ?`,
-        [result.status, safeLog, safeError, result.rollbackComplete ? 1 : 0,
-          result.status === "succeeded" ? "healthy" : "failed", now, now, id, leaseToken],
+         WHERE id = ?`,
+        [result.status, safeLog, safeError, result.rollbackComplete ? 1 : 0, checkpoint, now, now, id],
       );
       const applied = this.db.run(
         `UPDATE deliveries
@@ -1644,15 +1891,39 @@ export class HarborStore {
         [result.status, result.status === "succeeded" ? now : null, safeError, now,
           row.delivery_id, row.id, row.generation, row.revision],
       ).changes === 1;
+      if (result.status === "needs_recovery" && maintenance) {
+        this.db.run(
+          "UPDATE deployment_maintenance SET phase = 'needs_recovery', updated_at = ? WHERE job_id = ?",
+          [now, row.id],
+        );
+      } else if (maintenance) {
+        this.db.run("DELETE FROM deployment_maintenance WHERE job_id = ?", [row.id]);
+      }
       if (applied) {
         this.db.run(
           "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
           [row.delivery_id, `deployment_${result.status}`, JSON.stringify({
             jobId: row.id,
             targetId: row.target_id,
+            targetFingerprint: row.target_fingerprint,
             generation: row.generation,
             revision: row.revision,
             rollbackComplete: result.rollbackComplete,
+            error: safeError,
+            log: safeLog,
+          }), "provider", now],
+        );
+        this.touchDeliveryConversation(row.delivery_id, now);
+      } else if (verifiedStaleRecovery) {
+        this.db.run(
+          "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
+          [row.delivery_id, "deployment_stale_baseline_recovered", JSON.stringify({
+            jobId: row.id,
+            targetId: row.target_id,
+            targetFingerprint: row.target_fingerprint,
+            generation: row.generation,
+            revision: row.revision,
+            rollbackComplete: true,
             error: safeError,
             log: safeLog,
           }), "provider", now],

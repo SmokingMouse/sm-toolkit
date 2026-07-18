@@ -40,6 +40,7 @@ import type { DeviceHub } from "./ws.js";
 import type { RunCoordinator } from "./scheduler.js";
 import type { ApprovalService } from "./approvals.js";
 import { AutomationService } from "./automation.js";
+import { inactiveMaintenanceGuard, matchesRevisionAwareHealth, type MaintenanceGuard } from "./maintenance.js";
 import { transitionConversation } from "./statemachine.js";
 import { DeliveryService } from "./delivery.js";
 import {
@@ -104,6 +105,7 @@ export function buildRest(
   automations: AutomationService,
   expectedToken: string,
   deliveries = new DeliveryService(store),
+  maintenance: MaintenanceGuard = inactiveMaintenanceGuard,
 ): Hono {
   const app = new Hono();
 
@@ -182,6 +184,23 @@ export function buildRest(
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   });
 
+  app.use("*", async (c, next) => {
+    let snapshot;
+    try {
+      snapshot = await maintenance.current();
+    } catch {
+      return c.json({ error: "deployment maintenance state 不可判定；Harbor 已 fail-closed" }, 503);
+    }
+    if (!snapshot.active) return next();
+    const url = new URL(c.req.url);
+    if (url.pathname === "/api/health" && matchesRevisionAwareHealth(url, snapshot)) return next();
+    return c.json({
+      error: "Harbor 正处于 deployment maintenance；仅允许 exact revision health probe",
+      deploymentJobId: snapshot.gate?.jobId ?? null,
+      phase: snapshot.gate?.phase ?? "ambiguous",
+    }, 503);
+  });
+
   app.use("/api/*", async (c, next) => {
     const auth = c.req.header("Authorization");
     if (auth !== `Bearer ${expectedToken}`) {
@@ -192,7 +211,16 @@ export function buildRest(
 
   app.get("/api/deployment-targets", (c) => c.json(deliveries.listDeploymentTargets()));
 
-  app.get("/api/health", (c) => c.json({ ok: true }));
+  app.get("/api/health", async (c) => {
+    const snapshot = await maintenance.current();
+    return c.json({
+      ok: true,
+      revision: snapshot.runtimeRevision,
+      targetFingerprint: snapshot.runtimeFingerprint,
+      deploymentJobId: snapshot.gate?.jobId ?? null,
+      maintenance: snapshot.active,
+    });
+  });
 
   const resolveAgentSkills = (value: unknown, workspaceId: string, deviceId: string, backend: BackendKind) => {
     if (value === undefined) return [];

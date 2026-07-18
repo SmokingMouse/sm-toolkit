@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { databasePath, deploymentTargets } from "../config.js";
+import { databasePath, deploymentTargets, validateDeploymentWorkerConfigFile } from "../config.js";
 import { buildDaemonServicePath } from "../daemon/service.js";
 
 const LABEL = "com.smokingmouse.harbor.deploy-worker";
@@ -63,12 +63,10 @@ export function setupDeploymentWorkerService(): DeploymentWorkerServiceStatus {
   if (process.env.HARBOR_DEPLOYMENT_TARGETS_JSON) {
     throw new Error("LaunchAgent 不会把当前 shell env 安全持久化；请把 deployment_targets 写入权限 0600 的 ~/.harbor.yaml 后再 setup");
   }
-  if (deploymentTargets().length === 0) throw new Error("请先在 env 或 ~/.harbor.yaml 配置 deployment_targets");
+  const serviceHome = process.env.HARBOR_SERVICE_HOME ?? process.env.HOME ?? homedir();
+  validateDeploymentWorkerConfigFile(resolve(serviceHome, ".harbor.yaml"));
   const ctx = context();
-  const configPath = resolve(ctx.home, ".harbor.yaml");
-  if (!existsSync(configPath) || (statSync(configPath).mode & 0o077) !== 0) {
-    throw new Error("deploy worker 的 ~/.harbor.yaml 必须存在且权限为 0600 或更严格（其中可能包含部署凭证）");
-  }
+  if (deploymentTargets().length === 0) throw new Error("请先在 env 或 ~/.harbor.yaml 配置 deployment_targets");
   atomicWrite(ctx.definitionPath, renderDeploymentWorkerLaunchAgent(ctx));
   const domain = launchdDomain();
   command(["launchctl", "bootout", `${domain}/${LABEL}`], true);
@@ -111,9 +109,9 @@ export function uninstallDeploymentWorkerService(): DeploymentWorkerServiceStatu
 }
 
 function atomicWrite(path: string, content: string): void {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.tmp-${process.pid}`;
-  writeFileSync(temp, content, { mode: 0o644 });
+  writeFileSync(temp, content, { mode: 0o600 });
   renameSync(temp, path);
 }
 

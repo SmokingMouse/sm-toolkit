@@ -182,7 +182,14 @@ export type DeliveryReviewStatus = "pending" | "approved";
 export type DeliveryCheckStatus = "unknown" | "pending" | "passed" | "failed";
 export const DELIVERY_CHECK_STATUSES: DeliveryCheckStatus[] = ["unknown", "pending", "passed", "failed"];
 export type DeliveryMergeStatus = "open" | "closed" | "merged";
-export type DeliveryDeploymentStatus = "not_required" | "pending" | "queued" | "running" | "succeeded" | "failed";
+export type DeliveryDeploymentStatus =
+  | "not_required"
+  | "pending"
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "needs_recovery";
 /** 只读派生状态；调用方更新正交事实，不能直接写这个字段。 */
 export type DeliveryStatus =
   | "awaiting_change"
@@ -241,7 +248,29 @@ export interface DeploymentTargetDescriptor {
   provider: DeploymentProviderKind;
 }
 
-export type DeploymentJobStatus = "queued" | "running" | "succeeded" | "failed";
+export type DeploymentJobStatus = "queued" | "running" | "recovering" | "succeeded" | "failed" | "needs_recovery";
+
+export type DeploymentMaintenancePhase = "deploying" | "healthy" | "rolling_back" | "needs_recovery";
+
+/**
+ * DB 与 host 0600 sentinel 共用的非敏感 maintenance identity。
+ * 路径、argv、health URL/header 和环境变量绝不进入该记录。
+ */
+export interface DeploymentMaintenanceGate {
+  version: 1;
+  targetId: string;
+  jobId: string;
+  deliveryId: string;
+  generation: number;
+  revision: string;
+  targetFingerprint: string;
+  rollbackAttempt: number;
+  baselineRevision: string;
+  expectedRevision: string;
+  phase: DeploymentMaintenancePhase;
+  createdAt: number;
+  updatedAt: number;
+}
 
 export interface DeploymentJob {
   id: string;
@@ -249,6 +278,8 @@ export interface DeploymentJob {
   generation: number;
   targetId: string;
   revision: string;
+  /** enqueue 时冻结的非敏感 target topology fingerprint。 */
+  targetFingerprint: string;
   status: DeploymentJobStatus;
   attempt: number;
   leaseToken: string | null;
@@ -257,6 +288,10 @@ export interface DeploymentJob {
   log: string | null;
   error: string | null;
   rollbackComplete: boolean | null;
+  /** 首次进入 maintenance/cutover 的 attempt；重领后不得改写此 rollback anchor。 */
+  rollbackAttempt: number | null;
+  baselineRevision: string | null;
+  newServicePid: number | null;
   createdAt: number;
   startedAt: number | null;
   finishedAt: number | null;

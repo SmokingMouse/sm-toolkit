@@ -14,6 +14,8 @@ import {
 } from "./delivery.js";
 
 const REVISION = "a".repeat(40);
+const BASELINE = "b".repeat(40);
+const FINGERPRINT = "c".repeat(64);
 
 class FakeScmProvider implements DeliveryProvider {
   readonly kind = "github" as const;
@@ -38,10 +40,25 @@ function harness(path = ":memory:") {
   const agent = store.createAgent({ name: "builder", deviceId: device.id, backend: "claude", repositoryId: repository.id }, 4);
   const issue = store.createConversation({ kind: "issue", title: "deploy", agentId: agent.id, origin: "web" }, 5);
   store.setConversationStatus(issue.id, "review", 6);
-  const target = { id: "local-harbor", name: "Local Harbor", provider: "local-launchd" as const, repositoryId: repository.id };
+  const target = {
+    id: "local-harbor", name: "Local Harbor", provider: "local-launchd" as const,
+    repositoryId: repository.id, fingerprint: FINGERPRINT,
+  };
   const provider = new FakeScmProvider();
   const service = new DeliveryService(store, [provider], [target]);
   return { db, store, issue: store.getConversation(issue.id)!, service, provider, target };
+}
+
+function targetClaim(target: { id: string; fingerprint: string }) {
+  return [{ id: target.id, fingerprint: target.fingerprint }];
+}
+
+function markHealthy(store: HarborStore, claimed: ReturnType<HarborStore["claimDeploymentJob"]>, now: number) {
+  if (!claimed?.leaseToken) throw new Error("claim missing");
+  store.activateDeploymentMaintenance(claimed.id, claimed.leaseToken, { rollbackAttempt: claimed.attempt, baselineRevision: BASELINE }, now);
+  return store.updateDeploymentMaintenance(claimed.id, claimed.leaseToken, "healthy", claimed.revision, now + 1, {
+    checkpoint: "healthy", newServicePid: 42,
+  });
 }
 
 async function mergedDelivery() {
@@ -81,10 +98,11 @@ describe("durable automatic deployment queue", () => {
       const restarted = new DeliveryService(reopenedStore, [h.provider], [h.target]);
       expect(restarted.reconcileAutomaticDeployment(delivery.id, 12).deploymentStatus).toBe("queued");
       expect(reopenedStore.listDeploymentJobs(delivery.id)).toHaveLength(1);
-      const claimed = reopenedStore.claimDeploymentJob([h.target.id], 13, 100)!;
+      const claimed = reopenedStore.claimDeploymentJob(targetClaim(h.target), 13, 100)!;
+      markHealthy(reopenedStore, claimed, 14);
       reopenedStore.completeDeploymentJob(claimed.id, claimed.leaseToken!, {
         status: "succeeded", log: "result persisted while server is absent", rollbackComplete: true,
-      }, 14);
+      }, 16);
       reopenedDb.close();
 
       const finalDb = openDb(path);
@@ -113,8 +131,8 @@ describe("durable automatic deployment queue", () => {
     restarted.reconcileAutomaticDeployment(h.delivery.id, 12);
     expect(h.store.listDeploymentJobs(h.delivery.id)).toHaveLength(1);
 
-    const firstLease = h.store.claimDeploymentJob([h.target.id], 20, 10)!;
-    const reclaimed = h.store.claimDeploymentJob([h.target.id], 31, 10)!;
+    const firstLease = h.store.claimDeploymentJob(targetClaim(h.target), 20, 10)!;
+    const reclaimed = h.store.claimDeploymentJob(targetClaim(h.target), 31, 10)!;
     expect(reclaimed.id).toBe(firstLease.id);
     expect(reclaimed.attempt).toBe(2);
     expect(() => h.store.completeDeploymentJob(firstLease.id, firstLease.leaseToken!, {
@@ -135,10 +153,11 @@ describe("durable automatic deployment queue", () => {
     expect(lateDuplicate.duplicate).toBeTrue();
     expect(h.store.getDelivery(h.delivery.id)).toEqual(expect.objectContaining({ deploymentStatus: "queued", deploymentGeneration: 2 }));
 
-    const second = h.store.claimDeploymentJob([h.target.id], 36, 10)!;
+    const second = h.store.claimDeploymentJob(targetClaim(h.target), 36, 10)!;
+    markHealthy(h.store, second, 37);
     const completed = h.store.completeDeploymentJob(second.id, second.leaseToken!, {
       status: "succeeded", log: "ok", rollbackComplete: true,
-    }, 37);
+    }, 39);
     expect(completed.applied).toBeTrue();
     expect(h.store.completeDeploymentJob(second.id, second.leaseToken!, {
       status: "succeeded", log: "duplicate", rollbackComplete: true,
@@ -149,7 +168,8 @@ describe("durable automatic deployment queue", () => {
 
   test("discards a result when active generation/revision changed", async () => {
     const h = await mergedDelivery();
-    const claimed = h.store.claimDeploymentJob([h.target.id], 20, 100)!;
+    const claimed = h.store.claimDeploymentJob(targetClaim(h.target), 20, 100)!;
+    const originalGate = markHealthy(h.store, claimed, 21);
     h.store.updateDeliveryState(h.delivery.id, {
       deploymentGeneration: 2,
       deploymentRevision: "b".repeat(40),
@@ -165,6 +185,19 @@ describe("durable automatic deployment queue", () => {
       activeDeploymentJobId: "depjob_new",
       deploymentStatus: "running",
     }));
+    expect(result.job.status).toBe("needs_recovery");
+    h.store.claimDeploymentRecovery(claimed.id, h.target.id, h.target.fingerprint, 23, 100);
+    const recovered = h.store.completeRecoveredDeploymentJob(originalGate, {
+      status: "failed", log: "original baseline verified", error: "stale generation rolled back", rollbackComplete: true,
+    }, 24);
+    expect(recovered).toEqual(expect.objectContaining({ applied: false, job: expect.objectContaining({ status: "failed" }) }));
+    expect(h.store.getDeploymentMaintenance(h.target.id)).toBeNull();
+    expect(h.store.getDelivery(h.delivery.id)).toEqual(expect.objectContaining({
+      deploymentGeneration: 2,
+      deploymentRevision: "b".repeat(40),
+      activeDeploymentJobId: "depjob_new",
+      deploymentStatus: "running",
+    }));
   });
 
   test("never claims a queued job after it stops being the active generation", async () => {
@@ -174,7 +207,81 @@ describe("durable automatic deployment queue", () => {
       deploymentRevision: "b".repeat(40),
       activeDeploymentJobId: "depjob_new",
     }, 20);
-    expect(h.store.claimDeploymentJob([h.target.id], 21, 100)).toBeNull();
+    expect(h.store.claimDeploymentJob(targetClaim(h.target), 21, 100)).toBeNull();
+  });
+
+  test("a claimed worker cannot enter maintenance after its Delivery generation becomes stale", async () => {
+    const h = await mergedDelivery();
+    const claimed = h.store.claimDeploymentJob(targetClaim(h.target), 20, 100)!;
+    h.store.updateDeliveryState(h.delivery.id, {
+      deploymentGeneration: 2,
+      deploymentRevision: "b".repeat(40),
+      activeDeploymentJobId: "depjob_new",
+    }, 21);
+    expect(() => h.store.activateDeploymentMaintenance(
+      claimed.id,
+      claimed.leaseToken!,
+      { rollbackAttempt: 1, baselineRevision: BASELINE },
+      22,
+    )).toThrow("拒绝进入 maintenance/cutover");
+    expect(h.store.getDeploymentMaintenance(h.target.id)).toBeNull();
+  });
+
+  test("freezes target fingerprint and rejects a worker with drifted host config", async () => {
+    const h = await mergedDelivery();
+    expect(h.store.listDeploymentJobs(h.delivery.id)[0]?.targetFingerprint).toBe(FINGERPRINT);
+    expect(h.store.claimDeploymentJob([{ id: h.target.id, fingerprint: "d".repeat(64) }], 20, 100)).toBeNull();
+    expect(h.store.claimDeploymentJob(targetClaim(h.target), 21, 100)?.targetFingerprint).toBe(FINGERPRINT);
+  });
+
+  test("healthy checkpoint keeps the original rollback anchor across lease reclaim", async () => {
+    const h = await mergedDelivery();
+    const first = h.store.claimDeploymentJob(targetClaim(h.target), 20, 10)!;
+    const originalGate = markHealthy(h.store, first, 21);
+    const reclaimed = h.store.claimDeploymentJob(targetClaim(h.target), 31, 10)!;
+    expect(reclaimed).toEqual(expect.objectContaining({
+      attempt: 2,
+      checkpoint: "healthy",
+      rollbackAttempt: 1,
+      baselineRevision: BASELINE,
+      newServicePid: 42,
+    }));
+    expect(h.store.getDeploymentMaintenance(h.target.id)).toEqual(expect.objectContaining({
+      jobId: originalGate.jobId,
+      rollbackAttempt: 1,
+      baselineRevision: BASELINE,
+      phase: "healthy",
+    }));
+    h.store.completeDeploymentJob(reclaimed.id, reclaimed.leaseToken!, {
+      status: "succeeded", log: "revalidated after crash", rollbackComplete: true,
+    }, 32);
+    expect(h.store.getDelivery(h.delivery.id)?.deploymentStatus).toBe("succeeded");
+  });
+
+  test("rollback incomplete blocks Retry until administrator recovery verifies the frozen baseline", async () => {
+    const h = await mergedDelivery();
+    const claimed = h.store.claimDeploymentJob(targetClaim(h.target), 20, 100)!;
+    const maintenance = h.store.activateDeploymentMaintenance(
+      claimed.id,
+      claimed.leaseToken!,
+      { rollbackAttempt: 1, baselineRevision: BASELINE },
+      21,
+    );
+    h.store.completeRecoveredDeploymentJob(maintenance, {
+      status: "needs_recovery", log: "ambiguous stop", error: "rollback incomplete", rollbackComplete: false,
+    }, 22);
+    expect(h.store.getDelivery(h.delivery.id)).toEqual(expect.objectContaining({ deploymentStatus: "needs_recovery" }));
+    expect(() => h.service.reconcileAutomaticDeployment(h.delivery.id, 23)).toThrow("needs_recovery");
+    expect(h.service.startDeployment(h.store.getDelivery(h.delivery.id)!, h.issue, {}, 24)).rejects.toThrow("needs_recovery");
+
+    const recovery = h.store.claimDeploymentRecovery(claimed.id, h.target.id, h.target.fingerprint, 25, 100);
+    expect(recovery.status).toBe("recovering");
+    h.store.completeRecoveredDeploymentJob(maintenance, {
+      status: "failed", log: "old baseline verified", error: "deployment rolled back", rollbackComplete: true,
+    }, 26);
+    expect(h.store.getDelivery(h.delivery.id)?.deploymentStatus).toBe("failed");
+    const retried = await h.service.startDeployment(h.store.getDelivery(h.delivery.id)!, h.issue, {}, 27);
+    expect(retried).toEqual(expect.objectContaining({ deploymentStatus: "queued", deploymentGeneration: 2 }));
   });
 
   test("manual SCM stays orthogonal by supplying a verified exact revision to the configured target", async () => {
@@ -205,7 +312,7 @@ describe("durable automatic deployment queue", () => {
     expect(manual.service.finishDeployment(delivery, "succeeded", 12).deploymentStatus).toBe("succeeded");
 
     const automatic = await mergedDelivery();
-    const claimed = automatic.store.claimDeploymentJob([automatic.target.id], 20, 100)!;
+    const claimed = automatic.store.claimDeploymentJob(targetClaim(automatic.target), 20, 100)!;
     expect(() => automatic.service.finishDeployment(automatic.store.getDelivery(automatic.delivery.id)!, "succeeded", 21)).toThrow("只能由独立 host worker");
     automatic.store.completeDeploymentJob(claimed.id, claimed.leaseToken!, { status: "failed", log: "x", rollbackComplete: true }, 22);
   });

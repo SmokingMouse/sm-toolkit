@@ -19,6 +19,8 @@ import { GitHubDeliveryProvider, GitHubRestClient } from "./github-delivery.js";
 import { databasePath, deploymentTargets, feishuConfig, githubConfig, token } from "../config.js";
 import { DEFAULT_DEVICE_CONCURRENCY, DEFAULT_PORT, RUN_EVENTS_RETENTION_MS } from "../protocol.js";
 import { reconcileCompletedDeployments } from "./deployment-reconciler.js";
+import { HostMaintenanceSentinel } from "../deployment-worker/maintenance.js";
+import { DeploymentMaintenanceGuard } from "./maintenance.js";
 
 const authToken = token();
 const port = Number(process.env.HARBOR_PORT ?? DEFAULT_PORT);
@@ -28,13 +30,16 @@ const concurrency = Number(process.env.HARBOR_CONCURRENCY ?? DEFAULT_DEVICE_CONC
 const db = openDb(dbPath);
 const store = new HarborStore(db);
 const bus = new RunBus();
-const hub = new DeviceHub(store, authToken);
+const hub = new DeviceHub(store, authToken, () => store.listDeploymentMaintenance().length > 0);
 const gc = githubConfig();
 const configuredDeploymentTargets = deploymentTargets();
+const maintenance = new DeploymentMaintenanceGuard(store, configuredDeploymentTargets, new HostMaintenanceSentinel());
+let maintenanceActive = (await maintenance.current()).active;
+hub.setMaintenance(maintenanceActive);
 const deliveries = new DeliveryService(
   store,
   gc ? [new GitHubDeliveryProvider(new GitHubRestClient(gc.token))] : [],
-  configuredDeploymentTargets.map(({ id, name, provider, repositoryId }) => ({ id, name, provider, repositoryId })),
+  configuredDeploymentTargets.map(({ id, name, provider, repositoryId, fingerprint }) => ({ id, name, provider, repositoryId, fingerprint })),
 );
 if (!gc) {
   console.log(
@@ -43,7 +48,7 @@ if (!gc) {
 }
 const coordinator = new RunCoordinator(store, bus, hub, concurrency, deliveries);
 const approvals = new ApprovalService(store, bus, hub);
-const automations = new AutomationService(store, coordinator);
+const automations = new AutomationService(store, coordinator, () => maintenanceActive || store.listDeploymentMaintenance().length > 0);
 hub.coordinator = coordinator;
 hub.approvals = approvals;
 
@@ -58,7 +63,7 @@ if (fc) {
     botName: fc.botName,
     requireMention: true,
   });
-  feishu = new FeishuEntry(store, coordinator, approvals, fc, channel);
+  feishu = new FeishuEntry(store, coordinator, approvals, fc, channel, () => maintenanceActive || store.listDeploymentMaintenance().length > 0);
   approvals.sink = feishu;
   feishu.start().catch((e) => {
     console.error("[harbor-server] 飞书入口启动失败（server 继续跑，仅 CLI/REST 面可用）：", e);
@@ -75,21 +80,31 @@ coordinator.onRunFinished = (run, conv) => {
   feishu?.notifyRunDone(run, conv);
 };
 
-const app = buildRest(store, bus, hub, coordinator, approvals, automations, authToken, deliveries);
+const app = buildRest(store, bus, hub, coordinator, approvals, automations, authToken, deliveries, maintenance);
 
 // worker 直接把 durable result 写回 SQLite；server 在运行或重启后确定性推进 Issue/收尾 worktree。
-const finalizeDeployments = () => {
+const finalizeDeployments = async () => {
+  try {
+    if ((await maintenance.current()).active) return;
+  } catch {
+    return;
+  }
   reconcileCompletedDeployments(store, coordinator);
 };
-finalizeDeployments();
-setInterval(finalizeDeployments, 1_000);
+void finalizeDeployments();
+setInterval(() => void finalizeDeployments(), 1_000);
 
 Bun.serve<WsData>({
   port,
   idleTimeout: 0, // SSE 长挂（模型思考期无数据），禁用 HTTP 空闲超时；WS 保活靠心跳+sweep
-  fetch(req, server) {
+  async fetch(req, server) {
     const url = new URL(req.url);
     if (url.pathname === "/ws") {
+      let blocked = true;
+      try { blocked = (await maintenance.current()).active; } catch { /* fail-closed */ }
+      if (blocked) {
+        return new Response("deployment maintenance", { status: 503, headers: { "Retry-After": "1" } });
+      }
       const ok = server.upgrade(req, {
         data: { deviceId: null, deviceName: null, lastHeartbeat: Date.now() } satisfies WsData,
       });
@@ -105,11 +120,35 @@ Bun.serve<WsData>({
   },
 });
 hub.startSweeper();
-approvals.startSweeper();
-automations.start();
+if (!maintenanceActive) {
+  approvals.startSweeper();
+  automations.start();
+}
+
+setInterval(() => {
+  void maintenance.current().then((snapshot) => {
+    if (snapshot.active === maintenanceActive) return;
+    maintenanceActive = snapshot.active;
+    hub.setMaintenance(maintenanceActive);
+    if (maintenanceActive) {
+      approvals.stopSweeper();
+      automations.stop();
+    } else {
+      approvals.startSweeper();
+      automations.start();
+    }
+  }).catch((error) => {
+    maintenanceActive = true;
+    hub.setMaintenance(true);
+    approvals.stopSweeper();
+    automations.stop();
+    console.error("[harbor-server] maintenance sentinel 不可判定，已 fail-closed：", error);
+  });
+}, 250);
 
 // run_events 7 天滚动 prune（boot 一次 + 每小时）
 const prune = () => {
+  if (maintenanceActive) return;
   const n = store.pruneRunEvents(Date.now() - RUN_EVENTS_RETENTION_MS);
   if (n > 0) console.log(`[harbor-server] run_events prune：清理 ${n} 行（>7 天）`);
 };

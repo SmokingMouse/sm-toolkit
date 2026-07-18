@@ -69,6 +69,7 @@ export interface DeliveryProvider {
 /** server 只持有 target 的安全 routing metadata；执行路径/argv/secret 只给独立 worker。 */
 export interface DeploymentTargetRegistration extends DeploymentTargetDescriptor {
   repositoryId: string;
+  fingerprint: string;
 }
 
 /**
@@ -409,6 +410,9 @@ export class DeliveryService {
     if (delivery.mergeStatus !== "merged") throw new Error("代码尚未合并，不能开始部署");
     if (delivery.deploymentStatus === "not_required") throw new Error("当前 Delivery 配置为无需部署");
     if (delivery.deploymentStatus !== "pending" && delivery.deploymentStatus !== "failed") {
+      if (delivery.deploymentStatus === "needs_recovery") {
+        throw new Error("Deployment needs_recovery；必须先由 host 管理员执行 deploy-worker recover，普通 Retry 被禁止");
+      }
       throw new Error(`当前部署状态为 ${delivery.deploymentStatus}，不能重新开始`);
     }
     if (delivery.deploymentTargetId) {
@@ -456,9 +460,12 @@ export class DeliveryService {
     if (delivery.mergeStatus !== "merged" || delivery.reviewStatus !== "approved" || delivery.checkStatus !== "passed") {
       return delivery;
     }
-    this.configuredTarget(delivery.deploymentTargetId);
+    const target = this.configuredTarget(delivery.deploymentTargetId);
     if (delivery.deploymentStatus === "queued" || delivery.deploymentStatus === "running" || delivery.deploymentStatus === "succeeded") {
       return delivery;
+    }
+    if (delivery.deploymentStatus === "needs_recovery") {
+      throw new Error("Deployment needs_recovery；必须先由 host 管理员恢复并验证旧 baseline，不能普通 Retry");
     }
     if (!delivery.mergedRevision || !/^[a-f0-9]{40,64}$/i.test(delivery.mergedRevision)) {
       const message = "SCM Provider 未提供可信 exact merged revision，自动部署未入队";
@@ -468,7 +475,7 @@ export class DeliveryService {
       }
       return this.requireDelivery(delivery.id);
     }
-    this.store.enqueueDeploymentJob(delivery.id, delivery.deploymentTargetId, delivery.mergedRevision, now);
+    this.store.enqueueDeploymentJob(delivery.id, delivery.deploymentTargetId, delivery.mergedRevision, target.fingerprint, now);
     return this.requireDelivery(delivery.id);
   }
 

@@ -664,6 +664,113 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX idx_deployment_jobs_claim ON deployment_jobs(status, lease_expires_at, created_at);
   `,
+  // v15 —— fail-closed maintenance/recovery；冻结 target fingerprint 与原始 rollback anchor
+  `
+  DROP TABLE IF EXISTS deployment_maintenance;
+  CREATE TABLE deliveries_v15 (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id),
+    provider TEXT NOT NULL,
+    change_url TEXT,
+    external_id TEXT,
+    head_branch TEXT,
+    base_branch TEXT,
+    latest_head_sha TEXT,
+    approved_head_sha TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending' CHECK (review_status IN ('pending','approved')),
+    check_status TEXT NOT NULL DEFAULT 'unknown' CHECK (check_status IN ('unknown','pending','passed','failed')),
+    merge_status TEXT NOT NULL DEFAULT 'open' CHECK (merge_status IN ('open','closed','merged')),
+    deployment_status TEXT NOT NULL DEFAULT 'not_required'
+      CHECK (deployment_status IN ('not_required','pending','queued','running','succeeded','failed','needs_recovery')),
+    deployment_target_id TEXT,
+    merged_revision TEXT,
+    deployment_revision TEXT,
+    deployment_generation INTEGER NOT NULL DEFAULT 0,
+    active_deployment_job_id TEXT,
+    deployment_error TEXT,
+    review_approved_at INTEGER,
+    merged_at INTEGER,
+    deployed_at INTEGER,
+    revision INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  INSERT INTO deliveries_v15
+    SELECT id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+           latest_head_sha, approved_head_sha, review_status, check_status, merge_status,
+           CASE WHEN deployment_status IN ('queued','running') THEN 'needs_recovery' ELSE deployment_status END,
+           deployment_target_id, merged_revision, deployment_revision, deployment_generation,
+           active_deployment_job_id,
+           CASE WHEN deployment_status IN ('queued','running')
+                THEN 'v14 active deployment 缺少 target fingerprint/maintenance anchor；需要管理员 recovery'
+                ELSE deployment_error END,
+           review_approved_at, merged_at, deployed_at, revision, created_at, updated_at
+    FROM deliveries;
+
+  CREATE TABLE deployment_jobs_v15 (
+    id TEXT PRIMARY KEY,
+    delivery_id TEXT NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL,
+    target_id TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    target_fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued'
+      CHECK (status IN ('queued','running','recovering','succeeded','failed','needs_recovery')),
+    attempt INTEGER NOT NULL DEFAULT 0,
+    lease_token TEXT,
+    lease_expires_at INTEGER,
+    checkpoint TEXT NOT NULL DEFAULT 'queued',
+    log TEXT,
+    error TEXT,
+    rollback_complete INTEGER,
+    rollback_attempt INTEGER,
+    baseline_revision TEXT,
+    new_service_pid INTEGER,
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (delivery_id, generation)
+  );
+  INSERT INTO deployment_jobs_v15
+    (id, delivery_id, generation, target_id, revision, target_fingerprint, status, attempt,
+     lease_token, lease_expires_at, checkpoint, log, error, rollback_complete,
+     rollback_attempt, baseline_revision, new_service_pid, created_at, started_at, finished_at, updated_at)
+    SELECT id, delivery_id, generation, target_id, revision, '',
+           CASE WHEN status IN ('queued','running') THEN 'needs_recovery' ELSE status END,
+           attempt, NULL, NULL,
+           CASE WHEN status IN ('queued','running') THEN 'rollback_incomplete' ELSE checkpoint END,
+           log,
+           CASE WHEN status IN ('queued','running')
+                THEN 'v14 active deployment 无可证明 rollback anchor；需要管理员 recovery'
+                ELSE error END,
+           CASE WHEN status IN ('queued','running') THEN 0 ELSE rollback_complete END,
+           NULL, NULL, NULL, created_at, started_at, finished_at, updated_at
+    FROM deployment_jobs;
+
+  DROP TABLE deployment_jobs;
+  DROP TABLE deliveries;
+  ALTER TABLE deliveries_v15 RENAME TO deliveries;
+  ALTER TABLE deployment_jobs_v15 RENAME TO deployment_jobs;
+  CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
+  CREATE INDEX idx_deliveries_deployment_status ON deliveries(deployment_status, updated_at);
+  CREATE INDEX idx_deployment_jobs_claim ON deployment_jobs(status, lease_expires_at, created_at);
+
+  CREATE TABLE deployment_maintenance (
+    target_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL UNIQUE REFERENCES deployment_jobs(id) ON DELETE CASCADE,
+    delivery_id TEXT NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL,
+    revision TEXT NOT NULL,
+    target_fingerprint TEXT NOT NULL,
+    rollback_attempt INTEGER NOT NULL,
+    baseline_revision TEXT NOT NULL,
+    expected_revision TEXT NOT NULL,
+    phase TEXT NOT NULL CHECK (phase IN ('deploying','healthy','rolling_back','needs_recovery')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  `,
 ];
 
 function normalizeLegacyRepositoryNames(db: Database): void {
@@ -699,7 +806,7 @@ export function openDb(path: string): Database {
   let version = row?.user_version ?? 0;
   while (version < MIGRATIONS.length) {
     const sql = MIGRATIONS[version]!;
-    const rebuildsReferencedTables = version === 8 || version === 9 || version === 11 || version === 13;
+    const rebuildsReferencedTables = version === 8 || version === 9 || version === 11 || version === 13 || version === 14;
     if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = OFF;");
     try {
       db.transaction(() => {

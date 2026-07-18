@@ -1,88 +1,118 @@
 # Harbor Local launchd Deployment Provider
 
-## 结论
+## 决策
 
-Harbor 把代码合并与部署拆成两条正交轴：现有 `manual | github` 只表示 SCM Provider；Delivery 另存一个可空的管理员配置 `deploymentTargetId`。没有 target 时沿用既有 manual deployment；选择 `local-launchd` target 后，Harbor 只在人工验收、checks 和 merge 三个 gate 同时成立且拿到 exact committed revision 时，向 SQLite durable queue 幂等入队。独立 `harbor-deploy-worker` host service 领取 job，完成 release checkout、build/test、SQLite 一致性备份、launchd definition 原子切换、重启和 health check；失败时恢复旧 definition/release/DB。
+Harbor 把 SCM 与 Deployment 建成两条正交轴：`manual | github` 只提供 PR/check/merge 外部事实；Delivery 另选一个管理员配置的 `local-launchd` target。没有 target 时，既有 manual deployment 完全不变。绑定 target 后，只有 human review、Harbor checks、merge 与 exact committed revision 同时成立，control plane 才向 SQLite durable queue 幂等入队。
 
-任何缺证据、陈旧 generation、lease 丢失、health 失败或 rollback 不完整都只能得到 `Deployment failed`，Issue 保持 Review。Agent prompt、Issue 文本和 Web 请求都不能提供命令、路径、凭证或 launchd 参数。
+部署由独立 `harbor-deploy-worker` host service 执行。worker 不能改变 review/check/merge，Agent prompt、Issue、REST 与 Web 不能提供命令、路径、launchd 参数或 secret。任何 stop、identity、health、rollback 或 crash recovery 证据不完整，都保持 Issue Review 并落 `needs_recovery`；不能靠 Agent 自报或任意新 2xx 标 Done。
 
-## 背景与现状审计
+## 现状审计
 
-- `DeliveryService` 已确定性校验 human review、checks 和 merge，并用 `revision` CAS 隔离慢 GitHub 响应。
-- `manual | github` 当前既被称为 Delivery Provider，又承担 deployment；GitHub 明确拒绝 `deploymentRequired=true`，说明 SCM/CD 尚未真正正交。
-- v13 `deliveries` 只有 `pending/running/succeeded/failed` 事实；`/deploy` 与 `/deployment-result` 都依赖人工确认，没有 durable job 或 host executor。
-- `harbor-server`、`harbord` 都是业务生命周期进程。把部署放进任一进程会在其自身被重启时丢失执行上下文，也无法安全部署 Harbor 本身。
-- daemon service 已有 launchd definition 生成与 PATH 规则，但它管理的是 Agent daemon，不拥有 Delivery policy 或 release rollback。
+- `DeliveryService` 已用确定性 policy 校验 human review、checks 与 merge，并用 Delivery revision CAS 隔离慢 GitHub 响应。
+- v13 `deliveries` 只保存人工 deployment 事实；没有 durable job、host executor、maintenance gate 或 rollback anchor。
+- `harbor-server` 与 `harbord` 都是被部署对象的业务生命周期进程；把部署放进任一进程，会在自重启时丢失执行上下文。
+- daemon 的 service helper 只管理 Agent daemon，不拥有 Delivery policy、SQLite backup 或 release rollback。
+- Repository mount 是 Agent/Run 的仓库身份锚点，execution root 是一次 Run 的 cwd；Deployment target 的管理员 repository path 是独立 host capability。三者不能互相覆盖或由 Issue 输入改写。
 
 ## 目标与非目标
 
-目标：自动部署已通过 Harbor gates 的 exact merged revision；server/daemon 重启不丢 job/result；失败自动回滚；日志可审计且不泄密；v13 无损升级；manual fallback 保持可用。
+目标：部署 gate 已通过的 exact merged revision；server/daemon 重启不丢 job/result；切换前可靠停机；新 revision health 前禁止业务写入；失败恢复原 definition/release/DB；日志有界脱敏；v13 用户无损升级；manual fallback 不回归。
 
-非目标：自动创建/推送 GitHub PR、webhook、配置真实 token、实际操作本机 launchd、通用远程 CD、多环境编排或允许用户提交任意 shell。
+非目标：自动 push/创建 GitHub PR、webhook、配置真实 token、实际操作本机 launchd/用户 DB/`~/.harbor.yaml`、远程 CD、多环境编排或通用 shell endpoint。
 
-## 领域模型与状态机
+## 领域模型
 
-`Deployment target` 是 server/worker 从 env 或 `~/.harbor.yaml` 读取的管理员配置。DB 只保存稳定 `target id`，REST 只返回 `id/name/provider`；repository/release/DB/plist 路径、step argv、环境变量和凭证永不持久化或回显。
+`Deployment target` 来自 server/worker 的 env JSON 或管理员 `~/.harbor.yaml`。DB/REST/Web 只保存或返回 `id/name/provider` 与不可逆的非敏感 topology fingerprint；repository/release/SQLite/state/plist 路径、argv、health URL/header 与 env values 不进入 DB/前端。
 
-`Deployment job` 与 Delivery 是多对一；每次首次 enqueue 或 Retry 创建一个新 generation。Delivery 只认 `activeDeploymentJobId + deploymentGeneration + deploymentRevision` 对应的结果。
+`Deployment job` 冻结 `delivery + generation + target id + target fingerprint + exact revision`。首次 enqueue 与每次普通 Retry 都创建新 generation；claim 再加 lease token。结果必须同时匹配 active job、generation、revision、fingerprint 与 lease/rollback identity，旧 implementation、旧 worker callback 和重复 callback 不能覆盖新事实。
 
-| 当前事实 | 触发 | 下一状态 | 持久化/恢复语义 |
+`Rollback anchor` 在第一次切换前冻结：原 plist、原 current symlink target、原 release exact revision、rollback attempt，以及停机后创建的 SQLite 一致性 backup。后续 lease reclaim 只能复用该 anchor，禁止重新采样当前 release；否则可能把新 release 错当旧基线。
+
+`Maintenance gate` 有两份持久证据：SQLite `deployment_maintenance` 与 target 私有目录中的 `maintenance.json`。identity 包含 target/job/delivery/generation/revision/fingerprint/rollback attempt/baseline revision；phase 与 expected revision 描述当前应接受的唯一 runtime。任一 gate 存在、读取失败或两份不一致，Harbor 都 fail-closed。
+
+## 状态机
+
+| 当前事实 | 触发/证明 | 下一状态 | 语义 |
 |---|---|---|---|
-| merged + gates passed + target + exact revision | reconcile | queued | 单事务推进 generation、插 job、写 audit；重复 reconcile 返回现有 job |
-| queued / expired running lease | worker claim | running | 新 lease token fencing；server/daemon 不参与执行 |
-| running | health passed | succeeded | token、job、generation、revision 全匹配才落 Delivery；重复同 callback 幂等 |
-| running | 任一步失败且 rollback 完整 | failed | 截断/脱敏日志进入 job 与 Delivery audit |
-| running | rollback/DB restore 不确定 | failed | 明确 `rollbackComplete=false`；禁止 Done，等待人工处理/Retry |
-| failed | human Retry | queued(new generation) | 旧 job/result 永远不能更新新 generation |
+| merged + approved + checks passed + target | reconcile exact revision/fingerprint | `queued` | 单事务推进 generation、插 job、写 audit；重复 reconcile 返回原 job |
+| `queued` / lease 过期的 `running` | matching target id+fingerprint claim | `running` | 新 lease fencing；若已有 rollback anchor 则恢复，不创建新 baseline |
+| `running` + exact healthy gate | active identity + label/PID + revision-aware health | `succeeded` | DB terminal commit 后才清 host sentinel；Issue 才可由 control plane Done |
+| 任一步失败且旧 baseline 已完整恢复 | exact baseline label/PID/health | `failed` | maintenance 清除，允许普通 Retry 创建新 generation |
+| stop/restore/identity 任一不确定 | `rollbackComplete=false` | `needs_recovery` | checkpoint=`rollback_incomplete`；maintenance 保留，普通 Retry 禁止 |
+| `needs_recovery` | 管理员 CLI claim + 原 anchor rollback + exact baseline verification | `failed` | 只有验证旧 baseline 后才解除 maintenance/恢复 Retry 能力 |
 
-Worker 崩溃留下的 running job 在 lease 到期后可被重新领取；每次领取换 lease token，旧 worker 的晚结果被 fencing 拒绝。执行使用 attempt 独立 release 路径，重复 checkout/build 不覆盖旧 release。
+管理员 recovery 是实际恢复动作，不是 blind ack：`harbor deploy-worker recover <job-id> --target <id> --confirm <job-id>`。它复验 target fingerprint、配置/路径、双 gate 与原 anchor，可靠停止目标 label/PID；存在部署前 DB backup 才恢复 DB，不存在表示尚未越过 backup/cutover 边界；最后 bootstrap 并验证 exact baseline revision、label 与 live PID。任何一步失败仍是 `needs_recovery`。
 
-## 信任边界
+## 停机与主机副作用边界
 
-1. SCM Provider 只提供 PR/check/merge 事实和 exact merged revision；Deployment Provider 不调用 SCM，也不信 Agent 自报。
-2. Harbor control plane 决定是否 enqueue；worker 只能领取已持久化且 gate snapshot 完整的 job，不能改变 review/check/merge。
-3. Web/REST 只可选择 server 公布的 target id 和发起 Retry。命令、路径、health URL、launchd label/domain、plist template、SQLite 路径和 secret env 全来自管理员配置。
-4. Worker 以 argv + `shell=false` 执行配置步骤；revision 必须是完整十六进制 commit id，并在 configured repository 中解析为同一 commit。
-5. Job 日志先替换 secrets/敏感路径，再按固定上限截断；DB/audit 只接收处理后的文本。
+build/test 完成后，worker 先证明旧 service 为配置的 exact launchd label、`loaded/running` 且 PID 存活，再持久化原 anchor 与双 maintenance gate。此后执行 `bootout`，并持续同时证明：
 
-## Local launchd 执行与回滚
+1. `launchctl print gui/<uid>/<label>` 明确返回 unloaded；普通 print failure 不视为 unloaded。
+2. launchctl 不再报告 PID。
+3. bootout 前冻结的 PID 已不存在；`EPERM` 视为仍存活。
+4. label、PID 不能漂移；loaded-without-PID、unloaded-with-PID、PID change 都是 ambiguous failure。
 
-执行顺序：
+只要 `bootout` 报错或上述任一证明缺失，worker 绝不 backup/restore/replace DB、plist 或 symlink，直接保留 maintenance 并进入 `needs_recovery`。rollback 同样先可靠停止新/目标 service；未证明停止前禁止恢复旧 DB/plist/symlink。
 
-1. 在 attempt 专属 release 目录 checkout exact revision；执行管理员配置的 install/build/test argv。
-2. 读取旧 plist 和 current release 指针；bootout 旧 service。
-3. 在 service 停止后创建 SQLite 一致性 backup。
-4. 原子写入指向新 release 的 plist，并原子切换 current symlink；bootstrap 新 service。
-5. 在 deadline 内轮询 health URL；成功才提交 job success。
+## 执行、maintenance 与 health
 
-失败回滚顺序：bootout 新 service → 原子恢复旧 plist/current symlink → 从一致性 backup 原子恢复 DB（并清理 WAL/SHM）→ bootstrap 旧 service → health 旧 service。任一步失败都聚合进失败原因；尤其 DB restore 失败时不启动可能读取不兼容 DB 的旧程序，并标记 rollback 不完整。
+1. 在 attempt release 目录解析并 checkout job 的完整 commit id，验证 repository `rev-parse` 与 job revision 完全相同；按管理员 argv 执行 install/build/test。
+2. 冻结原 rollback anchor；先原子写 SQLite gate，再写 0600 host sentinel；可靠停止旧 service。
+3. 在目标进程已停止后创建 0600 SQLite backup；从含 `release_path/revision/target_fingerprint` 的管理员 plist template 生成 0600 definition，原子替换 plist/current symlink。
+4. bootstrap 后验证 exact label、running state 与 live PID；把新 PID 持久化到 job/gate。
+5. 新 server 在 plist 注入 `HARBOR_RELEASE_REVISION` 与 `HARBOR_TARGET_FINGERPRINT`。maintenance 期间所有 REST（包括 read/mutation）、WebSocket、automation、审批后台任务与飞书 mutation 都 503/拒绝；Device daemon 不能完成 `/ws` 连接，已有连接关闭。唯一放行的是带 exact job/revision/fingerprint query 的 `/api/health`。
+6. worker 的 health client 同时验证 HTTP 2xx、JSON 中 exact expected revision/job/fingerprint、`maintenance=true`，并在每次 probe 前复验相同 launchd label/PID 仍存活。普通 2xx、旧 revision 或 PID 漂移都失败。
+7. health 通过后先把 DB gate/checkpoint 原子改为 `healthy`，再写 host sentinel。worker 重新验证后提交 terminal result，最后 identity-safe 清 sentinel；在此之前业务写入始终关闭。
 
-## 崩溃恢复
+## 失败回滚
 
-- Queue、lease、attempt、result 和 audit 都在 Harbor SQLite；server 只负责 enqueue/展示，worker 可在 server/daemon 停止时继续。
-- worker 在每个外部步骤前后续租。进程消失后，lease 过期才允许下一 attempt 领取。
-- cutover 的旧 plist、旧 symlink 和 SQLite backup 放在 worker 私有 job/attempt rollback 目录，不写 Delivery event。
-- 若 worker 在 cutover 中间崩溃，下一 attempt 先按持久化 checkpoint 恢复旧 service，再从头部署；无法证明恢复完成则 job failed，不继续切换。
+rollback 先把 expected revision 改为冻结 baseline，再可靠停止 target service。只有停机证明完成，才原子恢复旧 plist/current symlink；若已生成部署前 SQLite backup，再恢复 DB 并移除 WAL/SHM。SQLite restore 会回退 lease/checkpoint，因此 worker 只凭冻结 maintenance identity 恢复 gate，不能接受恢复后 DB 中的旧 lease 作为新证据。随后 bootstrap 旧 service，并验证 exact baseline revision、label、live PID 与 revision-aware health。
+
+DB restore 失败时不启动可能读取不兼容 DB 的旧程序；bootout/restore/bootstrap/health 任一失败都保留双 gate，状态为 `needs_recovery`。只有上述完整证据成立，结果才是 rollbackComplete 的 `failed`。
+
+## 崩溃恢复矩阵
+
+| 崩溃窗口 | 重启后的处理 |
+|---|---|
+| enqueue/claim 前后 | SQLite queue + lease reclaim；旧 lease callback 被拒绝 |
+| DB gate 后、sentinel 前 | server 因 DB-only gate fail-closed；worker 用同一 identity 补写 sentinel，再用原 anchor rollback |
+| bootout 前/中 | 不越过 DB/plist/symlink mutation boundary；recovery 重新可靠停机并验证原 baseline |
+| backup/cutover/health 中 | reclaim 发现冻结 rollback attempt，直接用原 anchor rollback，不创建新 release baseline |
+| DB `healthy` 后、sentinel `healthy` 前 | 仅当 identity 完全一致且两者都指向 job revision，补写 sentinel；再验 exact revision + label/PID + health 后 finalize，否则原 anchor rollback |
+| rollback 中 DB restore 后、gate restore 前 | host sentinel 保留更晚的 baseline rollback phase；用同一 identity 恢复 DB gate并继续原 rollback |
+| terminal DB commit 后、sentinel clear 前 | server 仍因 file-only sentinel 拒绝写；worker复验 terminal expected revision + label/PID + health 后只清 sentinel，不重写 Delivery |
+| 任意 identity/phase 无法解释 | `needs_recovery`，不清 gate、不 Retry、不 Done |
+
+## 配置、进程与文件安全
+
+- parser 要求 absolute lexical-canonical paths，所有 target paths 两两不同且互不包含；health 只允许无 URL credential 的 loopback HTTP(S)，launchd domain 必须是 `gui/<uid>`。
+- worker 每次进程启动都用 `lstat` 复验 YAML：当前 uid owner、0600、regular file、non-symlink。target 每次 claim/recovery 前再复验 realpath、owner、type、mode、父目录归属、路径互斥与 current symlink target 位于 releases tree。
+- state/attempt 目录与 releases 目录为 0700；sentinel、rollback plist/revision/current anchor、生成 plist 与 SQLite backup/restore temp 为 0600。`readLink` 只把 ENOENT 当不存在；EACCES、regular file 和其他错误 fail loudly。
+- build/install/test 使用 argv + `shell=false`；子进程只继承 `PATH/TMPDIR/LANG/LC_ALL` allowlist 与显式非敏感 target env。`HARBOR_*`、`GITHUB_*`、credential-like env 被配置 parser 拒绝，health headers 只存在 worker 内存，配置 secret 禁止出现在 argv。
+- audit 只记录 executable basename 与 arg count，不记录 argv；stdout/stderr 持续 drain、单命令 capture 有界、总日志 32KB 截断。所有配置 path、env values、health URL/header/Bearer token 在 job error/audit/worker error 前脱敏；进程超时 TERM/KILL，lease heartbeat 在命令期间继续。
 
 ## 迁移与兼容
 
-v14 重建 `deliveries` 的 deployment CHECK 以加入 `queued`，并新增 target/generation/revision/active job/error 字段及 `deployment_jobs`。从 v13 逐列复制所有既有事实：`not_required/pending/running/succeeded/failed`、SHA、revision、时间戳和 events 均保持。旧 `running` 的 target id 为空，因此继续属于既有 manual fallback，不会被自动 worker 领取或伪装成 durable job。
+v14 首次引入 durable jobs。v15 重建 Delivery/job CHECK，新增 `needs_recovery/recovering`、target fingerprint、rollback attempt/baseline/new PID 与 `deployment_maintenance`。从 v13 升级逐列保留 review/check/merge/manual deployment facts、SHA、revision、时间戳与 events；无 target 时 manual fallback 不变。
 
-未配置 target 时：创建 Delivery、manual merge、manual deploy start/result 与 Issue 完成语义不变。配置 target 也不改变 manual fallback；用户可以选择不绑定 target。
+已运行的 v14 queued/running job 没有 fingerprint 或可证明的 rollback anchor，v15 一律 fail-closed 为 `needs_recovery`，不会被新 worker误领。它需要管理员按实际 host 状态处理，不能用新 2xx 冒充成功。
 
-## 主要替代方案
+## 被拒绝的替代方案
 
-| 方案 | 优点 | 缺点 | 结论 |
-|---|---|---|---|
-| Agent prompt 执行部署 | 实现快 | 可自报成功、无幂等/审计/恢复，权限边界错误 | 拒绝 |
-| server/harbord 内执行 | 少一个进程 | 部署自身会重启执行者，崩溃恢复困难 | 拒绝 |
-| 独立 worker + SQLite queue | 生命周期独立、事务/CAS 可证、适合单机 Harbor | 仅适合同 host SQLite | 采用 |
-| 通用 shell pipeline | 灵活 | UI/Issue 注入面过大，日志难脱敏 | 拒绝；只允许管理员配置 argv |
+| 方案 | 拒绝理由 |
+|---|---|
+| Agent prompt 执行/自报部署 | 无可信 gate、幂等、审计、停机与回滚证明 |
+| server/harbord 内执行 | 部署自重启会杀死执行者，生命周期边界错误 |
+| 单份 DB maintenance flag | DB restore 会回退 flag；无法覆盖 server DB 未启动/terminal clear crash |
+| bootout 返回即视为停止 | launchctl 可失败/状态模糊，旧 PID 可能仍写 DB |
+| health 2xx 即成功 | 可能来自旧进程/旧 revision，无法证明 exact release |
+| `needs_recovery` 直接 Retry/ack | 会覆盖未恢复 host，可能把新 release 当 baseline |
+| 通用 shell/UI commands | 注入面与 secret/日志边界不可控 |
 
-## 验证计划
+## 验证证据
 
-- Store/service：server restart、重复 enqueue、lease reclaim、duplicate callback、stale generation/revision、Retry。
-- Executor 全 fake：exact checkout、health success、health failure rollback、backup restore failure、日志截断/脱敏；不调用真实 FS/process/launchd/HTTP/clock。
-- REST/UI：target descriptor、自动进度、失败原因、Retry、未配置 manual fallback、拒绝未知 target/任意命令字段。
-- Migration：构造真实 v13 fixture，升级 v14 后逐字段/事件/foreign key 对比。
-- 最终：Harbor 定向测试、全量 test、root/Web typecheck、Web production build、`git diff --check`。
+- Store/Delivery fake SQLite：server restart、lease reclaim、duplicate/stale callback、fingerprint drift、generation/revision fencing、healthy anchor 保留、needs_recovery Retry 阻断与管理员 recovery 后 Retry。
+- Executor 全 fake FS/process/launchd/HTTP/clock：bootout failure、unloaded-but-live PID、label/PID 验证、rollback bootout failure、health rollback、DB restore failure、backup 前 recovery、healthy DB/sentinel crash、SQLite restore checkpoint crash、terminal sentinel crash、bounded/redacted log 与 minimal env。
+- Server：maintenance 中 REST mutation 不落库、所有 REST 503、exact revision-aware health 唯一放行、automation 拒绝、durable daemon connection gate、DB/file disagreement fail-closed。
+- Config/runtime：canonical/disjoint/loopback、owner/type/symlink/mode、strict readLink、secret argv 与 fingerprint drift 反例。
+- Migration：真实 v3/v9/v11/v13 fixture 无损升级；active v14 job fail-closed。所有测试只用隔离 DB 与 fake host adapter，不读取/修改真实 launchd、用户 DB 或 YAML。

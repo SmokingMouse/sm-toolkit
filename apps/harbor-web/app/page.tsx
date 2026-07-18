@@ -651,6 +651,10 @@ function IssueDrawer({ id, agents, onlineDeviceIds, initialAction, onInitialActi
 
   const startDeployment = async () => {
     if (!delivery) return;
+    if (delivery.deploymentStatus === "needs_recovery") {
+      toast("Host 处于 needs_recovery；管理员必须先运行 deploy-worker recover 并验证旧 baseline。", "error");
+      return;
+    }
     const prompt = delivery.deploymentTargetId
       ? `Retry 会为 target ${delivery.deploymentTargetId} 创建新 generation；旧 worker 结果不会覆盖。确认重试？`
       : "确认外部部署已经开始？这不会主动触发部署。";
@@ -874,7 +878,9 @@ function DeliveryCard({
     );
   }
 
-  const meta = delivery.mergeStatus === "closed"
+  const meta = delivery.deploymentStatus === "needs_recovery"
+    ? { label: "Needs recovery", note: "普通 Retry 已禁用，等待 host 管理员恢复并验证旧 baseline", tone: "bg-red-100 text-red-800" }
+    : delivery.mergeStatus === "closed"
     ? { label: "PR closed", note: "PR 已关闭且未合并", tone: "bg-red-50 text-red-700" }
     : DELIVERY_STATUS[delivery.status];
   const reviewDone = delivery.reviewStatus === "approved";
@@ -915,7 +921,7 @@ function DeliveryCard({
           </div>
           <DeliveryFact label="Merge" value={mergeDone ? "Merged" : delivery.mergeStatus === "closed" ? "Closed" : "Open"} ok={mergeDone} />
           <DeliveryFact label="Target" value={delivery.deploymentTargetId ?? (delivery.deploymentStatus === "not_required" ? "Not required" : "Manual")} ok={!!delivery.deploymentTargetId || delivery.deploymentStatus === "not_required"} />
-          <DeliveryFact label="Deploy" value={delivery.deploymentStatus.replace("_", " ")} ok={deployDone && mergeDone} />
+          <DeliveryFact label="Deploy" value={delivery.deploymentStatus.replaceAll("_", " ")} ok={deployDone && mergeDone} />
         </div>
 
         {delivery.deploymentError && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[10px] leading-4 text-red-700">{delivery.deploymentError}</p>}
@@ -931,7 +937,8 @@ function DeliveryCard({
             {delivery.provider === "github" && <button className={btnGhost} disabled={disabled} onClick={onSync}>Sync from GitHub</button>}
             {!reviewDone && <button className={btnPrimary} disabled={disabled} onClick={onApprove}>Approve implementation</button>}
             {delivery.status === "merge_ready" && <button className={btnPrimary} disabled={disabled} onClick={onMerge}>{delivery.provider === "github" ? "Merge on GitHub" : "Confirm externally merged"}</button>}
-            {(delivery.status === "merged" || delivery.status === "failed") && <button className={delivery.status === "failed" ? btnDanger : btnPrimary} disabled={disabled} onClick={onDeploy}>{delivery.deploymentTargetId ? "Retry deployment" : delivery.status === "failed" ? "Record deploy retry" : "Record deploy started"}</button>}
+            {(delivery.status === "merged" || (delivery.status === "failed" && delivery.deploymentStatus !== "needs_recovery")) && <button className={delivery.status === "failed" ? btnDanger : btnPrimary} disabled={disabled} onClick={onDeploy}>{delivery.deploymentTargetId ? "Retry deployment" : delivery.status === "failed" ? "Record deploy retry" : "Record deploy started"}</button>}
+            {delivery.deploymentStatus === "needs_recovery" && <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[10px] leading-4 text-red-700">普通 Retry 已禁用。Host 管理员需执行 <span className="break-all font-mono">harbor deploy-worker recover {delivery.activeDeploymentJobId ?? "<job-id>"} --target {delivery.deploymentTargetId ?? "<target-id>"} --confirm {delivery.activeDeploymentJobId ?? "<job-id>"}</span>；只有旧 baseline 的 revision、launchd label/PID 与 health 全部验证后才会恢复为可重试状态。</p>}
             {delivery.status === "deploying" && !delivery.deploymentTargetId && <div className="grid grid-cols-2 gap-2"><button className={btnPrimary} disabled={disabled} onClick={() => onDeploymentResult("succeeded")}>Succeeded</button><button className={btnDanger} disabled={disabled} onClick={() => onDeploymentResult("failed")}>Failed</button></div>}
           </div>
         )}

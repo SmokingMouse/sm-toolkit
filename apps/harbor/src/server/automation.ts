@@ -16,10 +16,12 @@ export class AutomationService {
   constructor(
     private store: HarborStore,
     private coordinator: RunCoordinator,
+    private readonly maintenanceActive: () => boolean = () => false,
   ) {}
 
   /** boot：missed 检查 + 全部 enabled 排班 */
   start(): void {
+    if (this.maintenanceActive()) return;
     const now = Date.now();
     for (const auto of this.store.listAutomations()) {
       if (!auto.enabled) continue;
@@ -60,6 +62,7 @@ export class AutomationService {
   }
 
   schedule(auto: Automation): void {
+    if (this.maintenanceActive()) throw new Error("deployment maintenance 期间禁止排班/触发 automation");
     this.unschedule(auto.id);
     const job = new Cron(auto.cron, { name: auto.id }, () => this.fire(auto.id));
     this.jobs.set(auto.id, job);
@@ -72,6 +75,7 @@ export class AutomationService {
 
   /** 即使规则已停用也允许人工单次执行；停用只控制 cron 排班。 */
   runNow(id: string): Run {
+    if (this.maintenanceActive()) throw new Error("deployment maintenance 期间禁止触发 automation");
     const auto = this.store.getAutomation(id);
     if (!auto) throw new Error(`automation "${id}" 不存在`);
     return this.dispatch(auto, "event.automation.manual");
@@ -79,6 +83,7 @@ export class AutomationService {
 
   private fire(id: string): void {
     const now = Date.now();
+    if (this.maintenanceActive()) return;
     const auto = this.store.getAutomation(id);
     if (!auto || !auto.enabled) return; // 已删/已停用（stop 竞态兜底）
 
@@ -92,6 +97,7 @@ export class AutomationService {
   }
 
   private dispatch(auto: Automation, promptEvent: PromptEventBlockKey, now = Date.now()): Run {
+    if (this.maintenanceActive()) throw new Error("deployment maintenance 期间禁止 automation 写入");
     const agent = this.store.getAgent(auto.agentId);
     if (!agent || agent.archivedAt) {
       throw new Error("agent 不存在或已归档，未触发");
