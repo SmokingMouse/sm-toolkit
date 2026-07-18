@@ -54,6 +54,7 @@ describe("Mew-style Automation runtime", () => {
       { ...automation, outputMode: "run" },
       { ...agent, isolation: "worktree" },
       "unsafe",
+      "implementation",
       "event.automation.manual",
       {},
     )).toThrow("isolation=none");
@@ -118,6 +119,58 @@ describe("Mew-style Automation runtime", () => {
       eventId: "delivery-1",
       payload: { ref: "refs/tags/release/prod" },
     }).status).toBe("duplicate");
+  });
+
+  test("internal event dispatches a review Run back to the source Issue exactly once", () => {
+    const { store, agent, service } = setup();
+    const issue = store.createConversation({
+      workspaceId: "ws_personal",
+      kind: "issue",
+      title: "Review me",
+      agentId: agent.id,
+      repositoryId: agent.repositoryId,
+    }, 3);
+    store.setConversationStatus(issue.id, "review", 4);
+    const automation = store.createAutomation({
+      name: "auto-review",
+      agentId: agent.id,
+      prompt: "Review the implementation and submit a decision.",
+      purpose: "review",
+      outputMode: "source",
+      overlapMode: "skip",
+      triggers: [{
+        type: "event",
+        events: ["issue.review_ready"],
+        filters: [{ path: "repositoryId", equals: agent.repositoryId }],
+      }],
+    }, 5);
+
+    const first = service.receiveEvent({
+      workspaceId: "ws_personal",
+      eventType: "issue.review_ready",
+      eventId: "issue.review_ready:r_1",
+      payload: { conversationId: issue.id, repositoryId: agent.repositoryId },
+    });
+    expect(first).toHaveLength(1);
+    expect(first[0]).toEqual(expect.objectContaining({ status: "started", automationId: automation.id }));
+    if (first[0]?.status !== "started") throw new Error("expected internal event to start");
+    expect(first[0].run).toEqual(expect.objectContaining({
+      conversationId: issue.id,
+      purpose: "review",
+      triggerRef: automation.id,
+      promptEvent: "event.automation.event",
+      triggerContext: expect.objectContaining({
+        provider: "harbor",
+        eventType: "issue.review_ready",
+      }),
+    }));
+
+    expect(service.receiveEvent({
+      workspaceId: "ws_personal",
+      eventType: "issue.review_ready",
+      eventId: "issue.review_ready:r_1",
+      payload: { conversationId: issue.id, repositoryId: agent.repositoryId },
+    })[0]).toEqual(expect.objectContaining({ status: "duplicate" }));
   });
 
   test("overlap=skip rejects an active invocation while queue serializes starts", () => {

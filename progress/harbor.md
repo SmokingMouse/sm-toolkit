@@ -34,7 +34,7 @@
 | **Conversation** | Workspace 内的对话容器，`kind: chat \| issue`。Chat=临时探索，Issue=留档任务 | 不独立选择 Repository；未指派 Inbox 可为空，指派后从 Agent 派生快照。Chat 始终绑定 Agent，Issue 当前 Assignee 可空。1 Conversation — N Run，同一 Conversation 严格串行 |
 | **Issue 状态机** | `backlog(Inbox) → todo(Ready) → doing(Running) → review → done / canceled` | implementation Run 排队/启动/成功分别推进 todo/doing/review；失败或取消回 todo；最终 Done 只接受人工验收。Reviewer Run 不改阶段与 Assignee |
 | **Run** | 一次 CLI 进程调用（一条 prompt → 一个 result），冻结 workspace / repository / mount / execution root 与 `purpose` | 一个 Run 最多写一个 Repository；状态 `queued → running → succeeded / failed / canceled`。跨仓库工作拆成多个 Conversation / Run，由 Workspace 聚合 |
-| **Automation** | Workspace 内的 cron 定时器，触发时对指定 Agent 发 prompt | 新 Issue 从 Agent 继承 Repository；append 沿用目标 Conversation。产物模式为每次新开 Issue，或追加到固定 Conversation |
+| **Automation** | Workspace 内的 Run Source：由 schedule、外部 webhook 或 Harbor 领域 event 触发指定 Agent | run/chat/issue/append/source 五种 output；source 把 review 等 Run 动态派回事件原 Conversation。Trigger 以稳定 eventId 去重，boot 从持久化事实重放 |
 | **Approval** | permission=default 档下，daemon 上抛的工具授权请求 | 经 server 路由到发起入口（飞书卡片 / CLI / Web）等人批，回传 allow/deny |
 
 命名注意：Harbor 的 **Agent** 与 Claude Code 的 subagent、@sm/agent 包名三者语义不同，

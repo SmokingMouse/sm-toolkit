@@ -115,6 +115,10 @@ export class Executor {
       const actionEnvironment: Record<string, string> = {};
       if (spec.agentActionToken && this.agentActionUrl) {
         actionEnvironment.HARBOR_AGENT_ACTION_URL = this.agentActionUrl;
+        const actionBaseUrl = this.agentActionUrl.replace(/\/issues$/, "");
+        actionEnvironment.HARBOR_AGENT_ISSUE_URL = `${actionBaseUrl}/issues`;
+        actionEnvironment.HARBOR_AGENT_DELIVERY_URL = `${actionBaseUrl}/deliveries`;
+        actionEnvironment.HARBOR_AGENT_REVIEW_URL = `${actionBaseUrl}/reviews`;
         actionEnvironment.HARBOR_AGENT_ACTION_TOKEN = spec.agentActionToken;
       }
       const interactive = spec.permission === "default";

@@ -35,7 +35,8 @@ export type PromptEventBlockKey =
   | "event.chat.message_created"
   | "event.automation.schedule"
   | "event.automation.manual"
-  | "event.automation.webhook";
+  | "event.automation.webhook"
+  | "event.automation.event";
 export type PromptBlockKey = PromptContextBlockKey | PromptEventBlockKey;
 
 /** daemon 从本机 Runtime 配置目录发现、可同步进 Workspace 的 Skill。 */
@@ -280,7 +281,7 @@ export interface DeliveryEvent {
   deliveryId: string;
   kind: string;
   data: unknown;
-  actor: "human" | "system" | "provider";
+  actor: "human" | "agent" | "system" | "provider";
   ts: number;
 }
 
@@ -393,7 +394,7 @@ export interface Run {
   promptEvent: PromptEventBlockKey;
   /** 触发对象引用（如 Automation ID）；append 到既有会话时不能从 Conversation 反推。 */
   triggerRef: string | null;
-  /** webhook/schedule/manual 的规范化触发上下文；执行时快照，不从外部事件事后重建。 */
+  /** webhook/event/schedule/manual 的规范化触发上下文；执行时快照，不事后重建。 */
   triggerContext: Record<string, unknown>;
   /** 非空时同 key 的 Run 串行；Automation overlap=queue 用它防并发启动。 */
   concurrencyKey: string | null;
@@ -440,9 +441,16 @@ export interface Approval {
 }
 
 export type RunSourceType = "issue" | "chat" | "automation";
-export type AutomationOutputMode = "run" | "chat" | "issue" | "append";
+export type AutomationOutputMode = "run" | "chat" | "issue" | "append" | "source";
 export type AutomationOverlapMode = "skip" | "queue";
-export type AutomationTriggerType = "schedule" | "webhook";
+/** event 是 Harbor 自己的可信领域事件；webhook 始终视为外部低信任输入。 */
+export type AutomationTriggerType = "schedule" | "webhook" | "event";
+export const AUTOMATION_EVENT_TYPES = [
+  "issue.review_ready",
+  "delivery.merge_ready",
+  "delivery.merged",
+] as const;
+export type AutomationEventType = (typeof AUTOMATION_EVENT_TYPES)[number];
 export type AutomationWebhookScalar = string | number | boolean | null;
 
 /** webhook filter 同一 Trigger 内按 OR 语义匹配；path 使用点号读取 JSON 字段。 */
@@ -481,9 +489,11 @@ export interface Automation {
   /** 兼容/审计快照；不是配置项，触发时以 Agent 当前 Repository 为准。 */
   repositoryId: string | null;
   prompt: string;
+  /** Automation 派出的 Run 意图；review/verification 不再伪装成 implementation。 */
+  purpose: RunPurpose;
   outputMode: AutomationOutputMode;
   overlapMode: AutomationOverlapMode;
-  /** outputMode=append 时必填：追加到的固定 conversation */
+  /** outputMode=append 时必填：追加到的固定 conversation；source 从领域事件动态解析。 */
   targetConversationId: string | null;
   /** 完成播报的飞书群（须在 server 白名单内才真正发送） */
   notifyChatId: string | null;

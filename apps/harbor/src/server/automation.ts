@@ -1,8 +1,9 @@
 /**
  * Mew 式 Automation 编排：Automation 是 Run Source，Trigger 是触发配置。
  *
- * - schedule/webhook Trigger 可并存，manual 是每条 Automation 都有的即时入口；
- * - output=run 不创建伪 Conversation，chat/issue/append 保留协作与旧数据兼容；
+ * - schedule/webhook/event Trigger 可并存，manual 是每条 Automation 都有的即时入口；
+ * - output=run 不创建伪 Conversation，source 把可信领域事件派回原 Conversation；
+ * - chat/issue/append 保留协作与旧数据兼容；
  * - overlap=skip 拒绝重叠触发，queue 通过 Run concurrencyKey 串行下发；
  * - webhook payload 只是低信任触发上下文，prompt wrapper 会明确标注边界。
  */
@@ -27,11 +28,23 @@ export interface AutomationWebhookInput {
   payload: Record<string, unknown>;
 }
 
+export interface AutomationEventInput {
+  workspaceId: string;
+  eventType: string;
+  /** 领域事件的稳定幂等键；同一 Trigger 只消费一次。 */
+  eventId: string;
+  payload: Record<string, unknown>;
+}
+
 export type AutomationWebhookResult =
   | { status: "started"; run: Run }
   | { status: "skipped"; reason: string }
   | { status: "ignored"; reason: string }
   | { status: "duplicate"; reason: string };
+
+export type AutomationEventResult =
+  | { status: "started"; automationId: string; triggerId: string; run: Run }
+  | { status: "skipped" | "duplicate" | "rejected"; automationId: string; triggerId: string; reason: string };
 
 interface ScheduledJob {
   automationId: string;
@@ -132,7 +145,7 @@ export class AutomationService {
       }, Date.now());
       return { status: "ignored", reason: "event filter 不匹配" };
     }
-    if (input.eventId && this.store.hasAutomationWebhookDelivery(trigger.id, input.eventId)) {
+    if (input.eventId && this.store.hasAutomationTriggerDelivery(trigger.id, input.eventId)) {
       return { status: "duplicate", reason: `delivery ${input.eventId} 已处理` };
     }
 
@@ -144,9 +157,88 @@ export class AutomationService {
       receivedAt: new Date().toISOString(),
       payload: input.payload,
     }, input.eventId);
-    if (input.eventId) this.store.recordAutomationWebhookDelivery(trigger.id, input.eventId, Date.now());
+    if (input.eventId) this.store.recordAutomationTriggerDelivery(trigger.id, input.eventId, Date.now());
     if (!run) return { status: "skipped", reason: "已有 queued/running Run，overlap=skip" };
     return { status: "started", run };
+  }
+
+  /**
+   * Harbor 内部领域事件入口。事件由 control plane 直接调用，不走公开 webhook，也不接受 secret。
+   * 一个事件可命中多条 Automation；每个 Trigger 用 eventId 独立去重。
+   */
+  receiveEvent(input: AutomationEventInput): AutomationEventResult[] {
+    const eventType = input.eventType.trim();
+    if (!eventType) throw new Error("Automation eventType 不能为空");
+    if (!input.eventId.trim()) throw new Error("Automation eventId 不能为空");
+    const results: AutomationEventResult[] = [];
+    for (const automation of this.store.listAutomations(input.workspaceId)) {
+      if (!automation.enabled) continue;
+      for (const trigger of automation.triggers) {
+        if (!trigger.enabled || trigger.type !== "event") continue;
+        if (trigger.events.length > 0 && !trigger.events.includes(eventType)) continue;
+        if (
+          trigger.filters.length > 0 &&
+          !trigger.filters.some((filter) => matchesFilter(input.payload, filter))
+        ) {
+          this.store.appendAutomationLog({
+            automationId: automation.id,
+            kind: "rejected",
+            triggerId: trigger.id,
+            eventId: input.eventId,
+            note: `internal event ${eventType} 未命中 filter`,
+          }, Date.now());
+          results.push({
+            status: "rejected",
+            automationId: automation.id,
+            triggerId: trigger.id,
+            reason: "event filter 不匹配",
+          });
+          continue;
+        }
+        if (this.store.hasAutomationTriggerDelivery(trigger.id, input.eventId)) {
+          results.push({
+            status: "duplicate",
+            automationId: automation.id,
+            triggerId: trigger.id,
+            reason: `event ${input.eventId} 已处理`,
+          });
+          continue;
+        }
+        try {
+          const run = this.dispatch(automation, trigger, "event.automation.event", {
+            eventType,
+            eventId: input.eventId,
+            provider: "harbor",
+            triggerId: trigger.id,
+            emittedAt: new Date().toISOString(),
+            payload: input.payload,
+          }, input.eventId);
+          if (run) {
+            this.store.recordAutomationTriggerDelivery(trigger.id, input.eventId, Date.now());
+            results.push({ status: "started", automationId: automation.id, triggerId: trigger.id, run });
+          } else {
+            // internal event 是持久化事实的投影；skip 不消费幂等键，后续重放仍可补派。
+            results.push({
+              status: "skipped",
+              automationId: automation.id,
+              triggerId: trigger.id,
+              reason: "已有 queued/running Run，overlap=skip",
+            });
+          }
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          this.store.appendAutomationLog({
+            automationId: automation.id,
+            kind: "rejected",
+            triggerId: trigger.id,
+            eventId: input.eventId,
+            note: reason,
+          }, Date.now());
+          results.push({ status: "rejected", automationId: automation.id, triggerId: trigger.id, reason });
+        }
+      }
+    }
+    return results;
   }
 
   private fire(triggerId: string): void {
@@ -206,6 +298,18 @@ export class AutomationService {
       if (conversation.repositoryId && conversation.repositoryId !== agent.repositoryId) {
         throw new Error("target conversation 与 Agent 绑定的 Repository 不一致，未触发");
       }
+    } else if (automation.outputMode === "source") {
+      const payload = triggerContext.payload;
+      const conversationId = payload && typeof payload === "object" && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>).conversationId
+        : null;
+      conversation = typeof conversationId === "string" ? this.store.getConversation(conversationId) : null;
+      if (!conversation || conversation.workspaceId !== automation.workspaceId) {
+        throw new Error("source output 需要同 Workspace 领域事件提供有效 conversationId");
+      }
+      if (conversation.repositoryId && !agent.repositoryIds.includes(conversation.repositoryId)) {
+        throw new Error("source conversation 的 Repository 不在 Agent 可见范围，未触发");
+      }
     } else if (automation.outputMode === "chat" || automation.outputMode === "issue") {
       const kind = automation.outputMode;
       conversation = this.store.createConversation({
@@ -226,7 +330,7 @@ export class AutomationService {
           conversation,
           agent,
           automation.prompt,
-          "implementation",
+          automation.purpose,
           promptEvent,
           automation.id,
           {
@@ -235,7 +339,14 @@ export class AutomationService {
             allowQueuedBehindConversation: automation.overlapMode === "queue",
           },
         )
-      : this.coordinator.enqueueAutomationRun(automation, agent, automation.prompt, promptEvent, triggerContext);
+      : this.coordinator.enqueueAutomationRun(
+          automation,
+          agent,
+          automation.prompt,
+          automation.purpose,
+          promptEvent,
+          triggerContext,
+        );
 
     this.store.markAutomationFired(automation.id, Date.now());
     if (trigger) this.store.markAutomationTriggerFired(trigger.id, Date.now());

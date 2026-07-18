@@ -115,6 +115,16 @@ export class GitHubRestClient {
     return this.request<GitHubPullResponse>(`repos/${segment(ref.owner)}/${segment(ref.repo)}/pulls/${ref.number}`);
   }
 
+  createPullRequest(
+    repository: GitHubRepositoryRef,
+    input: { title: string; body: string; head: string; base: string },
+  ): Promise<GitHubPullResponse> {
+    return this.request<GitHubPullResponse>(
+      `repos/${segment(repository.owner)}/${segment(repository.repo)}/pulls`,
+      { method: "POST", body: input },
+    );
+  }
+
   async getCheckSnapshot(ref: GitHubPullRequestRef, sha: string, baseBranch: string): Promise<GitHubCheckSnapshot> {
     const root = `repos/${segment(ref.owner)}/${segment(ref.repo)}`;
     const [branch, runs, combined, rules] = await Promise.all([
@@ -311,7 +321,7 @@ export class GitHubRestClient {
 
   private async request<T>(
     path: string,
-    options: { method?: "GET" | "PUT"; body?: unknown } = {},
+    options: { method?: "GET" | "POST" | "PUT"; body?: unknown } = {},
   ): Promise<T> {
     const method = options.method ?? "GET";
     let response: Response;
@@ -358,10 +368,38 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
 
   constructor(private readonly client: GitHubRestClient) {}
 
-  prepareChange(context: DeliveryProviderContext, input: DeliveryChangeInput): DeliveryChangeInput {
-    if (input.deploymentRequired) {
-      throw new Error("GitHub Delivery 当前不支持 deployment；请关闭“Merge 后需要部署”或使用 manual provider");
+  async createChange(
+    context: DeliveryProviderContext,
+    input: DeliveryChangeInput,
+  ): Promise<DeliveryChangeInput> {
+    if (!context.repository?.remoteUrl?.trim()) {
+      throw new Error("GitHub PR 创建需要 Repository remoteUrl");
     }
+    const title = input.title?.trim();
+    const head = input.headBranch?.trim();
+    const base = input.baseBranch?.trim() || context.repository.defaultBranch;
+    if (!title) throw new Error("GitHub PR 创建需要 title");
+    if (!head) throw new Error("GitHub PR 创建需要 headBranch");
+    const repository = parseGitHubRepository(context.repository.remoteUrl);
+    const pull = await this.client.createPullRequest(repository, {
+      title,
+      body: input.body?.trim() ?? "",
+      head,
+      base,
+    });
+    if (!Number.isSafeInteger(pull.number) || pull.number <= 0 || !pull.html_url?.trim()) {
+      throw new Error("GitHub 创建 PR 的响应缺少可信 number/html_url");
+    }
+    return {
+      ...input,
+      changeUrl: pull.html_url,
+      externalId: `#${pull.number}`,
+      headBranch: head,
+      baseBranch: base,
+    };
+  }
+
+  prepareChange(context: DeliveryProviderContext, input: DeliveryChangeInput): DeliveryChangeInput {
     const ref = resolveGitHubPullRequest(input.changeUrl, context.repository, input.externalId);
     return {
       ...input,

@@ -19,6 +19,7 @@ import { DeliveryService, ManualDeliveryProvider } from "./delivery.js";
 import { GitHubDeliveryProvider, GitHubRestClient } from "./github-delivery.js";
 import { CodebaseDeliveryProvider } from "./codebase.js";
 import { ScmService } from "./scm.js";
+import { transitionConversation } from "./statemachine.js";
 import { SkillImportService } from "./skill-import.js";
 import { SkillSyncService } from "./skill-sync.js";
 import {
@@ -31,6 +32,8 @@ import {
   DEFAULT_DEVICE_CONCURRENCY,
   DEFAULT_PORT,
   RUN_EVENTS_RETENTION_MS,
+  type Conversation,
+  type Delivery,
 } from "../protocol.js";
 
 const authToken = token();
@@ -68,6 +71,75 @@ const skillImports = new SkillImportService();
 const skillSync = new SkillSyncService(store, skillImports);
 hub.coordinator = coordinator;
 hub.approvals = approvals;
+
+const finalizeDelivery = (deliveryId: string): void => {
+  const delivery = store.getDelivery(deliveryId);
+  if (!delivery || !deliveries.isComplete(delivery)) return;
+  const conversation = store.getConversation(delivery.conversationId);
+  if (
+    !conversation ||
+    conversation.kind !== "issue" ||
+    conversation.status === "done" ||
+    conversation.status === "canceled"
+  ) return;
+  transitionConversation(store, conversation, "done", "system", Date.now());
+  coordinator.requestWorktreeCleanup(store.getConversation(conversation.id)!);
+};
+
+const dispatchMergedEvent = (delivery: Delivery, conversation: Conversation): void => {
+  const results = automations.receiveEvent({
+    workspaceId: conversation.workspaceId,
+    eventType: "delivery.merged",
+    eventId: `delivery.merged:${delivery.id}:${delivery.mergedAt ?? delivery.revision}`,
+    payload: {
+      conversationId: conversation.id,
+      deliveryId: delivery.id,
+      repositoryId: conversation.repositoryId,
+      changeUrl: delivery.changeUrl,
+      baseBranch: delivery.baseBranch,
+      deploymentStatus: delivery.deploymentStatus,
+    },
+  });
+  const deployment = results.find((result) => {
+    if (result.status !== "started") return false;
+    const automation = store.getAutomation(result.automationId);
+    return automation?.purpose === "verification" && automation.outputMode === "run";
+  });
+  if (delivery.deploymentStatus === "pending" && deployment?.status === "started") {
+    deliveries.beginAutomatedDeployment(delivery, deployment.run.id);
+  }
+};
+
+const dispatchMergeReadyEvent = (delivery: Delivery, conversation: Conversation): void => {
+  automations.receiveEvent({
+    workspaceId: conversation.workspaceId,
+    eventType: "delivery.merge_ready",
+    eventId: `delivery.merge_ready:${delivery.id}:${delivery.revision}`,
+    payload: {
+      conversationId: conversation.id,
+      deliveryId: delivery.id,
+      repositoryId: conversation.repositoryId,
+      changeUrl: delivery.changeUrl,
+      checkStatus: delivery.checkStatus,
+    },
+  });
+};
+
+deliveries.onTransition = (before, after) => {
+  const conversation = store.getConversation(after.conversationId);
+  if (!conversation) return;
+  if (before.mergeStatus !== "merged" && after.mergeStatus === "merged") {
+    dispatchMergedEvent(after, conversation);
+  }
+  if (
+    before.status !== "merge_ready" &&
+    after.status === "merge_ready" &&
+    !store.activeRunForConversation(conversation.id)
+  ) {
+    dispatchMergeReadyEvent(after, conversation);
+  }
+  finalizeDelivery(after.id);
+};
 
 // 飞书入口（可选）：配置齐才挂；审批卡片/结果回报都走它
 const feishuEntries: FeishuEntry[] = [];
@@ -135,6 +207,64 @@ coordinator.onRunFinished = (run, conv) => {
       error instanceof Error ? error.message : error,
     );
   });
+  if (
+    run.status === "succeeded" &&
+    run.purpose === "implementation" &&
+    conv?.kind === "issue" &&
+    conv.status === "review"
+  ) {
+    automations.receiveEvent({
+      workspaceId: run.workspaceId,
+      eventType: "issue.review_ready",
+      eventId: `issue.review_ready:${run.id}`,
+      payload: {
+        conversationId: conv.id,
+        runId: run.id,
+        repositoryId: conv.repositoryId,
+        assigneeAgentId: conv.agentId,
+      },
+    });
+  }
+  const triggerPayload = run.triggerContext.payload;
+  const deliveryId =
+    run.sourceType === "automation" &&
+    run.triggerContext.eventType === "delivery.merged" &&
+    triggerPayload &&
+    typeof triggerPayload === "object" &&
+    !Array.isArray(triggerPayload) &&
+    typeof (triggerPayload as Record<string, unknown>).deliveryId === "string"
+      ? (triggerPayload as Record<string, unknown>).deliveryId as string
+      : null;
+  if (deliveryId) {
+    const delivery = store.getDelivery(deliveryId);
+    const deploymentEvent = store
+      .listDeliveryEvents(deliveryId)
+      .filter((event) => event.kind === "deployment_started")
+      .at(-1);
+    const deploymentRunId =
+      deploymentEvent?.data &&
+      typeof deploymentEvent.data === "object" &&
+      !Array.isArray(deploymentEvent.data) &&
+      typeof (deploymentEvent.data as Record<string, unknown>).runId === "string"
+        ? (deploymentEvent.data as Record<string, unknown>).runId
+        : null;
+    if (delivery?.deploymentStatus === "running" && deploymentRunId === run.id) {
+      try {
+        deliveries.finishDeployment(
+          delivery,
+          run.status === "succeeded" ? "succeeded" : "failed",
+          Date.now(),
+          "agent",
+        );
+        finalizeDelivery(delivery.id);
+      } catch (error) {
+        console.error(
+          `[automation] deployment Run ${run.id} 收尾失败：`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+  }
 };
 
 const app = buildRest(
@@ -188,6 +318,35 @@ Bun.serve<WsData>({
 hub.startSweeper();
 approvals.startSweeper();
 automations.start();
+// crash-safe reconciliation：领域事实先落库，boot 时用稳定 eventId 重放；Trigger delivery 表负责去重。
+for (const conversation of store.listConversations({ kind: "issue", status: "review" })) {
+  if (store.activeRunForConversation(conversation.id)) continue;
+  const delivery = store.getDeliveryForConversation(conversation.id);
+  if (delivery?.mergeStatus === "merged" && delivery.deploymentStatus === "pending") {
+    dispatchMergedEvent(delivery, conversation);
+  } else if (delivery?.status === "merge_ready") {
+    dispatchMergeReadyEvent(delivery, conversation);
+  }
+  if (!delivery || delivery.reviewStatus === "pending") {
+    const implementation = store
+      .listRunsByConversation(conversation.id)
+      .filter((run) => run.purpose === "implementation" && run.status === "succeeded")
+      .at(-1);
+    if (implementation) {
+      automations.receiveEvent({
+        workspaceId: conversation.workspaceId,
+        eventType: "issue.review_ready",
+        eventId: `issue.review_ready:${implementation.id}`,
+        payload: {
+          conversationId: conversation.id,
+          runId: implementation.id,
+          repositoryId: conversation.repositoryId,
+          assigneeAgentId: conversation.agentId,
+        },
+      });
+    }
+  }
+}
 skillSync.start();
 
 // run_events 7 天滚动 prune（boot 一次 + 每小时）

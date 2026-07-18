@@ -1021,6 +1021,157 @@ export const MIGRATIONS: string[] = [
     SET review_status = 'pending', review_approved_at = NULL, check_status = 'pending'
     WHERE provider = 'github' AND (latest_head_sha IS NULL OR approved_head_sha IS NULL);
   `,
+  // v16 —— Agent team：Harbor 内部领域事件驱动 review/deploy Automation
+  `
+  CREATE TABLE IF NOT EXISTS automation_webhook_deliveries (
+    trigger_id TEXT NOT NULL REFERENCES automation_triggers(id) ON DELETE CASCADE,
+    delivery_id TEXT NOT NULL,
+    received_at INTEGER NOT NULL,
+    PRIMARY KEY (trigger_id, delivery_id)
+  );
+
+  CREATE TABLE runs_v16 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    source_type TEXT NOT NULL CHECK (source_type IN ('issue','chat','automation')),
+    source_id TEXT NOT NULL,
+    conversation_id TEXT REFERENCES conversations(id),
+    agent_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    repository_id TEXT REFERENCES repositories(id),
+    repository_mount_id TEXT REFERENCES repository_mounts(id),
+    execution_root TEXT,
+    prompt TEXT NOT NULL,
+    purpose TEXT NOT NULL DEFAULT 'implementation' CHECK (purpose IN ('implementation','triage','review','verification')),
+    prompt_event TEXT NOT NULL CHECK (prompt_event IN (
+      'event.issue.assigned','event.issue.mentioned','event.issue.message_created',
+      'event.chat.message_created','event.automation.schedule','event.automation.manual',
+      'event.automation.webhook','event.automation.event'
+    )),
+    trigger_ref TEXT,
+    trigger_context TEXT NOT NULL DEFAULT '{}',
+    concurrency_key TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    claude_session_id TEXT,
+    error TEXT,
+    cost_usd REAL,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cached_tokens INTEGER,
+    queued_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    CHECK (
+      (source_type = 'automation' AND conversation_id IS NULL) OR
+      (source_type IN ('issue','chat') AND conversation_id IS NOT NULL AND source_id = conversation_id)
+    )
+  );
+  INSERT INTO runs_v16
+    (id, workspace_id, source_type, source_id, conversation_id, agent_id, device_id,
+     repository_id, repository_mount_id, execution_root, prompt, purpose, prompt_event, trigger_ref,
+     trigger_context, concurrency_key, status, claude_session_id, error, cost_usd, input_tokens,
+     output_tokens, cached_tokens, queued_at, started_at, finished_at)
+    SELECT id, workspace_id, source_type, source_id, conversation_id, agent_id, device_id,
+           repository_id, repository_mount_id, execution_root, prompt, purpose, prompt_event, trigger_ref,
+           trigger_context, concurrency_key, status, claude_session_id, error, cost_usd, input_tokens,
+           output_tokens, cached_tokens, queued_at, started_at, finished_at
+    FROM runs;
+  DROP TABLE runs;
+  ALTER TABLE runs_v16 RENAME TO runs;
+  CREATE INDEX idx_runs_device_status ON runs(device_id, status);
+  CREATE INDEX idx_runs_conversation ON runs(conversation_id);
+  CREATE INDEX idx_runs_workspace ON runs(workspace_id, queued_at);
+  CREATE INDEX idx_runs_source ON runs(source_type, source_id, queued_at);
+  CREATE INDEX idx_runs_trigger_ref ON runs(trigger_ref, status, queued_at);
+  CREATE INDEX idx_runs_concurrency ON runs(concurrency_key, status, queued_at);
+
+  CREATE TABLE delivery_events_v16 (
+    delivery_id TEXT NOT NULL REFERENCES deliveries(id),
+    kind TEXT NOT NULL,
+    data TEXT NOT NULL DEFAULT '{}',
+    actor TEXT NOT NULL CHECK (actor IN ('human','agent','system','provider')),
+    ts INTEGER NOT NULL
+  );
+  INSERT INTO delivery_events_v16 (delivery_id, kind, data, actor, ts)
+    SELECT delivery_id, kind, data, actor, ts FROM delivery_events;
+  DROP TABLE delivery_events;
+  ALTER TABLE delivery_events_v16 RENAME TO delivery_events;
+  CREATE INDEX idx_delivery_events ON delivery_events(delivery_id, ts);
+
+  CREATE TABLE automations_v16 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    name TEXT NOT NULL,
+    agent_id TEXT NOT NULL REFERENCES agents(id),
+    repository_id TEXT REFERENCES repositories(id),
+    prompt TEXT NOT NULL,
+    purpose TEXT NOT NULL DEFAULT 'implementation' CHECK (purpose IN ('implementation','triage','review','verification')),
+    output_mode TEXT NOT NULL DEFAULT 'run' CHECK (output_mode IN ('run','chat','issue','append','source')),
+    overlap_mode TEXT NOT NULL DEFAULT 'skip' CHECK (overlap_mode IN ('skip','queue')),
+    target_conversation_id TEXT REFERENCES conversations(id),
+    notify_chat_id TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_fired_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, name),
+    CHECK (
+      (output_mode = 'append' AND target_conversation_id IS NOT NULL) OR
+      (output_mode <> 'append' AND target_conversation_id IS NULL)
+    )
+  );
+  INSERT INTO automations_v16
+    (id, workspace_id, name, agent_id, repository_id, prompt, purpose, output_mode, overlap_mode,
+     target_conversation_id, notify_chat_id, enabled, last_fired_at, created_at, updated_at)
+    SELECT id, workspace_id, name, agent_id, repository_id, prompt, 'implementation', output_mode, overlap_mode,
+           target_conversation_id, notify_chat_id, enabled, last_fired_at, created_at, updated_at
+    FROM automations;
+
+  CREATE TABLE automation_triggers_v16 (
+    id TEXT PRIMARY KEY,
+    automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+    type TEXT NOT NULL CHECK (type IN ('schedule','webhook','event')),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    cron TEXT,
+    provider TEXT,
+    events TEXT NOT NULL DEFAULT '[]',
+    filters TEXT NOT NULL DEFAULT '[]',
+    secret_hash TEXT,
+    last_fired_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK (
+      (type = 'schedule' AND cron IS NOT NULL AND secret_hash IS NULL) OR
+      (type = 'webhook' AND cron IS NULL AND secret_hash IS NOT NULL) OR
+      (type = 'event' AND cron IS NULL AND secret_hash IS NULL)
+    )
+  );
+  INSERT INTO automation_triggers_v16
+    (id, automation_id, type, enabled, cron, provider, events, filters, secret_hash,
+     last_fired_at, created_at, updated_at)
+    SELECT id, automation_id, type, enabled, cron, provider, events, filters, secret_hash,
+           last_fired_at, created_at, updated_at
+    FROM automation_triggers;
+
+  CREATE TABLE automation_trigger_deliveries_v16 (
+    trigger_id TEXT NOT NULL REFERENCES automation_triggers(id) ON DELETE CASCADE,
+    delivery_id TEXT NOT NULL,
+    received_at INTEGER NOT NULL,
+    PRIMARY KEY (trigger_id, delivery_id)
+  );
+  INSERT INTO automation_trigger_deliveries_v16 (trigger_id, delivery_id, received_at)
+    SELECT trigger_id, delivery_id, received_at FROM automation_webhook_deliveries;
+
+  DROP TABLE automation_webhook_deliveries;
+  DROP TABLE automation_triggers;
+  DROP TABLE automations;
+  ALTER TABLE automations_v16 RENAME TO automations;
+  ALTER TABLE automation_triggers_v16 RENAME TO automation_triggers;
+  ALTER TABLE automation_trigger_deliveries_v16 RENAME TO automation_trigger_deliveries;
+  CREATE INDEX idx_automations_workspace ON automations(workspace_id, name);
+  CREATE INDEX idx_automation_triggers_automation ON automation_triggers(automation_id, type);
+  CREATE INDEX idx_automation_trigger_deliveries_ts ON automation_trigger_deliveries(received_at);
+  `,
 ];
 
 function hasTable(db: Database, table: string): boolean {
@@ -1101,7 +1252,7 @@ export function openDb(path: string): Database {
   while (version < MIGRATIONS.length) {
     const sql = MIGRATIONS[version]!;
     const rebuildsReferencedTables =
-      version === 8 || version === 9 || version === 11 || version === 12 || version === 14;
+      version === 8 || version === 9 || version === 11 || version === 12 || version === 14 || version === 15;
     if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = OFF;");
     try {
       db.transaction(() => {

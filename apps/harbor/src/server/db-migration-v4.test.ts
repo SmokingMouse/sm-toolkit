@@ -70,7 +70,7 @@ test("legacy database migrates through latest schema without losing conversation
     legacy.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16);
     expect(
       migrated.query<{ agent_id: string | null; description: string | null; priority: string; status: string }, []>(
         "SELECT agent_id, description, priority, status FROM conversations WHERE id = 'conversation_1'",
@@ -248,7 +248,7 @@ test("latest schema upgrades an already-running v9 database and preserves unboun
     v9.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16);
     const agent = migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM agents WHERE id = 'agent_1'").get();
     expect(agent?.repository_id).toStartWith("repo_unconfigured_");
     expect(migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM conversations WHERE id = 'conversation_1'").get()).toEqual(agent);
@@ -337,12 +337,13 @@ test("v15 preserves Delivery rows and audit events while adding closed PR state 
       DROP TABLE deliveries;
       ALTER TABLE deliveries_v11 RENAME TO deliveries;
       CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
+      DROP TABLE automation_trigger_deliveries;
       PRAGMA user_version = 14;
     `);
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16);
     expect(migrated.query<{ provider: string; change_url: string }, [string]>("SELECT provider, change_url FROM deliveries WHERE id = ?").get(delivery.id)).toEqual({
       provider: "manual",
       change_url: "https://github.com/acme/repo/pull/1",
@@ -415,12 +416,13 @@ test("v15 invalidates unbound GitHub evidence while preserving Delivery and even
       DROP TABLE deliveries;
       ALTER TABLE deliveries_v12_fixture RENAME TO deliveries;
       CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
+      DROP TABLE automation_trigger_deliveries;
       PRAGMA user_version = 14;
     `);
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16);
     expect(
       migrated.query<{
         provider: string;
@@ -526,7 +528,7 @@ test("v15 converges the historical self-hosting v13 fork without losing GitHub D
     fork.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16);
     expect(
       migrated.query<{ name: string }, []>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'automation_triggers'",

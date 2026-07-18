@@ -228,6 +228,7 @@ interface AutomationRow {
   agent_id: string;
   repository_id: string | null;
   prompt: string;
+  purpose: string;
   output_mode: string;
   overlap_mode: string;
   target_conversation_id: string | null;
@@ -590,6 +591,7 @@ function toAutomation(r: AutomationRow, triggers: AutomationTrigger[]): Automati
     agentId: r.agent_id,
     repositoryId: r.repository_id,
     prompt: r.prompt,
+    purpose: r.purpose as RunPurpose,
     outputMode,
     overlapMode: r.overlap_mode as AutomationOverlapMode,
     targetConversationId: r.target_conversation_id,
@@ -2450,6 +2452,13 @@ export class HarborStore {
         `SELECT queued.* FROM runs queued
          WHERE queued.device_id = ? AND queued.status = 'queued'
            AND (
+             queued.conversation_id IS NULL OR NOT EXISTS (
+               SELECT 1 FROM runs conversation_running
+               WHERE conversation_running.conversation_id = queued.conversation_id
+                 AND conversation_running.status = 'running'
+             )
+           )
+           AND (
              queued.concurrency_key IS NULL OR NOT EXISTS (
                SELECT 1 FROM runs running
                WHERE running.status = 'running' AND running.concurrency_key = queued.concurrency_key
@@ -2683,6 +2692,7 @@ export class HarborStore {
       agentId: string;
       repositoryId?: string | null;
       prompt: string;
+      purpose?: RunPurpose;
       outputMode?: AutomationOutputMode;
       overlapMode?: AutomationOverlapMode;
       /** 旧调用兼容：new_issue → issue。 */
@@ -2708,9 +2718,9 @@ export class HarborStore {
     this.db.transaction(() => {
       this.db.run(
         `INSERT INTO automations
-         (id, workspace_id, name, agent_id, repository_id, prompt, output_mode, overlap_mode,
+         (id, workspace_id, name, agent_id, repository_id, prompt, purpose, output_mode, overlap_mode,
           target_conversation_id, notify_chat_id, enabled, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?)`,
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?,?)`,
         [
           id,
           a.workspaceId ?? DEFAULT_WORKSPACE_ID,
@@ -2718,6 +2728,7 @@ export class HarborStore {
           a.agentId,
           a.repositoryId ?? null,
           a.prompt,
+          a.purpose ?? "implementation",
           outputMode,
           a.overlapMode ?? "skip",
           a.targetConversationId ?? null,
@@ -2859,7 +2870,11 @@ export class HarborStore {
         automationId,
         input.type,
         input.type === "schedule" ? input.cron ?? null : null,
-        input.type === "webhook" ? input.provider ?? "generic" : null,
+        input.type === "webhook"
+          ? input.provider ?? "generic"
+          : input.type === "event"
+            ? "harbor"
+            : null,
         JSON.stringify(input.events ?? []),
         JSON.stringify(input.filters ?? []),
         input.type === "webhook" ? input.secretHash ?? null : null,
@@ -2907,19 +2922,19 @@ export class HarborStore {
     this.db.run("DELETE FROM automation_triggers WHERE id = ?", [id]);
   }
 
-  /** deliveryId 在同一 webhook Trigger 下只接收一次；true 表示本次首次登记。 */
-  recordAutomationWebhookDelivery(triggerId: string, deliveryId: string, now: number): boolean {
+  /** eventId 在同一 webhook/event Trigger 下只接收一次；true 表示本次首次登记。 */
+  recordAutomationTriggerDelivery(triggerId: string, deliveryId: string, now: number): boolean {
     const result = this.db.run(
-      `INSERT OR IGNORE INTO automation_webhook_deliveries (trigger_id, delivery_id, received_at)
+      `INSERT OR IGNORE INTO automation_trigger_deliveries (trigger_id, delivery_id, received_at)
        VALUES (?,?,?)`,
       [triggerId, deliveryId, now],
     );
     return result.changes === 1;
   }
 
-  hasAutomationWebhookDelivery(triggerId: string, deliveryId: string): boolean {
+  hasAutomationTriggerDelivery(triggerId: string, deliveryId: string): boolean {
     return Boolean(this.db.query<{ ok: number }, [string, string]>(
-      "SELECT 1 AS ok FROM automation_webhook_deliveries WHERE trigger_id = ? AND delivery_id = ?",
+      "SELECT 1 AS ok FROM automation_trigger_deliveries WHERE trigger_id = ? AND delivery_id = ?",
     ).get(triggerId, deliveryId));
   }
 

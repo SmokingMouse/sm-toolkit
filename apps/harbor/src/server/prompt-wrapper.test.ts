@@ -98,12 +98,12 @@ describe("prompt blocks", () => {
     const version = db
       .query<{ user_version: number }, []>("PRAGMA user_version")
       .get()?.user_version;
-    expect(version).toBe(15);
+    expect(version).toBe(16);
     const store = new HarborStore(db);
     const input = fixtures();
     const rendered = renderRunPrompt(store, input);
 
-    expect(listPromptBlockConfigs(store, "ws_personal")).toHaveLength(9);
+    expect(listPromptBlockConfigs(store, "ws_personal")).toHaveLength(10);
     expect(rendered).toContain("Issue Reference");
     expect(rendered).toContain("Creator: -");
     expect(rendered).toContain("Recent Discussion");

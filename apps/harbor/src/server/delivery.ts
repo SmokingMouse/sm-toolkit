@@ -7,9 +7,11 @@ import type {
   Conversation,
   Delivery,
   DeliveryCheckStatus,
+  DeliveryEvent,
   DeliveryMergeStatus,
   DeliveryProviderKind,
   HarborRepository,
+  Run,
 } from "../protocol.js";
 import type { HarborStore } from "./store.js";
 
@@ -34,6 +36,8 @@ export interface DeliveryChangeInput {
   baseBranch?: string | null;
   deploymentRequired?: boolean;
   checkStatus?: DeliveryCheckStatus;
+  title?: string | null;
+  body?: string | null;
 }
 
 export interface DeliveryProviderSnapshot {
@@ -64,6 +68,8 @@ export interface DeliveryProvider {
   readonly kind: DeliveryProviderKind;
   readonly mode: "confirmation" | "automatic";
   prepareChange?(context: DeliveryProviderContext, input: DeliveryChangeInput): DeliveryChangeInput;
+  /** Agent 已 push head branch 后，由 server-side SCM credential 创建 PR/MR。 */
+  createChange?(context: DeliveryProviderContext, input: DeliveryChangeInput): Promise<DeliveryChangeInput>;
   sync?(delivery: Delivery, context: DeliveryProviderContext): Promise<DeliveryProviderSyncResult>;
   merge(
     delivery: Delivery,
@@ -106,6 +112,8 @@ export class ManualDeliveryProvider implements DeliveryProvider {
 }
 
 export class DeliveryService {
+  /** 仅发布已经持久化的正交事实变化；监听方失败不能反向污染外部 merge 结果。 */
+  onTransition?: (before: Delivery, after: Delivery) => void;
   private readonly providers: Map<DeliveryProviderKind, DeliveryProvider>;
   private readonly externalActionTails = new Map<string, Promise<void>>();
 
@@ -134,6 +142,58 @@ export class DeliveryService {
       throw new Error("Delivery 只能在 Issue 的 Review 阶段创建");
     }
     if (this.store.activeRunForConversation(conv.id)) throw new Error("仍有 Run 进行中，不能创建 Delivery");
+    return this.createPrepared(conv, input, "human", now);
+  }
+
+  /**
+   * implementation Run 的最小权限交付入口：只允许给当前 Issue 的固定 branch 注册/创建 PR。
+   * 它不批准、不合并，也不修改 Issue 状态。
+   */
+  async createFromImplementationRun(
+    run: Run,
+    conv: Conversation,
+    input: DeliveryChangeInput & { provider?: DeliveryProviderKind },
+    now = Date.now(),
+  ): Promise<Delivery> {
+    if (
+      run.status !== "running" ||
+      run.purpose !== "implementation" ||
+      run.conversationId !== conv.id ||
+      run.workspaceId !== conv.workspaceId ||
+      conv.kind !== "issue"
+    ) {
+      throw new Error("只有当前 Issue 的 running implementation Run 可以注册 Delivery");
+    }
+    if (conv.status !== "doing") throw new Error("当前 Issue 不在 Doing 阶段");
+    if (this.store.getDeliveryForConversation(conv.id)) throw new Error("当前 Issue 已有 Delivery");
+    const repository = conv.repositoryId ? this.store.getRepository(conv.repositoryId) : null;
+    if (!repository) throw new Error("当前 Issue 没有关联 Repository");
+    const expectedHead = `harbor/${conv.id}`;
+    if (input.headBranch?.trim() !== expectedHead) {
+      throw new Error(`headBranch 必须是当前 Issue 的隔离分支 ${expectedHead}`);
+    }
+    if (input.baseBranch?.trim() && input.baseBranch.trim() !== repository.defaultBranch) {
+      throw new Error(`baseBranch 必须是 Repository default branch ${repository.defaultBranch}`);
+    }
+    const providerKind = input.provider ?? (repository.scmProvider === "codebase" ? "codebase" : "github");
+    const provider = this.configuredProvider(providerKind);
+    let preparedInput: DeliveryChangeInput = {
+      ...input,
+      headBranch: expectedHead,
+      baseBranch: repository.defaultBranch,
+    };
+    if (!preparedInput.changeUrl?.trim() && provider.createChange) {
+      preparedInput = await provider.createChange(this.context(conv), preparedInput);
+    }
+    return this.createPrepared(conv, { ...preparedInput, provider: providerKind }, "agent", now);
+  }
+
+  private createPrepared(
+    conv: Conversation,
+    input: DeliveryChangeInput & { provider?: DeliveryProviderKind },
+    actor: DeliveryEvent["actor"],
+    now: number,
+  ): Delivery {
     if (this.store.getDeliveryForConversation(conv.id)) throw new Error("当前 Issue 已有 Delivery");
     const repository = conv.repositoryId ? this.store.getRepository(conv.repositoryId) : null;
     const providerKind = input.provider ?? (repository?.scmProvider === "codebase" ? "codebase" : "manual");
@@ -174,7 +234,7 @@ export class DeliveryService {
         deploymentRequired: prepared.deploymentRequired ?? false,
         changeUrl: delivery.changeUrl,
       },
-      "human",
+      actor,
       now,
     );
     return this.store.getDelivery(delivery.id)!;
@@ -241,8 +301,14 @@ export class DeliveryService {
     return this.store.getDelivery(delivery.id)!;
   }
 
-  approve(delivery: Delivery, conv: Conversation, now = Date.now()): Delivery {
-    this.assertReviewIdle(conv);
+  approve(
+    delivery: Delivery,
+    conv: Conversation,
+    now = Date.now(),
+    allowedRunId?: string,
+    actor: DeliveryEvent["actor"] = "human",
+  ): Delivery {
+    this.assertReviewIdle(conv, allowedRunId);
     const current = this.store.getDelivery(delivery.id);
     if (!current) throw new Error(`Delivery "${delivery.id}" 不存在`);
     if (!current.changeUrl) throw new Error("Delivery 尚未关联 MR/PR，不能验收");
@@ -263,21 +329,24 @@ export class DeliveryService {
       current.id,
       "review_approved",
       current.provider === "github" ? { headSha: approvedHeadSha } : {},
-      "human",
+      actor,
       now,
     );
-    return this.store.getDelivery(current.id)!;
+    const after = this.store.getDelivery(current.id)!;
+    this.emitTransition(current, after);
+    return after;
   }
 
   async sync(
     delivery: Delivery,
     _conv: Conversation,
     now = Date.now(),
+    allowedRunId?: string,
   ): Promise<Delivery> {
     return this.runExternalAction(delivery.id, async () => {
       const current = this.requireDelivery(delivery.id);
       const conv = this.requireConversation(current);
-      this.assertReviewIdle(conv);
+      this.assertReviewIdle(conv, allowedRunId);
       const provider = this.provider(current);
       if (!provider.sync) throw new Error(`delivery provider "${current.provider}" 不支持外部同步`);
       const result = await provider.sync(current, this.context(conv));
@@ -339,7 +408,9 @@ export class DeliveryService {
       if (!this.store.compareAndSetDelivery(current.id, current.revision, patch, events, now)) {
         throw new Error("Delivery 证据在 GitHub sync 期间已变化；旧响应已丢弃，请重新 Sync from GitHub");
       }
-      return this.requireDelivery(current.id);
+      const after = this.requireDelivery(current.id);
+      this.emitTransition(current, after);
+      return after;
     });
   }
 
@@ -370,11 +441,12 @@ export class DeliveryService {
     _conv: Conversation,
     input: DeliveryProviderAction,
     now = Date.now(),
+    allowedRunId?: string,
   ): Promise<Delivery> {
     return this.runExternalAction(delivery.id, async () => {
       const current = this.requireDelivery(delivery.id);
       const conv = this.requireConversation(current);
-      this.assertReviewIdle(conv);
+      this.assertReviewIdle(conv, allowedRunId);
       if (current.mergeStatus === "merged") return current;
       if (current.mergeStatus !== "open") throw new Error("PR 已关闭且未合并；重新打开并 Sync 后才能合并");
       if (!current.changeUrl) throw new Error("Delivery 尚未关联 MR/PR");
@@ -401,7 +473,9 @@ export class DeliveryService {
           "GitHub merge 返回期间 Delivery 证据已变化；未写入 merged，请 Sync from GitHub 核对外部结果后重新验收",
         );
       }
-      return this.requireDelivery(current.id);
+      const after = this.requireDelivery(current.id);
+      this.emitTransition(current, after);
+      return after;
     });
   }
 
@@ -467,10 +541,27 @@ export class DeliveryService {
       "provider",
       now,
     );
+    const after = this.store.getDelivery(delivery.id)!;
+    this.emitTransition(delivery, after);
+    return after;
+  }
+
+  beginAutomatedDeployment(delivery: Delivery, runId: string, now = Date.now()): Delivery {
+    if (delivery.mergeStatus !== "merged") throw new Error("代码尚未合并，不能开始自动部署");
+    if (delivery.deploymentStatus !== "pending") {
+      throw new Error(`当前部署状态为 ${delivery.deploymentStatus}，不能开始自动部署`);
+    }
+    this.store.updateDeliveryState(delivery.id, { deploymentStatus: "running", deployedAt: null }, now);
+    this.store.appendDeliveryEvent(delivery.id, "deployment_started", { runId, mode: "automation" }, "system", now);
     return this.store.getDelivery(delivery.id)!;
   }
 
-  finishDeployment(delivery: Delivery, status: "succeeded" | "failed", now = Date.now()): Delivery {
+  finishDeployment(
+    delivery: Delivery,
+    status: "succeeded" | "failed",
+    now = Date.now(),
+    actor: DeliveryEvent["actor"] = "human",
+  ): Delivery {
     if (delivery.mergeStatus !== "merged") throw new Error("代码尚未合并，不能记录部署结果");
     if (delivery.deploymentStatus !== "running") throw new Error("只有 running 的部署可以记录结果");
     this.store.updateDeliveryState(
@@ -478,7 +569,7 @@ export class DeliveryService {
       { deploymentStatus: status, deployedAt: status === "succeeded" ? now : null },
       now,
     );
-    this.store.appendDeliveryEvent(delivery.id, `deployment_${status}`, {}, "human", now);
+    this.store.appendDeliveryEvent(delivery.id, `deployment_${status}`, {}, actor, now);
     return this.store.getDelivery(delivery.id)!;
   }
 
@@ -531,9 +622,22 @@ export class DeliveryService {
     });
   }
 
-  private assertReviewIdle(conv: Conversation): void {
+  private emitTransition(before: Delivery, after: Delivery): void {
+    if (!this.onTransition || before.revision === after.revision) return;
+    try {
+      this.onTransition(before, after);
+    } catch (error) {
+      console.error(
+        "[delivery] transition listener 失败：",
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  private assertReviewIdle(conv: Conversation, allowedRunId?: string): void {
     if (conv.kind !== "issue" || conv.status !== "review") throw new Error("当前 Issue 不在 Review 阶段");
-    if (this.store.activeRunForConversation(conv.id)) throw new Error("仍有 Run 进行中，不能推进 Delivery");
+    const active = this.store.activeRunForConversation(conv.id);
+    if (active && active.id !== allowedRunId) throw new Error("仍有 Run 进行中，不能推进 Delivery");
   }
 }
 

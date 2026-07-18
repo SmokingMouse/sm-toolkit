@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery 与 Agent Device 安全迁移已完成：control plane 已覆盖外部 Issue/MR、RBAC、Agent 多仓/执行配置、Skill bundle/import/sync、Lark 群绑定/附件/多 Bot、Issue 协作与受控交付；Codex worktree 可在 workspace-write 下安全提交，历史 Run 快照不随 Device 迁移改写。下一步只做真实环境验收：最小权限 GitHub token、安装并登录 `bitscli codebase`、真双机 checkout、真飞书群、automation 7 天与真实负载一周。
+Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、Agent Device 安全迁移与事件驱动 Agent team 已完成：Orchestrator 可受控路由，Developer 可从固定 Issue branch 创建/登记 PR，Reviewer 可在 Run-scoped policy 下 request changes/approve/merge，Review/merge/deploy 由可重放领域事件 Automation 串联。下一步只做真实环境验收：最小权限 GitHub token、Device push credential、部署 Runner dogfood、安装并登录 `bitscli codebase`、真双机 checkout、真飞书群、automation 7 天与真实负载一周。
 
 ## Goals
 
@@ -28,6 +28,7 @@ Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery 与
 
 ## Verified Facts
 
+- **Agent team 是“专业 Agent 判断 + control plane 授权”的事件闭环**（2026-07-19 定向测试）：Developer 只可给当前 running implementation 的 `harbor/<Issue ID>` 分支创建/登记 Delivery；Reviewer 只可在当前 review Run 提交 request_changes/approve，merge 仍重新同步 Provider 并检查 head SHA/CI/revision；request changes 严格排在 Review Run 后。`issue.review_ready / delivery.merge_ready / delivery.merged` 使用稳定 eventId 去重并在 boot 从持久化事实重放，部署成功前 Issue 不会 Done。架构见 ADR `progress/decisions/2026-07-19-harbor-agent-team.md`。
 - **Codex worktree Git 写权限是 Run 级 capability，不是 Agent 全局 full access**（2026-07-19 实测）：`RunSpec.repositoryRoot` 永远是 Run 绑定的 Repository mount，`executionRoot/worktreePath` 独立承载实际 cwd；只有 `Codex + implementation + worktree + auto-edit/full` 经本机 Repository common-dir、canonical Issue physical leaf、registry raw absolute leaf 与 `refs/heads/harbor/<Issue ID>` symbolic HEAD 校验后获得 additional writable dirs。初次 exec 用重复 `--add-dir`，resume 用 workspace-write config roots；readonly/default、triage、review、verification、Claude 与非 worktree 均为空，跨 Repository、正/反向跨 Issue symlink、错误 branch、detached HEAD 或路径不一致直接失败。隔离风险见 ADR `progress/decisions/2026-07-18-harbor-codex-worktree-git-metadata.md`。
 - **Daemon service PATH 必须从实际 bun executable 自举**（2026-07-18 实测）：launchd/systemd definition 都把 `dirname(bunPath)` 放在 PATH 首位并去重，避免 ProgramArguments 能启动 bun、Run 子进程却找不到 bun；生成逻辑不写 token，也不在测试中加载真实 service。
 - **GitHub Delivery 的外部真相来自 server-side REST sync，不来自 Agent/调用方自报**（2026-07-18 deferred fake HTTP + REST 实测）：Repository `remoteUrl` 锁定 owner/repo，PR URL 跨仓/非 GitHub/畸形即拒；classic protection + active rulesets + 完整分页 check-runs/combined statuses 合并判定，同名 required context 聚合全部来源，任一 failed/pending 即不通过；check-run/status id 重复、total 漂移/overshoot、跨页 state/SHA 漂移、不完整快照或 combined 顶层状态与本地 passed 矛盾均 fail-safe，unrelated context 不冒充 required failure。protected branch classic 404 权限歧义与 required workflows 同样 fail-safe。latest/approved head SHA 绑定人工验收；每次 implementation 无条件推进 revision，旧 generation 慢 sync 的 CAS 失败后丢弃且不自动重试；外部已 merged 仍需 Harbor policy 才能 Done；缺 token 只禁用 github，manual 正常。
@@ -52,6 +53,12 @@ Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery 与
 - **Next**：Issue 交人工验收；lockfile 双轨问题待决策。
 
 ## Session Log
+
+### 2026-07-19 — Harbor 事件驱动 Agent team
+- **Decision**：三类业务 Agent 保持最小权限；部署使用独立 private Runner。Automation 新增 Harbor `event` Trigger、动态 `source` output 与持久化 purpose，不用 cron 扫描状态。Agent 不拿 owner token，只消费 Run-scoped Issue/Delivery/Review capability。完整边界见 ADR。
+- **Done**：内部 `issue.review_ready / delivery.merge_ready / delivery.merged` dispatch + Trigger 级幂等与 boot reconciliation；Developer 固定 branch server-side GitHub PR 创建/Delivery 注册；Reviewer request changes 串行回 Developer、SHA-bound approve 与 policy merge；merged → deployment Run → succeeded/failed 回写并收敛 Issue Done；GitHub deploymentRequired 与 Automation UI；SQLite v16 保留历史 Run/Delivery/Automation 数据。
+- **Verified**：root typecheck ✓；全量 223 tests / 1059 assertions ✓；全部 workspace production build 与 Next 12 个静态页面 ✓；`git diff --check` ✓。
+- **Next**：提交合并、迁移生产 DB 并配置 Agent team/Automations。GitHub 真 PR/merge 仍等待最小权限 server token 与 Device push credential。
 
 ### 2026-07-19 — self-hosting production convergence
 - **Root cause**：生产 launchd 固定运行 `codex/harbor-self-hosting`，该分支与 main 分叉：一边已有 GitHub Delivery、Codex worktree 提交与 Device 迁移，另一边完成 Mew parity；两边还曾分别占用 SQLite v12/v13，单纯按 `user_version` 合并会静默漏跑 parity schema。

@@ -19,9 +19,10 @@ import { ago, usePoll } from "../../lib/hooks";
 import { useToast } from "../../components/toast";
 import { btnGhost, btnPrimary, Empty, Field, inputCls, Modal, ModalFooter, PageHeader } from "../../components/ui";
 
-type TriggerType = "schedule" | "webhook";
-type OutputMode = "run" | "chat" | "issue" | "append";
+type TriggerType = "schedule" | "webhook" | "event";
+type OutputMode = "run" | "chat" | "issue" | "append" | "source";
 type OverlapMode = "skip" | "queue";
+type Purpose = "implementation" | "review" | "verification";
 
 export default function AutomationsPage() {
   const autos = usePoll(listAutomations, 10_000);
@@ -31,13 +32,14 @@ export default function AutomationsPage() {
   const current = autos.data ?? [];
   const scheduleCount = current.flatMap((automation) => automation.triggers).filter((trigger) => trigger.type === "schedule").length;
   const webhookCount = current.flatMap((automation) => automation.triggers).filter((trigger) => trigger.type === "webhook").length;
+  const eventCount = current.flatMap((automation) => automation.triggers).filter((trigger) => trigger.type === "event").length;
 
   return (
     <div className="page-enter mx-auto max-w-[1440px] p-7 max-sm:p-4">
       <PageHeader
         eyebrow="Prompt-driven orchestration"
         title="Automations"
-        description={`${current.filter((automation) => automation.enabled).length} 条启用 · ${scheduleCount} schedule · ${webhookCount} webhook。Manual 可随时执行；overlap 决定重叠触发是跳过还是排队。`}
+        description={`${current.filter((automation) => automation.enabled).length} 条启用 · ${scheduleCount} schedule · ${webhookCount} webhook · ${eventCount} internal event。overlap 决定重叠触发是跳过还是排队。`}
         actions={<button className={btnPrimary} onClick={() => setCreating(true)}><span className="mr-1.5 text-base leading-none">＋</span> New Automation</button>}
       />
       {autos.error && <div className="mb-3 text-sm text-canceled">{autos.error}</div>}
@@ -144,13 +146,13 @@ function AutomationRow({
           <div className="flex flex-wrap gap-1">
             {auto.triggers.map((trigger) => (
               <span key={trigger.id} className="rounded-full border border-line bg-bg px-2 py-0.5 font-mono">
-                {trigger.type === "schedule" ? trigger.cron : `${trigger.provider ?? "generic"}:webhook`}
+                {trigger.type === "schedule" ? trigger.cron : `${trigger.provider ?? "generic"}:${trigger.type}`}
               </span>
             ))}
             {auto.triggers.length === 0 && <span className="text-dim">manual only</span>}
           </div>
         </td>
-        <td className="px-4 py-3 font-mono text-xs">{auto.outputMode}</td>
+        <td className="px-4 py-3 font-mono text-xs">{auto.purpose}:{auto.outputMode}</td>
         <td className="px-4 py-3 font-mono text-xs">{auto.overlapMode}</td>
         <td className="px-4 py-3">
           <span className={`text-xs font-medium ${auto.enabled ? "text-done" : "text-dim"}`}>{auto.enabled ? "on" : "off"}</span>
@@ -158,8 +160,8 @@ function AutomationRow({
         <td className="px-4 py-3 text-xs text-dim">{ago(auto.lastFiredAt)}</td>
         <td className="px-4 py-3">
           <div className="flex gap-2 text-xs">
-            <button className="text-accent hover:underline disabled:opacity-50" onClick={runNow} disabled={running}>
-              {running ? "running…" : "run now"}
+            <button className="text-accent hover:underline disabled:opacity-50" onClick={runNow} disabled={running || auto.outputMode === "source"} title={auto.outputMode === "source" ? "source output 需要领域事件上下文" : undefined}>
+              {running ? "running…" : auto.outputMode === "source" ? "event only" : "run now"}
             </button>
             <button className="text-accent hover:underline" onClick={toggleEnabled}>{auto.enabled ? "disable" : "enable"}</button>
             <button className="text-dim hover:underline" onClick={onToggleLog}>log</button>
@@ -212,6 +214,7 @@ function NewAutomationModal({
   const [filterPath, setFilterPath] = useState("");
   const [filterValue, setFilterValue] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [purpose, setPurpose] = useState<Purpose>("implementation");
   const [outputMode, setOutputMode] = useState<OutputMode>("run");
   const [overlapMode, setOverlapMode] = useState<OverlapMode>("skip");
   const [target, setTarget] = useState("");
@@ -237,6 +240,7 @@ function NewAutomationModal({
           filters: filterPath.trim() ? [{ path: filterPath.trim(), equals: filterValue }] : [],
         }),
         prompt: prompt.trim(),
+        purpose,
         outputMode,
         overlapMode,
         target: outputMode === "append" ? target : undefined,
@@ -298,26 +302,31 @@ function NewAutomationModal({
           <select className={inputCls} value={triggerType} onChange={(event) => setTriggerType(event.target.value as TriggerType)}>
             <option value="schedule">Schedule</option>
             <option value="webhook">Webhook</option>
+            <option value="event">Harbor internal event</option>
           </select>
         </Field>
         {triggerType === "schedule" ? (
           <Field label="cron（Server 本机时区）">
             <input className={`${inputCls} font-mono`} value={cron} onChange={(event) => setCron(event.target.value)} placeholder="0 9 * * *" />
           </Field>
-        ) : (
+        ) : triggerType === "webhook" ? (
           <Field label="provider">
             <select className={inputCls} value={provider} onChange={(event) => setProvider(event.target.value)}>
               <option value="generic">Generic</option>
               <option value="codebase">Codebase</option>
             </select>
           </Field>
+        ) : (
+          <Field label="provider">
+            <input className={inputCls} value="harbor" disabled />
+          </Field>
         )}
       </div>
 
-      {triggerType === "webhook" && (
+      {triggerType !== "schedule" && (
         <div className="grid gap-4 rounded-xl border border-line bg-bg p-3 sm:grid-cols-2">
-          <Field label="events（逗号分隔；留空接受全部）">
-            <input className={`${inputCls} font-mono`} value={events} onChange={(event) => setEvents(event.target.value)} placeholder="push, merge_request" />
+          <Field label={triggerType === "event" ? "Harbor events（逗号分隔）" : "events（逗号分隔；留空接受全部）"}>
+            <input className={`${inputCls} font-mono`} value={events} onChange={(event) => setEvents(event.target.value)} placeholder={triggerType === "event" ? "issue.review_ready, delivery.merge_ready" : "push, merge_request"} />
           </Field>
           <Field label="可选 OR filter">
             <div className="grid grid-cols-2 gap-2">
@@ -332,13 +341,21 @@ function NewAutomationModal({
         <textarea className={`${inputCls} h-28 resize-y`} value={prompt} onChange={(event) => setPrompt(event.target.value)} />
       </Field>
 
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Field label="purpose">
+          <select className={inputCls} value={purpose} onChange={(event) => setPurpose(event.target.value as Purpose)}>
+            <option value="implementation">Implementation</option>
+            <option value="review">Review</option>
+            <option value="verification">Verification / deployment</option>
+          </select>
+        </Field>
         <Field label="output">
           <select className={inputCls} value={outputMode} onChange={(event) => setOutputMode(event.target.value as OutputMode)}>
             <option value="run">Run（Automation 直接执行）</option>
             <option value="chat">Chat（每次创建 Chat）</option>
             <option value="issue">Issue（兼容模式）</option>
             <option value="append">Append（固定会话）</option>
+            <option value="source">Source（领域事件原对象）</option>
           </select>
         </Field>
         <Field label="overlap">
@@ -371,7 +388,7 @@ function NewAutomationModal({
         <button className={btnGhost} onClick={onClose}>取消</button>
         <button
           className={btnPrimary}
-          disabled={busy || !name.trim() || !agent || !prompt.trim() || (triggerType === "schedule" && !cron.trim()) || (outputMode === "append" && !target) || directWorktreeConflict}
+          disabled={busy || !name.trim() || !agent || !prompt.trim() || (triggerType === "schedule" && !cron.trim()) || (triggerType === "event" && !events.trim()) || (outputMode === "append" && !target) || (outputMode === "source" && triggerType !== "event") || (purpose === "review" && outputMode !== "source" && outputMode !== "append") || directWorktreeConflict}
           onClick={submit}
         >
           {busy ? "创建中…" : "创建"}

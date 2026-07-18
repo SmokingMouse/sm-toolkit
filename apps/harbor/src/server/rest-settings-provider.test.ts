@@ -105,7 +105,7 @@ describe("prompt block settings API", () => {
     const { request } = harness();
     const initial = await request("/api/settings/prompt-blocks");
     const initialBody = (await initial.json()) as { blocks: { key: string; isDefault: boolean }[] };
-    expect(initialBody.blocks).toHaveLength(9);
+    expect(initialBody.blocks).toHaveLength(10);
     expect(initialBody.blocks.every((block) => block.isDefault)).toBe(true);
 
     const invalid = await request("/api/settings/prompt-blocks", {

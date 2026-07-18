@@ -2321,7 +2321,6 @@ function DeliverySetupModal({
           onChange={(event) => {
             const next = event.target.value as DeliveryProviderKind;
             setProvider(next);
-            if (next === "github") setDeploymentRequired(false);
           }}
         >
           <option value="manual">Manual</option>
@@ -2358,7 +2357,6 @@ function DeliverySetupModal({
           className="mt-0.5 h-4 w-4 accent-accent"
           type="checkbox"
           checked={deploymentRequired}
-          disabled={provider === "github"}
           onChange={(event) => setDeploymentRequired(event.target.checked)}
         />
         <span>
@@ -2366,9 +2364,7 @@ function DeliverySetupModal({
             Merge 后需要部署
           </span>
           <span className="mt-1 block text-[11px] leading-5 text-dim">
-            {provider === "github"
-              ? "当前不接管 GitHub Actions deployment；合并即完成。"
-              : "开启后，部署成功才会把 Issue 推进 Done；关闭则合并即完成。"}
+            开启后，Harbor 会在 merged 领域事件上触发匹配的部署 Automation，部署 Run 成功才推进 Done；关闭则合并即完成。
           </span>
         </span>
       </label>

@@ -249,6 +249,87 @@ describe("GitHub Delivery URL and configuration boundaries", () => {
       archivedAt: null,
     })).toThrow("跨 Repository");
   });
+
+  test("creates a PR server-side from the fixed Issue branch and preserves deploymentRequired", async () => {
+    let request: { url: string; method: string; body: unknown; authorization: string } | null = null;
+    const client = new GitHubRestClient("server-token", {
+      baseUrl: "https://api.github.test/",
+      fetch: (async (input, init) => {
+        const headers = init?.headers as Record<string, string>;
+        request = {
+          url: String(input),
+          method: String(init?.method),
+          body: JSON.parse(String(init?.body)),
+          authorization: headers.Authorization,
+        };
+        return new Response(JSON.stringify({
+          number: 9,
+          state: "open",
+          merged: false,
+          merged_at: null,
+          html_url: "https://github.com/acme/harbor/pull/9",
+          head: { ref: "harbor/c_1", sha: "abc" },
+          base: { ref: "main" },
+        }), { status: 201, headers: { "Content-Type": "application/json" } });
+      }) as typeof fetch,
+    });
+    const provider = new GitHubDeliveryProvider(client);
+    const repository = {
+      id: "repo_1",
+      workspaceId: "ws_personal",
+      name: "harbor",
+      remoteUrl: "https://github.com/acme/harbor.git",
+      defaultBranch: "main",
+      scmProvider: "local" as const,
+      scmRepository: null,
+      scmAgentId: null,
+      scmAutoDispatch: false,
+      createdAt: 1,
+      archivedAt: null,
+    };
+    const created = await provider.createChange({
+      repository,
+      conversation: {
+        id: "c_1",
+        workspaceId: "ws_personal",
+        kind: "issue",
+        title: "Ship it",
+        agentId: null,
+        description: null,
+        priority: "medium",
+        status: "doing",
+        repositoryId: repository.id,
+        worktreePath: null,
+        worktreeMountId: null,
+        claudeSessionId: null,
+        origin: "web",
+        originRef: null,
+        creatorMemberId: null,
+        ownerMemberId: null,
+        labelIds: [],
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    }, {
+      title: "Ship it",
+      body: "PR body",
+      headBranch: "harbor/c_1",
+      baseBranch: "main",
+      deploymentRequired: true,
+    });
+    expect(request as unknown).toEqual({
+      url: "https://api.github.test/repos/acme/harbor/pulls",
+      method: "POST",
+      body: { title: "Ship it", body: "PR body", head: "harbor/c_1", base: "main" },
+      authorization: "Bearer server-token",
+    });
+    expect(provider.prepareChange({ repository, conversation: {} as never }, created)).toEqual(expect.objectContaining({
+      changeUrl: "https://github.com/acme/harbor/pull/9",
+      externalId: "#9",
+      deploymentRequired: true,
+      checkStatus: "pending",
+    }));
+  });
 });
 
 const checkScenarios: { name: string; state: FakeGitHubState; expected: DeliveryCheckStatus }[] = [
