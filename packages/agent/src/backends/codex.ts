@@ -52,6 +52,7 @@ export class CodexBackend implements Backend {
       ephemeral: opts.persistence === false,
       model: opts.model,
       resume: opts.resume ?? null,
+      additionalWritableDirs: opts.additionalWritableDirs ?? [],
       imagePaths: (opts.attachments ?? []).map((a) => a.path),
       prompt: finalPrompt,
     });
@@ -129,22 +130,38 @@ export class CodexBackend implements Backend {
   }
 }
 
-function buildCodexArgs(o: {
+export function buildCodexArgs(o: {
   policy: PermissionPolicy;
   ephemeral: boolean;
   model?: string;
   resume: string | null;
+  additionalWritableDirs: string[];
   imagePaths: string[];
   prompt: string;
 }): string[] {
   const common = ["--json", "--skip-git-repo-check"];
   if (o.model) common.push("-m", o.model);
   const imageArgs = o.imagePaths.flatMap((p) => ["--image", p]);
+  // default/readonly 都不能仅凭调用方传参扩大额外可写范围；Executor 另有领域闸，这里再做参数层防御。
+  const writableDirs =
+    o.policy === "auto-edit" || o.policy === "full" ? [...new Set(o.additionalWritableDirs)] : [];
 
   if (o.resume) {
-    // resume 不接受 -s/--sandbox;full 时用 bypass 拿写权限,否则用 codex 默认(只读问答够用)。
-    const bypass = o.policy === "full" ? ["--dangerously-bypass-approvals-and-sandbox"] : [];
-    return ["exec", "resume", o.resume, ...common, ...bypass, ...imageArgs, o.prompt];
+    // codex 0.144.2 实测：resume parser 不接受 --sandbox/--add-dir，但接受 -c。
+    // 用等价 config override 保留 readonly/workspace-write 边界，绝不为续会话退化成 full access。
+    const sandbox =
+      o.policy === "full"
+        ? ["--dangerously-bypass-approvals-and-sandbox"]
+        : o.policy === "readonly"
+          ? ["-c", 'sandbox_mode="read-only"']
+          : [
+              "-c",
+              'sandbox_mode="workspace-write"',
+              ...(writableDirs.length > 0
+                ? ["-c", `sandbox_workspace_write.writable_roots=${JSON.stringify(writableDirs)}`]
+                : []),
+            ];
+    return ["exec", "resume", o.resume, ...common, ...sandbox, ...imageArgs, o.prompt];
   }
   const sandbox =
     o.policy === "readonly"
@@ -152,8 +169,9 @@ function buildCodexArgs(o: {
       : o.policy === "full"
         ? ["--dangerously-bypass-approvals-and-sandbox"]
         : ["--sandbox", "workspace-write"]; // auto-edit(以及兼容 default,codex 无独立 default 档)
+  const additionalWritableDirs = writableDirs.flatMap((dir) => ["--add-dir", dir]);
   const ephemeral = o.ephemeral ? ["--ephemeral"] : [];
-  return ["exec", ...common, ...ephemeral, ...sandbox, ...imageArgs, o.prompt];
+  return ["exec", ...common, ...ephemeral, ...sandbox, ...additionalWritableDirs, ...imageArgs, o.prompt];
 }
 
 function ev(

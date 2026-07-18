@@ -135,7 +135,7 @@ describe("Mew-style Issue workflow", () => {
     expect(start).toEqual(expect.objectContaining({
       type: "run_start",
       runId: run.id,
-      spec: expect.objectContaining({ permission: "readonly", isolation: "none", worktreePath: null }),
+      spec: expect.objectContaining({ purpose: "triage", permission: "readonly", isolation: "none", worktreePath: null }),
     }));
     expect(h.store.getConversation(draft.id)).toEqual(expect.objectContaining({ kind: "issue_draft", status: "open" }));
 

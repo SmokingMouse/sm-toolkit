@@ -17,5 +17,6 @@
     "types": ["node"]
   },
   "references": [{ "path": "../llm" }],
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
 }

@@ -175,11 +175,24 @@ export class RunCoordinator {
 
       const agent = this.store.getAgent(run.agentId);
       const conv = this.store.getConversation(run.conversationId);
-      if (!agent || !conv) {
+      const mount = run.repositoryMountId ? this.store.getRepositoryMount(run.repositoryMountId) : null;
+      if (
+        !agent ||
+        !conv ||
+        !mount ||
+        mount.repositoryId !== run.repositoryId ||
+        mount.deviceId !== run.deviceId
+      ) {
         this.store.finishRun(
           run.id,
           "failed",
-          { claudeSessionId: null, cost: null, error: "agent 或 conversation 已不存在，无法下发" },
+          {
+            claudeSessionId: null,
+            cost: null,
+            error: !agent || !conv
+              ? "agent 或 conversation 已不存在，无法下发"
+              : "Run 绑定的 Repository mount 已不存在或身份不匹配，拒绝下发",
+          },
           now,
         );
         this.bus.emitDone(this.store.getRun(run.id)!);
@@ -191,7 +204,9 @@ export class RunCoordinator {
         model: agent.model,
         // runs.prompt 保留原文；只在 dispatch 瞬间按来源包裹结构化上下文。
         prompt: renderRunPrompt(this.store, { run, conversation: conv, agent }),
-        repositoryRoot: run.executionRoot,
+        purpose: run.purpose,
+        repositoryRoot: mount.path,
+        executionRoot: run.executionRoot,
         // AI draft 只允许读取仓库做分诊，不能在 Issue 尚未确认时改文件或创建 worktree。
         permission: run.purpose === "triage" ? "readonly" : agent.permission,
         systemPrompt: composeAgentSystemPrompt(agent.instruction, this.store.listSkillsForAgent(agent.id)),

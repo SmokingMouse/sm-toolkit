@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-Harbor P4.15「Mew Prompt workflows」已完成：Workspace 级 Prompt 配置从三类整块 wrapper 拆成 `session context + event trigger` 两段式 pipeline，Run 持久化 Assigned / Mentioned / New message / Schedule / Manual 触发原因；Workspace / Repository scope 与单仓库执行约束保持不变。下一步用真实双机 checkout 验证跨 Device mount，并接真实 Codebase/GitHub Provider；P5 时间性验证仍等待真飞书 / automation 7 天 / dogfood 一周。
+Harbor 自举修复及 Review blocker 已完成实现与全量回归：RunSpec 始终以 Repository mount 作为身份根、以 executionRoot/worktreePath 表达实际 cwd，Request changes/reviewer 可复用原 worktree；Codex worktree implementation 在保持 workspace-write 的前提下只获得经 Repository、当前 Issue canonical physical leaf、registry raw leaf 与 symbolic HEAD 四重校验的 Git common-dir 写范围，readonly/default/triage/reviewer 不扩权；daemon service PATH 稳定包含 bun。当前修复前启动的 Run 仍因旧 sandbox 无法写 common gitdir，需宿主完成一次 stage/commit 后由新 Run 验收自举；P5 时间性验证仍等待真飞书 / automation 7 天 / dogfood 一周。
 
 ## Goals
 
@@ -28,6 +28,8 @@ Harbor P4.15「Mew Prompt workflows」已完成：Workspace 级 Prompt 配置从
 
 ## Verified Facts
 
+- **Codex worktree Git 写权限是 Run 级 capability，不是 Agent 全局 full access**（2026-07-19 实测）：`RunSpec.repositoryRoot` 永远是 Run 绑定的 Repository mount，`executionRoot/worktreePath` 独立承载实际 cwd；只有 `Codex + implementation + worktree + auto-edit/full` 经本机 Repository common-dir、canonical Issue physical leaf、registry raw absolute leaf 与 `refs/heads/harbor/<Issue ID>` symbolic HEAD 校验后获得 additional writable dirs。初次 exec 用重复 `--add-dir`，resume 用 workspace-write config roots；readonly/default、triage、review、verification、Claude 与非 worktree 均为空，跨 Repository、正/反向跨 Issue symlink、错误 branch、detached HEAD 或路径不一致直接失败。隔离风险见 ADR `progress/decisions/2026-07-18-harbor-codex-worktree-git-metadata.md`。
+- **Daemon service PATH 必须从实际 bun executable 自举**（2026-07-18 实测）：launchd/systemd definition 都把 `dirname(bunPath)` 放在 PATH 首位并去重，避免 ProgramArguments 能启动 bun、Run 子进程却找不到 bun；生成逻辑不写 token，也不在测试中加载真实 service。
 - **Harbor Prompt 配置是 Workspace 级两段式 pipeline**（2026-07-17 实测）：Issue / Chat 在 dispatch 时组合稳定 `session context` 与本次 `event trigger`；Automation 只选 schedule/manual event。Run 持久化 `promptEvent` 与 `triggerRef`，不从可变 Conversation 事后猜触发来源；event block 停用时透传原始请求，旧 wrapper 无损迁移且不会重复拼接。
 - **Repository 的唯一产品配置源是 Agent**（2026-07-17 实测）：Workspace 只隔离 Agents / Skills / Conversations / Automations / prompt settings / Usage，不配置仓库地址；每个 Agent 必须绑定一个 Repository，且该 Repository 在 Agent Device 上必须有 checkout mount。Issue / Chat / AI draft / Automation 拒绝任务级 override，指派时继承 Agent Repository；Run 冻结 repository / mount / execution root，Review Agent 必须绑定实现仓库。
 - **Issue Done 与 Agent 自报完成解耦**（2026-07-17 实测）：代码 Issue 建立 Delivery 后，人工验收只更新 `review_status`，不会直接 Done；只有 CI passed + merged，且无需部署或 deployment succeeded，control plane 才以 system actor 推进 Done 并清理 worktree。新 implementation 或 MR/branch 引用变化都会使未合并 Delivery 的人工验收和 CI 证据失效；merged 后在原 Issue 返工会被调度层拒绝。
@@ -46,6 +48,13 @@ Harbor P4.15「Mew Prompt workflows」已完成：Workspace 级 Prompt 配置从
 - **Next**：Issue 交人工验收；lockfile 双轨问题待决策。
 
 ## Session Log
+
+### 2026-07-18 — Harbor worktree Agent 自举与 daemon PATH
+- **Root cause**：linked worktree 的真实 index/objects/refs 位于 Repository common gitdir，Codex workspace-write 只覆盖 checkout；同时 service 使用绝对 bun ProgramArguments，却原样继承一个可能不含 bun dirname 的 PATH。
+- **Decision**：新增 Run 级 `additionalWritableDirs`；daemon 只为可写 Codex implementation worktree 解析并授权经 Repository 身份校验的 common gitdir。resume 通过 `-c sandbox_mode/workspace_write.writable_roots` 保持沙箱，不用 full access 兜底。完整边界与 whole-common-dir 风险见 ADR。
+- **Done**：Codex 初次/resume 参数构造；RunSpec purpose + mount/execution root 分离；scheduler 从绑定 mount 下发 repositoryRoot；daemon 首轮创建、Request changes/reviewer 复用 worktree；worktree deterministic path + canonical current-Issue physical leaf + registry raw leaf + symbolic HEAD + cross-Repository 校验；Git stdout/stderr 分离；Executor 权限闸；launchd/systemd PATH bun dirname 置顶去重；glossary/ADR。
+- **Verified**：最终相关 24 tests / 83 assertions、全量 103 tests / 497 assertions、root TypeScript build、`git diff --check` ✓；跨层测试真实走通 scheduler → RunSpec → daemon 的首轮 ready、第二轮 implementation、reviewer 复用；同 Repository 的正向与反向跨 Issue symlink、错误 Issue branch、detached HEAD 均被拒绝；Git 成功且 stderr warning 的 fixture 证明机器路径只消费 stdout；隔离临时 Repository 的 linked worktree 真实 `git add/commit` ✓。当前 worktree `git add` 仍复现 `index.lock: Operation not permitted`，因为本 Run 在修复前启动且没有 common gitdir writable root；未形成 commit，未尝试 sandbox escape。
+- **Next**：宿主一次性 stage/commit，随后由修复后新启动的 Harbor Codex Run 重跑当前仓库 commit probe；Codex CLI 升级时重跑 resume parser，长期可评估 host-side narrow Git broker 收紧 whole-common-dir 风险。
 
 ### 2026-07-17 — P4.15 Mew Prompt workflows
 - **Evidence**：只读实测 Mew Prompts 页面与线上 bundle，确认 8 个可见 block：Issue context/assigned/mentioned/message、Chat context/message、Automation schedule/manual；另有当前 Harbor 尚无入口的隐藏 webhook block。

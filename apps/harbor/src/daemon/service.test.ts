@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { prepareDaemonConfig, renderLaunchAgent, renderSystemdUnit } from "./service.js";
+import { buildDaemonServicePath, prepareDaemonConfig, renderLaunchAgent, renderSystemdUnit } from "./service.js";
 
 describe("daemon service definitions", () => {
   test("launchd definition escapes paths and never contains a token", () => {
@@ -11,12 +11,15 @@ describe("daemon service definitions", () => {
       home: "/Users/a&b",
       bunPath: "/opt/Bun <runtime>/bun",
       daemonEntry: "/repo/harbord.ts",
-      pathEnv: "/bin:/opt/bin",
+      pathEnv: "/bin:/opt/Bun <runtime>/:/opt/bin:/bin",
       stdoutPath: "/tmp/out.log",
       stderrPath: "/tmp/err.log",
     });
     expect(plist).toContain("/Users/a&amp;b");
     expect(plist).toContain("/opt/Bun &lt;runtime&gt;/bun");
+    expect(plist).toContain(
+      "<key>PATH</key><string>/opt/Bun &lt;runtime&gt;:/bin:/opt/bin</string>",
+    );
     expect(plist).not.toContain("token");
   });
 
@@ -25,11 +28,18 @@ describe("daemon service definitions", () => {
       home: "/home/Harbor User",
       bunPath: "/home/Harbor User/.bun/bin/bun",
       daemonEntry: "/repo with spaces/main.ts",
-      pathEnv: "/bin:/usr/bin",
+      pathEnv: "/bin:/home/Harbor User/.bun/bin:/usr/bin:/bin",
     });
     expect(unit).toContain('ExecStart="/home/Harbor User/.bun/bin/bun" "/repo with spaces/main.ts"');
+    expect(unit).toContain('Environment="PATH=/home/Harbor User/.bun/bin:/bin:/usr/bin"');
     expect(unit).toContain("Restart=always");
     expect(unit).not.toContain("token");
+  });
+
+  test("PATH construction keeps bun dirname first and removes normalized duplicates", () => {
+    expect(buildDaemonServicePath("/home/me/.bun/bin/bun", "/usr/bin:/home/me/.bun/bin/:/bin:/usr/bin")).toBe(
+      "/home/me/.bun/bin:/usr/bin:/bin",
+    );
   });
 });
 

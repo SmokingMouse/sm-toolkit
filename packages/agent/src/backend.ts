@@ -20,6 +20,12 @@ export type PermissionPolicy = "readonly" | "auto-edit" | "full" | "default";
 export interface RunOptions {
   /** 文件工具可达范围(--add-dir + 权限);null/缺省 = 无(纯对话,无文件工具) */
   workspace?: string | null;
+  /**
+   * workspace 之外显式授权的额外可写目录。Codex 初次 exec 映射为重复
+   * `--add-dir`；resume 因 CLI 不接受该 flag，改用等价的 workspace-write
+   * writable_roots config override。readonly/default 策略始终忽略此字段。
+   */
+  additionalWritableDirs?: string[];
   /** 进程工作目录 —— 决定 CLI session transcript 落盘路径,与 workspace 正交。
    * 纯对话需要稳定落盘目录(供 fork resume 校验 + 清理路径一致)却不要文件工具,
    * 故 cwd 独立于 workspace。缺省回退 workspace,再回退继承父进程。 */

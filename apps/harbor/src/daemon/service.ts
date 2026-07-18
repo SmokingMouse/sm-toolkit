@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { delimiter, dirname, normalize, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 export type ServicePlatform = "darwin" | "linux";
@@ -107,6 +107,21 @@ function systemdQuote(value: string): string {
   return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
+/** service 的 PATH 必须能再次找到启动它的 bun；bun dirname 置顶并按规范化路径稳定去重。 */
+export function buildDaemonServicePath(bunPath: string, inheritedPath: string): string {
+  const entries = [dirname(bunPath), ...inheritedPath.split(delimiter)].filter(Boolean);
+  const seen = new Set<string>();
+  return entries
+    .filter((entry) => {
+      const normalized = normalize(entry);
+      const key = normalized.length > 1 ? normalized.replace(/[\\/]+$/, "") : normalized;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join(delimiter);
+}
+
 export function renderLaunchAgent(input: {
   home: string;
   bunPath: string;
@@ -115,6 +130,7 @@ export function renderLaunchAgent(input: {
   stdoutPath: string;
   stderrPath: string;
 }): string {
+  const pathEnv = buildDaemonServicePath(input.bunPath, input.pathEnv);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -129,7 +145,7 @@ export function renderLaunchAgent(input: {
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key><string>${xml(input.home)}</string>
-    <key>PATH</key><string>${xml(input.pathEnv)}</string>
+    <key>PATH</key><string>${xml(pathEnv)}</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -147,6 +163,7 @@ export function renderSystemdUnit(input: {
   daemonEntry: string;
   pathEnv: string;
 }): string {
+  const pathEnv = buildDaemonServicePath(input.bunPath, input.pathEnv);
   return `[Unit]
 Description=Harbor device daemon
 Wants=network-online.target
@@ -157,7 +174,7 @@ Type=simple
 ExecStart=${systemdQuote(input.bunPath)} ${systemdQuote(input.daemonEntry)}
 WorkingDirectory=${systemdQuote(input.home)}
 Environment=${systemdQuote(`HOME=${input.home}`)}
-Environment=${systemdQuote(`PATH=${input.pathEnv}`)}
+Environment=${systemdQuote(`PATH=${pathEnv}`)}
 Restart=always
 RestartSec=3
 

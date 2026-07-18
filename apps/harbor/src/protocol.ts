@@ -356,8 +356,12 @@ export interface RunSpec {
   backend: BackendKind;
   model: string | null;
   prompt: string;
-  /** Repository 在目标 Device 上的 checkout；非代码 Run 可为空。 */
+  /** 权限派生必须使用的执行意图快照；daemon 不从 prompt/permission 反推。 */
+  purpose: RunPurpose;
+  /** Run 绑定的 Repository mount 根目录；worktree 多轮续跑时也不得替换为 worktreePath。 */
   repositoryRoot: string | null;
+  /** 本轮实际执行目录快照；worktree ready 后指向 linked worktree，与 Repository mount 独立。 */
+  executionRoot: string | null;
   permission: PermissionPolicy;
   systemPrompt: string | null;
   /** 上一轮 claude_session_id，多轮续接 */

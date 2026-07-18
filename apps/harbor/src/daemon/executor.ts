@@ -13,7 +13,7 @@
 
 import { ClaudeBackend, CodexBackend, EventType, type AgentEvent, type Backend, type Cost } from "@sm/agent";
 import type { DaemonMsg, RunSpec } from "../protocol.js";
-import { ensureWorktree } from "./worktree.js";
+import { ensureWorktree, resolveWorktreeGitCommonDir } from "./worktree.js";
 
 const FLUSH_MS = 200;
 const FLUSH_COUNT = 20;
@@ -87,19 +87,16 @@ export class Executor {
     let cost: Cost | null = null;
     let errMsg: string | null = null;
     try {
-      // worktree 隔离：首跑创建 + 回报路径；失败直接 run failed（拒绝静默降级回主仓库）
-      let effectiveDir = spec.repositoryRoot;
-      if (spec.isolation === "worktree") {
-        if (!spec.repositoryRoot) throw new Error("worktree isolation 需要 Repository mount");
-        effectiveDir = ensureWorktree(spec.repositoryRoot, spec.conversationId, spec.worktreePath);
-        if (effectiveDir !== spec.worktreePath) {
-          this.send({ type: "worktree_ready", runId, conversationId: spec.conversationId, path: effectiveDir });
-        }
+      const { executionRoot: effectiveDir, shouldReportWorktreeReady } = prepareRunExecution(spec);
+      if (shouldReportWorktreeReady && effectiveDir) {
+        this.send({ type: "worktree_ready", runId, conversationId: spec.conversationId, path: effectiveDir });
       }
+      const additionalWritableDirs = resolveRunAdditionalWritableDirs(spec, effectiveDir);
 
       const interactive = spec.permission === "default";
       for await (const ev of backend.run(spec.prompt, {
         ...(effectiveDir ? { workspace: effectiveDir, cwd: effectiveDir } : {}),
+        ...(additionalWritableDirs.length > 0 ? { additionalWritableDirs } : {}),
         permission: spec.permission,
         systemPrompt: spec.systemPrompt,
         resume: spec.resume,
@@ -155,6 +152,41 @@ export class Executor {
       ...(errMsg ? { error: errMsg } : {}),
     });
   }
+}
+
+/**
+ * 解析 daemon 实际 cwd。Repository mount 只作为仓库身份锚点；executionRoot/worktreePath
+ * 是独立的执行位置。worktree 模式始终从 mount 校验/创建，已有路径只做幂等复用。
+ */
+export function prepareRunExecution(spec: RunSpec): {
+  executionRoot: string | null;
+  shouldReportWorktreeReady: boolean;
+} {
+  if (spec.isolation !== "worktree") {
+    return { executionRoot: spec.executionRoot ?? spec.repositoryRoot, shouldReportWorktreeReady: false };
+  }
+  if (!spec.repositoryRoot) throw new Error("worktree isolation 需要 Repository mount");
+  const executionRoot = ensureWorktree(spec.repositoryRoot, spec.conversationId, spec.worktreePath);
+  return { executionRoot, shouldReportWorktreeReady: spec.worktreePath === null };
+}
+
+/**
+ * Codex 自举授权闸：只有 linked worktree 中的可写 implementation Run 能写 Git metadata。
+ * review/verification/triage/readonly/非 worktree 均不得获得 common gitdir。
+ */
+export function resolveRunAdditionalWritableDirs(spec: RunSpec, effectiveDir: string | null): string[] {
+  if (
+    spec.backend !== "codex" ||
+    spec.purpose !== "implementation" ||
+    spec.isolation !== "worktree" ||
+    (spec.permission !== "auto-edit" && spec.permission !== "full")
+  ) {
+    return [];
+  }
+  if (!spec.repositoryRoot || !effectiveDir) {
+    throw new Error("Codex worktree implementation 缺少 Repository/worktree 路径，拒绝扩大可写范围");
+  }
+  return [resolveWorktreeGitCommonDir(spec.repositoryRoot, effectiveDir, spec.conversationId)];
 }
 
 /** 仅合并同一会话中连续的流式文本；工具、结果和不同 event type 必须保留顺序边界。 */

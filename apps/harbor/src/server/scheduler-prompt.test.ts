@@ -42,6 +42,7 @@ test("scheduler dispatches wrapped prompt while persisting the raw request", () 
   const start = sent.find((message) => message.type === "run_start");
   expect(start?.type).toBe("run_start");
   if (start?.type === "run_start") {
+    expect(start.spec.purpose).toBe("implementation");
     expect(start.spec.prompt).toBe(`Context=${conversation.id}\n\n---\n\nRequest=raw user request`);
     expect(start.spec.systemPrompt).toContain("Own the outcome.");
     expect(start.spec.systemPrompt).toContain("## Skill: review-first");
