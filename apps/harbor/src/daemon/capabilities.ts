@@ -7,14 +7,16 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { loadEndpoints, listEndpoints } from "@sm/llm";
 import type { EndpointInfo } from "@sm/llm";
 import { parse as parseYaml } from "yaml";
-import type { BackendKind, DeviceCapabilities, InstalledSkillCapability, ModelRouteCapability } from "../protocol.js";
+import type { BackendKind, DeviceCapabilities, InstalledSkillCapability, ModelRouteCapability, SkillDependency } from "../protocol.js";
 
 const MAX_SKILLS = 128;
 const MAX_SKILL_BYTES = 128 * 1024;
+const MAX_SKILL_BUNDLE_BYTES = 512 * 1024;
+const MAX_SKILL_FILES = 64;
 
 export interface SkillScanRoot {
   path: string;
@@ -78,6 +80,7 @@ export function detectInstalledSkills(roots: SkillScanRoot[] = defaultSkillRoots
         const file = realpathSync(candidate);
         const instruction = readFileSync(file, "utf8");
         const frontmatter = readSkillFrontmatter(instruction);
+        const directory = dirname(file);
         const existing = found.get(file);
         if (existing) {
           existing.runtimes = [...new Set([...existing.runtimes, ...root.runtimes])].sort() as BackendKind[];
@@ -89,6 +92,8 @@ export function detectInstalledSkills(roots: SkillScanRoot[] = defaultSkillRoots
           path: dirname(file),
           runtimes: [...root.runtimes],
           instruction,
+          files: readSkillBundle(directory),
+          dependencies: frontmatter.dependencies,
         });
       } catch {
         // 坏 symlink / 无权限 / 非 UTF-8：不宣称可导入，避免同步后运行才失败。
@@ -107,18 +112,82 @@ function defaultSkillRoots(): SkillScanRoot[] {
   ];
 }
 
-function readSkillFrontmatter(text: string): { name?: string; description?: string } {
+function readSkillFrontmatter(text: string): { name?: string; description?: string; dependencies?: SkillDependency[] } {
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
   if (!match) return {};
   try {
-    const value = parseYaml(match[1] ?? "") as { name?: unknown; description?: unknown } | null;
+    const value = parseYaml(match[1] ?? "") as { name?: unknown; description?: unknown; dependencies?: unknown } | null;
     return {
       ...(typeof value?.name === "string" ? { name: value.name.trim() } : {}),
       ...(typeof value?.description === "string" ? { description: value.description.trim() } : {}),
+      dependencies: parseSkillDependencies(value?.dependencies),
     };
   } catch {
     return {};
   }
+}
+
+function readSkillBundle(directory: string): { path: string; content: string }[] {
+  const files: { path: string; content: string }[] = [];
+  let total = 0;
+  const walk = (current: string): void => {
+    if (files.length >= MAX_SKILL_FILES || total >= MAX_SKILL_BUNDLE_BYTES) return;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(current, { withFileTypes: true, encoding: "utf8" });
+    } catch {
+      return;
+    }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (files.length >= MAX_SKILL_FILES || total >= MAX_SKILL_BUNDLE_BYTES) break;
+      if (entry.name === ".git" || entry.name === "node_modules" || entry.name === "__pycache__") continue;
+      const candidate = join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(candidate);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      try {
+        const real = realpathSync(candidate);
+        const prefix = `${realpathSync(directory)}${sep}`;
+        if (real !== join(realpathSync(directory), "SKILL.md") && !real.startsWith(prefix)) continue;
+        const size = statSync(real).size;
+        if (size > MAX_SKILL_BYTES || total + size > MAX_SKILL_BUNDLE_BYTES) continue;
+        const content = readFileSync(real);
+        if (content.includes(0)) continue;
+        files.push({ path: relative(directory, real).split(sep).join("/"), content: content.toString("utf8") });
+        total += size;
+      } catch {
+        // bundle 中单个文件不可读不影响整个 Skill 被发现。
+      }
+    }
+  };
+  walk(directory);
+  return files;
+}
+
+function parseSkillDependencies(value: unknown): SkillDependency[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => {
+      if (typeof item === "string" && item.trim()) return [{ name: item.trim(), spec: null, required: true }];
+      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+      const record = item as Record<string, unknown>;
+      return typeof record.name === "string" && record.name.trim()
+        ? [{
+            name: record.name.trim(),
+            spec: typeof record.spec === "string" ? record.spec : null,
+            required: record.required !== false,
+          }]
+        : [];
+    });
+  }
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>).flatMap(([name, spec]) =>
+      typeof spec === "string" || spec === null
+        ? [{ name, spec: typeof spec === "string" ? spec : null, required: true }]
+        : []);
+  }
+  return [];
 }
 
 /**

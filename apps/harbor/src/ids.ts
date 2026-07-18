@@ -18,6 +18,14 @@ const PREFIXES = {
   workspace: "ws",
   repository: "repo",
   repositoryMount: "mount",
+  member: "mem",
+  token: "tok",
+  label: "lbl",
+  message: "msg",
+  external: "ext",
+  larkBinding: "lark",
+  skillGroup: "skg",
+  runActionToken: "rat",
 } as const;
 
 export function newId(kind: keyof typeof PREFIXES): string {

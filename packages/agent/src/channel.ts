@@ -5,8 +5,12 @@ export interface IncomingMessage {
   threadId: string
   chatId: string
   senderId: string
+  senderName?: string
   text: string
   chatType: 'dm' | 'group'
+  mentionedBot?: boolean
+  replyToMessageId?: string
+  resources?: Array<{ type: 'image' | 'file' | 'audio' | 'video' | 'sticker'; fileKey: string; fileName?: string }>
 }
 
 export interface IncomingAction {

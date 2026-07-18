@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { Conversation, HarborAgent, PromptEventBlockKey, Run } from "../protocol.js";
+import type {
+  Conversation,
+  HarborAgent,
+  PromptEventBlockKey,
+  Run,
+} from "../protocol.js";
 import { openDb } from "./db.js";
 import {
   getPromptBlockConfig,
@@ -30,6 +35,9 @@ function fixtures(
     claudeSessionId: null,
     origin,
     originRef: origin === "automation" ? "automation_1" : null,
+    creatorMemberId: null,
+    ownerMemberId: null,
+    labelIds: [],
     createdAt: 1,
     updatedAt: 2,
   };
@@ -43,18 +51,25 @@ function fixtures(
     model: "sonnet",
     permission: "auto-edit",
     repositoryId: "repository_1",
+    repositoryIds: ["repository_1"],
     isolation: "none",
+    concurrency: 1,
+    visibility: "workspace",
+    environment: {},
+    setupScript: null,
+    reuseDeviceCli: true,
+    createdByMemberId: null,
     instruction: null,
     skillIds: [],
     createdAt: 1,
     archivedAt: null,
   };
-    const run: Run = {
-      id: "run_1",
-      workspaceId: "ws_personal",
-      sourceType: kind === "chat" ? "chat" : "issue",
-      sourceId: conversation.id,
-      conversationId: conversation.id,
+  const run: Run = {
+    id: "run_1",
+    workspaceId: "ws_personal",
+    sourceType: kind === "chat" ? "chat" : "issue",
+    sourceId: conversation.id,
+    conversationId: conversation.id,
     agentId: agent.id,
     deviceId: agent.deviceId,
     repositoryId: "repository_1",
@@ -63,9 +78,9 @@ function fixtures(
     prompt: "Implement the missing page",
     purpose: "implementation",
     promptEvent,
-      triggerRef: null,
-      triggerContext: {},
-      concurrencyKey: null,
+    triggerRef: null,
+    triggerContext: {},
+    concurrencyKey: null,
     status: "queued",
     claudeSessionId: null,
     error: null,
@@ -80,51 +95,99 @@ function fixtures(
 describe("prompt blocks", () => {
   test("latest migration exposes Mew-style blocks and composes issue context + assignment", () => {
     const db = openDb(":memory:");
-    const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version;
-    expect(version).toBe(12);
+    const version = db
+      .query<{ user_version: number }, []>("PRAGMA user_version")
+      .get()?.user_version;
+    expect(version).toBe(14);
     const store = new HarborStore(db);
     const input = fixtures();
     const rendered = renderRunPrompt(store, input);
 
     expect(listPromptBlockConfigs(store, "ws_personal")).toHaveLength(9);
     expect(rendered).toContain("Issue Reference");
+    expect(rendered).toContain("Creator: -");
+    expect(rendered).toContain("Recent Discussion");
     expect(rendered).toContain("Assignment");
     expect(rendered).toContain("Implement the missing page");
     expect(input.run.prompt).toBe("Implement the missing page");
-    expect(getPromptBlockConfig(store, "ws_personal", "session.issue.context").isDefault).toBe(true);
+    expect(
+      getPromptBlockConfig(store, "ws_personal", "session.issue.context")
+        .isDefault,
+    ).toBe(true);
   });
 
   test("infers event from source and conversation history", () => {
-    expect(inferPromptEvent(fixtures("web", "issue").conversation, false)).toBe("event.issue.assigned");
-    expect(inferPromptEvent(fixtures("feishu", "issue").conversation, false)).toBe("event.issue.mentioned");
-    expect(inferPromptEvent(fixtures("web", "issue").conversation, true)).toBe("event.issue.message_created");
-    expect(inferPromptEvent(fixtures("web", "chat", "event.chat.message_created").conversation, false)).toBe(
-      "event.chat.message_created",
+    expect(inferPromptEvent(fixtures("web", "issue").conversation, false)).toBe(
+      "event.issue.assigned",
     );
-    expect(inferPromptEvent(fixtures("automation", "issue").conversation, false)).toBe(
-      "event.automation.schedule",
+    expect(
+      inferPromptEvent(fixtures("feishu", "issue").conversation, false),
+    ).toBe("event.issue.mentioned");
+    expect(inferPromptEvent(fixtures("web", "issue").conversation, true)).toBe(
+      "event.issue.message_created",
     );
+    expect(
+      inferPromptEvent(
+        fixtures("web", "chat", "event.chat.message_created").conversation,
+        false,
+      ),
+    ).toBe("event.chat.message_created");
+    expect(
+      inferPromptEvent(fixtures("automation", "issue").conversation, false),
+    ).toBe("event.automation.schedule");
   });
 
   test("custom blocks apply immediately and disabled event safely falls back to raw request", () => {
     const store = new HarborStore(openDb(":memory:"));
     const input = fixtures();
-    store.setPromptBlock("ws_personal", "session.issue.context", true, "Context={{conversation.id}}", 10);
-    store.setPromptBlock("ws_personal", "event.issue.assigned", true, "Agent={{agent.name}}\n{{prompt}}", 11);
+    store.setPromptBlock(
+      "ws_personal",
+      "session.issue.context",
+      true,
+      "Context={{conversation.id}}",
+      10,
+    );
+    store.setPromptBlock(
+      "ws_personal",
+      "event.issue.assigned",
+      true,
+      "Agent={{agent.name}}\n{{prompt}}",
+      11,
+    );
     expect(renderRunPrompt(store, input)).toBe(
       "Context=conversation_1\n\n---\n\nAgent=builder\nImplement the missing page",
     );
 
-    store.setPromptBlock("ws_personal", "event.issue.assigned", false, "Request={{prompt}}", 12);
+    store.setPromptBlock(
+      "ws_personal",
+      "event.issue.assigned",
+      false,
+      "Request={{prompt}}",
+      12,
+    );
     expect(renderRunPrompt(store, input)).toBe(
       "Context=conversation_1\n\n---\n\nImplement the missing page",
     );
   });
 
   test("validates event request retention while context can omit request", () => {
-    expect(validatePromptTemplate("session.issue.context", "Issue={{conversation.id}}")).toBeNull();
-    expect(validatePromptTemplate("event.issue.assigned", "hello")).toContain("当前请求");
-    expect(validatePromptTemplate("event.issue.assigned", "{{unknown}} {{prompt}}")).toContain("未知变量");
-    expect(validatePromptTemplate("event.issue.assigned", "Request: {{ latest_message.content }}")).toBeNull();
+    expect(
+      validatePromptTemplate(
+        "session.issue.context",
+        "Issue={{conversation.id}}",
+      ),
+    ).toBeNull();
+    expect(validatePromptTemplate("event.issue.assigned", "hello")).toContain(
+      "当前请求",
+    );
+    expect(
+      validatePromptTemplate("event.issue.assigned", "{{unknown}} {{prompt}}"),
+    ).toContain("未知变量");
+    expect(
+      validatePromptTemplate(
+        "event.issue.assigned",
+        "Request: {{ latest_message.content }}",
+      ),
+    ).toBeNull();
   });
 });

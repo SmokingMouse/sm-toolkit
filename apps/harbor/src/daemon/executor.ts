@@ -12,7 +12,12 @@
  */
 
 import { ClaudeBackend, CodexBackend, EventType, type AgentEvent, type Backend, type Cost } from "@sm/agent";
-import type { DaemonMsg, RunSpec } from "../protocol.js";
+import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, join } from "node:path";
+import type { DaemonMsg, RunAttachment, RunSpec } from "../protocol.js";
 import { ensureWorktree } from "./worktree.js";
 
 const FLUSH_MS = 200;
@@ -26,7 +31,10 @@ export class Executor {
   /** `${runId}:${requestId}` → resolver（approval_res 到达时兑现） */
   private pendingApprovals = new Map<string, ApprovalResolver>();
 
-  constructor(private send: (msg: DaemonMsg) => void) {}
+  constructor(
+    private send: (msg: DaemonMsg) => void,
+    private agentActionUrl = process.env.HARBOR_AGENT_ACTION_URL ?? "",
+  ) {}
 
   runningIds(): string[] {
     return [...this.running.keys()];
@@ -86,6 +94,7 @@ export class Executor {
     let sessionId: string | null = spec.resume;
     let cost: Cost | null = null;
     let errMsg: string | null = null;
+    let attachmentDir: string | null = null;
     try {
       // worktree 隔离：首跑创建 + 回报路径；失败直接 run failed（拒绝静默降级回主仓库）
       let effectiveDir = spec.repositoryRoot;
@@ -98,14 +107,33 @@ export class Executor {
         }
       }
 
+      if (spec.setupScript?.trim()) {
+        if (!effectiveDir) throw new Error("Agent setup 需要 Repository mount");
+        await runAgentSetup(effectiveDir, spec.setupScript, spec.setupKey, spec.envOverrides ?? {}, signal);
+      }
+
+      const materialized = materializeRunAttachments(runId, spec.attachments ?? []);
+      attachmentDir = materialized.directory;
+      const prompt = materialized.paths.length
+        ? `${spec.prompt}\n\n## Input attachments\nThe following files were attached to this request and are available locally:\n${materialized.paths.map((item) => `- ${item.name}: ${item.path} (${item.mime})`).join("\n")}`
+        : spec.prompt;
+      const actionEnvironment: Record<string, string> = {};
+      if (spec.agentActionToken && this.agentActionUrl) {
+        actionEnvironment.HARBOR_AGENT_ACTION_URL = this.agentActionUrl;
+        actionEnvironment.HARBOR_AGENT_ACTION_TOKEN = spec.agentActionToken;
+      }
       const interactive = spec.permission === "default";
-      for await (const ev of backend.run(spec.prompt, {
+      for await (const ev of backend.run(prompt, {
         ...(effectiveDir ? { workspace: effectiveDir, cwd: effectiveDir } : {}),
+        additionalWorkspaces: spec.additionalRepositoryRoots,
         permission: spec.permission,
         systemPrompt: spec.systemPrompt,
         resume: spec.resume,
         model: spec.model ?? undefined,
-        env: spec.envOverrides,
+        env: { ...(spec.envOverrides ?? {}), ...actionEnvironment },
+        attachments: materialized.paths
+          .filter((attachment) => attachment.mime.startsWith("image/"))
+          .map((attachment) => ({ path: attachment.path, mime: attachment.mime })),
         signal,
         ...(interactive
           ? {
@@ -145,6 +173,7 @@ export class Executor {
     } finally {
       clearInterval(timer);
       flush();
+      if (attachmentDir) rmSync(attachmentDir, { recursive: true, force: true });
     }
 
     this.send({
@@ -156,6 +185,82 @@ export class Executor {
       ...(errMsg ? { error: errMsg } : {}),
     });
   }
+}
+
+export function materializeRunAttachments(
+  runId: string,
+  attachments: RunAttachment[],
+): {
+  directory: string | null;
+  paths: Array<{ name: string; mime: string; path: string }>;
+} {
+  if (attachments.length === 0) return { directory: null, paths: [] };
+  const directory = mkdtempSync(join(tmpdir(), `harbor-${runId.replace(/[^A-Za-z0-9_-]/g, "_")}-`));
+  const used = new Set<string>();
+  const paths = attachments.map((attachment, index) => {
+    const rawName = basename(attachment.name).replace(/[^\p{L}\p{N}._ -]/gu, "_") || `attachment-${index + 1}`;
+    let name = rawName;
+    let suffix = 2;
+    while (used.has(name)) name = `${index + 1}-${suffix++}-${rawName}`;
+    used.add(name);
+    const path = join(directory, name);
+    writeFileSync(path, Buffer.from(attachment.dataBase64, "base64"), { mode: 0o600 });
+    return { name, mime: attachment.mime, path };
+  });
+  return { directory, paths };
+}
+
+/**
+ * Setup command 是用户在 Agent 配置中显式授权的本机脚本。成功标记放在 ~/.harbor，
+ * 不污染仓库；key + checkout 路径任一变化都会重新执行。失败则拒绝启动 Agent runtime。
+ */
+export async function runAgentSetup(
+  cwd: string,
+  script: string,
+  setupKey: string | null | undefined,
+  environment: Record<string, string>,
+  signal: AbortSignal,
+  timeoutMs = 5 * 60_000,
+): Promise<void> {
+  const marker = setupKey
+    ? join(homedir(), ".harbor", "setup-cache", `${createHash("sha256").update(`${cwd}\0${setupKey}`).digest("hex")}.done`)
+    : null;
+  if (marker && existsSync(marker)) return;
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("/bin/sh", ["-lc", script], {
+      cwd,
+      env: { ...process.env, ...environment },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    const append = (current: string, chunk: unknown) => `${current}${String(chunk)}`.slice(-16 * 1024);
+    child.stdout.on("data", (chunk) => { stdout = append(stdout, chunk); });
+    child.stderr.on("data", (chunk) => { stderr = append(stderr, chunk); });
+    const stop = () => child.kill("SIGTERM");
+    signal.addEventListener("abort", stop, { once: true });
+    const timer = setTimeout(stop, timeoutMs);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", stop);
+      reject(new Error(`Agent setup 启动失败：${error.message}`));
+    });
+    child.on("close", (code, terminatedBy) => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", stop);
+      if (signal.aborted) return reject(new Error("Agent setup 已取消"));
+      if (terminatedBy || code !== 0) {
+        return reject(new Error(
+          `Agent setup 失败（exit=${code ?? terminatedBy ?? "unknown"}）：${(stderr || stdout || "无输出").trim()}`,
+        ));
+      }
+      if (marker) {
+        mkdirSync(join(homedir(), ".harbor", "setup-cache"), { recursive: true });
+        writeFileSync(marker, `${Date.now()}\n`, { mode: 0o600 });
+      }
+      resolve();
+    });
+  });
 }
 
 /** 仅合并同一会话中连续的流式文本；工具、结果和不同 event type 必须保留顺序边界。 */

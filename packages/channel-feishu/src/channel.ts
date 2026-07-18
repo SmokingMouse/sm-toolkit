@@ -14,6 +14,8 @@ import type {
 import type { FeishuChannelConfig } from './types.js'
 import { renderContent } from './cards.js'
 
+const MAX_RESOURCE_BYTES = 10 * 1024 * 1024
+
 export class FeishuChannel implements Channel {
   readonly source = 'feishu'
 
@@ -115,6 +117,31 @@ export class FeishuChannel implements Channel {
     return (resp?.data as { message_id?: string })?.message_id ?? null
   }
 
+  /** 下载当前消息里的附件，交由 Harbor 以受限 Run snapshot 下发；不落 server 文件系统。 */
+  async downloadResource(
+    messageId: string,
+    resource: NonNullable<IncomingMessage['resources']>[number],
+  ): Promise<{ name: string; mime: string; dataBase64: string }> {
+    if (resource.type === 'sticker') throw new Error('飞书暂不支持下载 sticker 附件')
+    const response = await this.#lark.rawClient.im.messageResource.get({
+      path: { message_id: messageId, file_key: resource.fileKey },
+      params: { type: resource.type === 'image' ? 'image' : 'file' },
+    })
+    const chunks: Buffer[] = []
+    let size = 0
+    for await (const value of response.getReadableStream()) {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
+      size += chunk.length
+      if (size > MAX_RESOURCE_BYTES) throw new Error(`附件 ${resource.fileName ?? resource.fileKey} 超过 10MB 上限`)
+      chunks.push(chunk)
+    }
+    return {
+      name: resource.fileName ?? `${resource.type}-${resource.fileKey.slice(0, 12)}`,
+      mime: resourceMime(resource),
+      dataBase64: Buffer.concat(chunks).toString('base64'),
+    }
+  }
+
   // ── internal adapters ─────────────────────────────────
 
   async #onLarkMessage(msg: NormalizedMessage): Promise<void> {
@@ -131,8 +158,12 @@ export class FeishuChannel implements Channel {
       threadId,
       chatId: msg.chatId ?? '',
       senderId: msg.senderId,
+      senderName: msg.senderName,
       text,
       chatType: msg.chatType === 'p2p' ? 'dm' : 'group',
+      mentionedBot: msg.mentionedBot,
+      replyToMessageId: msg.replyToMessageId,
+      resources: msg.resources,
     })
   }
 
@@ -156,4 +187,14 @@ export class FeishuChannel implements Channel {
       console.error('[feishu] Error handling card action:', err)
     }
   }
+}
+
+function resourceMime(resource: NonNullable<IncomingMessage['resources']>[number]): string {
+  const ext = resource.fileName?.split('.').pop()?.toLowerCase()
+  const byExtension: Record<string, string> = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+    pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', json: 'application/json',
+    mp3: 'audio/mpeg', wav: 'audio/wav', mp4: 'video/mp4', mov: 'video/quicktime',
+  }
+  return (ext && byExtension[ext]) || (resource.type === 'image' ? 'image/png' : 'application/octet-stream')
 }

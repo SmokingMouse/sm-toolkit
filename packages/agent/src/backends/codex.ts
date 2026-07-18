@@ -54,6 +54,7 @@ export class CodexBackend implements Backend {
       resume: opts.resume ?? null,
       imagePaths: (opts.attachments ?? []).map((a) => a.path),
       prompt: finalPrompt,
+      additionalDirs: opts.additionalWorkspaces ?? [],
     });
 
     let sid: string | null = opts.resume ?? null;
@@ -136,9 +137,12 @@ function buildCodexArgs(o: {
   resume: string | null;
   imagePaths: string[];
   prompt: string;
+  additionalDirs: string[];
 }): string[] {
   const common = ["--json", "--skip-git-repo-check"];
   if (o.model) common.push("-m", o.model);
+  // `codex exec resume` 当前没有 --add-dir；新会话才显式开放额外 Repository。
+  if (!o.resume) for (const directory of o.additionalDirs) common.push("--add-dir", directory);
   const imageArgs = o.imagePaths.flatMap((p) => ["--image", p]);
 
   if (o.resume) {
