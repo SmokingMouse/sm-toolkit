@@ -3,7 +3,7 @@
  * CRUD + run 事件 SSE + Bearer token auth + 只读看板（GET /）。
  * 语义校验尽量前置到这一层（fail loudly at 配置时而非运行时）：
  *   - agent create 校验 model ∈ device 能力清单（harbor.md §8「endpoints.yaml 各机不一致」对策）
- *   - automation create 校验 cron 表达式 / agent 存在 / append 模式 target 存在
+ *   - automation create 校验唯一 Schedule/Codebase Trigger 与 Agent/Repository binding
  */
 
 import { existsSync } from "node:fs";
@@ -16,10 +16,8 @@ import { HTTPException } from "hono/http-exception";
 import { assertAgentEnvironmentSafe } from "../agent-environment.js";
 import type {
   BackendKind,
-  AutomationOutputMode,
-  AutomationOverlapMode,
-  AutomationTriggerType,
-  AutomationWebhookFilter,
+  AutomationOutput,
+  CodebaseAutomationEvent,
   ConversationKind,
   ConversationStatus,
   Delivery,
@@ -40,7 +38,7 @@ import type {
   WorkspaceRole,
 } from "../protocol.js";
 import {
-  AUTOMATION_EVENT_TYPES,
+  CODEBASE_AUTOMATION_EVENTS,
   DELIVERY_CHECK_STATUSES,
   DEFAULT_WORKSPACE_ID,
   ISSUE_PRIORITIES,
@@ -53,7 +51,7 @@ import type { RunBus } from "./bus.js";
 import type { DeviceHub } from "./ws.js";
 import { RunCoordinator } from "./scheduler.js";
 import type { ApprovalService } from "./approvals.js";
-import { AutomationService, hashWebhookSecret } from "./automation.js";
+import { AutomationService } from "./automation.js";
 import { inactiveMaintenanceGuard, matchesRevisionAwareHealth, type MaintenanceGuard } from "./maintenance.js";
 import { AuthService } from "./auth.js";
 import { transitionConversation } from "./statemachine.js";
@@ -480,71 +478,6 @@ export function buildRest(
       { error: err instanceof Error ? err.message : String(err) },
       500,
     );
-  });
-
-  /** 外部 Trigger 入口：不走 Harbor Bearer auth，只认每个 webhook Trigger 的独立 secret。 */
-  app.post("/hooks/automations/:triggerId", async (c) => {
-    const contentLength = Number(c.req.header("content-length") ?? "0");
-    if (Number.isFinite(contentLength) && contentLength > 256 * 1024) {
-      return c.json({ error: "webhook payload 超过 256KB" }, 413);
-    }
-    let raw: unknown;
-    try {
-      raw = await c.req.json();
-    } catch {
-      return c.json({ error: "webhook body 必须是 JSON object" }, 400);
-    }
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      return c.json({ error: "webhook body 必须是 JSON object" }, 400);
-    }
-    const payload = raw as Record<string, unknown>;
-    if (JSON.stringify(payload).length > 256 * 1024) {
-      return c.json({ error: "webhook payload 超过 256KB" }, 413);
-    }
-    const authorization = c.req.header("authorization") ?? "";
-    const secret =
-      c.req.header("x-harbor-webhook-secret") ??
-      (authorization.startsWith("Bearer ")
-        ? authorization.slice("Bearer ".length)
-        : "");
-    const eventType =
-      c.req.header("x-harbor-event") ??
-      c.req.header("x-codebase-event") ??
-      (typeof payload.event === "string" ? payload.event : null) ??
-      (typeof payload.type === "string" ? payload.type : "unknown");
-    const eventId =
-      c.req.header("x-harbor-delivery") ??
-      c.req.header("x-codebase-delivery") ??
-      c.req.header("x-request-id") ??
-      (typeof payload.delivery_id === "string" ? payload.delivery_id : null);
-    if (
-      secret.length > 512 ||
-      eventType.length > 200 ||
-      (eventId?.length ?? 0) > 512
-    ) {
-      return c.json({ error: "webhook header 超过长度限制" }, 400);
-    }
-    try {
-      const result = automations.receiveWebhook(c.req.param("triggerId"), {
-        secret,
-        eventType,
-        eventId,
-        payload,
-      });
-      if (result.status === "started") return c.json(result, 202);
-      if (
-        result.status === "ignored" &&
-        result.reason === "webhook trigger 不存在"
-      ) {
-        return c.json({ error: result.reason }, 404);
-      }
-      return c.json(result, 200);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message === "webhook secret 不正确")
-        return c.json({ error: message }, 401);
-      throw error;
-    }
   });
 
   /** Codebase 独立入口：Repository id 定作用域，独立 secret 定授权，event id 定幂等。 */
@@ -3406,17 +3339,84 @@ export function buildRest(
     return c.json(decided);
   });
 
-  // ---- automations（P3 cron） ----
+  // ---- automations ----
+
+  type AutomationTriggerInput =
+    | { type: "schedule"; cron: string; timezone: string }
+    | { type: "codebase"; repositoryId: string; codebaseEvent: CodebaseAutomationEvent };
+
+  const parseAutomationOutput = (value: unknown, fallback: AutomationOutput): AutomationOutput => {
+    const output = value ?? fallback;
+    if (output !== "run" && output !== "chat" && output !== "issue") {
+      bad(`output 可选 run/chat/issue（收到 "${String(output)}"）`);
+    }
+    return output;
+  };
+
+  const parseAutomationTrigger = (
+    workspaceId: string,
+    agent: NonNullable<ReturnType<HarborStore["getAgent"]>>,
+    value: unknown,
+  ): AutomationTriggerInput => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      bad("trigger 需要是 Schedule 或 Codebase 配置");
+    }
+    const trigger = value as Record<string, unknown>;
+    if (trigger.type === "schedule") {
+      const cron = typeof trigger.cron === "string" ? trigger.cron.trim() : "";
+      const timezone = typeof trigger.timezone === "string" && trigger.timezone.trim()
+        ? trigger.timezone.trim()
+        : "Asia/Shanghai";
+      if (!cron) bad("Schedule trigger 缺少 cron");
+      try {
+        AutomationService.validateCron(cron, timezone);
+      } catch (error) {
+        bad(error instanceof Error ? error.message : String(error));
+      }
+      const repository = store.getRepository(agent.repositoryId);
+      if (!repository || repository.archivedAt) {
+        bad(`Agent "${agent.name}" 的 Repository 不存在或已归档`);
+      }
+      if (!store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
+        bad(`Repository "${repository.name}" 尚未挂载到 Agent "${agent.name}" 的设备`);
+      }
+      return { type: "schedule", cron, timezone };
+    }
+    if (trigger.type === "codebase") {
+      const repositoryKey = typeof trigger.repository === "string"
+        ? trigger.repository.trim()
+        : typeof trigger.repositoryId === "string"
+          ? trigger.repositoryId.trim()
+          : "";
+      if (!repositoryKey) bad("Codebase trigger 缺少 Repository");
+      const repository = scopedRepository(workspaceId, repositoryKey);
+      if (!repository || repository.archivedAt || repository.scmProvider !== "codebase") {
+        bad(`Repository "${repositoryKey}" 不存在、已归档或未启用 Codebase`);
+      }
+      if (!agent.repositoryIds.includes(repository.id)) {
+        bad(`Agent "${agent.name}" 未绑定 Repository "${repository.name}"`);
+      }
+      if (!store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
+        bad(`Repository "${repository.name}" 尚未挂载到 Agent "${agent.name}" 的设备`);
+      }
+      const codebaseEvent = (trigger.event ?? trigger.codebaseEvent) as CodebaseAutomationEvent | undefined;
+      if (!codebaseEvent || !CODEBASE_AUTOMATION_EVENTS.includes(codebaseEvent)) {
+        bad(`Codebase event 可选 ${CODEBASE_AUTOMATION_EVENTS.join("/")}`);
+      }
+      return { type: "codebase", repositoryId: repository.id, codebaseEvent };
+    }
+    bad(`trigger.type 可选 schedule/codebase（收到 "${String(trigger.type)}"）`);
+  };
 
   app.get("/api/automations", (c) => {
     const workspace = currentWorkspace(c);
     const agentNames = new Map(
-      store.listAgents(true, workspace.id).map((a) => [a.id, a.name]),
+      store.listAgents(true, workspace.id).map((agent) => [agent.id, agent.name]),
     );
     return c.json(
-      store.listAutomations(workspace.id).map((a) => ({
-        ...a,
-        agentName: agentNames.get(a.agentId) ?? a.agentId,
+      store.listAutomations(workspace.id).map((automation) => ({
+        ...automation,
+        agentName: agentNames.get(automation.agentId) ?? automation.agentId,
       })),
     );
   });
@@ -3424,279 +3424,156 @@ export function buildRest(
   app.post("/api/automations", async (c) => {
     const workspace = currentWorkspace(c);
     requireRole(c, workspace.id, "admin");
-    const b = (await c.req.json()) as {
+    const body = (await c.req.json()) as {
       name?: string;
       agent?: string;
-      triggerType?: AutomationTriggerType;
-      cron?: string;
-      provider?: string;
-      events?: unknown;
-      filters?: unknown;
       prompt?: string;
-      purpose?: RunPurpose;
-      outputMode?: AutomationOutputMode;
-      overlapMode?: AutomationOverlapMode;
-      /** 旧客户端兼容。 */
-      mode?: string;
-      target?: string;
-      notifyChat?: string;
-      repository?: unknown;
+      output?: AutomationOutput;
+      trigger?: unknown;
+      enabled?: boolean;
+      purpose?: unknown;
+      outputMode?: unknown;
+      overlapMode?: unknown;
+      target?: unknown;
+      notifyChat?: unknown;
     };
-    if (b.repository !== undefined)
-      bad("Automation 的 Repository 由 Agent 决定，请修改 Agent 配置");
-    const name = b.name?.trim() ?? "";
-    if (!name) bad("缺少 name");
     if (
-      store
-        .listAutomations(workspace.id)
-        .some((automation) => automation.name === name)
+      body.purpose !== undefined ||
+      body.outputMode !== undefined ||
+      body.overlapMode !== undefined ||
+      body.target !== undefined ||
+      body.notifyChat !== undefined
     ) {
+      bad("Purpose/OutputMode/Overlap/Target/notifyChat 已退出 Automation API；请使用 output=run|chat|issue");
+    }
+    const name = body.name?.trim() ?? "";
+    if (!name) bad("缺少 name");
+    if (store.listAutomations(workspace.id).some((candidate) => candidate.name === name)) {
       bad(`automation 名 "${name}" 已存在于当前 Workspace`);
     }
-    if (!b.prompt?.trim()) bad("缺少 prompt");
-    const agent = scopedAgent(c, workspace.id, b.agent);
-    if (!agent) bad(`agent "${b.agent}" 不存在（harbor agent ls 查看）`);
-    if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
-
-    const triggerType = b.triggerType ?? "schedule";
-    if (triggerType !== "schedule" && triggerType !== "webhook" && triggerType !== "event") {
-      bad(`triggerType 可选 schedule/webhook/event（收到 "${b.triggerType}"）`);
+    const prompt = body.prompt?.trim() ?? "";
+    if (!prompt) bad("缺少 prompt");
+    const agent = scopedAgent(c, workspace.id, body.agent);
+    if (!agent || agent.archivedAt) {
+      bad(`agent "${body.agent ?? ""}" 不存在或已归档`);
     }
-    let webhookSecret: string | null = null;
-    let filters: AutomationWebhookFilter[] = [];
-    let events: string[] = [];
-    if (triggerType === "schedule") {
-      if (!b.cron?.trim())
-        bad("schedule trigger 缺少 cron（5 段标准 cron 表达式）");
-      try {
-        AutomationService.validateCron(b.cron.trim());
-      } catch (e) {
-        bad(
-          `cron 表达式非法："${b.cron}"（${e instanceof Error ? e.message : e}）`,
-        );
-      }
+    const output = parseAutomationOutput(body.output, "run");
+    const trigger = parseAutomationTrigger(workspace.id, agent, body.trigger);
+    const automation = store.createAutomation({
+      workspaceId: workspace.id,
+      name,
+      agentId: agent.id,
+      prompt,
+      output,
+      trigger,
+    }, Date.now());
+    if (body.enabled === false) {
+      store.setAutomationEnabled(automation.id, false);
     } else {
-      if (
-        b.events !== undefined &&
-        (!Array.isArray(b.events) ||
-          b.events.some((value) => typeof value !== "string"))
-      ) {
-        bad("events 必须是 string[]");
-      }
-      events = [
-        ...new Set(
-          ((b.events as string[] | undefined) ?? [])
-            .map((event) => event.trim())
-            .filter(Boolean),
-        ),
-      ];
-      if (b.filters !== undefined && !Array.isArray(b.filters))
-        bad("filters 必须是数组");
-      filters = (
-        (b.filters as AutomationWebhookFilter[] | undefined) ?? []
-      ).map((filter) => {
-        if (
-          !filter ||
-          typeof filter !== "object" ||
-          typeof filter.path !== "string" ||
-          !filter.path.trim()
-        ) {
-          bad("每个 webhook filter 都需要非空 path");
-        }
-        if (
-          !["string", "number", "boolean"].includes(typeof filter.equals) &&
-          filter.equals !== null
-        ) {
-          bad("webhook filter.equals 只支持 string/number/boolean/null");
-        }
-        return { path: filter.path.trim(), equals: filter.equals };
-      });
-      if (triggerType === "event" && events.length === 0) {
-        bad("event trigger 至少需要一个 Harbor event type");
-      }
-      if (
-        triggerType === "event" &&
-        events.some((event) => !AUTOMATION_EVENT_TYPES.includes(event as (typeof AUTOMATION_EVENT_TYPES)[number]))
-      ) {
-        bad(`Harbor event 可选 ${AUTOMATION_EVENT_TYPES.join(", ")}`);
-      }
-      webhookSecret = triggerType === "webhook" ? randomBytes(24).toString("base64url") : null;
+      automations.schedule(automation);
     }
-
-    const legacyOutput =
-      b.mode === "append" ? "append" : b.mode === "new_issue" ? "issue" : null;
-    const outputMode = b.outputMode ?? legacyOutput ?? "run";
-    if (!["run", "chat", "issue", "append", "source"].includes(outputMode)) {
-      bad(`outputMode 可选 run/chat/issue/append/source（收到 "${outputMode}"）`);
-    }
-    const purpose = b.purpose ?? "implementation";
-    if (!RUN_PURPOSES.includes(purpose)) bad(`purpose 可选 ${RUN_PURPOSES.join("/")}`);
-    if (purpose === "triage") bad("Automation 不直接创建 Issue draft，purpose 不能是 triage");
-    if ((outputMode === "chat" || outputMode === "issue") && purpose !== "implementation") {
-      bad(`${outputMode} output 只支持 implementation purpose`);
-    }
-    if ((purpose === "review" || purpose === "verification") && outputMode !== "source" && outputMode !== "append") {
-      bad(`${purpose} purpose 需要 source 或 append conversation output`);
-    }
-    if (outputMode === "source" && triggerType !== "event") {
-      bad("source output 只接受 Harbor event trigger");
-    }
-    const overlapMode = b.overlapMode ?? "skip";
-    if (overlapMode !== "skip" && overlapMode !== "queue") {
-      bad(`overlapMode 可选 skip/queue（收到 "${b.overlapMode}"）`);
-    }
-    if (outputMode === "run" && purpose !== "coordination" && agent.isolation === "worktree") {
-      bad(
-        "outputMode=run 当前要求 Agent isolation=none；需要 worktree 时请选择 chat/issue 输出",
-      );
-    }
-    let targetId: string | null = null;
-    if (outputMode === "append") {
-      if (!b.target) bad("outputMode=append 需要 target conversation");
-      const target = store.resolveConversationPrefix(b.target);
-      if (!target || target.workspaceId !== workspace.id)
-        bad(`target conversation "${b.target}" 不存在于当前 Workspace`);
-      if (target.repositoryId && target.repositoryId !== agent.repositoryId) {
-        bad("append target 与 Agent 绑定的 Repository 不一致");
-      }
-      targetId = target.id;
-    }
-    const repository = store.getRepository(agent.repositoryId);
-    if (!repository || repository.archivedAt)
-      bad(`Agent "${agent.name}" 的 Repository 不存在或已归档`);
-    if (!store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
-      bad(
-        `Repository "${repository.name}" 尚未挂载到 Agent "${agent.name}" 的设备`,
-      );
-    }
-    const auto = store.createAutomation(
-      {
-        workspaceId: workspace.id,
-        name,
-        agentId: agent.id,
-        repositoryId: repository.id,
-        prompt: b.prompt.trim(),
-        purpose,
-        outputMode,
-        overlapMode,
-        targetConversationId: targetId,
-        notifyChatId: b.notifyChat ?? null,
-        triggers: [
-          {
-            type: triggerType,
-            cron: triggerType === "schedule" ? b.cron!.trim() : null,
-            provider:
-              triggerType === "webhook"
-                ? b.provider?.trim() || "generic"
-                : triggerType === "event"
-                  ? "harbor"
-                  : null,
-            events,
-            filters,
-            secretHash: webhookSecret ? hashWebhookSecret(webhookSecret) : null,
-          },
-        ],
-      },
-      Date.now(),
-    );
-    automations.schedule(auto);
-    return c.json(
-      { ...auto, ...(webhookSecret ? { webhookSecret } : {}) },
-      201,
-    );
+    return c.json(store.getAutomation(automation.id), 201);
   });
 
   app.patch("/api/automations/:id", async (c) => {
     const workspace = currentWorkspace(c);
     requireRole(c, workspace.id, "admin");
-    const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
-    if (!auto || auto.workspaceId !== workspace.id)
+    const automation = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
+    if (!automation) {
       throw new HTTPException(404, {
         message: `automation "${c.req.param("id")}" 不存在`,
       });
-    const b = (await c.req.json()) as {
+    }
+    const body = (await c.req.json()) as {
       name?: string;
       agent?: string;
       prompt?: string;
-      purpose?: RunPurpose;
-      outputMode?: AutomationOutputMode;
-      overlapMode?: AutomationOverlapMode;
-      target?: string | null;
-      notifyChat?: string | null;
+      output?: AutomationOutput;
+      trigger?: unknown;
       enabled?: boolean;
-      repository?: unknown;
+      purpose?: unknown;
+      outputMode?: unknown;
+      overlapMode?: unknown;
+      target?: unknown;
+      notifyChat?: unknown;
     };
-    if (b.repository !== undefined) bad("Automation 的 Repository 由 Agent 决定，请修改 Agent 配置");
-    const name = b.name === undefined ? auto.name : b.name.trim();
+    if (
+      body.purpose !== undefined ||
+      body.outputMode !== undefined ||
+      body.overlapMode !== undefined ||
+      body.target !== undefined ||
+      body.notifyChat !== undefined
+    ) {
+      bad("Purpose/OutputMode/Overlap/Target/notifyChat 已退出 Automation API");
+    }
+    const name = body.name === undefined ? automation.name : body.name.trim();
     if (!name) bad("name 不能为空");
-    if (store.listAutomations(workspace.id).some((candidate) => candidate.id !== auto.id && candidate.name === name)) {
+    if (store.listAutomations(workspace.id).some(
+      (candidate) => candidate.id !== automation.id && candidate.name === name,
+    )) {
       bad(`automation 名 "${name}" 已存在于当前 Workspace`);
     }
-    const prompt = b.prompt === undefined ? auto.prompt : b.prompt.trim();
+    const prompt = body.prompt === undefined ? automation.prompt : body.prompt.trim();
     if (!prompt) bad("prompt 不能为空");
-    const agent = b.agent === undefined ? store.getAgent(auto.agentId) : scopedAgent(c, workspace.id, b.agent);
-    if (!agent || agent.archivedAt) bad(`agent "${b.agent ?? auto.agentId}" 不存在或已归档`);
-    const purpose = b.purpose ?? auto.purpose;
-    if (!RUN_PURPOSES.includes(purpose) || purpose === "triage") bad(`purpose 可选 ${RUN_PURPOSES.filter((value) => value !== "triage").join("/")}`);
-    const outputMode = b.outputMode ?? auto.outputMode;
-    if (!["run", "chat", "issue", "append", "source"].includes(outputMode)) bad("outputMode 可选 run/chat/issue/append/source");
-    if ((outputMode === "chat" || outputMode === "issue") && purpose !== "implementation") {
-      bad(`${outputMode} output 只支持 implementation purpose`);
+    const agent = body.agent === undefined
+      ? store.getAgent(automation.agentId)
+      : scopedAgent(c, workspace.id, body.agent);
+    if (!agent || agent.archivedAt) {
+      bad(`agent "${body.agent ?? automation.agentId}" 不存在或已归档`);
     }
-    if ((purpose === "review" || purpose === "verification") && outputMode !== "source" && outputMode !== "append") {
-      bad(`${purpose} purpose 需要 source 或 append conversation output`);
-    }
-    if (outputMode === "source" && auto.triggers.some((trigger) => trigger.type !== "event")) {
-      bad("source output 只接受 Harbor event trigger；请先删除 schedule/webhook trigger");
-    }
-    if (outputMode === "run" && purpose !== "coordination" && agent.isolation === "worktree") {
-      bad("outputMode=run 要求 Agent isolation=none；coordination purpose 除外");
-    }
-    const overlapMode = b.overlapMode ?? auto.overlapMode;
-    if (overlapMode !== "skip" && overlapMode !== "queue") bad("overlapMode 可选 skip/queue");
-    let targetId = auto.targetConversationId;
-    if (outputMode === "append") {
-      const targetKey = b.target === undefined ? auto.targetConversationId : b.target;
-      if (!targetKey) bad("outputMode=append 需要 target conversation");
-      const target = store.resolveConversationPrefix(targetKey);
-      if (!target || target.workspaceId !== workspace.id) bad(`target conversation "${targetKey}" 不存在`);
-      if (target.repositoryId && !agent.repositoryIds.includes(target.repositoryId)) {
-        bad("append target Repository 不在 Agent 可见范围");
-      }
-      targetId = target.id;
-    } else {
-      targetId = null;
-    }
-    const repository = store.getRepository(agent.repositoryId);
-    if (!repository || repository.archivedAt || !store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
-      bad(`Agent "${agent.name}" 的 Repository mount 不可用`);
-    }
-    const fresh = store.updateAutomation(auto.id, {
-      name,
-      agentId: agent.id,
-      repositoryId: repository.id,
-      prompt,
-      purpose,
-      outputMode,
-      overlapMode,
-      targetConversationId: targetId,
-      ...(b.notifyChat !== undefined ? { notifyChatId: b.notifyChat?.trim() || null } : {}),
-      ...(b.enabled !== undefined ? { enabled: b.enabled } : {}),
-    }, Date.now());
+    const output = parseAutomationOutput(body.output, automation.output);
+    const currentTrigger = automation.trigger.type === "schedule"
+      ? {
+          type: "schedule" as const,
+          cron: automation.trigger.cron!,
+          timezone: automation.trigger.timezone!,
+        }
+      : {
+          type: "codebase" as const,
+          repositoryId: automation.trigger.repositoryId!,
+          codebaseEvent: automation.trigger.codebaseEvent!,
+        };
+    const trigger = body.trigger === undefined
+      ? parseAutomationTrigger(
+          workspace.id,
+          agent,
+          currentTrigger.type === "schedule"
+            ? currentTrigger
+            : {
+                type: "codebase",
+                repositoryId: currentTrigger.repositoryId,
+                event: currentTrigger.codebaseEvent,
+              },
+        )
+      : parseAutomationTrigger(workspace.id, agent, body.trigger);
+
+    automations.unschedule(automation.id);
+    const fresh = store.updateAutomationDefinition(
+      automation.id,
+      {
+        name,
+        agentId: agent.id,
+        prompt,
+        output,
+        ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+      },
+      trigger,
+      Date.now(),
+    );
     if (fresh.enabled) automations.schedule(fresh);
-    else automations.unschedule(auto.id);
     return c.json(fresh);
   });
 
   app.post("/api/automations/:id/run", (c) => {
     const workspace = currentWorkspace(c);
-    const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
-    if (!auto)
+    const automation = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
+    if (!automation) {
       throw new HTTPException(404, {
         message: `automation "${c.req.param("id")}" 不存在`,
       });
+    }
     try {
-      return c.json(automations.runNow(auto.id), 201);
+      return c.json(automations.runNow(automation.id), 201);
     } catch (error) {
       bad(error instanceof Error ? error.message : String(error));
     }
@@ -3705,150 +3582,27 @@ export function buildRest(
   app.delete("/api/automations/:id", (c) => {
     const workspace = currentWorkspace(c);
     requireRole(c, workspace.id, "admin");
-    const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
-    if (!auto || auto.workspaceId !== workspace.id)
+    const automation = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
+    if (!automation) {
       throw new HTTPException(404, {
         message: `automation "${c.req.param("id")}" 不存在`,
       });
-    automations.unschedule(auto.id);
-    store.deleteAutomation(auto.id);
+    }
+    automations.unschedule(automation.id);
+    store.deleteAutomation(automation.id);
     return c.json({ ok: true });
   });
 
   app.get("/api/automations/:id/log", (c) => {
     const workspace = currentWorkspace(c);
-    const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
-    if (!auto || auto.workspaceId !== workspace.id)
+    const automation = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
+    if (!automation) {
       throw new HTTPException(404, {
         message: `automation "${c.req.param("id")}" 不存在`,
       });
-    return c.json(store.listAutomationLog(auto.id));
+    }
+    return c.json(store.listAutomationLog(automation.id));
   });
-
-  app.post("/api/automations/:id/triggers", async (c) => {
-    const workspace = currentWorkspace(c);
-    requireRole(c, workspace.id, "admin");
-    const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
-    if (!auto)
-      throw new HTTPException(404, {
-        message: `automation "${c.req.param("id")}" 不存在`,
-      });
-    const b = (await c.req.json()) as {
-      type?: AutomationTriggerType;
-      cron?: string;
-      provider?: string;
-      events?: string[];
-      filters?: AutomationWebhookFilter[];
-    };
-    if (b.type !== "schedule" && b.type !== "webhook" && b.type !== "event")
-      bad("type 可选 schedule/webhook/event");
-    if (auto.outputMode === "source" && b.type !== "event") {
-      bad("source output 只接受 Harbor event trigger");
-    }
-    if (b.events !== undefined && (!Array.isArray(b.events) || b.events.some((event) => typeof event !== "string"))) {
-      bad("events 必须是 string[]");
-    }
-    if (b.filters !== undefined && (!Array.isArray(b.filters) || b.filters.some((filter) =>
-      !filter || typeof filter !== "object" || typeof filter.path !== "string" || !filter.path.trim()
-    ))) {
-      bad("filters 必须是包含非空 path 的数组");
-    }
-    if (b.type === "schedule") {
-      if (!b.cron?.trim()) bad("schedule trigger 缺少 cron");
-      try {
-        AutomationService.validateCron(b.cron.trim());
-      } catch (error) {
-        bad(
-          `cron 表达式非法：${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-    if (b.type === "event" && (!b.events || b.events.length === 0)) {
-      bad("event trigger 至少需要一个 Harbor event type");
-    }
-    if (
-      b.type === "event" &&
-      b.events?.some((event) => !AUTOMATION_EVENT_TYPES.includes(event as (typeof AUTOMATION_EVENT_TYPES)[number]))
-    ) {
-      bad(`Harbor event 可选 ${AUTOMATION_EVENT_TYPES.join(", ")}`);
-    }
-    const secret = b.type === "webhook" ? randomBytes(24).toString("base64url") : null;
-    const trigger = store.createAutomationTrigger(
-      auto.id,
-      {
-        type: b.type,
-        cron: b.cron?.trim() ?? null,
-        provider: b.type === "event" ? "harbor" : b.provider?.trim() || "generic",
-        events: b.events ?? [],
-        filters: b.filters ?? [],
-        secretHash: secret ? hashWebhookSecret(secret) : null,
-      },
-      Date.now(),
-    );
-    automations.schedule(store.getAutomation(auto.id)!);
-    return c.json(
-      { ...trigger, ...(secret ? { webhookSecret: secret } : {}) },
-      201,
-    );
-  });
-
-  app.delete("/api/automations/:id/triggers/:triggerId", (c) => {
-    const workspace = currentWorkspace(c);
-    requireRole(c, workspace.id, "admin");
-    const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
-    const trigger = store.getAutomationTrigger(c.req.param("triggerId"));
-    if (!auto || !trigger || trigger.automationId !== auto.id) {
-      throw new HTTPException(404, { message: "automation trigger 不存在" });
-    }
-    store.deleteAutomationTrigger(trigger.id);
-    automations.schedule(store.getAutomation(auto.id)!);
-    return c.json({ ok: true });
-  });
-
-  app.patch("/api/automations/:id/triggers/:triggerId", async (c) => {
-    const workspace = currentWorkspace(c);
-    requireRole(c, workspace.id, "admin");
-    const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
-    const trigger = store.getAutomationTrigger(c.req.param("triggerId"));
-    if (!auto || !trigger || trigger.automationId !== auto.id) {
-      throw new HTTPException(404, { message: "automation trigger 不存在" });
-    }
-    const b = (await c.req.json()) as {
-      enabled?: boolean;
-      cron?: string | null;
-      provider?: string | null;
-      events?: unknown;
-      filters?: unknown;
-    };
-    if (trigger.type === "schedule" && b.cron !== undefined) {
-      if (!b.cron?.trim()) bad("schedule trigger 缺少 cron");
-      try { AutomationService.validateCron(b.cron.trim()); }
-      catch (error) { bad(`cron 表达式非法：${error instanceof Error ? error.message : String(error)}`); }
-    }
-    if (b.events !== undefined && (!Array.isArray(b.events) || b.events.some((event) => typeof event !== "string"))) {
-      bad("events 必须是 string[]");
-    }
-    const events = b.events === undefined
-      ? undefined
-      : [...new Set((b.events as string[]).map((event) => event.trim()).filter(Boolean))];
-    if (trigger.type === "event" && events?.length === 0) bad("event trigger 至少需要一个 Harbor event type");
-    if (trigger.type === "event" && events?.some((event) => !AUTOMATION_EVENT_TYPES.includes(event as (typeof AUTOMATION_EVENT_TYPES)[number]))) {
-      bad(`Harbor event 可选 ${AUTOMATION_EVENT_TYPES.join(", ")}`);
-    }
-    if (b.filters !== undefined && (!Array.isArray(b.filters) || b.filters.some((filter) =>
-      !filter || typeof filter !== "object" || typeof (filter as AutomationWebhookFilter).path !== "string" || !(filter as AutomationWebhookFilter).path.trim()
-    ))) bad("filters 必须是包含非空 path 的数组");
-    const fresh = store.updateAutomationTrigger(trigger.id, {
-      ...(b.enabled !== undefined ? { enabled: b.enabled } : {}),
-      ...(b.cron !== undefined ? { cron: b.cron?.trim() ?? null } : {}),
-      ...(b.provider !== undefined ? { provider: b.provider?.trim() || "generic" } : {}),
-      ...(events !== undefined ? { events } : {}),
-      ...(b.filters !== undefined ? { filters: b.filters as AutomationWebhookFilter[] } : {}),
-    }, Date.now());
-    automations.schedule(store.getAutomation(auto.id)!);
-    return c.json(fresh);
-  });
-
   // ---- usage（P3 报表） ----
 
   app.get("/api/usage", (c) => {

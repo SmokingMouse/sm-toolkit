@@ -147,7 +147,7 @@ export class HarborClient {
     return this.req("GET", "/api/automations");
   }
 
-  createAutomation(body: Record<string, unknown>): Promise<Automation & { webhookSecret?: string }> {
+  createAutomation(body: Record<string, unknown>): Promise<Automation> {
     return this.req("POST", "/api/automations", body);
   }
 

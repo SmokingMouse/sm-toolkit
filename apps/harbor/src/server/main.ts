@@ -36,7 +36,6 @@ import {
   RUN_EVENTS_RETENTION_MS,
   type Conversation,
   type Delivery,
-  type DomainEvent,
 } from "../protocol.js";
 import { reconcileCompletedDeployments } from "./deployment-reconciler.js";
 import { HostMaintenanceSentinel } from "../deployment-worker/maintenance.js";
@@ -84,17 +83,8 @@ if (!gc) {
 const coordinator = new RunCoordinator(store, bus, hub, concurrency, deliveries);
 const approvals = new ApprovalService(store, bus, hub, writesBlocked);
 const automations = new AutomationService(store, coordinator, writesBlocked);
-const consumeDomainEvent = (event: DomainEvent): void => {
-  automations.receiveEvent({
-    workspaceId: event.workspaceId,
-    eventType: event.type,
-    eventId: event.id,
-    payload: event.payload,
-    createdAt: event.createdAt,
-  });
-};
-store.setDomainEventListener(consumeDomainEvent);
 const scm = new ScmService(store, coordinator, deliveries);
+scm.setAutomationListener((input) => automations.receiveCodebase(input).length > 0);
 const codebase = codebaseConfig();
 const skillImports = new SkillImportService();
 const skillSync = new SkillSyncService(store, skillImports);
@@ -259,7 +249,6 @@ coordinator.onRunFinished = (run, conv) => {
       },
     }, run.finishedAt ?? Date.now());
   }
-  automations.replayEvents();
 };
 
 const app = buildRest(
@@ -330,76 +319,10 @@ Bun.serve<WsData>({
   },
 });
 hub.startSweeper();
-// crash-safe reconciliation：领域事实先落库，boot 时用稳定 eventId 重放；Trigger delivery 表负责去重。
-const reconcileDomainEvents = () => {
-  for (const conversation of store.listConversations({ kind: "issue" })) {
-    store.recordDomainEvent({
-      id: `issue.created:${conversation.id}`,
-      workspaceId: conversation.workspaceId,
-      type: "issue.created",
-      sourceType: "issue",
-      sourceId: conversation.id,
-      payload: {
-        conversationId: conversation.id,
-        repositoryId: conversation.repositoryId,
-        status: conversation.status,
-        title: conversation.title,
-      },
-    }, conversation.createdAt);
-    if (conversation.status !== "backlog") {
-      store.recordDomainEvent({
-        id: `issue.ready:${conversation.id}`,
-        workspaceId: conversation.workspaceId,
-        type: "issue.ready",
-        sourceType: "issue",
-        sourceId: conversation.id,
-        payload: {
-          conversationId: conversation.id,
-          repositoryId: conversation.repositoryId,
-          status: conversation.status,
-          title: conversation.title,
-        },
-      }, conversation.createdAt);
-    }
-  }
-  for (const conversation of store.listConversations({ kind: "issue", status: "review" })) {
-    if (store.activeRunForConversation(conversation.id)) continue;
-    const delivery = store.getDeliveryForConversation(conversation.id);
-    if (delivery?.mergeStatus === "merged" && delivery.deploymentStatus === "pending") {
-      dispatchMergedEvent(delivery, conversation);
-    } else if (delivery?.status === "merge_ready") {
-      dispatchMergeReadyEvent(delivery, conversation);
-    }
-    if (!delivery || delivery.reviewStatus === "pending") {
-      const implementation = store
-        .listRunsByConversation(conversation.id)
-        .filter((run) => run.purpose === "implementation" && run.status === "succeeded")
-        .at(-1);
-      if (implementation) {
-        store.recordDomainEvent({
-          workspaceId: conversation.workspaceId,
-          type: "issue.review_ready",
-          id: `issue.review_ready:${implementation.id}`,
-          sourceType: "issue",
-          sourceId: conversation.id,
-          payload: {
-            conversationId: conversation.id,
-            runId: implementation.id,
-            repositoryId: conversation.repositoryId,
-            assigneeAgentId: conversation.agentId,
-          },
-        }, implementation.finishedAt ?? implementation.queuedAt);
-      }
-    }
-  }
-  // 已存在事件（包括上次进程在派发前崩溃的事实）由 Trigger delivery 幂等表安全重放。
-  automations.replayEvents();
-};
 
 const startControlPlane = () => {
   approvals.startSweeper();
   automations.start();
-  reconcileDomainEvents();
   skillSync.start();
   startFeishu();
 };

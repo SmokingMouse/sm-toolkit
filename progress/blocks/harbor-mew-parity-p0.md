@@ -1,5 +1,7 @@
 # Harbor Mew Parity P0
 
+> 历史实现记录：其中 1:N webhook Trigger、append/source Output 与 overlap 配置已在 schema v25 被 `progress/decisions/2026-07-19-harbor-mew-automation-model.md` 取代，不代表当前产品契约。
+
 ## Current Focus
 
 Mew parity P0 已完成：Automation 是一等 Run Source，schedule/manual/webhook、输出模式和 overlap 语义已贯通协议、DB、调度、REST/CLI 与 Web。

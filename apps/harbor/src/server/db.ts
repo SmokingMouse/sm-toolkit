@@ -34,6 +34,7 @@ const APPLICATION_MUTATION_TABLES = [
   "delivery_events",
   "automation_triggers",
   "automation_trigger_deliveries",
+  "automation_legacy_archive_v25",
   "scm_events",
   "scm_external_objects",
   "workspace_members",
@@ -1803,6 +1804,141 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE devices ADD COLUMN capabilities_summary TEXT NOT NULL DEFAULT '{}';
   `,
+  // v25 —— Mew Automation product model：单一 Output + 单一 Schedule/Codebase Trigger。
+  `
+  CREATE TABLE automation_legacy_archive_v25 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    output_mode TEXT NOT NULL,
+    overlap_mode TEXT NOT NULL,
+    target_conversation_id TEXT,
+    notify_chat_id TEXT,
+    enabled INTEGER NOT NULL,
+    trigger_snapshot TEXT NOT NULL,
+    archived_at INTEGER NOT NULL,
+    reason TEXT NOT NULL
+  );
+
+  CREATE TABLE automations_v25 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    name TEXT NOT NULL,
+    agent_id TEXT NOT NULL REFERENCES agents(id),
+    prompt TEXT NOT NULL,
+    output_mode TEXT NOT NULL CHECK (output_mode IN ('run','chat','issue')),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_fired_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, name)
+  );
+
+  INSERT INTO automations_v25
+    (id, workspace_id, name, agent_id, prompt, output_mode, enabled,
+     last_fired_at, created_at, updated_at)
+    SELECT a.id, a.workspace_id, a.name, a.agent_id, a.prompt, a.output_mode,
+           CASE WHEN a.enabled != 0 AND EXISTS (
+             SELECT 1 FROM automation_triggers only_trigger
+             WHERE only_trigger.automation_id = a.id AND only_trigger.enabled != 0
+           ) THEN 1 ELSE 0 END,
+           a.last_fired_at, a.created_at, a.updated_at
+    FROM automations a
+    WHERE a.output_mode IN ('run','chat','issue')
+      AND (SELECT COUNT(*) FROM automation_triggers t WHERE t.automation_id = a.id) = 1
+      AND EXISTS (
+        SELECT 1 FROM automation_triggers t
+        WHERE t.automation_id = a.id
+          AND (
+            (t.type = 'schedule' AND t.cron IS NOT NULL) OR
+            (t.type = 'webhook' AND t.provider = 'codebase'
+              AND a.repository_id IS NOT NULL
+              AND json_array_length(t.events) = 1
+              AND json_extract(t.events, '$[0]') IN (
+                'merge_request_opened','merge_request_updated','merge_request_merged',
+                'issue_opened','issue_updated','issue_commented'
+              ))
+          )
+      );
+
+  INSERT INTO automation_legacy_archive_v25
+    (id, workspace_id, name, agent_id, prompt, purpose, output_mode, overlap_mode,
+     target_conversation_id, notify_chat_id, enabled, trigger_snapshot, archived_at, reason)
+    SELECT a.id, a.workspace_id, a.name, a.agent_id, a.prompt, a.purpose,
+           a.output_mode, a.overlap_mode, a.target_conversation_id, a.notify_chat_id,
+           a.enabled,
+           COALESCE((
+             SELECT json_group_array(json_object(
+               'id', t.id, 'type', t.type, 'enabled', t.enabled, 'cron', t.cron,
+               'provider', t.provider, 'events', json(t.events), 'filters', json(t.filters),
+               'lastFiredAt', t.last_fired_at, 'createdAt', t.created_at, 'updatedAt', t.updated_at
+             )) FROM automation_triggers t WHERE t.automation_id = a.id
+           ), '[]'),
+           CAST(strftime('%s','now') AS INTEGER) * 1000,
+           'Not representable as one Mew Output plus one Schedule/Codebase Trigger'
+    FROM automations a
+    WHERE NOT EXISTS (SELECT 1 FROM automations_v25 fresh WHERE fresh.id = a.id);
+
+  CREATE TABLE automation_triggers_v25 (
+    id TEXT PRIMARY KEY,
+    automation_id TEXT NOT NULL UNIQUE REFERENCES automations(id) ON DELETE CASCADE,
+    type TEXT NOT NULL CHECK (type IN ('schedule','codebase')),
+    cron TEXT,
+    timezone TEXT,
+    repository_id TEXT REFERENCES repositories(id),
+    codebase_event TEXT CHECK (codebase_event IN (
+      'merge_request_opened','merge_request_updated','merge_request_merged',
+      'issue_opened','issue_updated','issue_commented'
+    )),
+    last_fired_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK (
+      (type = 'schedule' AND cron IS NOT NULL AND timezone IS NOT NULL
+        AND repository_id IS NULL AND codebase_event IS NULL) OR
+      (type = 'codebase' AND cron IS NULL AND timezone IS NULL
+        AND repository_id IS NOT NULL AND codebase_event IS NOT NULL)
+    )
+  );
+
+  INSERT INTO automation_triggers_v25
+    (id, automation_id, type, cron, timezone, repository_id, codebase_event,
+     last_fired_at, created_at, updated_at)
+    SELECT t.id, t.automation_id,
+           CASE WHEN t.type = 'schedule' THEN 'schedule' ELSE 'codebase' END,
+           CASE WHEN t.type = 'schedule' THEN t.cron ELSE NULL END,
+           CASE WHEN t.type = 'schedule' THEN 'Asia/Shanghai' ELSE NULL END,
+           CASE WHEN t.type = 'webhook' THEN a.repository_id ELSE NULL END,
+           CASE WHEN t.type = 'webhook' THEN json_extract(t.events, '$[0]') ELSE NULL END,
+           t.last_fired_at, t.created_at, t.updated_at
+    FROM automation_triggers t
+    JOIN automations a ON a.id = t.automation_id
+    JOIN automations_v25 fresh ON fresh.id = t.automation_id;
+
+  CREATE TABLE automation_trigger_deliveries_v25 (
+    trigger_id TEXT NOT NULL REFERENCES automation_triggers(id) ON DELETE CASCADE,
+    delivery_id TEXT NOT NULL,
+    received_at INTEGER NOT NULL,
+    PRIMARY KEY (trigger_id, delivery_id)
+  );
+  INSERT INTO automation_trigger_deliveries_v25
+    SELECT delivery.trigger_id, delivery.delivery_id, delivery.received_at
+    FROM automation_trigger_deliveries delivery
+    JOIN automation_triggers_v25 trigger ON trigger.id = delivery.trigger_id;
+
+  DROP TABLE automation_trigger_deliveries;
+  DROP TABLE automation_triggers;
+  DROP TABLE automations;
+  ALTER TABLE automations_v25 RENAME TO automations;
+  ALTER TABLE automation_triggers_v25 RENAME TO automation_triggers;
+  ALTER TABLE automation_trigger_deliveries_v25 RENAME TO automation_trigger_deliveries;
+  CREATE INDEX idx_automations_workspace ON automations(workspace_id, name);
+  CREATE INDEX idx_automation_triggers_repository ON automation_triggers(repository_id, codebase_event);
+  CREATE INDEX idx_automation_trigger_deliveries_ts ON automation_trigger_deliveries(received_at);
+  `,
 ];
 
 function backfillDeviceCapabilitySummaries(db: Database): void {
@@ -1933,7 +2069,8 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
       version === 17 ||
       version === 18 ||
       version === 19 ||
-      version === 21;
+      version === 21 ||
+      version === 24;
     if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = OFF;");
     try {
       db.transaction(() => {
@@ -1942,6 +2079,11 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
         // 内暂时移除待 backfill 表的 trigger，提交前原样重装。其他连接在 commit 前看不到该变化。
         if (version === 22) dropMaintenanceLinearization(db, ["workspace_members", "workspaces"]);
         if (version === 23) dropMaintenanceLinearization(db, ["devices"]);
+        if (version === 24) dropMaintenanceLinearization(db, [
+          "automations",
+          "automation_triggers",
+          "automation_trigger_deliveries",
+        ]);
         if (sql.trim()) db.exec(sql);
         if (version === 22) {
           applyIdentityNormalization(db, identityReport!);
@@ -1984,6 +2126,11 @@ export function openV22MigrationFixtureDb(path = ":memory:"): Database {
 /** 只给 v24 projection migration regression fixture 使用。 */
 export function openV23MigrationFixtureDb(path = ":memory:"): Database {
   return openDbAtVersion(path, 23);
+}
+
+/** 只给 v25 Mew Automation migration regression fixture 使用。 */
+export function openV24MigrationFixtureDb(path = ":memory:"): Database {
+  return openDbAtVersion(path, 24);
 }
 
 function installMaintenanceLinearization(db: Database): void {

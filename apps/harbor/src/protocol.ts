@@ -35,7 +35,9 @@ export type PromptEventBlockKey =
   | "event.chat.message_created"
   | "event.automation.schedule"
   | "event.automation.manual"
+  /** Legacy storage key retained for historical Runs; current product label is Codebase. */
   | "event.automation.webhook"
+  /** Historical Harbor-domain-event Run; no longer available as an Automation Trigger. */
   | "event.automation.event";
 export type PromptBlockKey = PromptContextBlockKey | PromptEventBlockKey;
 
@@ -618,11 +620,11 @@ export interface Run {
   purpose: RunPurpose;
   /** 本次 Run 的触发原因；与 purpose（执行意图）正交，用于选择 event Prompt block。 */
   promptEvent: PromptEventBlockKey;
-  /** 触发对象引用（如 Automation ID）；append 到既有会话时不能从 Conversation 反推。 */
+  /** 触发对象引用（如 Automation ID）；不能从 Conversation 事后反推。 */
   triggerRef: string | null;
-  /** webhook/event/schedule/manual 的规范化触发上下文；执行时快照，不事后重建。 */
+  /** codebase/schedule/manual/dispatch 的规范化触发上下文；执行时快照，不事后重建。 */
   triggerContext: Record<string, unknown>;
-  /** 非空时同 key 的 Run 串行；Automation overlap=queue 用它防并发启动。 */
+  /** 非空时同 key 的 Run 串行；属于 control-plane 并发闸，不是 Automation 用户配置。 */
   concurrencyKey: string | null;
   /** Run-scoped dispatch lineage；根 Run 的 rootRunId 等于自身 ID。 */
   parentRunId: string | null;
@@ -675,10 +677,18 @@ export interface Approval {
 }
 
 export type RunSourceType = "issue" | "chat" | "automation";
-export type AutomationOutputMode = "run" | "chat" | "issue" | "append" | "source";
-export type AutomationOverlapMode = "skip" | "queue";
-/** event 是 Harbor 自己的可信领域事件；webhook 始终视为外部低信任输入。 */
-export type AutomationTriggerType = "schedule" | "webhook" | "event";
+export type AutomationOutput = "run" | "chat" | "issue";
+export type AutomationTriggerType = "schedule" | "codebase";
+export const CODEBASE_AUTOMATION_EVENTS = [
+  "merge_request_opened",
+  "merge_request_updated",
+  "merge_request_merged",
+  "issue_opened",
+  "issue_updated",
+  "issue_commented",
+] as const;
+export type CodebaseAutomationEvent = (typeof CODEBASE_AUTOMATION_EVENTS)[number];
+
 export const AUTOMATION_EVENT_TYPES = [
   "issue.created",
   "issue.ready",
@@ -698,61 +708,37 @@ export interface DomainEvent {
   payload: Record<string, unknown>;
   createdAt: number;
 }
-export type AutomationWebhookScalar = string | number | boolean | null;
-
-/** webhook filter 同一 Trigger 内按 OR 语义匹配；path 使用点号读取 JSON 字段。 */
-export interface AutomationWebhookFilter {
-  path: string;
-  equals: AutomationWebhookScalar;
-}
-
 export interface AutomationTrigger {
   id: string;
   automationId: string;
   type: AutomationTriggerType;
-  enabled: boolean;
   /** type=schedule 时必填。 */
   cron: string | null;
-  /** type=webhook 时标记来源适配器；首期 generic/codebase 共用规范化入口。 */
-  provider: string | null;
-  /** 空数组接受任意事件；非空时匹配规范化 eventType。 */
-  events: string[];
-  filters: AutomationWebhookFilter[];
-  /** 仅创建/轮换时返回明文；持久化对象永不包含 secret。 */
-  webhookPath: string | null;
+  /** type=schedule 时必填，使用 IANA timezone。 */
+  timezone: string | null;
+  /** type=codebase 时必填，且必须属于 Agent 可访问的 Repository。 */
+  repositoryId: string | null;
+  /** type=codebase 时必填。 */
+  codebaseEvent: CodebaseAutomationEvent | null;
   lastFiredAt: number | null;
   createdAt: number;
   updatedAt: number;
 }
-
-/** 旧 CLI/API create body 的兼容输入；领域对象使用 AutomationOutputMode。 */
-export type AutomationMode = "new_issue" | "append";
 
 export interface Automation {
   id: string;
   workspaceId: string;
   name: string;
   agentId: string;
-  /** 兼容/审计快照；不是配置项，触发时以 Agent 当前 Repository 为准。 */
-  repositoryId: string | null;
   prompt: string;
-  /** Automation 派出的 Run 意图；review/verification 不再伪装成 implementation。 */
-  purpose: RunPurpose;
-  outputMode: AutomationOutputMode;
-  overlapMode: AutomationOverlapMode;
-  /** outputMode=append 时必填：追加到的固定 conversation；source 从领域事件动态解析。 */
-  targetConversationId: string | null;
-  /** 完成播报的飞书群（须在 server 白名单内才真正发送） */
-  notifyChatId: string | null;
+  /** 用户只选择结果落点；Run purpose 由 Harbor 根据 output 推导。 */
+  output: AutomationOutput;
   enabled: boolean;
   lastFiredAt: number | null;
   createdAt: number;
   updatedAt: number;
-  triggers: AutomationTrigger[];
-  /** 旧客户端展示兼容；等于首个 schedule Trigger 的 cron。 */
-  cron: string | null;
-  /** 旧客户端展示兼容；issue 映射为 new_issue。 */
-  mode: AutomationMode;
+  /** Automation 恰好有一个 Trigger。 */
+  trigger: AutomationTrigger;
 }
 
 export interface AutomationLogRow {

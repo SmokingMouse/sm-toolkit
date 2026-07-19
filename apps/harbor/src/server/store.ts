@@ -14,17 +14,15 @@ import type {
   AuthIdentity,
   Automation,
   AutomationLogRow,
-  AutomationMode,
-  AutomationOutputMode,
-  AutomationOverlapMode,
+  AutomationOutput,
   AutomationTrigger,
   AutomationTriggerType,
-  AutomationWebhookFilter,
   BackendKind,
   Conversation,
   ConversationKind,
   ConversationMessage,
   ConversationStatus,
+  CodebaseAutomationEvent,
   Delivery,
   DeliveryCheckStatus,
   DeliveryDeploymentStatus,
@@ -323,13 +321,8 @@ interface AutomationRow {
   workspace_id: string;
   name: string;
   agent_id: string;
-  repository_id: string | null;
   prompt: string;
-  purpose: string;
   output_mode: string;
-  overlap_mode: string;
-  target_conversation_id: string | null;
-  notify_chat_id: string | null;
   enabled: number;
   last_fired_at: number | null;
   created_at: number;
@@ -340,12 +333,10 @@ interface AutomationTriggerRow {
   id: string;
   automation_id: string;
   type: string;
-  enabled: number;
   cron: string | null;
-  provider: string | null;
-  events: string;
-  filters: string;
-  secret_hash: string | null;
+  timezone: string | null;
+  repository_id: string | null;
+  codebase_event: string | null;
   last_fired_at: number | null;
   created_at: number;
   updated_at: number;
@@ -821,39 +812,29 @@ function toAutomationTrigger(r: AutomationTriggerRow): AutomationTrigger {
     id: r.id,
     automationId: r.automation_id,
     type: r.type as AutomationTriggerType,
-    enabled: r.enabled === 1,
     cron: r.cron,
-    provider: r.provider,
-    events: parseJsonArray<string>(r.events),
-    filters: parseJsonArray<AutomationWebhookFilter>(r.filters),
-    webhookPath: r.type === "webhook" ? `/hooks/automations/${r.id}` : null,
+    timezone: r.timezone,
+    repositoryId: r.repository_id,
+    codebaseEvent: r.codebase_event as CodebaseAutomationEvent | null,
     lastFiredAt: r.last_fired_at,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
 }
 
-function toAutomation(r: AutomationRow, triggers: AutomationTrigger[]): Automation {
-  const outputMode = r.output_mode as AutomationOutputMode;
+function toAutomation(r: AutomationRow, trigger: AutomationTrigger): Automation {
   return {
     id: r.id,
     workspaceId: r.workspace_id,
     name: r.name,
     agentId: r.agent_id,
-    repositoryId: r.repository_id,
     prompt: r.prompt,
-    purpose: r.purpose as RunPurpose,
-    outputMode,
-    overlapMode: r.overlap_mode as AutomationOverlapMode,
-    targetConversationId: r.target_conversation_id,
-    notifyChatId: r.notify_chat_id,
+    output: r.output_mode as AutomationOutput,
     enabled: r.enabled === 1,
     lastFiredAt: r.last_fired_at,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
-    triggers,
-    cron: triggers.find((trigger) => trigger.type === "schedule")?.cron ?? null,
-    mode: outputMode === "append" ? "append" : "new_issue",
+    trigger,
   };
 }
 
@@ -4455,68 +4436,49 @@ export class HarborStore {
     ).all(triggerId, workspaceId, createdAtOrAfter).map(toDomainEvent);
   }
 
-  // ---- automations（P3 cron） ----
+  // ---- automations（Mew: one Output + one Schedule/Codebase Trigger） ----
 
   createAutomation(
     a: {
       workspaceId?: string;
       name: string;
       agentId: string;
-      repositoryId?: string | null;
       prompt: string;
-      purpose?: RunPurpose;
-      outputMode?: AutomationOutputMode;
-      overlapMode?: AutomationOverlapMode;
-      /** 旧调用兼容：new_issue → issue。 */
-      mode?: AutomationMode;
-      /** 旧调用兼容：自动创建一个 schedule Trigger。 */
-      cron?: string;
-      triggers?: {
-        type: AutomationTriggerType;
-        cron?: string | null;
-        provider?: string | null;
-        events?: string[];
-        filters?: AutomationWebhookFilter[];
-        secretHash?: string | null;
-      }[];
-      targetConversationId?: string | null;
-      notifyChatId?: string | null;
+      output?: AutomationOutput;
+      trigger:
+        | { type: "schedule"; cron: string; timezone: string }
+        | { type: "codebase"; repositoryId: string; codebaseEvent: CodebaseAutomationEvent };
     },
     now: number,
   ): Automation {
     const id = newId("automation");
-    const outputMode = a.outputMode ?? (a.mode === "append" ? "append" : "issue");
-    const triggers = a.triggers ?? (a.cron ? [{ type: "schedule" as const, cron: a.cron }] : []);
     this.db.transaction(() => {
       this.db.run(
         `INSERT INTO automations
-         (id, workspace_id, name, agent_id, repository_id, prompt, purpose, output_mode, overlap_mode,
-          target_conversation_id, notify_chat_id, enabled, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?,?)`,
+         (id, workspace_id, name, agent_id, prompt, output_mode, enabled, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,1,?,?)`,
         [
           id,
           a.workspaceId ?? DEFAULT_WORKSPACE_ID,
           a.name,
           a.agentId,
-          a.repositoryId ?? null,
           a.prompt,
-          a.purpose ?? "implementation",
-          outputMode,
-          a.overlapMode ?? "skip",
-          a.targetConversationId ?? null,
-          a.notifyChatId ?? null,
+          a.output ?? "run",
           now,
           now,
         ],
       );
-      for (const trigger of triggers) this.insertAutomationTrigger(id, trigger, now);
+      this.insertAutomationTrigger(id, a.trigger, now);
     })();
     return this.getAutomation(id)!;
   }
 
   getAutomation(id: string): Automation | null {
     const r = this.db.query<AutomationRow, [string]>("SELECT * FROM automations WHERE id = ?").get(id);
-    return r ? toAutomation(r, this.listAutomationTriggers(id)) : null;
+    if (!r) return null;
+    const trigger = this.getAutomationTriggerForAutomation(id);
+    if (!trigger) throw new Error(`automation "${id}" 缺少唯一 Trigger`);
+    return toAutomation(r, trigger);
   }
 
   resolveAutomationPrefix(prefix: string, workspaceId?: string): Automation | null {
@@ -4528,7 +4490,10 @@ export class HarborStore {
         "SELECT * FROM automations WHERE id LIKE ? || '%' OR name = ? LIMIT 2",
       ).all(prefix, prefix);
     if (rows.length > 1) throw new Error(`automation "${prefix}" 有多个匹配，请给更长前缀或用完整 id`);
-    return rows[0] ? toAutomation(rows[0], this.listAutomationTriggers(rows[0].id)) : null;
+    if (!rows[0]) return null;
+    const trigger = this.getAutomationTriggerForAutomation(rows[0].id);
+    if (!trigger) throw new Error(`automation "${rows[0].id}" 缺少唯一 Trigger`);
+    return toAutomation(rows[0], trigger);
   }
 
   listAutomations(workspaceId?: string): Automation[] {
@@ -4537,7 +4502,11 @@ export class HarborStore {
       : this.db
       .query<AutomationRow, [string]>("SELECT * FROM automations WHERE workspace_id = ? ORDER BY name")
       .all(workspaceId);
-    return rows.map((row) => toAutomation(row, this.listAutomationTriggers(row.id)));
+    return rows.map((row) => {
+      const trigger = this.getAutomationTriggerForAutomation(row.id);
+      if (!trigger) throw new Error(`automation "${row.id}" 缺少唯一 Trigger`);
+      return toAutomation(row, trigger);
+    });
   }
 
   setAutomationEnabled(id: string, enabled: boolean): void {
@@ -4549,13 +4518,8 @@ export class HarborStore {
     patch: {
       name?: string;
       agentId?: string;
-      repositoryId?: string | null;
       prompt?: string;
-      purpose?: RunPurpose;
-      outputMode?: AutomationOutputMode;
-      overlapMode?: AutomationOverlapMode;
-      targetConversationId?: string | null;
-      notifyChatId?: string | null;
+      output?: AutomationOutput;
       enabled?: boolean;
     },
     now: number,
@@ -4568,13 +4532,8 @@ export class HarborStore {
     };
     if (patch.name !== undefined) add("name", patch.name);
     if (patch.agentId !== undefined) add("agent_id", patch.agentId);
-    if (patch.repositoryId !== undefined) add("repository_id", patch.repositoryId);
     if (patch.prompt !== undefined) add("prompt", patch.prompt);
-    if (patch.purpose !== undefined) add("purpose", patch.purpose);
-    if (patch.outputMode !== undefined) add("output_mode", patch.outputMode);
-    if (patch.overlapMode !== undefined) add("overlap_mode", patch.overlapMode);
-    if (patch.targetConversationId !== undefined) add("target_conversation_id", patch.targetConversationId);
-    if (patch.notifyChatId !== undefined) add("notify_chat_id", patch.notifyChatId);
+    if (patch.output !== undefined) add("output_mode", patch.output);
     if (patch.enabled !== undefined) add("enabled", patch.enabled ? 1 : 0);
     if (fields.length > 0) {
       add("updated_at", now);
@@ -4584,6 +4543,29 @@ export class HarborStore {
     const automation = this.getAutomation(id);
     if (!automation) throw new Error(`automation "${id}" 不存在`);
     return automation;
+  }
+
+  updateAutomationDefinition(
+    id: string,
+    patch: {
+      name?: string;
+      agentId?: string;
+      prompt?: string;
+      output?: AutomationOutput;
+      enabled?: boolean;
+    },
+    trigger:
+      | { type: "schedule"; cron: string; timezone: string }
+      | { type: "codebase"; repositoryId: string; codebaseEvent: CodebaseAutomationEvent },
+    now: number,
+  ): Automation {
+    this.db.transaction(() => {
+      this.updateAutomation(id, patch, now);
+      const current = this.getAutomationTriggerForAutomation(id);
+      if (!current) throw new Error(`automation "${id}" 缺少唯一 Trigger`);
+      this.updateAutomationTrigger(current.id, trigger, now);
+    })();
+    return this.getAutomation(id)!;
   }
 
   deleteAutomation(id: string): void {
@@ -4646,52 +4628,27 @@ export class HarborStore {
       }));
   }
 
-  createAutomationTrigger(
-    automationId: string,
-    input: {
-      type: AutomationTriggerType;
-      cron?: string | null;
-      provider?: string | null;
-      events?: string[];
-      filters?: AutomationWebhookFilter[];
-      secretHash?: string | null;
-    },
-    now: number,
-  ): AutomationTrigger {
-    const id = this.insertAutomationTrigger(automationId, input, now);
-    return this.getAutomationTrigger(id)!;
-  }
-
   private insertAutomationTrigger(
     automationId: string,
-    input: {
-      type: AutomationTriggerType;
-      cron?: string | null;
-      provider?: string | null;
-      events?: string[];
-      filters?: AutomationWebhookFilter[];
-      secretHash?: string | null;
-    },
+    input:
+      | { type: "schedule"; cron: string; timezone: string }
+      | { type: "codebase"; repositoryId: string; codebaseEvent: CodebaseAutomationEvent },
     now: number,
   ): string {
     const id = newId("automationTrigger");
     this.db.run(
       `INSERT INTO automation_triggers
-       (id, automation_id, type, cron, provider, events, filters, secret_hash, last_fired_at, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,NULL,?,?)`,
+       (id, automation_id, type, cron, timezone, repository_id, codebase_event,
+        last_fired_at, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,NULL,?,?)`,
       [
         id,
         automationId,
         input.type,
-        input.type === "schedule" ? input.cron ?? null : null,
-        input.type === "webhook"
-          ? input.provider ?? "generic"
-          : input.type === "event"
-            ? "harbor"
-            : null,
-        JSON.stringify(input.events ?? []),
-        JSON.stringify(input.filters ?? []),
-        input.type === "webhook" ? input.secretHash ?? null : null,
+        input.type === "schedule" ? input.cron : null,
+        input.type === "schedule" ? input.timezone : null,
+        input.type === "codebase" ? input.repositoryId : null,
+        input.type === "codebase" ? input.codebaseEvent : null,
         now,
         now,
       ],
@@ -4706,57 +4663,38 @@ export class HarborStore {
     return row ? toAutomationTrigger(row) : null;
   }
 
-  getAutomationTriggerSecretHash(id: string): string | null {
+  getAutomationTriggerForAutomation(automationId: string): AutomationTrigger | null {
     const row = this.db
-      .query<{ secret_hash: string | null }, [string]>(
-        "SELECT secret_hash FROM automation_triggers WHERE id = ? AND type = 'webhook'",
-      )
-      .get(id);
-    return row?.secret_hash ?? null;
-  }
-
-  listAutomationTriggers(automationId: string): AutomationTrigger[] {
-    return this.db
       .query<AutomationTriggerRow, [string]>(
-        "SELECT * FROM automation_triggers WHERE automation_id = ? ORDER BY created_at, id",
+        "SELECT * FROM automation_triggers WHERE automation_id = ?",
       )
-      .all(automationId)
-      .map(toAutomationTrigger);
-  }
-
-  setAutomationTriggerEnabled(id: string, enabled: boolean, now: number): void {
-    this.db.run("UPDATE automation_triggers SET enabled = ?, updated_at = ? WHERE id = ?", [enabled ? 1 : 0, now, id]);
+      .get(automationId);
+    return row ? toAutomationTrigger(row) : null;
   }
 
   updateAutomationTrigger(
     id: string,
-    patch: {
-      enabled?: boolean;
-      cron?: string | null;
-      provider?: string | null;
-      events?: string[];
-      filters?: AutomationWebhookFilter[];
-    },
+    input:
+      | { type: "schedule"; cron: string; timezone: string }
+      | { type: "codebase"; repositoryId: string; codebaseEvent: CodebaseAutomationEvent },
     now: number,
   ): AutomationTrigger {
     const trigger = this.getAutomationTrigger(id);
     if (!trigger) throw new Error(`automation trigger "${id}" 不存在`);
-    const fields: string[] = [];
-    const values: (string | number | null)[] = [];
-    const add = (field: string, value: string | number | null) => {
-      fields.push(`${field} = ?`);
-      values.push(value);
-    };
-    if (patch.enabled !== undefined) add("enabled", patch.enabled ? 1 : 0);
-    if (patch.cron !== undefined) add("cron", trigger.type === "schedule" ? patch.cron : null);
-    if (patch.provider !== undefined) add("provider", trigger.type === "webhook" ? patch.provider : trigger.provider);
-    if (patch.events !== undefined) add("events", JSON.stringify(patch.events));
-    if (patch.filters !== undefined) add("filters", JSON.stringify(patch.filters));
-    if (fields.length > 0) {
-      add("updated_at", now);
-      values.push(id);
-      this.db.run(`UPDATE automation_triggers SET ${fields.join(", ")} WHERE id = ?`, values);
-    }
+    this.db.run(
+      `UPDATE automation_triggers
+       SET type = ?, cron = ?, timezone = ?, repository_id = ?, codebase_event = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        input.type,
+        input.type === "schedule" ? input.cron : null,
+        input.type === "schedule" ? input.timezone : null,
+        input.type === "codebase" ? input.repositoryId : null,
+        input.type === "codebase" ? input.codebaseEvent : null,
+        now,
+        id,
+      ],
+    );
     return this.getAutomationTrigger(id)!;
   }
 
@@ -4764,11 +4702,7 @@ export class HarborStore {
     this.db.run("UPDATE automation_triggers SET last_fired_at = ?, updated_at = ? WHERE id = ?", [now, now, id]);
   }
 
-  deleteAutomationTrigger(id: string): void {
-    this.db.run("DELETE FROM automation_triggers WHERE id = ?", [id]);
-  }
-
-  /** eventId 在同一 webhook/event Trigger 下只接收一次；true 表示本次首次登记。 */
+  /** eventId 在同一 Codebase Trigger 下只接收一次；true 表示本次首次登记。 */
   recordAutomationTriggerDelivery(triggerId: string, deliveryId: string, now: number): boolean {
     const result = this.db.run(
       `INSERT OR IGNORE INTO automation_trigger_deliveries (trigger_id, delivery_id, received_at)

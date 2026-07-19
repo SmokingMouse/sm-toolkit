@@ -30,4 +30,4 @@
 
 ## Next
 
-- P6.2 因 schema v24 已由性能 projection 使用而顺延到 v25；daemon credential 只在该阶段迁移。另行修复 deploy-worker idle wakeup。
+- P6.2 因 schema v24/v25 已由性能 projection 与后续 Automation normalization 使用而顺延到 v26；daemon credential 只在该阶段迁移。另行修复 deploy-worker idle wakeup。

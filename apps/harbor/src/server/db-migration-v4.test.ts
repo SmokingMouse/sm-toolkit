@@ -269,7 +269,10 @@ test("latest schema upgrades an already-running v9 database and preserves unboun
     const agent = migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM agents WHERE id = 'agent_1'").get();
     expect(agent?.repository_id).toStartWith("repo_unconfigured_");
     expect(migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM conversations WHERE id = 'conversation_1'").get()).toEqual(agent);
-    expect(migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM automations WHERE id = 'automation_1'").get()).toEqual(agent);
+    expect(migrated.query<{ output_mode: string }, []>("SELECT output_mode FROM automations WHERE id = 'automation_1'").get()).toEqual({ output_mode: "issue" });
+    expect(migrated.query<{ type: string; cron: string; timezone: string }, []>(
+      "SELECT type, cron, timezone FROM automation_triggers WHERE automation_id = 'automation_1'",
+    ).get()).toEqual({ type: "schedule", cron: "0 0 * * *", timezone: "Asia/Shanghai" });
     expect(
       migrated.query<{ name: string }, []>("PRAGMA table_info(agents)").all().map((column) => column.name),
     ).toContain("repository_id");

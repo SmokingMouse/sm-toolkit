@@ -23,11 +23,9 @@ test("manual automation run persists the manual prompt event even when schedule 
     {
       name: "daily-report",
       agentId: agent.id,
-      cron: "0 9 * * *",
       prompt: "Generate the report",
-      mode: "new_issue",
-      targetConversationId: null,
-      notifyChatId: null,
+      output: "issue",
+      trigger: { type: "schedule", cron: "0 9 * * *", timezone: "Asia/Shanghai" },
     },
     3,
   );

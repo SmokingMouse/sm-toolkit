@@ -37,7 +37,7 @@ Harbor 已有 Workspace RBAC、Workspace API token、Agent `private | workspace`
 ## Consequences
 
 - Workspace 从“非租户的逻辑分组”升级为实例内的安全租户边界，但仍不承担计费或跨实例组织能力。
-- 需要 v23–v26 四阶段 migration、Web 登录面和 daemon 换证；live migration 窗口会短暂存在兼容读路径。
+- 账户方案仍按四个独立阶段 migration；因性能与 Automation schema 已占用 v24/v25，当前编号顺延为 v23、v26–v28。Web 登录面和 daemon 换证的边界不变；live migration 窗口会短暂存在兼容读路径。
 - Device owner 离开 Workspace 时其 grant 自动 revoke；首期若要保留机器，必须先转移 Device ownership。
 - Workspace owner 对 private Agent 不是密码学不可见，但任何提权必须显式且可审计。
 - Harbor 的开放编排决策不变：身份层授权“能否调用”，用户仍定义“调用哪个 Agent、如何流转”。

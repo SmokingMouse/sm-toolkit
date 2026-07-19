@@ -4,7 +4,7 @@
  */
 
 import { createHash } from "node:crypto";
-import type { Conversation, Run, ScmObjectKind } from "../protocol.js";
+import type { CodebaseAutomationEvent, Conversation, Run, ScmObjectKind } from "../protocol.js";
 import type { CodebaseCommandRunner } from "./codebase.js";
 import { BitsCodebaseRunner } from "./codebase.js";
 import type { DeliveryProviderSnapshot, DeliveryService } from "./delivery.js";
@@ -40,7 +40,18 @@ interface NormalizedScmEvent {
   mergeStatus: "open" | "merged" | null;
 }
 
+export interface ScmAutomationEventInput {
+  workspaceId: string;
+  repositoryId: string;
+  eventType: CodebaseAutomationEvent;
+  eventId: string;
+  payload: Record<string, unknown>;
+  occurredAt: number;
+}
+
 export class ScmService {
+  private automationListener: ((input: ScmAutomationEventInput) => boolean) | null = null;
+
   constructor(
     private readonly store: HarborStore,
     private readonly coordinator: RunCoordinator,
@@ -48,11 +59,16 @@ export class ScmService {
     private readonly runner: CodebaseCommandRunner = new BitsCodebaseRunner(),
   ) {}
 
+  setAutomationListener(listener: (input: ScmAutomationEventInput) => boolean): void {
+    this.automationListener = listener;
+  }
+
   receiveCodebase(repositoryId: string, input: ScmWebhookInput, now = Date.now()): {
     status: "applied" | "ignored" | "duplicate";
     eventId: string;
     conversationId?: string;
     deliveryId?: string;
+    automationEvent?: CodebaseAutomationEvent;
   } {
     const repository = this.store.getRepository(repositoryId);
     if (!repository || repository.scmProvider !== "codebase" || !repository.scmRepository) {
@@ -102,6 +118,7 @@ export class ScmService {
         payload: input.payload,
       }, now);
       let conversation = external.conversationId ? this.store.getConversation(external.conversationId) : null;
+      const createdConversation = !conversation;
       if (!conversation) {
         conversation = this.store.createConversation({
           workspaceId: repository.workspaceId,
@@ -176,9 +193,26 @@ export class ScmService {
         }
       }
 
-      this.maybeDispatch(repository, conversation, normalized, eventId);
+      const automationEvent = classifyCodebaseAutomationEvent(normalized, createdConversation);
+      const handledByAutomation = automationEvent
+        ? this.automationListener?.({
+            workspaceId: repository.workspaceId,
+            repositoryId,
+            eventType: automationEvent,
+            eventId,
+            payload: input.payload,
+            occurredAt: now,
+          }) ?? false
+        : false;
+      if (!handledByAutomation) this.maybeDispatch(repository, conversation, normalized, eventId);
       this.store.finishScmEvent(eventId, "applied", null, now);
-      return { status: "applied", eventId, conversationId: conversation.id, ...(deliveryId ? { deliveryId } : {}) };
+      return {
+        status: "applied",
+        eventId,
+        conversationId: conversation.id,
+        ...(deliveryId ? { deliveryId } : {}),
+        ...(automationEvent ? { automationEvent } : {}),
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.store.finishScmEvent(eventId, "failed", message, now);
@@ -246,6 +280,29 @@ export class ScmService {
             : "backlog";
     if (conversation.status !== target) transitionConversation(this.store, conversation, target, "system", now);
   }
+}
+
+function classifyCodebaseAutomationEvent(
+  event: NormalizedScmEvent,
+  createdConversation: boolean,
+): CodebaseAutomationEvent | null {
+  const action = `${event.eventType} ${event.action ?? ""}`.toLowerCase();
+  if (event.kind === "change") {
+    if (event.mergeStatus === "merged" || /\bmerged\b/.test(action)) return "merge_request_merged";
+    return createdConversation || /\b(opened|created|open)\b/.test(action)
+      ? "merge_request_opened"
+      : "merge_request_updated";
+  }
+  if (event.kind === "issue") {
+    const explicitComment = !createdConversation && !!event.commentBody && (
+      !!event.commentId || /\b(comment|note|reply)\b/.test(action)
+    );
+    if (explicitComment) return "issue_commented";
+    return createdConversation || /\b(opened|created|open)\b/.test(action)
+      ? "issue_opened"
+      : "issue_updated";
+  }
+  return null;
 }
 
 export function normalizeCodebaseEvent(eventType: string, payload: Record<string, unknown>): NormalizedScmEvent {

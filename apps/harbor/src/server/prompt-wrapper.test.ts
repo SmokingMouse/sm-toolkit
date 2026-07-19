@@ -108,7 +108,13 @@ describe("prompt blocks", () => {
     const input = fixtures();
     const rendered = renderRunPrompt(store, input);
 
-    expect(listPromptBlockConfigs(store, "ws_personal")).toHaveLength(10);
+    expect(listPromptBlockConfigs(store, "ws_personal")).toHaveLength(9);
+    expect(listPromptBlockConfigs(store, "ws_personal")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "event.automation.webhook", label: "Codebase" }),
+    ]));
+    expect(listPromptBlockConfigs(store, "ws_personal")).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "event.automation.event" }),
+    ]));
     expect(rendered).toContain("Issue Reference");
     expect(rendered).toContain("Creator: -");
     expect(rendered).toContain("Recent Discussion");

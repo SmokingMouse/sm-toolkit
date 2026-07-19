@@ -1,5 +1,7 @@
 # Harbor Open Orchestration
 
+> 历史实现记录：Automation 的 purpose/output/overlap/event Trigger 产品面已在 schema v25 被 `progress/decisions/2026-07-19-harbor-mew-automation-model.md` 取代；Run dispatch 与开放 Agent 拓扑结论继续有效。
+
 ## Current Focus
 
 把 Harbor 收敛为“开放编排机制、用户自定义策略”：不内置 Orchestrator/Reviewer Pool，补齐领域事件、Run-scoped dispatch/query、跨设备 exact-revision Review 与 Automation 编辑，并迁移单控制面到 Mac mini。

@@ -426,16 +426,15 @@ describe("Repository mount execution snapshots", () => {
     const automation = store.createAutomation({
       name: "nightly",
       agentId: agent.id,
-      repositoryId: firstRepository.id,
-      cron: "0 0 * * *",
       prompt: "Run checks",
-      mode: "new_issue",
+      output: "issue",
+      trigger: { type: "schedule", cron: "0 0 * * *", timezone: "Asia/Shanghai" },
     }, 5);
     store.setAgentRepository(agent.id, nextRepository.id);
     const coordinator = new RunCoordinator(store, new RunBus(), { isOnline: () => false, send: () => true }, 1);
     const service = new AutomationService(store, coordinator);
 
-    (service as unknown as { fire: (id: string) => void }).fire(automation.triggers[0]!.id);
+    (service as unknown as { fire: (id: string) => void }).fire(automation.trigger.id);
 
     const conversation = store.listConversations({ workspaceId: "ws_personal" }).find((item) => item.originRef === automation.id);
     expect(conversation?.repositoryId).toBe(nextRepository.id);

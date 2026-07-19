@@ -463,46 +463,12 @@ export class FeishuEntry implements ApprovalSink {
   ): Promise<void> {
     this.assertOutboundAllowed();
     if (!conv) {
-      if (run.sourceType !== "automation") return;
-      const automation = this.store.getAutomation(run.sourceId);
-      const notifyBinding = automation?.notifyChatId
-        ? this.store.getLarkWorkspaceBinding(automation.notifyChatId)
-        : null;
-      // 多 Bot profile 会同时收到 coordinator hook；只有绑定所属 Bot 负责群播报，
-      // 没有群绑定的 automation 则由 global Bot 负责，避免重复消息和重复告警。
-      if (
-        notifyBinding
-          ? !this.ownsBinding(notifyBinding)
-          : this.scope.botMode !== "global"
-      )
-        return;
       const text =
         run.status === "succeeded"
           ? (this.store.getRunResultText(run.id) ?? "（完成，无文本输出）")
           : run.status === "canceled"
             ? `⊘ automation run \`${run.id}\` 已取消`
             : `automation run \`${run.id}\` 失败：${run.error ?? "（无 error 信息）"}`;
-      if (automation?.notifyChatId) {
-        if (this.config.allowedChats.includes(automation.notifyChatId)) {
-          this.assertOutboundAllowed();
-          if (run.status === "failed") {
-            await this.channel.sendToChat(automation.notifyChatId, {
-              type: "error",
-              message: text,
-            });
-          } else {
-            await this.channel.sendToChat(automation.notifyChatId, {
-              type: "result",
-              text,
-              metadata: `automation ${automation.name} · run ${run.id}`,
-            });
-          }
-        } else {
-          console.warn(
-            `[feishu] automation "${automation.name}" 的播报群 ${automation.notifyChatId} 不在白名单，已拦（allowed_chats 配置）`,
-          );
-        }
-      }
       if (run.status === "failed" && this.config.adminUserId) {
         this.assertOutboundAllowed();
         await this.channel.send(this.config.adminUserId, {
@@ -526,21 +492,6 @@ export class FeishuEntry implements ApprovalSink {
         await this.replyToConversation(conv, content);
       }
       return;
-    }
-
-    // automation 播报：仅白名单群（send-gate 场景③）
-    if (conv.origin === "automation" && conv.originRef) {
-      const auto = this.store.getAutomation(conv.originRef);
-      if (auto?.notifyChatId) {
-        if (this.config.allowedChats.includes(auto.notifyChatId)) {
-          this.assertOutboundAllowed();
-          await this.channel.sendToChat(auto.notifyChatId, content);
-        } else {
-          console.warn(
-            `[feishu] automation "${auto.name}" 的播报群 ${auto.notifyChatId} 不在白名单，已拦（allowed_chats 配置）`,
-          );
-        }
-      }
     }
 
     // 无静默失败：非飞书入口的 failed run → admin DM 告警（P5 终验第 4 条）

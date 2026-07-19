@@ -76,9 +76,9 @@ ${c.bold}审批${c.reset}（permission=default 的 agent 用工具时上抛）
 
 ${c.bold}Automations${c.reset}
   harbor auto create --name <n> --agent <a> --prompt "<p>"
-                     [--trigger schedule --cron "<表达式>" | --trigger webhook --provider generic --events push,merge]
-                     [--output run|chat|issue|append --target <conv-id>] [--overlap skip|queue]
-                     [--notify-chat <oc_xx>]
+                     [--trigger schedule --cron "<表达式>" --timezone Asia/Shanghai
+                      | --trigger codebase --repository <repo> --event merge_request_opened]
+                     [--output run|chat|issue]
   harbor auto ls · auto log <id> · auto enable|disable|rm <id>
 
 ${c.bold}用量${c.reset}
@@ -544,27 +544,28 @@ async function main(): Promise<number> {
   if (domain === "auto") {
     if (verb === "create") {
       const triggerType = String(flags.trigger ?? "schedule");
+      if (triggerType !== "schedule" && triggerType !== "codebase") {
+        throw new Error("--trigger 只支持 schedule/codebase");
+      }
       const auto = await client.createAutomation({
         name: req(flags, "name"),
         agent: req(flags, "agent"),
-        triggerType,
-        ...(triggerType === "schedule" ? { cron: req(flags, "cron") } : {}),
-        ...(triggerType === "webhook" ? {
-          provider: String(flags.provider ?? "generic"),
-          events: typeof flags.events === "string" ? flags.events.split(",").map((value) => value.trim()).filter(Boolean) : [],
-        } : {}),
+        trigger: triggerType === "schedule"
+          ? {
+              type: "schedule",
+              cron: req(flags, "cron"),
+              timezone: String(flags.timezone ?? "Asia/Shanghai"),
+            }
+          : {
+              type: "codebase",
+              repository: req(flags, "repository"),
+              event: String(flags.event ?? "merge_request_opened"),
+            },
         prompt: req(flags, "prompt"),
-        outputMode: flags.output ?? (flags.mode === "append" ? "append" : flags.mode === "new_issue" ? "issue" : undefined),
-        overlapMode: flags.overlap,
-        target: flags.target,
-        notifyChat: flags["notify-chat"],
+        output: flags.output ?? "run",
       });
       console.log(`${c.green}✓${c.reset} automation ${c.bold}${auto.name}${c.reset}（${auto.id}）已创建`);
-      console.log(`${c.dim}  trigger=${auto.triggers.map((trigger) => trigger.type).join(",")} output=${auto.outputMode} overlap=${auto.overlapMode}${auto.notifyChatId ? ` notify=${auto.notifyChatId}` : ""}${c.reset}`);
-      const webhook = auto.triggers.find((trigger) => trigger.type === "webhook");
-      if (webhook && auto.webhookSecret) {
-        console.log(`${c.yellow}  webhook path=${webhook.webhookPath} secret=${auto.webhookSecret}（只显示一次）${c.reset}`);
-      }
+      console.log(`${c.dim}  trigger=${auto.trigger.type} output=${auto.output}${c.reset}`);
       return 0;
     }
     if (verb === "ls") {
@@ -575,11 +576,13 @@ async function main(): Promise<number> {
           a.enabled ? `${c.green}on${c.reset}` : `${c.dim}off${c.reset}`,
           a.name,
           a.agentName,
-          a.triggers.map((trigger) => trigger.type === "schedule" ? `cron:${trigger.cron}` : `${trigger.provider ?? "generic"}:webhook`).join(", ") || "manual",
-          `${a.outputMode}/${a.overlapMode}`,
+          a.trigger.type === "schedule"
+            ? `schedule:${a.trigger.cron} (${a.trigger.timezone})`
+            : `codebase:${a.trigger.codebaseEvent}`,
+          a.output,
           fmtAgo(a.lastFiredAt),
         ]),
-        ["ID", "STATE", "NAME", "AGENT", "TRIGGERS", "OUTPUT/OVERLAP", "LAST FIRED"],
+        ["ID", "STATE", "NAME", "AGENT", "TRIGGER", "OUTPUT", "LAST FIRED"],
       );
       return 0;
     }

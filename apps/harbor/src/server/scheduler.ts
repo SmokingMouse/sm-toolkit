@@ -289,6 +289,7 @@ export class RunCoordinator {
   enqueueAutomationRun(
     automation: Automation,
     agent: HarborAgent,
+    repositoryId: string,
     prompt: string,
     purpose: RunPurpose,
     promptEvent: PromptEventBlockKey,
@@ -298,10 +299,10 @@ export class RunCoordinator {
       throw new Error("agent 与 automation 不在同一 Workspace，不能执行");
     }
     if (agent.archivedAt) throw new Error("agent 已归档，不能执行");
-    if (agent.isolation === "worktree") {
-      throw new Error("Automation 直跑当前要求 Agent isolation=none；需要 worktree 时请选择 Chat/Issue 输出");
+    if (!agent.repositoryIds.includes(repositoryId)) {
+      throw new Error("Automation Repository 不在 Agent 可见范围");
     }
-    const repository = this.store.getRepository(agent.repositoryId);
+    const repository = this.store.getRepository(repositoryId);
     if (!repository || repository.archivedAt) throw new Error("Automation Agent 的 Repository 不存在或已归档");
     const mount = this.store.getRepositoryMountForDevice(repository.id, agent.deviceId);
     if (!mount) {
@@ -314,7 +315,7 @@ export class RunCoordinator {
       conversationId: null,
       agentId: agent.id,
       deviceId: agent.deviceId,
-      repositoryId: repository.id,
+      repositoryId,
       repositoryMountId: mount.id,
       executionRoot: mount.path,
       prompt,

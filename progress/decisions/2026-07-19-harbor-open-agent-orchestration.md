@@ -1,5 +1,7 @@
 # ADR: Harbor 提供开放式 Agent 编排机制，不内置团队策略
 
+> 2026-07-19 补充：本 ADR 第 2 节的 Domain Event Trigger 与可配置 purpose/output/overlap/target/notify 产品面已被 `2026-07-19-harbor-mew-automation-model.md` 取代；Run lineage、显式 Agent dispatch、exact Review checkout 与“不内置团队策略”的其余结论继续有效。
+
 ## Context
 
 早期 Agent team 方案把 Orchestrator、Developer、Reviewer 固定为产品角色，并配置统一 Review Automation。这证明了 Harbor 的 Run-scoped capability、Delivery policy 与事件闭环可行，但也把一种用户编排方案误当成了 control plane 本身：控制面开始承担“应该选哪个 Reviewer”的策略，Device/Agent 关系也容易被理解为中央 Reviewer Pool。

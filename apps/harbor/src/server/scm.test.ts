@@ -41,6 +41,7 @@ describe("SCM event projection", () => {
     const replay = scm.receiveCodebase(repository.id, { eventId: "evt-18", eventType: "merge_request", payload }, 3);
 
     expect(first.status).toBe("applied");
+    expect(first.automationEvent).toBe("merge_request_opened");
     expect(replay.status).toBe("duplicate");
     expect(store.listConversations({ workspaceId: "ws_personal", kind: "issue" })).toHaveLength(1);
     const conversation = store.getConversation(first.conversationId!)!;
@@ -88,6 +89,46 @@ describe("SCM event projection", () => {
     expect(store.listRunsByConversation(result.conversationId!)).toEqual([
       expect.objectContaining({ status: "queued", prompt: "@harbor please diagnose this" }),
     ]);
+  });
+
+  test("a matching Automation listener consumes the normalized Codebase event before legacy auto-dispatch", () => {
+    const store = new HarborStore(openDb(":memory:"));
+    const device = store.upsertDevice("worker", "hash", { clis: { claude: "2" }, endpoints: [] }, 1);
+    const repository = store.createRepository({
+      workspaceId: "ws_personal",
+      name: "harbor",
+      scmProvider: "codebase",
+      scmRepository: "team/harbor",
+    }, 2);
+    store.setRepositoryMount(repository.id, device.id, "/repo", 3);
+    const agent = store.createAgent({
+      name: "triager",
+      deviceId: device.id,
+      backend: "claude",
+      repositoryId: repository.id,
+    }, 4);
+    store.updateRepository(repository.id, { scmAgentId: agent.id, scmAutoDispatch: true }, 5);
+    const deliveries = new DeliveryService(store);
+    const coordinator = new RunCoordinator(store, new RunBus(), { isOnline: () => false, send: () => false }, 2, deliveries);
+    const scm = new ScmService(store, coordinator, deliveries, runner);
+    const received: string[] = [];
+    scm.setAutomationListener((event) => {
+      received.push(`${event.eventType}:${event.eventId}`);
+      return true;
+    });
+
+    const result = scm.receiveCodebase(repository.id, {
+      eventId: "evt-issue",
+      eventType: "issue",
+      payload: {
+        action: "opened",
+        issue: { number: 9, title: "Investigate", description: "Find the cause", status: "open" },
+      },
+    }, 6);
+
+    expect(result.automationEvent).toBe("issue_opened");
+    expect(received).toEqual(["issue_opened:evt-issue"]);
+    expect(store.listRunsByConversation(result.conversationId!)).toEqual([]);
   });
 
   test("normalizer recognizes review and CI facts without assuming one webhook casing", () => {
