@@ -34,13 +34,17 @@ const executor = new LocalLaunchdDeploymentExecutor({
 const worker = new DeploymentWorker(new EphemeralDeploymentJobStore(dbPath), targets, executor, hostClock);
 
 console.log(`[harbor-deploy-worker] started targets=${targets.map((target) => target.id).join(",")}`);
+// launchd starts this one-shot drainer every few seconds.  Exiting after the
+// queue is empty avoids depending on a long-lived Bun.sleep timer surviving a
+// macOS host sleep; StartInterval supplies the next durable wakeup.
 while (true) {
   try {
     const result = await worker.runOnce();
-    if (!result.worked) await hostClock.sleep(500);
+    if (!result.worked) break;
   } catch (error) {
     console.error(`[harbor-deploy-worker] ${safeWorkerError(error, targets)}`);
-    await hostClock.sleep(1_000);
+    process.exitCode = 1;
+    break;
   }
 }
 

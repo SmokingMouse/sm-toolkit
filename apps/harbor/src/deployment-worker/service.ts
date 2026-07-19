@@ -54,7 +54,10 @@ export function renderDeploymentWorkerLaunchAgent(input: {
     <key>HARBOR_DB</key><string>${xml(input.databasePath)}</string>
     <key>HARBOR_DEPLOYMENT_MAINTENANCE_PATH</key><string>${xml(input.maintenancePath ?? resolve(input.home, ".harbor/deployment/maintenance.json"))}</string>
   </dict>
-  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>3</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>3</integer>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>3</integer>
   <key>StandardOutPath</key><string>${xml(input.stdoutPath)}</string>
   <key>StandardErrorPath</key><string>${xml(input.stderrPath)}</string>
 </dict></plist>

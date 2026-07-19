@@ -243,11 +243,33 @@ export interface ProcessGroupControl {
 /** Bun 1.1 on macOS rejects negative PIDs in process.kill(). */
 export class MacOsProcessGroupControl implements ProcessGroupControl {
   async signal(pgid: number, signal: NodeJS.Signals): Promise<void> {
-    await this.kill([signal === "SIGKILL" ? "-KILL" : "-TERM", "--", `-${positivePgid(pgid)}`], true);
+    try {
+      await this.kill([signal === "SIGKILL" ? "-KILL" : "-TERM", "--", `-${positivePgid(pgid)}`], true);
+    } catch (error) {
+      // macOS may retain an already-terminated orphan as a zombie briefly.
+      // /bin/kill reports EPERM for a group containing only zombies even though
+      // no member can execute or retain a pipe.  Live/unowned members remain a
+      // hard failure: the ps probe below returns true and preserves fail-closed.
+      const detail = error instanceof Error ? error.message : String(error);
+      if (/operation not permitted/i.test(detail) && !await this.exists(pgid)) return;
+      throw error;
+    }
   }
 
   async exists(pgid: number): Promise<boolean> {
-    return (await this.kill(["-0", "--", `-${positivePgid(pgid)}`], false)) === 0;
+    const child = Bun.spawn(["/bin/ps", "-o", "stat=", "-g", String(positivePgid(pgid))], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    if (exitCode === 0) return processGroupHasLiveMembers(stdout);
+    if (exitCode === 1 && !stdout.trim() && !stderr.trim()) return false;
+    throw new Error(`/bin/ps process-group probe failed (${exitCode}): ${stderr.trim()}`);
   }
 
   private async kill(argv: string[], missingIsSuccess: boolean): Promise<number> {
@@ -257,6 +279,15 @@ export class MacOsProcessGroupControl implements ProcessGroupControl {
     if (!missingIsSuccess && /no such process/i.test(stderr)) return exitCode;
     throw new Error(`/bin/kill process-group primitive failed (${exitCode}): ${stderr.trim()}`);
   }
+}
+
+/** A zombie is already unable to execute or retain an open pipe. */
+export function processGroupHasLiveMembers(output: string): boolean {
+  return output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .some((state) => state[0]?.toUpperCase() !== "Z");
 }
 
 export class HostLaunchd implements LaunchdControl {

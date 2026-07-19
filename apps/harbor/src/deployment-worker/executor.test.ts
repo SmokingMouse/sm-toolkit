@@ -34,6 +34,7 @@ import {
   HostProcess,
   minimalProcessEnvironment,
   parseLaunchctlPrint,
+  processGroupHasLiveMembers,
   readLinkOrMissing,
   terminateProcessGroup,
 } from "./runtime.js";
@@ -832,6 +833,13 @@ test("HostProcess verifies sensitive stdout internally while returning only reda
   });
   expect(mismatched.stdout).not.toContain(sensitive);
   expect(mismatched.stdoutMatched).toBeFalse();
+});
+
+test("process group liveness ignores zombies but fails closed for any live member", () => {
+  expect(processGroupHasLiveMembers("Z\nZ+\n")).toBeFalse();
+  expect(processGroupHasLiveMembers("Z\nS+\n")).toBeTrue();
+  expect(processGroupHasLiveMembers("unexpected\n")).toBeTrue();
+  expect(processGroupHasLiveMembers("\n")).toBeFalse();
 });
 
 function pidAlive(pid: number): boolean {
