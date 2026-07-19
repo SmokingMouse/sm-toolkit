@@ -87,6 +87,17 @@ export interface Device {
   createdAt: number;
 }
 
+export type InstalledSkillCapabilitySummary = Omit<InstalledSkillCapability, "instruction" | "files"> & {
+  fileCount: number;
+};
+
+/** REST/CLI/Web 的轻量列表投影；完整 Skill bundle 只留在 daemon→server capability snapshot。 */
+export type DeviceSummary = Omit<Device, "capabilities"> & {
+  capabilities: Omit<DeviceCapabilities, "installedSkills"> & {
+    installedSkills?: InstalledSkillCapabilitySummary[];
+  };
+};
+
 /** Harbor 的资源、协作与授权边界；不是 Repository、目录或 Device。 */
 export interface HarborWorkspace {
   id: string;

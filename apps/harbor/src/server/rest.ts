@@ -26,6 +26,7 @@ import type {
   DeliveryCheckStatus,
   DeliveryProviderKind,
   Device,
+  DeviceSummary,
   IssuePriority,
   IsolationKind,
   Origin,
@@ -97,6 +98,21 @@ User request:
 
 /** Web 产物目录（Next.js 静态导出）。相对本源码定位仓库内路径，不依赖 cwd。 */
 const WEB_OUT = resolve(import.meta.dir, "../../../harbor-web/out");
+
+function deviceSummary(device: Device): DeviceSummary {
+  return {
+    ...device,
+    capabilities: {
+      ...device.capabilities,
+      installedSkills: device.capabilities.installedSkills?.map(
+        ({ instruction: _instruction, files, ...skill }) => ({
+          ...skill,
+          fileCount: files?.length ?? 1,
+        }),
+      ),
+    },
+  };
+}
 
 function bad(message: string): never {
   throw new HTTPException(400, { message });
@@ -1685,8 +1701,7 @@ export function buildRest(
       mounts: store.listRepositoryMounts(id).map((mount) => ({
         ...mount,
         deviceName:
-          store.getDevice(mount.deviceId, hub.isOnline(mount.deviceId))?.name ??
-          mount.deviceId,
+          store.getDeviceName(mount.deviceId) ?? mount.deviceId,
       })),
     };
   };
@@ -1946,17 +1961,7 @@ export function buildRest(
   // ---- devices ----
 
   app.get("/api/devices", (c) =>
-    c.json(
-      store.listDevices(hub.onlineIds()).map((device) => ({
-        ...device,
-        capabilities: {
-          ...device.capabilities,
-          installedSkills: device.capabilities.installedSkills?.map(
-            ({ instruction: _instruction, ...skill }) => skill,
-          ),
-        },
-      })),
-    ),
+    c.json(store.listDevices(hub.onlineIds()).map(deviceSummary)),
   );
 
   // ---- skills ----

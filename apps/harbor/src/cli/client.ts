@@ -9,7 +9,7 @@ import type {
   AutomationLogRow,
   Conversation,
   ConversationStatus,
-  Device,
+  DeviceSummary,
   HarborAgent,
   HarborRepository,
   HarborWorkspace,
@@ -51,7 +51,7 @@ export class HarborClient {
     return res.json() as Promise<T>;
   }
 
-  devices(): Promise<Device[]> {
+  devices(): Promise<DeviceSummary[]> {
     return this.req("GET", "/api/devices");
   }
 

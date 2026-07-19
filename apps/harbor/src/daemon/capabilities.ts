@@ -60,7 +60,7 @@ export function detectCapabilities(): DeviceCapabilities {
 
 /**
  * 只扫描各 Runtime 的显式安装目录，不递归插件 cache。正文随 hello 送到 server，
- * import 时保存成 Workspace 快照；GET /api/devices 会剥离 instruction。
+ * import 时保存成 Workspace 快照；GET /api/devices 会剥离 instruction 与 files 正文。
  */
 export function detectInstalledSkills(roots: SkillScanRoot[] = defaultSkillRoots()): InstalledSkillCapability[] {
   const found = new Map<string, InstalledSkillCapability>();

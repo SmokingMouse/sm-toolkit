@@ -1819,6 +1819,11 @@ export class HarborStore {
     return r ? toDevice(r, online) : null;
   }
 
+  /** 只读展示名时不得解析可能包含完整 runtime Skill bundles 的 capabilities。 */
+  getDeviceName(id: string): string | null {
+    return this.db.query<{ name: string }, [string]>("SELECT name FROM devices WHERE id = ?").get(id)?.name ?? null;
+  }
+
   getDeviceByName(name: string, online: boolean): Device | null {
     const r = this.db.query<DeviceRow, [string]>("SELECT * FROM devices WHERE name = ?").get(name);
     return r ? toDevice(r, online) : null;

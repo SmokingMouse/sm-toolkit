@@ -21,7 +21,7 @@ import type {
   DeploymentJobView,
   DeploymentTargetDescriptor,
   DeliveryStatus,
-  Device,
+  DeviceSummary,
   HarborAgent,
   HarborRepository,
   HarborSkill,
@@ -68,7 +68,7 @@ export type {
   DeploymentJobView,
   DeploymentTargetDescriptor,
   DeliveryStatus,
-  Device,
+  DeviceSummary,
   HarborAgent,
   HarborRepository,
   HarborSkill,
@@ -97,6 +97,9 @@ export type {
   WorkspaceInvitation,
   WorkspaceRole,
 };
+
+/** Web 永远消费轻量 Device 列表投影，不持有 runtime Skill 正文。 */
+export type Device = DeviceSummary;
 
 /** = protocol.ISSUE_STATUSES（运行时值不能 import type，本地复制） */
 export const ISSUE_STATUSES = [

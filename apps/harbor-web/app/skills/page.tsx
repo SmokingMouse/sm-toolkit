@@ -924,7 +924,7 @@ function SyncSkillsPanel({
                       </span>
                     )}
                     <span className="mt-1 block truncate font-mono text-[9px] text-dim">
-                      {candidate.path} · {candidate.files?.length ?? 1} files
+                      {candidate.path} · {candidate.fileCount} files
                     </span>
                   </span>
                 </button>
