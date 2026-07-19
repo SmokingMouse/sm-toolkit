@@ -6,7 +6,7 @@
 - **Repository**：Agent 必选的逻辑代码资源，不直接等于本地路径。同一 Repository 可以被多个 Agent 复用，并在多台 Device 上分别 checkout；用户从 Agent 创建/详情配置，不从 Workspace 或任务单独配置。
 - **Repository mount**：Repository 在某台 Device 上的绝对主 checkout 路径，`(repository, device)` 唯一。Agent 绑定 Repository + Device 后确定 mount；`RunSpec.repositoryRoot` 始终保持这个身份锚点，即使 Run 已进入 linked worktree。被 Agent、活跃任务、Run 或 worktree 引用时不能删除。
 - **Execution root**：某一 Run 的实际 cwd 快照。首轮 worktree Run 下发时可先等于 Repository mount，`worktree_ready` 后改为 per-Issue worktree；后续 implementation/reviewer 继续用该 worktree，但不改变 `repositoryRoot` 的 mount 语义。
-- **Chat worktree cleanup**：Chat 没有 Issue 终态，因此 worktree 不自动随 Done/Cancel 收尾。管理员可在没有 active Run 时显式请求 daemon 释放目录；Conversation/Run 历史与 branch 保留，只有 daemon 回报实际删除成功后 control plane 才清空 worktree binding，后续消息需要时会创建新 worktree。
+- **Chat worktree cleanup**：Chat 没有 Issue 终态，因此 worktree 不自动随 Done/Cancel 收尾。管理员可在没有 active Run 时显式请求 daemon 释放目录；请求送达后 control plane 会 fence 新 Run并在 Device 重连时补发，Conversation/Run 历史与 branch 保留，只有 daemon 回报实际删除成功后才清空 worktree binding、解除 fence，后续消息需要时会创建新 worktree。
 - **Device**：运行一个 `harbord` 的真实机器。设备在线状态来自 WebSocket 连接，能力来自 daemon 启动时探测，不是用户手填标签。
 - **Harbor Agent**：固定归属一个 Workspace，并且在任一时刻恰好绑定一台 Device 与一个 Repository 的执行配置。Issue、Chat、AI draft 与 Automation 不另选仓库；指派 Agent 时继承其当前 execution binding。Device 可经显式迁移安全切换，不代表历史 Run 会随之改写。
 - **Agent execution binding**：Agent 当前的 `Device + Repository + repository mount` 组合，决定未来 Run 的执行位置。迁移要求目标 Device 具备 Agent Runtime/model 能力与 Repository mount，且 Agent 没有 active Run 或未清理 worktree；历史 Run 继续保留原 Device/mount/execution root 快照，旧 Device 独占的 runtime Skills 在确认后解除。

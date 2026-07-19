@@ -2909,13 +2909,13 @@ export function buildRest(
     const workspace = currentWorkspace(c);
     requireRole(c, workspace.id, "admin");
     const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
-    if (conv.kind !== "chat") bad("Issue worktree 由 Done/Cancel 交付终态自动收尾");
+    if (conv.kind !== "chat") bad("只有 Chat 支持显式 worktree cleanup");
     if (store.activeRunForConversation(conv.id)) bad("仍有 Run 进行中，不能清理 Chat worktree");
     if (!conv.worktreePath || !conv.worktreeMountId) {
       return c.json({ conversation: conv, cleanupRequested: false });
     }
     if (!coordinator.requestWorktreeCleanup(conv)) {
-      bad("Chat worktree 所在 Device 当前不可达，请在设备恢复在线后重试");
+      bad("Chat worktree cleanup 未送达目标 Device，请在设备恢复在线后重试");
     }
     return c.json({ conversation: conv, cleanupRequested: true }, 202);
   });

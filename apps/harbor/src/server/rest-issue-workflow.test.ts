@@ -337,6 +337,21 @@ test("Chat worktree cleanup is admin-controlled, idle-only, and proof-driven", a
     worktreePath,
   });
   expect(store.getConversation(chat.id)?.worktreePath).toBe(worktreePath);
+  expect(() => coordinator.enqueueRun(
+    store.getConversation(chat.id)!,
+    agent,
+    "must wait for cleanup proof",
+    "implementation",
+  )).toThrow("worktree cleanup 进行中");
+
+  sent.length = 0;
+  coordinator.reconcileDevice(device.id, []);
+  expect(sent).toEqual([{
+    type: "worktree_cleanup",
+    conversationId: chat.id,
+    repositoryRoot: mount.path,
+    worktreePath,
+  }]);
 
   coordinator.onWorktreeCleanupResult(chat.id, true, "removed");
   expect(store.getConversation(chat.id)).toEqual(expect.objectContaining({
