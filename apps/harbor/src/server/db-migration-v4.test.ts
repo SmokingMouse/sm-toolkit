@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { chmodSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MIGRATIONS, openDb, openDeploymentDb } from "./db.js";
+import { LATEST_SCHEMA_VERSION, MIGRATIONS, openDb, openDeploymentDb, openV22MigrationFixtureDb } from "./db.js";
 import { DeliveryService } from "./delivery.js";
 import { renderRunPrompt } from "./prompt-wrapper.js";
 import { HarborStore } from "./store.js";
@@ -87,7 +87,7 @@ test("legacy database migrates through latest schema without losing conversation
     legacy.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(22);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(LATEST_SCHEMA_VERSION);
     expect(
       migrated.query<{ agent_id: string | null; description: string | null; priority: string; status: string }, []>(
         "SELECT agent_id, description, priority, status FROM conversations WHERE id = 'conversation_1'",
@@ -265,7 +265,7 @@ test("latest schema upgrades an already-running v9 database and preserves unboun
     v9.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(22);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(LATEST_SCHEMA_VERSION);
     const agent = migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM agents WHERE id = 'agent_1'").get();
     expect(agent?.repository_id).toStartWith("repo_unconfigured_");
     expect(migrated.query<{ repository_id: string }, []>("SELECT repository_id FROM conversations WHERE id = 'conversation_1'").get()).toEqual(agent);
@@ -311,7 +311,7 @@ test("latest schema preserves v11 Delivery rows and audit events while adding de
   const dir = mkdtempSync(join(tmpdir(), "harbor-v11-delivery-"));
   const path = join(dir, "v11.db");
   try {
-    const current = openDb(path);
+    const current = openV22MigrationFixtureDb(path);
     const store = new HarborStore(current);
     const device = store.upsertDevice("worker", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
     const repository = store.createRepository(
@@ -361,7 +361,7 @@ test("latest schema preserves v11 Delivery rows and audit events while adding de
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(22);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(LATEST_SCHEMA_VERSION);
     expect(migrated.query<{ provider: string; change_url: string }, [string]>("SELECT provider, change_url FROM deliveries WHERE id = ?").get(delivery.id)).toEqual({
       provider: "manual",
       change_url: "https://github.com/acme/repo/pull/1",
@@ -385,7 +385,7 @@ test("latest schema invalidates unbound GitHub evidence from v12 while preservin
   const dir = mkdtempSync(join(tmpdir(), "harbor-v12-delivery-"));
   const path = join(dir, "v12.db");
   try {
-    const current = openDb(path);
+    const current = openV22MigrationFixtureDb(path);
     const store = new HarborStore(current);
     const device = store.upsertDevice("worker", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
     const repository = store.createRepository(
@@ -441,7 +441,7 @@ test("latest schema invalidates unbound GitHub evidence from v12 while preservin
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(22);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(LATEST_SCHEMA_VERSION);
     expect(
       migrated.query<{
         provider: string;
@@ -547,7 +547,7 @@ test("latest schema converges the historical self-hosting v13 fork without losin
     fork.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(22);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(LATEST_SCHEMA_VERSION);
     expect(
       migrated.query<{ name: string }, []>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'automation_triggers'",
@@ -584,7 +584,7 @@ test("latest schema preserves a legitimate pre-provider manual no-target running
   const dir = mkdtempSync(join(tmpdir(), "harbor-v16-delivery-"));
   const path = join(dir, "v16.db");
   try {
-    const current = openDb(path);
+    const current = openV22MigrationFixtureDb(path);
     const store = new HarborStore(current);
     const device = store.upsertDevice("worker-v13", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
     const repository = store.createRepository({ workspaceId: store.defaultWorkspace().id, name: "repo-v13" }, 2);
@@ -627,7 +627,7 @@ test("latest schema preserves a legitimate pre-provider manual no-target running
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(22);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(LATEST_SCHEMA_VERSION);
     expect(migrated.query<{
       provider: string; review_status: string; check_status: string; deployment_status: string;
       review_approved_at: number; revision: number; deployment_target_id: null; deployment_generation: number;
@@ -657,7 +657,7 @@ test("latest schema gives an active phase-1 deployment without fingerprint/ancho
   const dir = mkdtempSync(join(tmpdir(), "harbor-v17-active-deploy-"));
   const path = join(dir, "v17.db");
   try {
-    const current = openDb(path);
+    const current = openV22MigrationFixtureDb(path);
     const store = new HarborStore(current);
     const device = store.upsertDevice("worker-v14", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
     const repository = store.createRepository({ workspaceId: store.defaultWorkspace().id, name: "repo-v14" }, 2);
@@ -707,7 +707,7 @@ test("latest schema gives an active phase-1 deployment without fingerprint/ancho
     current.close();
 
     const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(22);
+    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(LATEST_SCHEMA_VERSION);
     expect(migrated.query<{ deployment_status: string; deployment_error: string }, [string]>(
       "SELECT deployment_status, deployment_error FROM deliveries WHERE id = ?",
     ).get(delivery.id)).toEqual({
@@ -737,7 +737,7 @@ test("v20 preserves existing Skill bundles, dependencies, and Agent bindings", (
   const dir = mkdtempSync(join(tmpdir(), "harbor-v19-skills-"));
   const path = join(dir, "v19.db");
   try {
-    const current = openDb(path);
+    const current = openV22MigrationFixtureDb(path);
     const store = new HarborStore(current);
     const device = store.upsertDevice(
       "skill-worker",

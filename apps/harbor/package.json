@@ -18,6 +18,7 @@
     "@sm/agent": "workspace:*",
     "@sm/channel-feishu": "workspace:*",
     "@sm/llm": "workspace:*",
+    "@simplewebauthn/server": "^13.3.2",
     "croner": "^10.0.1",
     "hono": "^4.7.0",
     "yaml": "^2.9.0"

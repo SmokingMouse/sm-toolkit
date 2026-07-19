@@ -1,7 +1,23 @@
 import { expect, test } from "bun:test";
-import { assertPrivateConfigMetadata, parseDeploymentTargets } from "./config.js";
+import { assertPrivateConfigMetadata, parseDeploymentTargets, parsePublicAuthConfig } from "./config.js";
 
 const SECRETS = { HEALTH_TOKEN: "TOPSECRET", OTHER_HEALTH_TOKEN: "OTHERSECRET" };
+
+test("public auth origin is admin-pinned and only permits HTTPS or localhost development", () => {
+  expect(parsePublicAuthConfig("https://harbor.example.test")).toEqual({
+    origin: "https://harbor.example.test",
+    rpId: "harbor.example.test",
+    rpName: "Harbor",
+    secureCookie: true,
+  });
+  expect(parsePublicAuthConfig("http://localhost:7777")).toEqual(expect.objectContaining({
+    origin: "http://localhost:7777", rpId: "localhost", secureCookie: false,
+  }));
+  expect(() => parsePublicAuthConfig(undefined)).toThrow("HARBOR_PUBLIC_URL 未设置");
+  expect(() => parsePublicAuthConfig("http://harbor.example.test")).toThrow("必须是 https");
+  expect(() => parsePublicAuthConfig("https://harbor.example.test/login")).toThrow("只能包含 origin");
+  expect(() => parsePublicAuthConfig("https://user:secret@harbor.example.test")).toThrow("只能包含 origin");
+});
 
 function configured(overrides: Record<string, unknown> = {}) {
   return {

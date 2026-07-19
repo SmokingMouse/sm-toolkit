@@ -10,6 +10,8 @@ import { existsSync } from "node:fs";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { join, resolve } from "node:path";
 import { Hono, type Context } from "hono";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import { HTTPException } from "hono/http-exception";
 import { assertAgentEnvironmentSafe } from "../agent-environment.js";
 import type {
@@ -31,6 +33,9 @@ import type {
   Run,
   RunPurpose,
   RunStreamFrame,
+  Account,
+  PersonalAccessToken,
+  PersonalAccessTokenScope,
   WorkspaceMember,
   WorkspaceRole,
 } from "../protocol.js";
@@ -50,6 +55,7 @@ import { RunCoordinator } from "./scheduler.js";
 import type { ApprovalService } from "./approvals.js";
 import { AutomationService, hashWebhookSecret } from "./automation.js";
 import { inactiveMaintenanceGuard, matchesRevisionAwareHealth, type MaintenanceGuard } from "./maintenance.js";
+import { AuthService } from "./auth.js";
 import { transitionConversation } from "./statemachine.js";
 import { DeliveryService } from "./delivery.js";
 import type { ScmService } from "./scm.js";
@@ -216,13 +222,49 @@ export function buildRest(
   skillImports = new SkillImportService(),
   customLarkWorkspaceIds: ReadonlySet<string> = new Set(),
   maintenance: MaintenanceGuard = inactiveMaintenanceGuard,
+  auth: AuthService = new AuthService(store, {
+    origin: "http://localhost",
+    rpId: "localhost",
+    rpName: "Harbor Test",
+    secureCookie: false,
+  }),
 ): Hono {
   const app = new Hono();
   type ApiActor =
-    { kind: "system" } | { kind: "member"; member: WorkspaceMember };
+    | { kind: "system" }
+    | {
+        kind: "account";
+        account: Account;
+        credential: { kind: "session"; sessionId: string; csrfTokenHash: string }
+          | { kind: "pat"; token: PersonalAccessToken };
+      };
   const actors = new WeakMap<Request, ApiActor>();
   const requestActor = (c: Context): ApiActor =>
     actors.get(c.req.raw) ?? { kind: "system" };
+  const challengeCookie = "harbor_auth_challenge";
+  const sessionCookie = "harbor_session";
+  const csrfCookie = "harbor_csrf";
+  const cookieBase = {
+    secure: auth.config.secureCookie,
+    sameSite: "Lax" as const,
+    path: "/",
+  };
+  const setSessionCookies = (c: Context, session: { sessionToken: string; csrfToken: string; expiresAt: number }) => {
+    const maxAge = Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1_000));
+    setCookie(c, sessionCookie, session.sessionToken, { ...cookieBase, httpOnly: true, maxAge });
+    setCookie(c, csrfCookie, session.csrfToken, { ...cookieBase, httpOnly: false, maxAge });
+  };
+  const clearSessionCookies = (c: Context) => {
+    deleteCookie(c, sessionCookie, cookieBase);
+    deleteCookie(c, csrfCookie, cookieBase);
+  };
+  const bearer = (c: Context): string => {
+    const value = c.req.header("Authorization") ?? "";
+    return value.startsWith("Bearer ") ? value.slice(7) : "";
+  };
+  const requireBootstrapToken = (c: Context) => {
+    if (bearer(c) !== expectedToken) throw new HTTPException(403, { message: "需要 system bootstrap token" });
+  };
 
   // 调度冲突（已有 active Run、阶段不符、Reviewer 看不到 worktree）是可修正的请求错误，
   // 不应泄漏成 500。统一收口，保证 Web / CLI 都拿到可读的 400 提示。
@@ -236,20 +278,35 @@ export function buildRest(
 
   const currentWorkspace = (c: Context) => {
     const actor = requestActor(c);
+    const memberships = actor.kind === "account"
+      ? store.listMembershipsForAccount(actor.account.id)
+      : [];
+    const patWorkspace = actor.kind === "account" && actor.credential.kind === "pat"
+      ? actor.credential.token.workspaceId
+      : null;
     const key =
       c.req.header("X-Harbor-Workspace")?.trim() ||
-      (actor.kind === "member"
-        ? actor.member.workspaceId
+      (actor.kind === "account"
+        ? patWorkspace ?? memberships.find((membership) => store.getWorkspace(membership.workspaceId)?.kind === "personal")?.workspaceId ?? memberships[0]?.workspaceId
         : DEFAULT_WORKSPACE_ID);
+    if (!key) throw new HTTPException(403, { message: "Account 没有 active Workspace Membership" });
     const workspace = store.resolveWorkspace(key);
     if (!workspace || workspace.archivedAt)
       bad(`workspace "${key}" 不存在或已归档`);
-    if (actor.kind === "member" && actor.member.workspaceId !== workspace.id) {
+    if (actor.kind === "account" && !store.membershipForAccount(actor.account.id, workspace.id)) {
       throw new HTTPException(403, {
-        message: "当前 token 不属于该 Workspace",
+        message: "Account 不属于该 Workspace",
       });
     }
+    if (patWorkspace && patWorkspace !== workspace.id) {
+      throw new HTTPException(403, { message: "PAT 已绑定其他 Workspace" });
+    }
     return workspace;
+  };
+
+  const currentMembership = (c: Context, workspaceId: string): WorkspaceMember | null => {
+    const actor = requestActor(c);
+    return actor.kind === "account" ? store.membershipForAccount(actor.account.id, workspaceId) : null;
   };
 
   const requireRole = (
@@ -259,10 +316,8 @@ export function buildRest(
   ) => {
     const actor = requestActor(c);
     if (actor.kind === "system") return null;
-    if (
-      actor.member.workspaceId !== workspaceId ||
-      actor.member.status !== "active"
-    ) {
+    const member = store.membershipForAccount(actor.account.id, workspaceId);
+    if (!member || member.status !== "active") {
       throw new HTTPException(403, { message: "Workspace 访问被拒绝" });
     }
     const rank: Record<WorkspaceRole, number> = {
@@ -270,12 +325,12 @@ export function buildRest(
       admin: 2,
       owner: 3,
     };
-    if (rank[actor.member.role] < rank[minimum]) {
+    if (rank[member.role] < rank[minimum]) {
       throw new HTTPException(403, {
-        message: `需要 ${minimum} 权限（当前 ${actor.member.role}）`,
+        message: `需要 ${minimum} 权限（当前 ${member.role}）`,
       });
     }
-    return actor.member;
+    return member;
   };
 
   const requireSystem = (c: Context) => {
@@ -292,11 +347,14 @@ export function buildRest(
   ) => {
     if (agent.visibility === "workspace") return true;
     const actor = requestActor(c);
+    const member = actor.kind === "account"
+      ? store.membershipForAccount(actor.account.id, agent.workspaceId)
+      : null;
     return (
       actor.kind === "system" ||
-      actor.member.role === "owner" ||
-      actor.member.role === "admin" ||
-      actor.member.id === agent.createdByMemberId
+      member?.role === "owner" ||
+      member?.role === "admin" ||
+      member?.id === agent.createdByMemberId
     );
   };
   const agentView = (
@@ -314,12 +372,16 @@ export function buildRest(
     body: string,
   ) => {
     const actor = requestActor(c);
+    const conversation = store.getConversation(conversationId);
+    const member = actor.kind === "account" && conversation
+      ? store.membershipForAccount(actor.account.id, conversation.workspaceId)
+      : null;
     return store.appendConversationMessage(
       conversationId,
       {
-        authorType: actor.kind === "member" ? "member" : "system",
-        authorId: actor.kind === "member" ? actor.member.id : null,
-        authorName: actor.kind === "member" ? actor.member.name : "Local owner",
+        authorType: member ? "member" : "system",
+        authorId: member?.id ?? null,
+        authorName: member?.name ?? "Local owner",
         body,
         externalId: null,
       },
@@ -934,25 +996,181 @@ export function buildRest(
     }, 503);
   });
 
+  // Auth ceremony endpoints 必须先于通用 /api bearer/session middleware 注册。
+  // challenge cookie HttpOnly + DB 单次消费；Passkey RP/origin 只来自 HARBOR_PUBLIC_URL。
+  app.get("/api/auth/bootstrap/status", (c) => c.json(auth.bootstrapState()));
+
+  app.post("/api/auth/bootstrap/options", async (c) => {
+    requireBootstrapToken(c);
+    try {
+      const body = await c.req.json().catch(() => ({})) as { displayName?: string };
+      const started = await auth.beginRegistration({ flow: "bootstrap", displayName: body.displayName });
+      setCookie(c, challengeCookie, started.challengeToken, {
+        ...cookieBase, httpOnly: true, maxAge: 300,
+      });
+      return c.json(started.options);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  app.post("/api/auth/bootstrap/verify", async (c) => {
+    requireBootstrapToken(c);
+    const challengeToken = getCookie(c, challengeCookie);
+    if (!challengeToken) return c.json({ error: "bootstrap challenge cookie 缺失" }, 400);
+    try {
+      const body = await c.req.json() as { response?: RegistrationResponseJSON; label?: string };
+      if (!body.response) return c.json({ error: "缺少 Passkey response" }, 400);
+      const completed = await auth.finishRegistration({
+        flow: "bootstrap",
+        challengeToken,
+        response: body.response,
+        label: body.label,
+      });
+      if (!completed.session) throw new Error("bootstrap 未创建 Session");
+      deleteCookie(c, challengeCookie, cookieBase);
+      setSessionCookies(c, completed.session);
+      return c.json({ account: completed.account, recoveryCodes: completed.recoveryCodes, csrfToken: completed.session.csrfToken });
+    } catch (error) {
+      deleteCookie(c, challengeCookie, cookieBase);
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  app.post("/api/auth/login/options", async (c) => {
+    try {
+      const started = await auth.beginAuthentication();
+      setCookie(c, challengeCookie, started.challengeToken, {
+        ...cookieBase, httpOnly: true, maxAge: 300,
+      });
+      return c.json(started.options);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  app.post("/api/auth/login/verify", async (c) => {
+    const challengeToken = getCookie(c, challengeCookie);
+    if (!challengeToken) return c.json({ error: "login challenge cookie 缺失" }, 400);
+    try {
+      const body = await c.req.json() as { response?: AuthenticationResponseJSON };
+      if (!body.response) return c.json({ error: "缺少 Passkey response" }, 400);
+      const completed = await auth.finishAuthentication({ challengeToken, response: body.response });
+      deleteCookie(c, challengeCookie, cookieBase);
+      setSessionCookies(c, completed.session);
+      return c.json({ account: completed.account, csrfToken: completed.session.csrfToken });
+    } catch (error) {
+      deleteCookie(c, challengeCookie, cookieBase);
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 401);
+    }
+  });
+
+  app.post("/api/auth/invitation/options", async (c) => {
+    try {
+      const body = await c.req.json() as { token?: string; displayName?: string };
+      if (!body.token || !body.displayName?.trim()) return c.json({ error: "缺少 Invitation token/displayName" }, 400);
+      const started = await auth.beginInvitationRegistration({
+        invitationToken: body.token,
+        displayName: body.displayName,
+      });
+      setCookie(c, challengeCookie, started.challengeToken, {
+        ...cookieBase, httpOnly: true, maxAge: 300,
+      });
+      return c.json(started.options);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  app.post("/api/auth/invitation/verify", async (c) => {
+    const challengeToken = getCookie(c, challengeCookie);
+    if (!challengeToken) return c.json({ error: "Invitation registration challenge cookie 缺失" }, 400);
+    try {
+      const body = await c.req.json() as { response?: RegistrationResponseJSON; label?: string };
+      if (!body.response) return c.json({ error: "缺少 Passkey response" }, 400);
+      const now = Date.now();
+      const completed = await auth.finishInvitationRegistration({
+        challengeToken,
+        response: body.response,
+        label: body.label,
+      }, now);
+      ensureBuiltinHarborSkill(store, completed.personalWorkspace.id, now);
+      deleteCookie(c, challengeCookie, cookieBase);
+      setSessionCookies(c, completed.session);
+      return c.json({
+        account: completed.account,
+        membership: completed.membership,
+        personalWorkspace: completed.personalWorkspace,
+        recoveryCodes: completed.recoveryCodes,
+        csrfToken: completed.session.csrfToken,
+      });
+    } catch (error) {
+      deleteCookie(c, challengeCookie, cookieBase);
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  app.post("/api/auth/recovery", async (c) => {
+    try {
+      const body = await c.req.json() as { accountId?: string; code?: string };
+      if (!body.accountId || !body.code) return c.json({ error: "缺少 accountId/code" }, 400);
+      const completed = auth.recover(body.accountId, body.code);
+      setSessionCookies(c, completed.session);
+      return c.json({ account: completed.account, csrfToken: completed.session.csrfToken });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 401);
+    }
+  });
+
   app.use("/api/*", async (c, next) => {
-    const auth = c.req.header("Authorization");
-    const raw = auth?.startsWith("Bearer ") ? auth.slice(7) : "";
+    const raw = bearer(c);
     if (raw === expectedToken) {
       actors.set(c.req.raw, { kind: "system" });
     } else {
-      const member = raw
-        ? store.memberForApiToken(
-            createHash("sha256").update(raw).digest("hex"),
-            Date.now(),
-          )
-        : null;
-      if (member) actors.set(c.req.raw, { kind: "member", member });
+      const pat = raw ? auth.pat(raw) : null;
+      if (pat) {
+        actors.set(c.req.raw, { kind: "account", account: pat.account, credential: { kind: "pat", token: pat.token } });
+      } else {
+        const rawSession = getCookie(c, sessionCookie);
+        const session = rawSession ? auth.session(rawSession) : null;
+        if (session) {
+          actors.set(c.req.raw, {
+            kind: "account",
+            account: session.account,
+            credential: { kind: "session", sessionId: session.sessionId, csrfTokenHash: session.csrfTokenHash },
+          });
+        }
+      }
     }
     if (!actors.has(c.req.raw)) {
       return c.json(
-        { error: "unauthorized（Authorization: Bearer <HARBOR_TOKEN>）" },
+        { error: "unauthorized（Passkey Session、PAT 或 system break-glass token）" },
         401,
       );
+    }
+    const actor = requestActor(c);
+    if (actor.kind === "account" && actor.credential.kind === "session" && !["GET", "HEAD", "OPTIONS"].includes(c.req.method)) {
+      const origin = c.req.header("Origin");
+      const headerCsrf = c.req.header("X-Harbor-CSRF") ?? "";
+      const cookieCsrf = getCookie(c, csrfCookie) ?? "";
+      if (origin !== auth.config.origin || !headerCsrf || headerCsrf !== cookieCsrf || !auth.verifyCsrf(actor.credential.csrfTokenHash, headerCsrf)) {
+        return c.json({ error: "CSRF/Origin 校验失败" }, 403);
+      }
+    }
+    if (actor.kind === "account" && actor.credential.kind === "pat") {
+      const path = new URL(c.req.url).pathname;
+      const required: PersonalAccessTokenScope = c.req.method === "GET" || c.req.method === "HEAD"
+        ? "workspace:read"
+        : path.startsWith("/api/agents")
+          ? "agent:manage"
+          : path.includes("/dispatch") || path.includes("/continue") || path.startsWith("/api/chats") || path.startsWith("/api/issues")
+            ? "agent:run"
+            : path.startsWith("/api/devices") || path.includes("/mount")
+              ? "device:manage"
+              : "workspace:write";
+      if (!actor.credential.token.scopes.includes(required)) {
+        return c.json({ error: `PAT 缺少 scope ${required}` }, 403);
+      }
     }
     await next();
   });
@@ -974,7 +1192,12 @@ export function buildRest(
     const actor = requestActor(c);
     if (actor.kind === "system")
       return c.json({ kind: "system", role: "owner" });
-    return c.json({ kind: "member", member: actor.member });
+    return c.json({
+      kind: "account",
+      account: actor.account,
+      memberships: store.listMembershipsForAccount(actor.account.id),
+      credential: actor.credential.kind,
+    });
   });
 
   app.get("/api/members", (c) => {
@@ -984,33 +1207,7 @@ export function buildRest(
   });
 
   app.post("/api/members", async (c) => {
-    const workspace = currentWorkspace(c);
-    requireRole(c, workspace.id, "admin");
-    const b = (await c.req.json()) as {
-      name?: string;
-      email?: string;
-      role?: WorkspaceRole;
-      externalProvider?: WorkspaceMember["externalProvider"];
-      externalId?: string;
-    };
-    if (!b.name?.trim()) bad("缺少 member name");
-    if (b.role !== undefined && !["owner", "admin", "member"].includes(b.role))
-      bad("role 可选 owner/admin/member");
-    if (b.role === "owner") requireRole(c, workspace.id, "owner");
-    return c.json(
-      store.createWorkspaceMember(
-        {
-          workspaceId: workspace.id,
-          name: b.name.trim(),
-          email: b.email?.trim() || null,
-          role: b.role ?? "member",
-          externalProvider: b.externalProvider ?? "local",
-          externalId: b.externalId?.trim() || null,
-        },
-        Date.now(),
-      ),
-      201,
-    );
+    return c.json({ error: "成员必须通过 Invitation 加入；请使用 POST /api/invitations" }, 410);
   });
 
   app.patch("/api/members/:id", async (c) => {
@@ -1027,9 +1224,9 @@ export function buildRest(
       bad("role 可选 owner/admin/member");
     if (
       b.status !== undefined &&
-      !["active", "invited", "disabled"].includes(b.status)
+      !["active", "disabled"].includes(b.status)
     )
-      bad("status 可选 active/invited/disabled");
+      bad("status 可选 active/disabled");
     const removesOwner =
       member.role === "owner" &&
       ((b.role && b.role !== "owner") || (b.status && b.status !== "active"));
@@ -1042,41 +1239,166 @@ export function buildRest(
   });
 
   app.get("/api/member-tokens", (c) => {
-    const workspace = currentWorkspace(c);
-    requireRole(c, workspace.id, "admin");
-    return c.json(store.listWorkspaceApiTokens(workspace.id));
+    return c.json({ error: "PAT 只能由 Account 自己管理；请使用 /api/accounts/me/pats" }, 410);
   });
 
   app.post("/api/members/:id/tokens", async (c) => {
-    const workspace = currentWorkspace(c);
-    requireRole(c, workspace.id, "admin");
-    const member = store.getWorkspaceMember(c.req.param("id"));
-    if (
-      !member ||
-      member.workspaceId !== workspace.id ||
-      member.status !== "active"
-    )
-      bad("只能给当前 Workspace 的 active member 创建 token");
-    const b = (await c.req.json()) as { label?: string };
-    const raw = `harbor_${randomBytes(24).toString("base64url")}`;
-    const id = store.createWorkspaceApiToken(
-      workspace.id,
-      member.id,
-      b.label?.trim() || "Personal access token",
-      createHash("sha256").update(raw).digest("hex"),
-      Date.now(),
-    );
-    return c.json({ id, token: raw }, 201);
+    return c.json({ error: "管理员不能替其他 Account 铸造 PAT" }, 410);
   });
 
   app.delete("/api/member-tokens/:id", (c) => {
+    return c.json({ error: "PAT 只能由 Account 自己撤销" }, 410);
+  });
+
+  app.get("/api/accounts/me/pats", (c) => {
+    const actor = requestActor(c);
+    if (actor.kind !== "account") bad("system token 没有 Account PAT");
+    return c.json(store.listPersonalAccessTokens(actor.account.id));
+  });
+
+  app.post("/api/accounts/me/pats", async (c) => {
+    const actor = requestActor(c);
+    if (actor.kind !== "account" || actor.credential.kind !== "session") bad("只有登录 Session 可以创建 PAT");
+    const body = await c.req.json() as {
+      label?: string;
+      workspaceId?: string | null;
+      scopes?: PersonalAccessTokenScope[];
+      expiresAt?: number | null;
+    };
+    const validScopes: PersonalAccessTokenScope[] = ["workspace:read", "workspace:write", "agent:run", "agent:manage", "device:manage"];
+    const scopes = body.scopes ?? ["workspace:read", "agent:run"];
+    if (!scopes.length || scopes.some((scope) => !validScopes.includes(scope))) bad("PAT scopes 非法或为空");
+    if (body.expiresAt !== undefined && body.expiresAt !== null && body.expiresAt <= Date.now()) bad("PAT expiresAt 必须在未来");
+    try {
+      const issued = auth.issuePat({
+        accountId: actor.account.id,
+        workspaceId: body.workspaceId ?? null,
+        label: body.label?.trim() || "Personal access token",
+        scopes: [...new Set(scopes)],
+        expiresAt: body.expiresAt ?? null,
+      });
+      return c.json({ ...issued.token, token: issued.raw }, 201);
+    } catch (error) {
+      bad(error instanceof Error ? error.message : String(error));
+    }
+  });
+
+  app.delete("/api/accounts/me/pats/:id", (c) => {
+    const actor = requestActor(c);
+    if (actor.kind !== "account" || actor.credential.kind !== "session") bad("只有登录 Session 可以撤销 PAT");
+    if (!store.revokePersonalAccessToken(c.req.param("id"), actor.account.id, Date.now())) {
+      throw new HTTPException(404, { message: "PAT 不存在或已撤销" });
+    }
+    return c.json({ ok: true });
+  });
+
+  app.get("/api/accounts/me/passkeys", (c) => {
+    const actor = requestActor(c);
+    if (actor.kind !== "account") bad("system token 没有 Account Passkey");
+    return c.json(store.listPasskeys(actor.account.id).map((passkey) => ({
+      id: passkey.id,
+      accountId: passkey.accountId,
+      label: passkey.label,
+      createdAt: passkey.createdAt,
+      lastUsedAt: passkey.lastUsedAt,
+      revokedAt: passkey.revokedAt,
+    })));
+  });
+
+  app.post("/api/accounts/me/passkeys/options", async (c) => {
+    const actor = requestActor(c);
+    if (actor.kind !== "account" || actor.credential.kind !== "session") bad("只有登录 Session 可以绑定 Passkey");
+    try {
+      const started = await auth.beginRegistration({ flow: "register", accountId: actor.account.id });
+      setCookie(c, challengeCookie, started.challengeToken, {
+        ...cookieBase, httpOnly: true, maxAge: 300,
+      });
+      return c.json(started.options);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  app.post("/api/accounts/me/passkeys/verify", async (c) => {
+    const actor = requestActor(c);
+    if (actor.kind !== "account" || actor.credential.kind !== "session") bad("只有登录 Session 可以绑定 Passkey");
+    const challengeToken = getCookie(c, challengeCookie);
+    if (!challengeToken) return c.json({ error: "Passkey registration challenge cookie 缺失" }, 400);
+    try {
+      const body = await c.req.json() as { response?: RegistrationResponseJSON; label?: string };
+      if (!body.response) return c.json({ error: "缺少 Passkey response" }, 400);
+      const completed = await auth.finishRegistration({
+        flow: "register",
+        accountId: actor.account.id,
+        challengeToken,
+        response: body.response,
+        label: body.label,
+      });
+      deleteCookie(c, challengeCookie, cookieBase);
+      return c.json({ account: completed.account });
+    } catch (error) {
+      deleteCookie(c, challengeCookie, cookieBase);
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  app.get("/api/invitations", (c) => {
     const workspace = currentWorkspace(c);
     requireRole(c, workspace.id, "admin");
-    const token = store
-      .listWorkspaceApiTokens(workspace.id)
-      .find((candidate) => candidate.id === c.req.param("id"));
-    if (!token) throw new HTTPException(404, { message: "token 不存在" });
-    store.revokeWorkspaceApiToken(token.id, Date.now());
+    return c.json(store.listWorkspaceInvitations(workspace.id));
+  });
+
+  app.post("/api/invitations", async (c) => {
+    const workspace = currentWorkspace(c);
+    const member = requireRole(c, workspace.id, "admin");
+    const actor = requestActor(c);
+    if (actor.kind !== "account" || !member) bad("Invitation 必须由登录 Account 创建");
+    const body = await c.req.json() as { email?: string; role?: WorkspaceRole; expiresAt?: number };
+    const role = body.role ?? "member";
+    if (!["owner", "admin", "member"].includes(role)) bad("role 可选 owner/admin/member");
+    if (role === "owner") requireRole(c, workspace.id, "owner");
+    const expiresAt = body.expiresAt ?? Date.now() + 7 * 24 * 60 * 60_000;
+    if (expiresAt <= Date.now()) bad("Invitation expiresAt 必须在未来");
+    const raw = `hinv_${randomBytes(24).toString("base64url")}`;
+    const invitation = store.createWorkspaceInvitation({
+      workspaceId: workspace.id,
+      email: body.email?.trim() || null,
+      role,
+      tokenHash: createHash("sha256").update(raw).digest("hex"),
+      invitedByAccountId: actor.account.id,
+      expiresAt,
+    }, Date.now());
+    return c.json({ ...invitation, token: raw }, 201);
+  });
+
+  app.post("/api/invitations/accept", async (c) => {
+    const actor = requestActor(c);
+    if (actor.kind !== "account" || actor.credential.kind !== "session") bad("接受 Invitation 需要登录 Session");
+    const body = await c.req.json() as { token?: string };
+    if (!body.token) bad("缺少 Invitation token");
+    const invitation = store.workspaceInvitationForToken(createHash("sha256").update(body.token).digest("hex"), Date.now());
+    if (!invitation) bad("Invitation 不存在、已过期或已结束");
+    try {
+      return c.json(store.acceptWorkspaceInvitation(invitation.id, actor.account.id, Date.now()));
+    } catch (error) {
+      bad(error instanceof Error ? error.message : String(error));
+    }
+  });
+
+  app.delete("/api/invitations/:id", (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    if (!store.revokeWorkspaceInvitation(c.req.param("id"), workspace.id, Date.now())) {
+      throw new HTTPException(404, { message: "pending Invitation 不存在" });
+    }
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/auth/logout", (c) => {
+    const actor = requestActor(c);
+    if (actor.kind !== "account" || actor.credential.kind !== "session") bad("当前不是 browser Session");
+    auth.logout(actor.credential.sessionId);
+    clearSessionCookies(c);
     return c.json({ ok: true });
   });
 
@@ -1286,12 +1608,14 @@ export function buildRest(
     return c.json(
       actor.kind === "system"
         ? store.listWorkspaces()
-        : [store.getWorkspace(actor.member.workspaceId)!],
+        : store.listMembershipsForAccount(actor.account.id)
+            .map((membership) => store.getWorkspace(membership.workspaceId))
+            .filter((workspace) => workspace && !workspace.archivedAt),
     );
   });
 
   app.post("/api/workspaces", async (c) => {
-    requireSystem(c);
+    const actor = requestActor(c);
     const b = (await c.req.json()) as {
       name?: string;
       slug?: string;
@@ -1310,7 +1634,13 @@ export function buildRest(
       bad(`Workspace name/slug "${name}" / "${slug}" 已存在`);
     const now = Date.now();
     const workspace = store.createWorkspace(
-      { name, slug, description: b.description?.trim() || null },
+      {
+        name,
+        slug,
+        description: b.description?.trim() || null,
+        kind: "team",
+        ownerAccountId: actor.kind === "account" ? actor.account.id : "acc_bootstrap",
+      },
       now,
     );
     ensureBuiltinHarborSkill(store, workspace.id, now);

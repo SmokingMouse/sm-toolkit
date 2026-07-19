@@ -7,6 +7,7 @@
 import type {
   Approval,
   ApprovalStatus,
+  Account,
   Automation,
   AutomationLogRow,
   BackendKind,
@@ -31,6 +32,9 @@ import type {
   PromptBlockConfig,
   PromptBlockKey,
   PromptSource,
+  PasskeyCredential,
+  PersonalAccessToken,
+  PersonalAccessTokenScope,
   Run,
   RunStreamFrame,
   RepositoryMount,
@@ -43,12 +47,14 @@ import type {
   LarkWorkspaceBinding,
   UsageRow,
   WorkspaceMember,
+  WorkspaceInvitation,
   WorkspaceRole,
 } from "../../harbor/src/protocol";
 
 export type {
   Approval,
   ApprovalStatus,
+  Account,
   Automation,
   AutomationLogRow,
   BackendKind,
@@ -73,6 +79,9 @@ export type {
   PromptBlockConfig,
   PromptBlockKey,
   PromptSource,
+  PasskeyCredential,
+  PersonalAccessToken,
+  PersonalAccessTokenScope,
   Run,
   RunStreamFrame,
   RepositoryMount,
@@ -85,6 +94,7 @@ export type {
   LarkWorkspaceBinding,
   UsageRow,
   WorkspaceMember,
+  WorkspaceInvitation,
   WorkspaceRole,
 };
 
@@ -154,30 +164,16 @@ export interface ConversationDetail {
 
 export type CurrentActor =
   | { kind: "system"; role: "owner" }
-  | { kind: "member"; member: WorkspaceMember };
-export interface WorkspaceApiToken {
-  id: string;
-  workspaceId: string;
-  memberId: string;
-  label: string;
-  createdAt: number;
-  lastUsedAt: number | null;
-  revokedAt: number | null;
-}
+  | {
+      kind: "account";
+      account: Account;
+      memberships: WorkspaceMember[];
+      credential: "session" | "pat";
+    };
 
-// ── token（localStorage） ───────────────────────────────
+// ── browser session / Workspace selection ─────────────
 
-const TOKEN_KEY = "harbor_token";
 const WORKSPACE_KEY = "harbor_workspace";
-
-export function getToken(): string {
-  if (typeof window === "undefined") return "";
-  return localStorage.getItem(TOKEN_KEY) ?? "";
-}
-
-export function setToken(t: string): void {
-  localStorage.setItem(TOKEN_KEY, t);
-}
 
 export function getActiveWorkspace(): string {
   if (typeof window === "undefined") return "";
@@ -199,49 +195,97 @@ export class ApiError extends Error {
   }
 }
 
+function cookie(name: string): string {
+  if (typeof document === "undefined") return "";
+  const encoded = `${encodeURIComponent(name)}=`;
+  const item = document.cookie.split("; ").find((part) => part.startsWith(encoded));
+  return item ? decodeURIComponent(item.slice(encoded.length)) : "";
+}
+
+async function requestJson<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  options: { bootstrapToken?: string; redirectOnUnauthorized?: boolean } = {},
+): Promise<T> {
+  let res: Response;
+  const mutating = method !== "GET" && method !== "HEAD";
+  try {
+    res = await fetch(path, {
+      method,
+      credentials: "same-origin",
+      headers: {
+        ...(options.bootstrapToken ? { Authorization: `Bearer ${options.bootstrapToken}` } : {}),
+        ...(getActiveWorkspace() ? { "X-Harbor-Workspace": getActiveWorkspace() } : {}),
+        ...(mutating && cookie("harbor_csrf") ? { "X-Harbor-CSRF": cookie("harbor_csrf") } : {}),
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (error) {
+    throw new ApiError(
+      `无法连接 harbor-server：${error instanceof Error ? error.message : error}`,
+      0,
+    );
+  }
+  if (res.status === 401 && options.redirectOnUnauthorized !== false) {
+    if (typeof window !== "undefined" && !location.pathname.startsWith("/login")) location.href = "/login";
+    throw new ApiError("登录已失效，请重新使用 Passkey 登录", 401);
+  }
+  if (!res.ok) {
+    let message = res.statusText;
+    try {
+      message = ((await res.json()) as { error?: string }).error ?? message;
+    } catch {}
+    throw new ApiError(message, res.status);
+  }
+  return res.json() as Promise<T>;
+}
+
 async function req<T>(
   method: string,
   path: string,
   body?: unknown,
 ): Promise<T> {
-  let res: Response;
-  try {
-    res = await fetch(path, {
-      method,
-      headers: {
-        Authorization: `Bearer ${getToken()}`,
-        ...(getActiveWorkspace()
-          ? { "X-Harbor-Workspace": getActiveWorkspace() }
-          : {}),
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-  } catch (e) {
-    throw new ApiError(
-      `无法连接 harbor-server：${e instanceof Error ? e.message : e}`,
-      0,
-    );
-  }
-  if (res.status === 401) {
-    // token 门：未授权一律引到 Settings 输 token
-    if (
-      typeof window !== "undefined" &&
-      !location.pathname.startsWith("/settings")
-    ) {
-      location.href = "/settings";
-    }
-    throw new ApiError("unauthorized（去 Settings 配置 token）", 401);
-  }
-  if (!res.ok) {
-    let msg = res.statusText;
-    try {
-      msg = ((await res.json()) as { error?: string }).error ?? msg;
-    } catch {}
-    throw new ApiError(msg, res.status);
-  }
-  return res.json() as Promise<T>;
+  return requestJson<T>(method, path, body);
 }
+
+export const bootstrapStatus = () => requestJson<{ required: boolean }>(
+  "GET", "/api/auth/bootstrap/status", undefined, { redirectOnUnauthorized: false },
+);
+export const beginBootstrap = (displayName: string, bootstrapToken: string) =>
+  requestJson<unknown>("POST", "/api/auth/bootstrap/options", { displayName }, {
+    bootstrapToken, redirectOnUnauthorized: false,
+  });
+export const finishBootstrap = (response: unknown, bootstrapToken: string, label?: string) =>
+  requestJson<{ account: Account; recoveryCodes: string[]; csrfToken: string }>(
+    "POST", "/api/auth/bootstrap/verify", { response, label }, {
+      bootstrapToken, redirectOnUnauthorized: false,
+    },
+  );
+export const beginLogin = () => requestJson<unknown>(
+  "POST", "/api/auth/login/options", {}, { redirectOnUnauthorized: false },
+);
+export const finishLogin = (response: unknown) => requestJson<{ account: Account; csrfToken: string }>(
+  "POST", "/api/auth/login/verify", { response }, { redirectOnUnauthorized: false },
+);
+export const beginInvitationRegistration = (token: string, displayName: string) =>
+  requestJson<unknown>(
+    "POST", "/api/auth/invitation/options", { token, displayName }, { redirectOnUnauthorized: false },
+  );
+export const finishInvitationRegistration = (response: unknown, label?: string) =>
+  requestJson<{
+    account: Account;
+    membership: WorkspaceMember;
+    personalWorkspace: HarborWorkspace;
+    recoveryCodes: string[];
+    csrfToken: string;
+  }>("POST", "/api/auth/invitation/verify", { response, label }, { redirectOnUnauthorized: false });
+export const recoverSession = (accountId: string, code: string) =>
+  requestJson<{ account: Account; csrfToken: string }>(
+    "POST", "/api/auth/recovery", { accountId, code }, { redirectOnUnauthorized: false },
+  );
+export const logout = () => req<{ ok: true }>("POST", "/api/auth/logout", {});
 
 // ── 域 API ──────────────────────────────────────────────
 
@@ -536,30 +580,36 @@ export const createConversationMessage = (
   );
 
 export const listMembers = () => req<WorkspaceMember[]>("GET", "/api/members");
-export const createMember = (body: {
-  name: string;
-  email?: string;
-  role?: WorkspaceRole;
-  externalProvider?: WorkspaceMember["externalProvider"];
-  externalId?: string;
-}) => req<WorkspaceMember>("POST", "/api/members", body);
 export const updateMember = (
   id: string,
   body: { role?: WorkspaceRole; status?: WorkspaceMember["status"] },
 ) =>
   req<WorkspaceMember>("PATCH", `/api/members/${encodeURIComponent(id)}`, body);
-export const listMemberTokens = () =>
-  req<WorkspaceApiToken[]>("GET", "/api/member-tokens");
-export const createMemberToken = (id: string, label?: string) =>
-  req<{ id: string; token: string }>(
-    "POST",
-    `/api/members/${encodeURIComponent(id)}/tokens`,
-    { label },
-  );
-export const revokeMemberToken = (id: string) =>
-  req<{ ok: boolean }>(
-    "DELETE",
-    `/api/member-tokens/${encodeURIComponent(id)}`,
+export const listInvitations = () => req<WorkspaceInvitation[]>("GET", "/api/invitations");
+export const createInvitation = (body: { email?: string; role: WorkspaceRole; expiresAt?: number }) =>
+  req<WorkspaceInvitation & { token: string }>("POST", "/api/invitations", body);
+export const acceptInvitation = (token: string) =>
+  req<WorkspaceMember>("POST", "/api/invitations/accept", { token });
+export const revokeInvitation = (id: string) =>
+  req<{ ok: boolean }>("DELETE", `/api/invitations/${encodeURIComponent(id)}`);
+
+export const listPersonalAccessTokens = () =>
+  req<PersonalAccessToken[]>("GET", "/api/accounts/me/pats");
+export const createPersonalAccessToken = (body: {
+  label?: string;
+  workspaceId?: string | null;
+  scopes?: PersonalAccessTokenScope[];
+  expiresAt?: number | null;
+}) => req<PersonalAccessToken & { token: string }>("POST", "/api/accounts/me/pats", body);
+export const revokePersonalAccessToken = (id: string) =>
+  req<{ ok: boolean }>("DELETE", `/api/accounts/me/pats/${encodeURIComponent(id)}`);
+
+export const listPasskeys = () => req<PasskeyCredential[]>("GET", "/api/accounts/me/passkeys");
+export const beginPasskeyRegistration = () =>
+  req<unknown>("POST", "/api/accounts/me/passkeys/options", {});
+export const finishPasskeyRegistration = (response: unknown, label?: string) =>
+  req<{ account: Account }>(
+    "POST", "/api/accounts/me/passkeys/verify", { response, label },
   );
 
 export const listLabels = () => req<IssueLabel[]>("GET", "/api/labels");
@@ -669,15 +719,15 @@ export const resetPromptBlock = (key: PromptBlockKey) =>
     `/api/settings/prompt-blocks/${encodeURIComponent(key)}`,
   );
 
-// ── SSE：run 事件流（EventSource 带不了 Authorization header → fetch 手解） ──
+// ── SSE：run 事件流（使用同源 HttpOnly Session Cookie） ──
 
 export async function* watchRun(
   runId: string,
   signal?: AbortSignal,
 ): AsyncGenerator<RunStreamFrame> {
   const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/events`, {
+    credentials: "same-origin",
     headers: {
-      Authorization: `Bearer ${getToken()}`,
       ...(getActiveWorkspace()
         ? { "X-Harbor-Workspace": getActiveWorkspace() }
         : {}),

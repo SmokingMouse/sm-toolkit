@@ -7,6 +7,7 @@
 import { Database } from "bun:sqlite";
 import { chmodSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { applyIdentityNormalization, inspectIdentityNormalization } from "./identity-normalization.js";
 
 const APPLICATION_MUTATION_TABLES = [
   "devices",
@@ -47,6 +48,14 @@ const APPLICATION_MUTATION_TABLES = [
   "domain_events",
   "workspace_api_tokens",
   "lark_message_links",
+  "accounts",
+  "auth_identities",
+  "passkey_credentials",
+  "account_recovery_codes",
+  "account_sessions",
+  "webauthn_challenges",
+  "personal_access_tokens",
+  "workspace_invitations",
 ] as const;
 
 function maintenanceLinearizationSql(tables: readonly string[]): string {
@@ -56,6 +65,11 @@ function maintenanceLinearizationSql(tables: readonly string[]): string {
     WHEN EXISTS (SELECT 1 FROM deployment_maintenance WHERE lock_id = 1)
     BEGIN SELECT RAISE(ABORT, 'deployment maintenance'); END;
   `)).join("\n");
+}
+
+function dropMaintenanceLinearization(db: Database, tables: readonly string[]): void {
+  db.exec(tables.flatMap((table) => (['insert', 'update', 'delete'] as const)
+    .map((operation) => `DROP TRIGGER IF EXISTS maintenance_block_${operation}_${table};`)).join("\n"));
 }
 
 /** Exported for migration-lineage regression fixtures; application code should use openDb. */
@@ -1681,6 +1695,108 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX IF NOT EXISTS idx_domain_events_workspace ON domain_events(workspace_id, created_at, id);
   `,
+  // v23 —— P6.1 identity normalization：全局 Account + Workspace Membership + browser/API auth 基座。
+  `
+  CREATE TABLE accounts (
+    id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    primary_email TEXT,
+    primary_email_normalized TEXT UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('active','suspended','deleted')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted_at INTEGER
+  );
+  CREATE TABLE auth_identities (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    provider TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    email TEXT,
+    verified_at INTEGER,
+    created_at INTEGER NOT NULL,
+    UNIQUE(provider, subject)
+  );
+  CREATE INDEX idx_auth_identities_account ON auth_identities(account_id, created_at);
+  CREATE TABLE passkey_credentials (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    credential_id TEXT NOT NULL UNIQUE,
+    public_key BLOB NOT NULL,
+    sign_count INTEGER NOT NULL DEFAULT 0,
+    transports TEXT NOT NULL DEFAULT '[]',
+    label TEXT,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER,
+    revoked_at INTEGER
+  );
+  CREATE INDEX idx_passkeys_account ON passkey_credentials(account_id, revoked_at);
+  CREATE TABLE account_recovery_codes (
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    code_hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    used_at INTEGER,
+    PRIMARY KEY(account_id, code_hash)
+  );
+  CREATE TABLE account_sessions (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    token_hash TEXT NOT NULL UNIQUE,
+    csrf_token_hash TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    last_used_at INTEGER,
+    created_at INTEGER NOT NULL,
+    revoked_at INTEGER
+  );
+  CREATE INDEX idx_account_sessions_account ON account_sessions(account_id, revoked_at, expires_at);
+  CREATE TABLE webauthn_challenges (
+    id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    flow TEXT NOT NULL CHECK (flow IN ('bootstrap','register','invite','authenticate')),
+    account_id TEXT REFERENCES accounts(id),
+    invitation_id TEXT REFERENCES workspace_invitations(id),
+    display_name TEXT,
+    challenge TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    consumed_at INTEGER
+  );
+  CREATE INDEX idx_webauthn_challenges_expiry ON webauthn_challenges(expires_at, consumed_at);
+  CREATE TABLE personal_access_tokens (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    workspace_id TEXT REFERENCES workspaces(id),
+    label TEXT NOT NULL,
+    prefix TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    scopes TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    last_used_at INTEGER,
+    revoked_at INTEGER
+  );
+  CREATE INDEX idx_personal_access_tokens_account ON personal_access_tokens(account_id, revoked_at, expires_at);
+  CREATE TABLE workspace_invitations (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    email TEXT,
+    role TEXT NOT NULL CHECK (role IN ('owner','admin','member')),
+    token_hash TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('pending','accepted','revoked','expired')),
+    invited_by_account_id TEXT NOT NULL REFERENCES accounts(id),
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    accepted_at INTEGER
+  );
+  CREATE INDEX idx_workspace_invitations_workspace ON workspace_invitations(workspace_id, status, created_at);
+
+  ALTER TABLE workspace_members ADD COLUMN account_id TEXT REFERENCES accounts(id);
+  CREATE UNIQUE INDEX idx_workspace_members_account
+    ON workspace_members(workspace_id, account_id) WHERE account_id IS NOT NULL;
+  ALTER TABLE workspaces ADD COLUMN kind TEXT NOT NULL DEFAULT 'team'
+    CHECK (kind IN ('personal','team'));
+  ALTER TABLE workspaces ADD COLUMN created_by_account_id TEXT REFERENCES accounts(id);
+  `,
 ];
 
 function hasTable(db: Database, table: string): boolean {
@@ -1735,7 +1851,10 @@ function normalizeLegacyRepositoryNames(db: Database): void {
   }
 }
 
-export function openDb(path: string): Database {
+function openDbAtVersion(path: string, targetVersion: number): Database {
+  if (!Number.isInteger(targetVersion) || targetVersion < 1 || targetVersion > MIGRATIONS.length) {
+    throw new Error(`无效 SQLite target schema v${targetVersion}`);
+  }
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new Database(path, { create: true });
   if (path !== ":memory:") chmodSync(path, 0o600);
@@ -1744,6 +1863,10 @@ export function openDb(path: string): Database {
 
   const row = db.query<{ user_version: number }, []>("PRAGMA user_version").get();
   let version = row?.user_version ?? 0;
+  if (version > targetVersion) {
+    db.close();
+    throw new Error(`SQLite schema v${version} 新于目标 v${targetVersion}；拒绝隐式降级`);
+  }
 
   // codex/harbor-self-hosting 曾把 GitHub migrations 占用了 v12/v13。按结构识别该 lineage，
   // 先补跑 canonical Mew parity v12/v13，再从 v14 汇合；不能只信 user_version。
@@ -1761,7 +1884,7 @@ export function openDb(path: string): Database {
     version = 13;
   }
 
-  while (version < MIGRATIONS.length) {
+  while (version < targetVersion) {
     // deployment phase 3（当前 MIGRATIONS[18]）收敛 host-global gate 前拒绝多重 legacy gate。
     if (version === 18) {
       const active = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM deployment_maintenance").get()?.count ?? 0;
@@ -1771,6 +1894,15 @@ export function openDb(path: string): Database {
       }
     }
     const sql = MIGRATIONS[version]!;
+    const identityReport = version === 22 ? inspectIdentityNormalization(db) : null;
+    if (identityReport && !identityReport.migratable) {
+      const blockers = identityReport.issues
+        .filter((entry) => entry.severity === "error")
+        .map((entry) => `${entry.code}[${entry.refs.join(",")}]`)
+        .join("; ");
+      db.close();
+      throw new Error(`schema v23 identity normalization preflight 失败：${blockers}`);
+    }
     const rebuildsReferencedTables =
       version === 8 ||
       version === 9 ||
@@ -1787,7 +1919,14 @@ export function openDb(path: string): Database {
     try {
       db.transaction(() => {
         if (version === 14) ensureGitHubDeliveryColumns(db);
+        // v21 maintenance triggers 正确阻止应用写；migration 自身在同一 SQLite transaction
+        // 内暂时移除两个待 backfill 表的 trigger，提交前原样重装。其他连接在 commit 前看不到该变化。
+        if (version === 22) dropMaintenanceLinearization(db, ["workspace_members", "workspaces"]);
         if (sql.trim()) db.exec(sql);
+        if (version === 22) {
+          applyIdentityNormalization(db, identityReport!);
+          installMaintenanceLinearization(db);
+        }
         if (version === 20) installMaintenanceLinearization(db);
         db.exec(`PRAGMA user_version = ${version + 1}`);
       })();
@@ -1804,6 +1943,18 @@ export function openDb(path: string): Database {
     throw new Error(`SQLite migration foreign_key_check 失败（${foreignKeyFailures.length} rows）`);
   }
   return db;
+}
+
+export function openDb(path: string): Database {
+  return openDbAtVersion(path, LATEST_SCHEMA_VERSION);
+}
+
+/**
+ * 只给 migration regression fixture 固定历史输入使用。应用代码必须调用 openDb，
+ * 否则会把旧 schema 当成可运行版本。限定 v22，避免这个测试闸演变成通用降级入口。
+ */
+export function openV22MigrationFixtureDb(path = ":memory:"): Database {
+  return openDbAtVersion(path, 22);
 }
 
 function installMaintenanceLinearization(db: Database): void {

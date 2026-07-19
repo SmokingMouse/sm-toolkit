@@ -45,6 +45,7 @@ import { DEFAULT_PORT } from "./protocol.js";
 
 interface HarborFileConfig {
   server_url?: string;
+  public_url?: string;
   token?: string;
   device_name?: string;
   workspace?: string;
@@ -89,6 +90,36 @@ export function serverUrl(): string {
   return (
     process.env.HARBOR_SERVER_URL ?? fileConfig().server_url ?? `http://127.0.0.1:${DEFAULT_PORT}`
   );
+}
+
+export interface HarborPublicAuthConfig {
+  origin: string;
+  rpId: string;
+  rpName: string;
+  secureCookie: boolean;
+}
+
+/** WebAuthn/Origin 真相只来自管理员配置，绝不相信请求 Host header。 */
+export function parsePublicAuthConfig(raw: string | undefined): HarborPublicAuthConfig {
+  if (!raw) throw new Error("HARBOR_PUBLIC_URL 未设置（env 或 ~/.harbor.yaml public_url）——Passkey RP/Origin 禁止从请求 Host 推断");
+  const url = new URL(raw);
+  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  if (url.protocol !== "https:" && !(local && url.protocol === "http:")) {
+    throw new Error("HARBOR_PUBLIC_URL 必须是 https；仅 localhost 开发允许 http");
+  }
+  if (url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
+    throw new Error("HARBOR_PUBLIC_URL 只能包含 origin，不允许凭证、path、query 或 fragment");
+  }
+  return {
+    origin: url.origin,
+    rpId: url.hostname,
+    rpName: "Harbor",
+    secureCookie: url.protocol === "https:",
+  };
+}
+
+export function publicAuthConfig(): HarborPublicAuthConfig {
+  return parsePublicAuthConfig(process.env.HARBOR_PUBLIC_URL ?? fileConfig().public_url);
 }
 
 /** serverUrl 的 ws 形态（daemon 连 /ws 用） */

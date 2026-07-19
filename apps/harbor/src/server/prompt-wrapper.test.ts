@@ -5,7 +5,7 @@ import type {
   PromptEventBlockKey,
   Run,
 } from "../protocol.js";
-import { openDb } from "./db.js";
+import { LATEST_SCHEMA_VERSION, openDb } from "./db.js";
 import {
   getPromptBlockConfig,
   inferPromptEvent,
@@ -103,7 +103,7 @@ describe("prompt blocks", () => {
     const version = db
       .query<{ user_version: number }, []>("PRAGMA user_version")
       .get()?.user_version;
-    expect(version).toBe(22);
+    expect(version).toBe(LATEST_SCHEMA_VERSION);
     const store = new HarborStore(db);
     const input = fixtures();
     const rendered = renderRunPrompt(store, input);

@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { chmodSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openDb, openDeploymentDb } from "./db.js";
+import { LATEST_SCHEMA_VERSION, openDb, openDeploymentDb, openV22MigrationFixtureDb } from "./db.js";
 import { HarborStore } from "./store.js";
 import { reconcileCompletedDeployments } from "./deployment-reconciler.js";
 import {
@@ -39,8 +39,8 @@ class FakeScmProvider implements DeliveryProvider {
   }
 }
 
-function harness(path = ":memory:") {
-  const db = openDb(path);
+function harness(path = ":memory:", schema: "latest" | "v22" = "latest") {
+  const db = schema === "v22" ? openV22MigrationFixtureDb(path) : openDb(path);
   const store = new HarborStore(db);
   const device = store.upsertDevice("worker", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
   const repository = store.createRepository(
@@ -111,14 +111,14 @@ async function mergedDelivery() {
 }
 
 describe("durable automatic deployment queue", () => {
-  test("a v20-compatible worker remains able to health-finalize and rollback after the server migrates application schema to v22", async () => {
+  test("a v20-compatible worker remains able to health-finalize and rollback after the server migrates application schema", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "harbor-worker-v20-v21-")));
     const path = join(dir, "harbor.db");
     const backupPath = join(dir, "state", "database.sqlite");
     let workerDb: Database | null = null;
     let serverDb: Database | null = null;
     try {
-      const h = harness(path);
+      const h = harness(path, "v22");
       let delivery = h.service.create(h.issue, {
         provider: "github", changeUrl: "https://github.com/acme/harbor/pull/compat",
         deploymentRequired: true, deploymentTargetId: h.target.id,
@@ -145,7 +145,7 @@ describe("durable automatic deployment queue", () => {
       await new HostSqliteBackup().backup(path, backupPath);
 
       serverDb = openDb(path); // new server installs v22 application mutation guards.
-      expect(serverDb.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(22);
+      expect(serverDb.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(LATEST_SCHEMA_VERSION);
       const rollbackGate = workerStore.updateDeploymentMaintenance(
         claimed.id, fenceOf(claimed), "rolling_back", BASELINE, BASELINE_FINGERPRINT, 23,
       );

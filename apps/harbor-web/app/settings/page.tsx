@@ -1,30 +1,34 @@
 "use client";
 
+import { startRegistration } from "@simplewebauthn/browser";
 import { useEffect, useMemo, useState } from "react";
 import {
+  beginPasskeyRegistration,
+  createInvitation,
   createLabel,
   createLarkBinding,
-  createMember,
-  createMemberToken,
+  createPersonalAccessToken,
   currentActor,
   deleteLarkBinding,
+  finishPasskeyRegistration,
   getActiveWorkspace,
-  getToken,
   health,
   listAgents,
+  listInvitations,
   listLabels,
   listLarkBindings,
   listMembers,
-  listMemberTokens,
+  listPasskeys,
+  listPersonalAccessTokens,
   listRepositories,
   listScmEvents,
   listWorkspaces,
   promptBlockSettings,
   resetPromptBlock,
-  revokeMemberToken,
+  revokeInvitation,
+  revokePersonalAccessToken,
   savePromptBlock,
   setActiveWorkspace,
-  setToken,
   updateLarkBinding,
   updateMember,
   updateRepository,
@@ -34,12 +38,14 @@ import {
   type HarborWorkspace,
   type IssueLabel,
   type LarkWorkspaceBinding,
+  type PasskeyCredential,
+  type PersonalAccessToken,
   type PromptBlockConfig,
   type PromptBlockKey,
   type PromptSource,
   type RepositoryWithMounts,
   type ScmEvent,
-  type WorkspaceApiToken,
+  type WorkspaceInvitation,
   type WorkspaceMember,
   type WorkspaceRole,
 } from "../../lib/api";
@@ -54,10 +60,11 @@ import {
   PageHeader,
 } from "../../components/ui";
 
-type Tab = "general" | "members" | "integrations" | "prompts";
+type Tab = "general" | "account" | "members" | "integrations" | "prompts";
 const TABS: { key: Tab; label: string; hint: string }[] = [
-  { key: "general", label: "General", hint: "Workspace 与浏览器连接" },
-  { key: "members", label: "Members", hint: "角色、状态与访问 token" },
+  { key: "general", label: "General", hint: "Workspace 基本信息" },
+  { key: "account", label: "Account", hint: "Passkeys 与 PAT" },
+  { key: "members", label: "Members", hint: "角色、状态与邀请" },
   {
     key: "integrations",
     label: "Integrations",
@@ -93,6 +100,7 @@ export default function SettingsPage() {
         ))}
       </div>
       {tab === "general" && <GeneralPanel />}
+      {tab === "account" && <AccountPanel />}
       {tab === "members" && <MembersPanel />}
       {tab === "integrations" && <IntegrationsPanel />}
       {tab === "prompts" && <PromptsPanel />}
@@ -102,7 +110,6 @@ export default function SettingsPage() {
 
 function GeneralPanel() {
   const toast = useToast();
-  const [tok, setTok] = useState("");
   const [origin, setOrigin] = useState("");
   const [connected, setConnected] = useState<boolean | null>(null);
   const [workspaces, setWorkspaces] = useState<HarborWorkspace[]>([]);
@@ -113,9 +120,7 @@ function GeneralPanel() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    setTok(getToken());
     setOrigin(location.origin);
-    if (!getToken()) return;
     Promise.all([listWorkspaces(), currentActor(), health()])
       .then(([spaces, me]) => {
         setWorkspaces(spaces);
@@ -135,11 +140,6 @@ function GeneralPanel() {
     const workspace = workspaces.find((item) => item.id === id);
     setName(workspace?.name ?? "");
     setDescription(workspace?.description ?? "");
-  };
-  const saveConnection = () => {
-    setToken(tok.trim());
-    toast("Token 已保存，仅存于浏览器 localStorage", "success");
-    setTimeout(() => location.reload(), 500);
   };
   const activateWorkspace = () => {
     setActiveWorkspace(workspaceId);
@@ -185,20 +185,16 @@ function GeneralPanel() {
           </div>
         </div>
         <div className="p-5">
-          <Field label="HARBOR_TOKEN">
-            <input
-              type="password"
-              className={inputCls}
-              value={tok}
-              onChange={(event) => setTok(event.target.value)}
-            />
-          </Field>
-          <p className="mt-2 text-[11px] leading-4 text-dim">
-            Owner token 或 Workspace member token。只保存在当前浏览器。
+          <div className="text-[10px] font-bold uppercase tracking-[0.15em] text-dim">Current principal</div>
+          <div className="mt-2 text-sm font-semibold">
+            {actor?.kind === "account" ? actor.account.displayName : actor?.kind === "system" ? "System break-glass" : "Loading…"}
+          </div>
+          <div className="mt-1 break-all font-mono text-[10px] text-dim">
+            {actor?.kind === "account" ? actor.account.id : "HARBOR_TOKEN compatibility gate"}
+          </div>
+          <p className="mt-4 border-t border-line pt-4 text-[11px] leading-5 text-dim">
+            Browser access uses an HttpOnly Session cookie. Harbor 不再把长期凭证写入 localStorage。
           </p>
-          <button className={`${btnPrimary} mt-5`} onClick={saveConnection}>
-            保存 Token
-          </button>
         </div>
       </section>
       <section className="surface-shadow rounded-2xl border border-line bg-panel p-6 max-sm:p-4">
@@ -208,7 +204,7 @@ function GeneralPanel() {
           description="Workspace 隔离 Agent、Skill、Issue、Automation、Integration 与成员权限。"
         />
         {!workspaces.length ? (
-          <Empty text="保存可用 Token 后加载 Workspace" />
+          <Empty text="当前 Account 没有 active Workspace Membership" />
         ) : (
           <>
             <div className="grid gap-x-5 md:grid-cols-2">
@@ -228,8 +224,10 @@ function GeneralPanel() {
               <Field label="Current actor">
                 <div className={`${inputCls} flex items-center`}>
                   {actor?.kind === "system"
-                    ? "Server owner token"
-                    : `${actor?.member.name} · ${actor?.member.role}`}
+                    ? "System break-glass"
+                    : actor?.kind === "account"
+                      ? `${actor.account.displayName} · ${actor.credential}`
+                      : "Loading…"}
                 </div>
               </Field>
               <Field label="Name">
@@ -267,51 +265,146 @@ function GeneralPanel() {
   );
 }
 
-function MembersPanel() {
+type RegistrationOptions = Parameters<typeof startRegistration>[0]["optionsJSON"];
+
+function AccountPanel() {
   const toast = useToast();
-  const [members, setMembers] = useState<WorkspaceMember[]>([]);
-  const [tokens, setTokens] = useState<WorkspaceApiToken[]>([]);
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [role, setRole] = useState<WorkspaceRole>("member");
+  const [actor, setActor] = useState<CurrentActor | null>(null);
+  const [passkeys, setPasskeys] = useState<PasskeyCredential[]>([]);
+  const [tokens, setTokens] = useState<PersonalAccessToken[]>([]);
+  const [workspaces, setWorkspaces] = useState<HarborWorkspace[]>([]);
+  const [passkeyLabel, setPasskeyLabel] = useState("");
+  const [tokenLabel, setTokenLabel] = useState("CLI access");
+  const [tokenWorkspace, setTokenWorkspace] = useState("");
   const [rawToken, setRawToken] = useState("");
   const [busy, setBusy] = useState(false);
+
   const reload = async () => {
-    const [memberResult, tokenResult] = await Promise.allSettled([
-      listMembers(),
-      listMemberTokens(),
+    const [me, keys, pats, spaces] = await Promise.all([
+      currentActor(), listPasskeys(), listPersonalAccessTokens(), listWorkspaces(),
     ]);
-    if (memberResult.status === "fulfilled") setMembers(memberResult.value);
-    else
-      toast(
-        memberResult.reason instanceof Error
-          ? memberResult.reason.message
-          : String(memberResult.reason),
-        "error",
-      );
-    if (tokenResult.status === "fulfilled") setTokens(tokenResult.value);
+    setActor(me);
+    setPasskeys(keys);
+    setTokens(pats);
+    setWorkspaces(spaces);
+    setTokenWorkspace((current) => current || getActiveWorkspace() || spaces[0]?.id || "");
   };
-  useEffect(() => {
-    void reload();
-  }, []);
-  const add = async () => {
+
+  useEffect(() => { void reload().catch((error) => toast(error instanceof Error ? error.message : String(error), "error")); }, []);
+
+  const addPasskey = async () => {
     setBusy(true);
     try {
-      await createMember({
-        name: name.trim(),
-        email: email.trim() || undefined,
-        role,
-      });
-      setName("");
-      setEmail("");
+      const options = await beginPasskeyRegistration() as RegistrationOptions;
+      const response = await startRegistration({ optionsJSON: options });
+      await finishPasskeyRegistration(response, passkeyLabel.trim() || undefined);
+      setPasskeyLabel("");
       await reload();
-      toast("Member 已添加", "success");
+      toast("Passkey 已绑定", "success");
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setBusy(false);
     }
   };
+
+  const issuePat = async () => {
+    setBusy(true);
+    try {
+      const created = await createPersonalAccessToken({
+        label: tokenLabel.trim() || "CLI access",
+        workspaceId: tokenWorkspace || null,
+        scopes: ["workspace:read", "workspace:write", "agent:run"],
+      });
+      setRawToken(created.token);
+      await reload();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="grid items-start gap-5 xl:grid-cols-[1fr_390px]">
+      <section className="surface-shadow overflow-hidden rounded-2xl border border-line bg-panel">
+        <div className="border-b border-line p-5">
+          <SectionTitle eyebrow="WebAuthn" title="Passkeys" description="Discoverable credential；RP ID 与 allowed origin 由 HARBOR_PUBLIC_URL 固定。" />
+        </div>
+        <div className="divide-y divide-line">
+          {passkeys.filter((key) => !key.revokedAt).map((key) => (
+            <div key={key.id} className="flex items-center gap-4 px-5 py-4">
+              <span className="grid h-10 w-10 place-items-center rounded-xl bg-accent-soft text-lg text-accent">⌁</span>
+              <div className="min-w-0 flex-1"><div className="truncate text-sm font-semibold">{key.label || "Passkey"}</div><div className="mt-1 text-[10px] text-dim">Added {new Date(key.createdAt).toLocaleDateString()} · {key.lastUsedAt ? `used ${new Date(key.lastUsedAt).toLocaleDateString()}` : "not used yet"}</div></div>
+              <span className="rounded-full bg-accent-soft px-2 py-1 text-[9px] font-bold uppercase text-accent">active</span>
+            </div>
+          ))}
+          {!passkeys.some((key) => !key.revokedAt) && <Empty text="No active Passkey" />}
+        </div>
+        <div className="flex gap-2 border-t border-line bg-bg/50 p-4">
+          <input className={`${inputCls} min-w-0 flex-1`} value={passkeyLabel} onChange={(event) => setPasskeyLabel(event.target.value)} placeholder="例如 MacBook Touch ID" />
+          <button className={btnPrimary} disabled={busy} onClick={() => void addPasskey()}>{busy ? "Waiting…" : "Add Passkey"}</button>
+        </div>
+      </section>
+
+      <div className="space-y-5">
+        <section className="surface-shadow rounded-2xl border border-line bg-panel p-5">
+          <SectionTitle eyebrow="Account identity" title={actor?.kind === "account" ? actor.account.displayName : "Account"} description="Recovery 时需要 Account ID；它不是 secret。" />
+          <code className="mt-4 block break-all rounded-xl border border-line bg-bg px-3 py-2 text-[11px]">{actor?.kind === "account" ? actor.account.id : "—"}</code>
+        </section>
+        <section className="surface-shadow rounded-2xl border border-line bg-panel p-5">
+          <SectionTitle eyebrow="Personal access" title="PATs" description="由当前 Account 自己签发；raw token 只展示一次。" />
+          {rawToken && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3"><div className="text-[10px] font-bold uppercase text-amber-700">Copy now</div><code className="mt-2 block break-all text-xs">{rawToken}</code><button className={`${btnGhost} mt-3`} onClick={() => { void navigator.clipboard.writeText(rawToken); toast("PAT 已复制", "success"); }}>Copy PAT</button></div>}
+          <div className="mt-4"><Field label="Label"><input className={inputCls} value={tokenLabel} onChange={(event) => setTokenLabel(event.target.value)} /></Field><Field label="Workspace binding"><select className={inputCls} value={tokenWorkspace} onChange={(event) => setTokenWorkspace(event.target.value)}>{workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></Field><button className={`${btnPrimary} w-full`} disabled={busy || !tokenWorkspace} onClick={() => void issuePat()}>Create scoped PAT</button></div>
+          <div className="mt-4 space-y-2">{tokens.filter((token) => !token.revokedAt).map((token) => <div key={token.id} className="flex items-center justify-between gap-3 rounded-xl border border-line px-3 py-2"><div className="min-w-0"><div className="truncate text-xs font-semibold">{token.label}</div><div className="mt-1 text-[9px] text-dim">{token.prefix} · {token.scopes.join(", ")}</div></div><button className="text-[10px] font-semibold text-canceled" onClick={async () => { await revokePersonalAccessToken(token.id); await reload(); }}>Revoke</button></div>)}</div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function MembersPanel() {
+  const toast = useToast();
+  const [members, setMembers] = useState<WorkspaceMember[]>([]);
+  const [invitations, setInvitations] = useState<WorkspaceInvitation[]>([]);
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<WorkspaceRole>("member");
+  const [invitationLink, setInvitationLink] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const reload = async () => {
+    const [nextMembers, nextInvitations] = await Promise.all([
+      listMembers(),
+      listInvitations(),
+    ]);
+    setMembers(nextMembers);
+    setInvitations(nextInvitations);
+  };
+
+  useEffect(() => {
+    void reload().catch((error) =>
+      toast(error instanceof Error ? error.message : String(error), "error"),
+    );
+  }, []);
+
+  const invite = async () => {
+    setBusy(true);
+    try {
+      const created = await createInvitation({
+        email: email.trim() || undefined,
+        role,
+      });
+      setInvitationLink(`${location.origin}/login?invite=${encodeURIComponent(created.token)}`);
+      setEmail("");
+      await reload();
+      toast("Invitation 已创建；link 只展示一次", "success");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const patchMember = async (
     member: WorkspaceMember,
     patch: { role?: WorkspaceRole; status?: WorkspaceMember["status"] },
@@ -323,182 +416,104 @@ function MembersPanel() {
       toast(error instanceof Error ? error.message : String(error), "error");
     }
   };
-  const issueToken = async (member: WorkspaceMember) => {
-    try {
-      const created = await createMemberToken(
-        member.id,
-        `${member.name} access`,
-      );
-      setRawToken(created.token);
-      await reload();
-    } catch (error) {
-      toast(error instanceof Error ? error.message : String(error), "error");
-    }
-  };
+
   return (
-    <div className="grid items-start gap-5 xl:grid-cols-[1fr_360px]">
+    <div className="grid items-start gap-5 xl:grid-cols-[1fr_380px]">
       <section className="surface-shadow overflow-hidden rounded-2xl border border-line bg-panel">
         <div className="border-b border-line p-5">
           <SectionTitle
-            eyebrow="RBAC"
-            title="Workspace members"
-            description="Owner 管所有边界；Admin 配资源；Member 创建 Issue、Chat 和消息。"
+            eyebrow="Workspace RBAC"
+            title="Memberships"
+            description="Membership 只连接 Account 与当前 Workspace；历史资源不属于个人。"
           />
         </div>
         <div className="divide-y divide-line">
           {members.map((member) => (
             <div
               key={member.id}
-              className="grid items-center gap-3 px-5 py-4 md:grid-cols-[minmax(0,1fr)_130px_130px_auto]"
+              className="grid items-center gap-3 px-5 py-4 md:grid-cols-[minmax(0,1fr)_130px_130px]"
             >
               <div className="min-w-0">
-                <div className="truncate text-sm font-semibold">
-                  {member.name}
-                </div>
+                <div className="truncate text-sm font-semibold">{member.name}</div>
                 <div className="mt-1 truncate text-[10px] text-dim">
-                  {member.email ||
-                    `${member.externalProvider}:${member.externalId ?? "local"}`}
+                  {member.email || member.accountId}
                 </div>
               </div>
               <select
                 className={`${inputCls} py-2 text-xs`}
                 value={member.role}
                 onChange={(event) =>
-                  void patchMember(member, {
-                    role: event.target.value as WorkspaceRole,
-                  })
+                  void patchMember(member, { role: event.target.value as WorkspaceRole })
                 }
               >
-                {["owner", "admin", "member"].map((item) => (
-                  <option key={item}>{item}</option>
-                ))}
+                {["owner", "admin", "member"].map((item) => <option key={item}>{item}</option>)}
               </select>
               <select
                 className={`${inputCls} py-2 text-xs`}
                 value={member.status}
                 onChange={(event) =>
-                  void patchMember(member, {
-                    status: event.target.value as WorkspaceMember["status"],
-                  })
+                  void patchMember(member, { status: event.target.value as WorkspaceMember["status"] })
                 }
               >
-                {["active", "invited", "disabled"].map((item) => (
-                  <option key={item}>{item}</option>
-                ))}
+                {["active", "disabled"].map((item) => <option key={item}>{item}</option>)}
               </select>
-              <button
-                className={btnGhost}
-                disabled={member.status !== "active"}
-                onClick={() => void issueToken(member)}
-              >
-                New token
-              </button>
             </div>
           ))}
+          {!members.length && <Empty text="No Memberships in this Workspace" />}
         </div>
       </section>
+
       <div className="space-y-5">
         <section className="surface-shadow rounded-2xl border border-line bg-panel p-5">
           <SectionTitle
-            eyebrow="Invite"
-            title="Add member"
-            description="本地部署不伪装企业通讯录；可绑定 Feishu/Codebase external id。"
+            eyebrow="Invite-only"
+            title="Create invitation"
+            description="邀请不会提前创建 Account；接收者登录后原子创建 Membership。"
           />
           <div className="mt-5">
-            <Field label="Name">
+            <Field label="Email（optional binding）">
               <input
-                className={inputCls}
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-              />
-            </Field>
-            <Field label="Email（optional）">
-              <input
+                type="email"
                 className={inputCls}
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
+                placeholder="teammate@example.com"
               />
             </Field>
             <Field label="Initial role">
-              <select
-                className={inputCls}
-                value={role}
-                onChange={(event) =>
-                  setRole(event.target.value as WorkspaceRole)
-                }
-              >
-                {["member", "admin", "owner"].map((item) => (
-                  <option key={item}>{item}</option>
-                ))}
+              <select className={inputCls} value={role} onChange={(event) => setRole(event.target.value as WorkspaceRole)}>
+                {["member", "admin", "owner"].map((item) => <option key={item}>{item}</option>)}
               </select>
             </Field>
-            <button
-              className={`${btnPrimary} w-full`}
-              disabled={busy || !name.trim()}
-              onClick={add}
-            >
-              Add member
+            <button className={`${btnPrimary} w-full`} disabled={busy} onClick={() => void invite()}>
+              {busy ? "Creating…" : "Create invitation link"}
             </button>
           </div>
-        </section>
-        <section className="surface-shadow rounded-2xl border border-line bg-panel p-5">
-          <SectionTitle
-            eyebrow="Access"
-            title="API tokens"
-            description="Token 只在创建时显示一次，可随时 revoke。"
-          />
-          {rawToken && (
+          {invitationLink && (
             <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3">
-              <div className="text-[10px] font-bold uppercase text-amber-700">
-                Copy now
-              </div>
-              <code className="mt-2 block break-all text-xs">{rawToken}</code>
-              <button
-                className={`${btnGhost} mt-3`}
-                onClick={() => {
-                  void navigator.clipboard.writeText(rawToken);
-                  toast("Token 已复制", "success");
-                }}
-              >
-                Copy token
-              </button>
+              <div className="text-[10px] font-bold uppercase text-amber-700">Copy now</div>
+              <code className="mt-2 block break-all text-[10px]">{invitationLink}</code>
+              <button className={`${btnGhost} mt-3`} onClick={() => { void navigator.clipboard.writeText(invitationLink); toast("Invitation link 已复制", "success"); }}>Copy link</button>
             </div>
           )}
+        </section>
+
+        <section className="surface-shadow rounded-2xl border border-line bg-panel p-5">
+          <SectionTitle eyebrow="Pending" title="Invitations" description="过期、接受或撤销后 token 都不能再次使用。" />
           <div className="mt-4 space-y-2">
-            {tokens
-              .filter((token) => !token.revokedAt)
-              .map((token) => (
-                <div
-                  key={token.id}
-                  className="flex items-center justify-between gap-3 rounded-xl border border-line px-3 py-2"
-                >
-                  <div className="min-w-0">
-                    <div className="truncate text-xs font-semibold">
-                      {token.label}
-                    </div>
-                    <div className="mt-1 text-[9px] text-dim">
-                      {members.find((member) => member.id === token.memberId)
-                        ?.name ?? token.memberId}
-                    </div>
-                  </div>
-                  <button
-                    className="text-[10px] font-semibold text-canceled"
-                    onClick={async () => {
-                      await revokeMemberToken(token.id);
-                      await reload();
-                    }}
-                  >
-                    Revoke
-                  </button>
-                </div>
-              ))}
+            {invitations.filter((invitation) => invitation.status === "pending").map((invitation) => (
+              <div key={invitation.id} className="flex items-center justify-between gap-3 rounded-xl border border-line px-3 py-2">
+                <div className="min-w-0"><div className="truncate text-xs font-semibold">{invitation.email || "Any authenticated Account"}</div><div className="mt-1 text-[9px] text-dim">{invitation.role} · expires {new Date(invitation.expiresAt).toLocaleDateString()}</div></div>
+                <button className="text-[10px] font-semibold text-canceled" onClick={async () => { await revokeInvitation(invitation.id); await reload(); }}>Revoke</button>
+              </div>
+            ))}
+            {!invitations.some((invitation) => invitation.status === "pending") && <Empty text="No pending invitations" />}
           </div>
         </section>
       </div>
     </div>
   );
 }
-
 function IntegrationsPanel() {
   const toast = useToast();
   const [repositories, setRepositories] = useState<RepositoryWithMounts[]>([]);

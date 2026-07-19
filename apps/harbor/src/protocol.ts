@@ -87,12 +87,14 @@ export interface Device {
   createdAt: number;
 }
 
-/** Harbor 的一级逻辑作用域；不是租户，也不是代码目录。 */
+/** Harbor 的资源、协作与授权边界；不是 Repository、目录或 Device。 */
 export interface HarborWorkspace {
   id: string;
   name: string;
   slug: string;
   description: string | null;
+  kind: "personal" | "team";
+  createdByAccountId: string;
   createdAt: number;
   archivedAt: number | null;
 }
@@ -429,17 +431,88 @@ export interface DeliveryEvent {
 
 export type WorkspaceRole = "owner" | "admin" | "member";
 
+export type AccountStatus = "active" | "suspended" | "deleted";
+
+export interface Account {
+  id: string;
+  displayName: string;
+  primaryEmail: string | null;
+  status: AccountStatus;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AuthIdentity {
+  id: string;
+  accountId: string;
+  provider: string;
+  subject: string;
+  email: string | null;
+  verifiedAt: number | null;
+  createdAt: number;
+}
+
+/** Web/API 的安全 Passkey projection；credential id 与 public key 不离开 server。 */
+export interface PasskeyCredential {
+  id: string;
+  accountId: string;
+  label: string | null;
+  createdAt: number;
+  lastUsedAt: number | null;
+  revokedAt: number | null;
+}
+
 export interface WorkspaceMember {
   id: string;
   workspaceId: string;
+  accountId: string;
   name: string;
   email: string | null;
   externalProvider: "local" | "feishu" | "codebase";
   externalId: string | null;
   role: WorkspaceRole;
-  status: "active" | "invited" | "disabled";
+  status: "active" | "disabled";
   createdAt: number;
 }
+
+export interface WorkspaceInvitation {
+  id: string;
+  workspaceId: string;
+  email: string | null;
+  role: WorkspaceRole;
+  status: "pending" | "accepted" | "revoked" | "expired";
+  invitedByAccountId: string;
+  expiresAt: number;
+  createdAt: number;
+  acceptedAt: number | null;
+}
+
+export type PersonalAccessTokenScope =
+  | "workspace:read"
+  | "workspace:write"
+  | "agent:run"
+  | "agent:manage"
+  | "device:manage";
+
+export interface PersonalAccessToken {
+  id: string;
+  accountId: string;
+  workspaceId: string | null;
+  label: string;
+  prefix: string;
+  scopes: PersonalAccessTokenScope[];
+  createdAt: number;
+  expiresAt: number | null;
+  lastUsedAt: number | null;
+  revokedAt: number | null;
+}
+
+export type PrincipalContext =
+  | { kind: "account"; accountId: string; membershipId: string; workspaceId: string }
+  | { kind: "service"; servicePrincipalId: string; workspaceId: string }
+  | { kind: "device"; deviceId: string }
+  | { kind: "system" }
+  | { kind: "external"; provider: string; subject: string; workspaceId: string };
 
 export interface IssueLabel {
   id: string;

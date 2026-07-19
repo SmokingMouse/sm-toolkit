@@ -5,11 +5,12 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   createWorkspace,
+  currentActor,
   getActiveWorkspace,
-  getToken,
   health,
   listApprovals,
   listWorkspaces,
+  logout,
   setActiveWorkspace,
 } from "../lib/api";
 import { usePoll } from "../lib/hooks";
@@ -67,15 +68,12 @@ function BrandMark() {
 export function Shell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  const isLogin = pathname.startsWith("/login");
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceName, setWorkspaceName] = useState("");
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
-
-  useEffect(() => {
-    if (!getToken() && !pathname.startsWith("/settings")) router.replace("/settings");
-  }, [pathname, router]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -89,15 +87,24 @@ export function Shell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const conn = usePoll(health, 30_000);
-  const pending = usePoll(() => listApprovals("pending"), 30_000);
-  const workspaces = usePoll(listWorkspaces, 30_000);
+  const conn = usePoll(() => isLogin ? Promise.resolve({ ok: true }) : health(), 30_000);
+  const pending = usePoll(() => isLogin ? Promise.resolve([]) : listApprovals("pending"), 30_000);
+  const workspaces = usePoll(() => isLogin ? Promise.resolve([]) : listWorkspaces(), 30_000);
+  const me = usePoll(() => isLogin ? Promise.resolve(null) : currentActor(), 30_000);
   const activeWorkspaceId = getActiveWorkspace() || workspaces.data?.[0]?.id || "";
   const activeWorkspace = workspaces.data?.find((item) => item.id === activeWorkspaceId) ?? workspaces.data?.[0];
   const pendingCount = pending.data?.length ?? 0;
   const connected = !!conn.data && !conn.error;
   const quickLinks = useMemo(() => [...NAV.flatMap((group) => group.items), { href: "/settings", label: "Settings", icon: "settings" as const }], []);
   const searchResults = quickLinks.filter((item) => item.label.toLowerCase().includes(searchQuery.trim().toLowerCase()));
+
+  useEffect(() => {
+    if (!isLogin && workspaces.data?.length && !workspaces.data.some((workspace) => workspace.id === getActiveWorkspace())) {
+      setActiveWorkspace(workspaces.data[0].id);
+    }
+  }, [isLogin, workspaces.data]);
+
+  if (isLogin) return <ToastProvider>{children}</ToastProvider>;
 
   return (
     <ToastProvider>
@@ -180,9 +187,20 @@ export function Shell({ children }: { children: ReactNode }) {
                 {connected && <span className="absolute inset-0 animate-ping rounded-full bg-[#62cfb6] opacity-50" />}
               </span>
               <div className="max-md:hidden">
-                <div className="text-[11px] font-semibold text-white/80">{connected ? "Server online" : "Disconnected"}</div>
-                <div className="mt-0.5 text-[9px] text-white/35">{activeWorkspace?.slug ?? "workspace"} control plane</div>
+                <div className="max-w-[150px] truncate text-[11px] font-semibold text-white/80">
+                  {me.data?.kind === "account" ? me.data.account.displayName : me.data?.kind === "system" ? "Break-glass system" : connected ? "Server online" : "Disconnected"}
+                </div>
+                <div className="mt-0.5 text-[9px] text-white/35">{activeWorkspace?.slug ?? "workspace"} · {me.data?.kind === "account" ? me.data.credential : "control plane"}</div>
               </div>
+              {me.data?.kind === "account" && me.data.credential === "session" && (
+                <button
+                  type="button"
+                  className="ml-auto text-[9px] font-semibold text-white/45 hover:text-white max-md:hidden"
+                  onClick={() => { void logout().finally(() => { location.href = "/login"; }); }}
+                >
+                  Logout
+                </button>
+              )}
             </div>
           </div>
         </aside>

@@ -28,6 +28,13 @@ const PREFIXES = {
   larkBinding: "lark",
   skillGroup: "skg",
   runActionToken: "rat",
+  account: "acc",
+  authIdentity: "auth",
+  session: "sess",
+  passkey: "pk",
+  invitation: "inv",
+  personalAccessToken: "pat",
+  authChallenge: "chal",
 } as const;
 
 export function newId(kind: keyof typeof PREFIXES): string {

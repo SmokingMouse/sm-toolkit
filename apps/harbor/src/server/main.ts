@@ -27,6 +27,7 @@ import {
   deploymentTargets,
   feishuBotProfiles,
   githubConfig,
+  publicAuthConfig,
   token,
 } from "../config.js";
 import {
@@ -41,6 +42,7 @@ import { reconcileCompletedDeployments } from "./deployment-reconciler.js";
 import { HostMaintenanceSentinel } from "../deployment-worker/maintenance.js";
 import { DeploymentMaintenanceGuard } from "./maintenance.js";
 import { ensureBuiltinSkills } from "./builtin-skills.js";
+import { AuthService } from "./auth.js";
 
 const authToken = token();
 const port = Number(process.env.HARBOR_PORT ?? DEFAULT_PORT);
@@ -51,6 +53,7 @@ const concurrency = Number(
 
 const db = openDb(dbPath);
 const store = new HarborStore(db);
+const auth = new AuthService(store, publicAuthConfig());
 ensureBuiltinSkills(store);
 const bus = new RunBus();
 const hub = new DeviceHub(store, authToken, () => store.listDeploymentMaintenance().length > 0);
@@ -282,6 +285,7 @@ const app = buildRest(
       .filter((id): id is string => !!id),
   ),
   maintenance,
+  auth,
 );
 
 // worker 直接把 durable result 写回 SQLite；server 在运行或重启后确定性推进 Issue/收尾 worktree。

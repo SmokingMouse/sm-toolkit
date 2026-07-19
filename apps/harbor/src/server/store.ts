@@ -8,8 +8,10 @@ import type { AgentEvent, Cost } from "@sm/agent";
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import type {
+  Account,
   Approval,
   ApprovalStatus,
+  AuthIdentity,
   Automation,
   AutomationLogRow,
   AutomationMode,
@@ -52,6 +54,8 @@ import type {
   Origin,
   PromptBlockKey,
   PromptEventBlockKey,
+  PersonalAccessToken,
+  PersonalAccessTokenScope,
   Run,
   RunAttachment,
   RunEventRow,
@@ -69,6 +73,7 @@ import type {
   SkillSource,
   UsageRow,
   WorkspaceMember,
+  WorkspaceInvitation,
   WorkspaceRole,
 } from "../protocol.js";
 import { DEFAULT_WORKSPACE_ID } from "../protocol.js";
@@ -356,6 +361,8 @@ interface WorkspaceRow {
   name: string;
   slug: string;
   description: string | null;
+  kind: string;
+  created_by_account_id: string;
   created_at: number;
   archived_at: number | null;
 }
@@ -433,6 +440,8 @@ function toWorkspace(r: WorkspaceRow): HarborWorkspace {
     name: r.name,
     slug: r.slug,
     description: r.description,
+    kind: r.kind as HarborWorkspace["kind"],
+    createdByAccountId: r.created_by_account_id,
     createdAt: r.created_at,
     archivedAt: r.archived_at,
   };
@@ -876,6 +885,93 @@ export class HarborStore {
 
   // ---- workspaces / repositories ----
 
+  createAccount(input: {
+    id?: string;
+    displayName: string;
+    primaryEmail?: string | null;
+    status?: Account["status"];
+  }, now: number): Account {
+    const id = input.id ?? newId("account");
+    const primaryEmail = input.primaryEmail?.trim() || null;
+    let normalized = primaryEmail?.toLowerCase() ?? null;
+    if (normalized && this.db.query<{ id: string }, [string]>(
+      "SELECT id FROM accounts WHERE primary_email_normalized = ?",
+    ).get(normalized)) normalized = null;
+    this.db.run(
+      `INSERT INTO accounts
+       (id, display_name, primary_email, primary_email_normalized, status, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      [id, input.displayName.trim(), primaryEmail, normalized, input.status ?? "active", now, now],
+    );
+    return this.getAccount(id)!;
+  }
+
+  getAccount(id: string): Account | null {
+    const row = this.db.query<{
+      id: string; display_name: string; primary_email: string | null; status: string;
+      created_at: number; updated_at: number;
+    }, [string]>(
+      "SELECT id, display_name, primary_email, status, created_at, updated_at FROM accounts WHERE id = ?",
+    ).get(id);
+    return row ? {
+      id: row.id,
+      displayName: row.display_name,
+      primaryEmail: row.primary_email,
+      status: row.status as Account["status"],
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    } : null;
+  }
+
+  hasActiveAccountWithEmail(email: string): boolean {
+    return !!this.db.query<{ found: number }, [string]>(
+      "SELECT 1 AS found FROM accounts WHERE status = 'active' AND lower(trim(primary_email)) = ? LIMIT 1",
+    ).get(email.trim().toLowerCase());
+  }
+
+  updateAccountDisplayName(id: string, displayName: string, now: number): void {
+    if (!displayName.trim()) throw new Error("Account displayName 不能为空");
+    this.db.run(
+      "UPDATE accounts SET display_name = ?, updated_at = ? WHERE id = ?",
+      [displayName.trim(), now, id],
+    );
+  }
+
+  getAuthIdentity(provider: string, subject: string): AuthIdentity | null {
+    const row = this.db.query<{
+      id: string; account_id: string; provider: string; subject: string; email: string | null;
+      verified_at: number | null; created_at: number;
+    }, [string, string]>(
+      "SELECT * FROM auth_identities WHERE provider = ? AND subject = ?",
+    ).get(provider, subject);
+    return row ? {
+      id: row.id,
+      accountId: row.account_id,
+      provider: row.provider,
+      subject: row.subject,
+      email: row.email,
+      verifiedAt: row.verified_at,
+      createdAt: row.created_at,
+    } : null;
+  }
+
+  createAuthIdentity(input: {
+    accountId: string;
+    provider: string;
+    subject: string;
+    email?: string | null;
+    verifiedAt?: number | null;
+  }, now: number): AuthIdentity {
+    const id = newId("authIdentity");
+    this.db.run(
+      `INSERT INTO auth_identities
+       (id, account_id, provider, subject, email, verified_at, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      [id, input.accountId, input.provider, input.subject, input.email?.trim() || null, input.verifiedAt ?? null, now],
+    );
+    return this.getAuthIdentity(input.provider, input.subject)!;
+  }
+
   defaultWorkspace(): HarborWorkspace {
     const workspace = this.getWorkspace(DEFAULT_WORKSPACE_ID);
     if (!workspace) throw new Error("默认 Workspace 不存在；SQLite migration 未完成");
@@ -883,20 +979,32 @@ export class HarborStore {
   }
 
   createWorkspace(
-    input: { name: string; slug: string; description?: string | null; ownerName?: string },
+    input: {
+      name: string;
+      slug: string;
+      description?: string | null;
+      ownerName?: string;
+      ownerAccountId?: string;
+      kind?: "personal" | "team";
+    },
     now: number,
   ): HarborWorkspace {
     const id = newId("workspace");
+    const ownerAccountId = input.ownerAccountId ?? "acc_bootstrap";
+    const owner = this.getAccount(ownerAccountId);
+    if (!owner || owner.status !== "active") throw new Error("Workspace owner Account 不存在或不可用");
     this.db.transaction(() => {
       this.db.run(
-        "INSERT INTO workspaces (id, name, slug, description, created_at) VALUES (?,?,?,?,?)",
-        [id, input.name, input.slug, input.description ?? null, now],
+        `INSERT INTO workspaces
+         (id, name, slug, description, created_at, kind, created_by_account_id)
+         VALUES (?,?,?,?,?,?,?)`,
+        [id, input.name, input.slug, input.description ?? null, now, input.kind ?? "team", ownerAccountId],
       );
       this.createWorkspaceMember({
         workspaceId: id,
-        name: input.ownerName ?? "Local owner",
+        accountId: ownerAccountId,
+        name: input.ownerName ?? owner.displayName,
         role: "owner",
-        externalProvider: "local",
       }, now);
     })();
     return this.getWorkspace(id)!;
@@ -904,6 +1012,7 @@ export class HarborStore {
 
   createWorkspaceMember(input: {
     workspaceId: string;
+    accountId?: string;
     name: string;
     email?: string | null;
     externalProvider?: WorkspaceMember["externalProvider"];
@@ -912,24 +1021,58 @@ export class HarborStore {
     status?: WorkspaceMember["status"];
   }, now: number): WorkspaceMember {
     const id = newId("member");
-    this.db.run(
-      `INSERT INTO workspace_members
-       (id, workspace_id, name, email, external_provider, external_id, role, status, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?)`,
-      [id, input.workspaceId, input.name, input.email ?? null, input.externalProvider ?? "local",
-       input.externalId ?? null, input.role ?? "member", input.status ?? "active", now],
-    );
+    this.db.transaction(() => {
+      let accountId = input.accountId;
+      const provider = input.externalProvider ?? "local";
+      if (!accountId && provider !== "local" && input.externalId) {
+        accountId = this.getAuthIdentity(provider, input.externalId)?.accountId;
+      }
+      if (!accountId) {
+        accountId = this.createAccount({
+          displayName: input.name,
+          primaryEmail: input.email ?? null,
+          status: input.status === "disabled" ? "suspended" : "active",
+        }, now).id;
+        if (provider !== "local" && input.externalId) {
+          this.createAuthIdentity({
+            accountId,
+            provider,
+            subject: input.externalId,
+            email: input.email ?? null,
+            verifiedAt: now,
+          }, now);
+        }
+      }
+      const account = this.getAccount(accountId);
+      if (!account) throw new Error("Membership Account 不存在");
+      this.db.run(
+        `INSERT INTO workspace_members
+         (id, workspace_id, name, email, external_provider, external_id, role, status, created_at, account_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        [id, input.workspaceId, account.displayName, account.primaryEmail, provider,
+         input.externalId ?? null, input.role ?? "member", input.status ?? "active", now, accountId],
+      );
+    })();
     return this.getWorkspaceMember(id)!;
   }
 
   getWorkspaceMember(id: string): WorkspaceMember | null {
     const row = this.db.query<{
-      id: string; workspace_id: string; name: string; email: string | null; external_provider: string;
-      external_id: string | null; role: string; status: string; created_at: number;
-    }, [string]>("SELECT * FROM workspace_members WHERE id = ?").get(id);
+      id: string; workspace_id: string; account_id: string; name: string; email: string | null;
+      external_provider: string; external_id: string | null; role: string; status: string; created_at: number;
+    }, [string]>(
+      `SELECT m.id, m.workspace_id, m.account_id,
+              a.display_name AS name, a.primary_email AS email,
+              COALESCE((SELECT i.provider FROM auth_identities i WHERE i.account_id = a.id ORDER BY i.verified_at DESC, i.created_at LIMIT 1), 'local') AS external_provider,
+              (SELECT i.subject FROM auth_identities i WHERE i.account_id = a.id ORDER BY i.verified_at DESC, i.created_at LIMIT 1) AS external_id,
+              m.role, m.status, m.created_at
+       FROM workspace_members m JOIN accounts a ON a.id = m.account_id
+       WHERE m.id = ?`,
+    ).get(id);
     return row ? {
       id: row.id,
       workspaceId: row.workspace_id,
+      accountId: row.account_id,
       name: row.name,
       email: row.email,
       externalProvider: row.external_provider as WorkspaceMember["externalProvider"],
@@ -957,27 +1100,31 @@ export class HarborStore {
   }
 
   createWorkspaceApiToken(workspaceId: string, memberId: string, label: string, tokenHash: string, now: number): string {
-    const id = newId("token");
+    const member = this.getWorkspaceMember(memberId);
+    if (!member || member.workspaceId !== workspaceId || member.status !== "active") {
+      throw new Error("只能给 active Membership 创建 PAT");
+    }
+    const id = newId("personalAccessToken");
+    const scopes: PersonalAccessTokenScope[] = [
+      "workspace:read", "workspace:write", "agent:run", "agent:manage", "device:manage",
+    ];
     this.db.run(
-      `INSERT INTO workspace_api_tokens
-       (id, workspace_id, member_id, label, token_hash, created_at) VALUES (?,?,?,?,?,?)`,
-      [id, workspaceId, memberId, label, tokenHash, now],
+      `INSERT INTO personal_access_tokens
+       (id, account_id, workspace_id, label, prefix, token_hash, scopes, created_at)
+       VALUES (?,?,?,?,?,?,?,?)`,
+      [id, member.accountId, workspaceId, label, "harbor_legacy", tokenHash, JSON.stringify(scopes), now],
     );
     return id;
   }
 
   memberForApiToken(tokenHash: string, now: number): WorkspaceMember | null {
-    const row = this.db.query<{ id: string }, [string]>(
-      `SELECT m.id FROM workspace_api_tokens t JOIN workspace_members m ON m.id = t.member_id
-       WHERE t.token_hash = ? AND t.revoked_at IS NULL AND m.status = 'active'`,
-    ).get(tokenHash);
-    if (!row) return null;
-    this.db.run("UPDATE workspace_api_tokens SET last_used_at = ? WHERE token_hash = ?", [now, tokenHash]);
-    return this.getWorkspaceMember(row.id);
+    const resolved = this.accountForPersonalAccessToken(tokenHash, now);
+    if (!resolved?.token.workspaceId) return null;
+    return this.membershipForAccount(resolved.account.id, resolved.token.workspaceId);
   }
 
   revokeWorkspaceApiToken(id: string, now: number): void {
-    this.db.run("UPDATE workspace_api_tokens SET revoked_at = ? WHERE id = ?", [now, id]);
+    this.db.run("UPDATE personal_access_tokens SET revoked_at = ? WHERE id = ?", [now, id]);
   }
 
   listWorkspaceApiTokens(workspaceId: string): {
@@ -993,7 +1140,10 @@ export class HarborStore {
       id: string; workspace_id: string; member_id: string; label: string;
       created_at: number; last_used_at: number | null; revoked_at: number | null;
     }, [string]>(
-      "SELECT id, workspace_id, member_id, label, created_at, last_used_at, revoked_at FROM workspace_api_tokens WHERE workspace_id = ? ORDER BY created_at DESC",
+      `SELECT t.id, t.workspace_id, m.id AS member_id, t.label, t.created_at, t.last_used_at, t.revoked_at
+       FROM personal_access_tokens t
+       JOIN workspace_members m ON m.workspace_id = t.workspace_id AND m.account_id = t.account_id
+       WHERE t.workspace_id = ? ORDER BY t.created_at DESC`,
     ).all(workspaceId).map((row) => ({
       id: row.id,
       workspaceId: row.workspace_id,
@@ -1003,6 +1153,406 @@ export class HarborStore {
       lastUsedAt: row.last_used_at,
       revokedAt: row.revoked_at,
     }));
+  }
+
+  membershipForAccount(accountId: string, workspaceId: string): WorkspaceMember | null {
+    const row = this.db.query<{ id: string }, [string, string]>(
+      `SELECT id FROM workspace_members
+       WHERE account_id = ? AND workspace_id = ? AND status = 'active'`,
+    ).get(accountId, workspaceId);
+    return row ? this.getWorkspaceMember(row.id) : null;
+  }
+
+  listMembershipsForAccount(accountId: string, activeOnly = true): WorkspaceMember[] {
+    const rows = this.db.query<{ id: string }, [string]>(
+      `SELECT id FROM workspace_members WHERE account_id = ? ${activeOnly ? "AND status = 'active'" : ""}
+       ORDER BY created_at, id`,
+    ).all(accountId);
+    return rows.map((row) => this.getWorkspaceMember(row.id)!).filter(Boolean);
+  }
+
+  hasLoginOwner(): boolean {
+    return !!this.db.query<{ found: number }, []>(
+      `SELECT 1 AS found
+       FROM passkey_credentials p
+       JOIN accounts a ON a.id = p.account_id
+       JOIN workspace_members m ON m.account_id = a.id
+       WHERE p.revoked_at IS NULL AND a.status = 'active'
+         AND m.status = 'active' AND m.role = 'owner'
+       LIMIT 1`,
+    ).get();
+  }
+
+  listPasskeys(accountId: string): {
+    id: string;
+    accountId: string;
+    credentialId: string;
+    publicKey: Uint8Array;
+    signCount: number;
+    transports: string[];
+    label: string | null;
+    createdAt: number;
+    lastUsedAt: number | null;
+    revokedAt: number | null;
+  }[] {
+    return this.db.query<{
+      id: string; account_id: string; credential_id: string; public_key: Uint8Array; sign_count: number;
+      transports: string; label: string | null; created_at: number; last_used_at: number | null; revoked_at: number | null;
+    }, [string]>(
+      "SELECT * FROM passkey_credentials WHERE account_id = ? ORDER BY created_at, id",
+    ).all(accountId).map((row) => ({
+      id: row.id,
+      accountId: row.account_id,
+      credentialId: row.credential_id,
+      publicKey: new Uint8Array(row.public_key),
+      signCount: row.sign_count,
+      transports: parseJsonArray<string>(row.transports),
+      label: row.label,
+      createdAt: row.created_at,
+      lastUsedAt: row.last_used_at,
+      revokedAt: row.revoked_at,
+    }));
+  }
+
+  getPasskeyByCredentialId(credentialId: string) {
+    const row = this.db.query<{ account_id: string }, [string]>(
+      "SELECT account_id FROM passkey_credentials WHERE credential_id = ? AND revoked_at IS NULL",
+    ).get(credentialId);
+    return row ? this.listPasskeys(row.account_id).find((passkey) => passkey.credentialId === credentialId && !passkey.revokedAt) ?? null : null;
+  }
+
+  createPasskey(input: {
+    accountId: string;
+    credentialId: string;
+    publicKey: Uint8Array;
+    signCount: number;
+    transports?: string[];
+    label?: string | null;
+  }, now: number): string {
+    const id = newId("passkey");
+    this.db.run(
+      `INSERT INTO passkey_credentials
+       (id, account_id, credential_id, public_key, sign_count, transports, label, created_at)
+       VALUES (?,?,?,?,?,?,?,?)`,
+      [id, input.accountId, input.credentialId, input.publicKey, input.signCount,
+       JSON.stringify(input.transports ?? []), input.label ?? null, now],
+    );
+    return id;
+  }
+
+  updatePasskeyCounter(credentialId: string, signCount: number, now: number): void {
+    this.db.run(
+      "UPDATE passkey_credentials SET sign_count = ?, last_used_at = ? WHERE credential_id = ? AND revoked_at IS NULL",
+      [signCount, now, credentialId],
+    );
+  }
+
+  createAuthChallenge(input: {
+    tokenHash: string;
+    flow: "bootstrap" | "register" | "invite" | "authenticate";
+    accountId?: string | null;
+    invitationId?: string | null;
+    displayName?: string | null;
+    challenge: string;
+    expiresAt: number;
+  }, now: number): string {
+    const id = newId("authChallenge");
+    this.db.run(
+      `INSERT INTO webauthn_challenges
+       (id, token_hash, flow, account_id, invitation_id, display_name, challenge, expires_at, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+      [id, input.tokenHash, input.flow, input.accountId ?? null, input.invitationId ?? null,
+       input.displayName?.trim() || null, input.challenge, input.expiresAt, now],
+    );
+    return id;
+  }
+
+  consumeAuthChallenge(tokenHash: string, flow: "bootstrap" | "register" | "invite" | "authenticate", now: number): {
+    id: string; flow: string; accountId: string | null; invitationId: string | null; displayName: string | null; challenge: string;
+  } | null {
+    return this.db.transaction(() => {
+      const row = this.db.query<{
+        id: string; flow: string; account_id: string | null; invitation_id: string | null; display_name: string | null; challenge: string;
+      }, [string, string, number]>(
+        `SELECT id, flow, account_id, invitation_id, display_name, challenge FROM webauthn_challenges
+         WHERE token_hash = ? AND flow = ? AND consumed_at IS NULL AND expires_at > ?`,
+      ).get(tokenHash, flow, now);
+      if (!row) return null;
+      const changed = this.db.run(
+        "UPDATE webauthn_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
+        [now, row.id],
+      ).changes;
+      return changed === 1 ? {
+        id: row.id, flow: row.flow, accountId: row.account_id,
+        invitationId: row.invitation_id, displayName: row.display_name, challenge: row.challenge,
+      } : null;
+    })();
+  }
+
+  createSession(input: {
+    accountId: string;
+    tokenHash: string;
+    csrfTokenHash: string;
+    expiresAt: number;
+  }, now: number): string {
+    const id = newId("session");
+    this.db.run(
+      `INSERT INTO account_sessions
+       (id, account_id, token_hash, csrf_token_hash, expires_at, created_at)
+       VALUES (?,?,?,?,?,?)`,
+      [id, input.accountId, input.tokenHash, input.csrfTokenHash, input.expiresAt, now],
+    );
+    return id;
+  }
+
+  accountForSession(tokenHash: string, now: number): { account: Account; csrfTokenHash: string; sessionId: string } | null {
+    const row = this.db.query<{ id: string; account_id: string; csrf_token_hash: string }, [string, number]>(
+      `SELECT id, account_id, csrf_token_hash FROM account_sessions
+       WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?`,
+    ).get(tokenHash, now);
+    if (!row) return null;
+    const account = this.getAccount(row.account_id);
+    if (!account || account.status !== "active") return null;
+    this.db.run("UPDATE account_sessions SET last_used_at = ? WHERE id = ?", [now, row.id]);
+    return { account, csrfTokenHash: row.csrf_token_hash, sessionId: row.id };
+  }
+
+  revokeSession(id: string, now: number): void {
+    this.db.run("UPDATE account_sessions SET revoked_at = ? WHERE id = ?", [now, id]);
+  }
+
+  createRecoveryCodes(accountId: string, codeHashes: string[], now: number): void {
+    const insert = this.db.prepare(
+      "INSERT INTO account_recovery_codes (account_id, code_hash, created_at) VALUES (?,?,?)",
+    );
+    this.db.transaction(() => {
+      for (const codeHash of codeHashes) insert.run(accountId, codeHash, now);
+    })();
+  }
+
+  consumeRecoveryCode(accountId: string, codeHash: string, now: number): boolean {
+    return this.db.run(
+      `UPDATE account_recovery_codes SET used_at = ?
+       WHERE account_id = ? AND code_hash = ? AND used_at IS NULL`,
+      [now, accountId, codeHash],
+    ).changes === 1;
+  }
+
+  createPersonalAccessToken(input: {
+    accountId: string;
+    workspaceId?: string | null;
+    label: string;
+    prefix: string;
+    tokenHash: string;
+    scopes: PersonalAccessTokenScope[];
+    expiresAt?: number | null;
+  }, now: number): PersonalAccessToken {
+    if (input.workspaceId && !this.membershipForAccount(input.accountId, input.workspaceId)) {
+      throw new Error("PAT workspace binding 需要 active Membership");
+    }
+    const id = newId("personalAccessToken");
+    this.db.run(
+      `INSERT INTO personal_access_tokens
+       (id, account_id, workspace_id, label, prefix, token_hash, scopes, created_at, expires_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+      [id, input.accountId, input.workspaceId ?? null, input.label, input.prefix, input.tokenHash,
+       JSON.stringify(input.scopes), now, input.expiresAt ?? null],
+    );
+    return this.getPersonalAccessToken(id)!;
+  }
+
+  getPersonalAccessToken(id: string): PersonalAccessToken | null {
+    const row = this.db.query<{
+      id: string; account_id: string; workspace_id: string | null; label: string; prefix: string;
+      scopes: string; created_at: number; expires_at: number | null; last_used_at: number | null; revoked_at: number | null;
+    }, [string]>(
+      `SELECT id, account_id, workspace_id, label, prefix, scopes, created_at, expires_at, last_used_at, revoked_at
+       FROM personal_access_tokens WHERE id = ?`,
+    ).get(id);
+    return row ? {
+      id: row.id,
+      accountId: row.account_id,
+      workspaceId: row.workspace_id,
+      label: row.label,
+      prefix: row.prefix,
+      scopes: parseJsonArray<PersonalAccessTokenScope>(row.scopes),
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      lastUsedAt: row.last_used_at,
+      revokedAt: row.revoked_at,
+    } : null;
+  }
+
+  listPersonalAccessTokens(accountId: string): PersonalAccessToken[] {
+    return this.db.query<{ id: string }, [string]>(
+      "SELECT id FROM personal_access_tokens WHERE account_id = ? ORDER BY created_at DESC",
+    ).all(accountId).map((row) => this.getPersonalAccessToken(row.id)!);
+  }
+
+  accountForPersonalAccessToken(tokenHash: string, now: number): { account: Account; token: PersonalAccessToken } | null {
+    const row = this.db.query<{ id: string; account_id: string }, [string, number]>(
+      `SELECT id, account_id FROM personal_access_tokens
+       WHERE token_hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`,
+    ).get(tokenHash, now);
+    if (!row) return null;
+    const account = this.getAccount(row.account_id);
+    const token = this.getPersonalAccessToken(row.id);
+    if (!account || account.status !== "active" || !token) return null;
+    this.db.run("UPDATE personal_access_tokens SET last_used_at = ? WHERE id = ?", [now, row.id]);
+    token.lastUsedAt = now;
+    return { account, token };
+  }
+
+  revokePersonalAccessToken(id: string, accountId: string, now: number): boolean {
+    return this.db.run(
+      "UPDATE personal_access_tokens SET revoked_at = ? WHERE id = ? AND account_id = ? AND revoked_at IS NULL",
+      [now, id, accountId],
+    ).changes === 1;
+  }
+
+  createWorkspaceInvitation(input: {
+    workspaceId: string;
+    email?: string | null;
+    role: WorkspaceRole;
+    tokenHash: string;
+    invitedByAccountId: string;
+    expiresAt: number;
+  }, now: number): WorkspaceInvitation {
+    const id = newId("invitation");
+    this.db.run(
+      `INSERT INTO workspace_invitations
+       (id, workspace_id, email, role, token_hash, status, invited_by_account_id, expires_at, created_at)
+       VALUES (?,?,?,?,?,'pending',?,?,?)`,
+      [id, input.workspaceId, input.email?.trim() || null, input.role, input.tokenHash,
+       input.invitedByAccountId, input.expiresAt, now],
+    );
+    return this.getWorkspaceInvitation(id)!;
+  }
+
+  getWorkspaceInvitation(id: string): WorkspaceInvitation | null {
+    const row = this.db.query<{
+      id: string; workspace_id: string; email: string | null; role: string; status: string;
+      invited_by_account_id: string; expires_at: number; created_at: number; accepted_at: number | null;
+    }, [string]>(
+      `SELECT id, workspace_id, email, role, status, invited_by_account_id, expires_at, created_at, accepted_at
+       FROM workspace_invitations WHERE id = ?`,
+    ).get(id);
+    return row ? {
+      id: row.id,
+      workspaceId: row.workspace_id,
+      email: row.email,
+      role: row.role as WorkspaceRole,
+      status: row.status as WorkspaceInvitation["status"],
+      invitedByAccountId: row.invited_by_account_id,
+      expiresAt: row.expires_at,
+      createdAt: row.created_at,
+      acceptedAt: row.accepted_at,
+    } : null;
+  }
+
+  listWorkspaceInvitations(workspaceId: string): WorkspaceInvitation[] {
+    return this.db.query<{ id: string }, [string]>(
+      "SELECT id FROM workspace_invitations WHERE workspace_id = ? ORDER BY created_at DESC",
+    ).all(workspaceId).map((row) => this.getWorkspaceInvitation(row.id)!);
+  }
+
+  workspaceInvitationForToken(tokenHash: string, now: number): WorkspaceInvitation | null {
+    const row = this.db.query<{ id: string }, [string, number]>(
+      `SELECT id FROM workspace_invitations
+       WHERE token_hash = ? AND status = 'pending' AND expires_at > ?`,
+    ).get(tokenHash, now);
+    return row ? this.getWorkspaceInvitation(row.id) : null;
+  }
+
+  invitationRegistrationAccount(invitationId: string): Account | null {
+    const row = this.db.query<{ account_id: string }, [string]>(
+      `SELECT c.account_id
+       FROM webauthn_challenges c
+       JOIN accounts a ON a.id = c.account_id
+       WHERE c.invitation_id = ? AND c.flow = 'invite' AND a.status = 'suspended'
+       ORDER BY c.created_at DESC LIMIT 1`,
+    ).get(invitationId);
+    return row ? this.getAccount(row.account_id) : null;
+  }
+
+  completeInvitationRegistration(input: {
+    invitationId: string;
+    accountId: string;
+    credential: {
+      id: string;
+      publicKey: Uint8Array;
+      counter: number;
+      transports: string[];
+    };
+    passkeyLabel?: string | null;
+    recoveryCodeHashes: string[];
+  }, now: number): { account: Account; membership: WorkspaceMember; personalWorkspace: HarborWorkspace } {
+    return this.db.transaction(() => {
+      const invitation = this.getWorkspaceInvitation(input.invitationId);
+      if (!invitation || invitation.status !== "pending" || invitation.expiresAt <= now) {
+        throw new Error("Invitation 不存在、已过期或已结束");
+      }
+      const account = this.getAccount(input.accountId);
+      if (!account || account.status !== "suspended") throw new Error("Invitation registration Account 不可用");
+      if (invitation.email && invitation.email.trim().toLowerCase() !== account.primaryEmail?.trim().toLowerCase()) {
+        throw new Error("Invitation email 与注册 Account 不匹配");
+      }
+      this.createPasskey({
+        accountId: account.id,
+        credentialId: input.credential.id,
+        publicKey: input.credential.publicKey,
+        signCount: input.credential.counter,
+        transports: input.credential.transports,
+        label: input.passkeyLabel ?? null,
+      }, now);
+      this.createRecoveryCodes(account.id, input.recoveryCodeHashes, now);
+      this.db.run("UPDATE accounts SET status = 'active', updated_at = ? WHERE id = ? AND status = 'suspended'", [now, account.id]);
+      const personalWorkspace = this.createWorkspace({
+        name: `${account.displayName}'s Harbor`,
+        slug: `personal-${account.id.replace(/[^a-z0-9]/gi, "").slice(-12).toLowerCase()}`,
+        description: "Personal Workspace",
+        ownerAccountId: account.id,
+        kind: "personal",
+      }, now);
+      const membership = this.acceptWorkspaceInvitation(invitation.id, account.id, now);
+      return { account: this.getAccount(account.id)!, membership, personalWorkspace };
+    })();
+  }
+
+  acceptWorkspaceInvitation(id: string, accountId: string, now: number): WorkspaceMember {
+    return this.db.transaction(() => {
+      const invitation = this.getWorkspaceInvitation(id);
+      if (!invitation || invitation.status !== "pending" || invitation.expiresAt <= now) {
+        throw new Error("Invitation 不存在、已过期或已结束");
+      }
+      const account = this.getAccount(accountId);
+      if (!account || account.status !== "active") throw new Error("Account 不存在或不可用");
+      if (invitation.email && invitation.email.trim().toLowerCase() !== account.primaryEmail?.trim().toLowerCase()) {
+        throw new Error("Invitation email 与当前 Account 不匹配");
+      }
+      if (this.membershipForAccount(accountId, invitation.workspaceId)) {
+        throw new Error("Account 已是该 Workspace 的 active member");
+      }
+      const member = this.createWorkspaceMember({
+        workspaceId: invitation.workspaceId,
+        accountId,
+        name: account.displayName,
+        role: invitation.role,
+      }, now);
+      this.db.run(
+        "UPDATE workspace_invitations SET status = 'accepted', accepted_at = ? WHERE id = ? AND status = 'pending'",
+        [now, id],
+      );
+      return member;
+    })();
+  }
+
+  revokeWorkspaceInvitation(id: string, workspaceId: string, now: number): boolean {
+    return this.db.run(
+      `UPDATE workspace_invitations SET status = 'revoked'
+       WHERE id = ? AND workspace_id = ? AND status = 'pending'`,
+      [id, workspaceId],
+    ).changes === 1;
   }
 
   countActiveWorkspaceOwners(workspaceId: string): number {

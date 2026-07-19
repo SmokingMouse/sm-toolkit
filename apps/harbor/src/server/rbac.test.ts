@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import type { WorkspaceMember } from "../protocol.js";
 import { openDb } from "./db.js";
 import { HarborStore } from "./store.js";
 import { buildRest } from "./rest.js";
@@ -8,9 +7,11 @@ import { RunCoordinator } from "./scheduler.js";
 import type { DeviceHub } from "./ws.js";
 import type { ApprovalService } from "./approvals.js";
 import type { AutomationService } from "./automation.js";
+import { AuthService } from "./auth.js";
 
-test("workspace member tokens enforce RBAC, private visibility, and env redaction", async () => {
+test("Account PATs enforce live Membership RBAC, private visibility, and env redaction", async () => {
   const store = new HarborStore(openDb(":memory:"));
+  const auth = new AuthService(store, { origin: "http://localhost", rpId: "localhost", rpName: "Harbor Test", secureCookie: false });
   const device = store.upsertDevice("worker", "hash", { clis: { claude: "2" }, endpoints: [] }, 1);
   const repository = store.createRepository({ workspaceId: "ws_personal", name: "app" }, 2);
   store.setRepositoryMount(repository.id, device.id, "/repo", 3);
@@ -39,11 +40,14 @@ test("workspace member tokens enforce RBAC, private visibility, and env redactio
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 
-  const memberResponse = await request("owner-token", "POST", "/api/members", { name: "Alice", role: "member" });
-  expect(memberResponse.status).toBe(201);
-  const member = await memberResponse.json() as WorkspaceMember;
-  const tokenResponse = await request("owner-token", "POST", `/api/members/${member.id}/tokens`, { label: "Alice laptop" });
-  const memberToken = (await tokenResponse.json() as { token: string }).token;
+  const alice = store.createAccount({ displayName: "Alice", primaryEmail: "alice@example.com" }, 4);
+  const member = store.createWorkspaceMember({ workspaceId: "ws_personal", accountId: alice.id, name: alice.displayName }, 5);
+  const memberToken = auth.issuePat({
+    accountId: alice.id,
+    workspaceId: "ws_personal",
+    label: "Alice laptop",
+    scopes: ["workspace:read", "workspace:write", "agent:run", "agent:manage", "device:manage"],
+  }, 6).raw;
 
   expect((await request(memberToken, "GET", "/api/workspaces")).status).toBe(200);
   const denied = await request(memberToken, "POST", "/api/agents", {
@@ -73,8 +77,14 @@ test("workspace member tokens enforce RBAC, private visibility, and env redactio
   expect(created.status).toBe(201);
   expect((await created.json() as { environment: Record<string, string> }).environment).toEqual({ SECRET_TOKEN: "••••••" });
 
-  const bob = await (await request("owner-token", "POST", "/api/members", { name: "Bob", role: "member" })).json() as WorkspaceMember;
-  const bobToken = (await (await request("owner-token", "POST", `/api/members/${bob.id}/tokens`, {})).json() as { token: string }).token;
+  const bobAccount = store.createAccount({ displayName: "Bob" }, 7);
+  const bob = store.createWorkspaceMember({ workspaceId: "ws_personal", accountId: bobAccount.id, name: "Bob" }, 8);
+  const bobToken = auth.issuePat({
+    accountId: bobAccount.id,
+    workspaceId: "ws_personal",
+    label: "Bob laptop",
+    scopes: ["workspace:read", "agent:run"],
+  }, 9).raw;
   const bobAgents = await (await request(bobToken, "GET", "/api/agents")).json() as unknown[];
   expect(bobAgents).toHaveLength(0);
   const adminAgents = await (await request(memberToken, "GET", "/api/agents")).json() as { environment: Record<string, string> }[];
