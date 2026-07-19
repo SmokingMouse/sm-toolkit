@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { loadEndpoints, listEndpoints } from "@sm/llm";
 import type { EndpointInfo } from "@sm/llm";
 import { parse as parseYaml } from "yaml";
@@ -17,6 +17,7 @@ const MAX_SKILLS = 128;
 const MAX_SKILL_BYTES = 128 * 1024;
 const MAX_SKILL_BUNDLE_BYTES = 512 * 1024;
 const MAX_SKILL_FILES = 64;
+const MAX_ENVIRONMENT_SKILL_NAMES = 512;
 
 export interface SkillScanRoot {
   path: string;
@@ -101,6 +102,61 @@ export function detectInstalledSkills(roots: SkillScanRoot[] = defaultSkillRoots
     }
   }
   return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Harbor Agent 只应看到 control plane 绑定的 Skill。Claude 有 safe-mode；Codex 仍会
+ * 扫描 `$HOME/.agents/skills`、`$CODEX_HOME/skills(.system)` 和 checkout 祖先的
+ * `.agents/.codex` Skill，因此在 Run 启动时取一份名字快照，交给 Codex 的
+ * `skills.config` 逐一禁用，连 Issue 文本里的显式 `$skill` 也不能绕过。
+ */
+export function detectEnvironmentSkillNames(
+  cwd: string | null | undefined,
+  roots: string[] = environmentSkillRoots(cwd),
+): string[] {
+  const names = new Set<string>();
+  for (const root of [...new Set(roots)]) {
+    if (names.size >= MAX_ENVIRONMENT_SKILL_NAMES || !existsSync(root)) continue;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(root, { withFileTypes: true, encoding: "utf8" });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (names.size >= MAX_ENVIRONMENT_SKILL_NAMES) break;
+      const candidate = join(root, entry.name, "SKILL.md");
+      if (!existsSync(candidate)) continue;
+      try {
+        if (statSync(candidate).size > MAX_SKILL_BYTES) continue;
+        const frontmatter = readSkillFrontmatter(readFileSync(realpathSync(candidate), "utf8"));
+        const name = frontmatter.name?.trim() || entry.name.trim();
+        if (name) names.add(name);
+      } catch {
+        // 坏 symlink / 无权限 / 非 UTF-8：不把不确定名字写入 CLI config。
+      }
+    }
+  }
+  return [...names].sort();
+}
+
+function environmentSkillRoots(cwd: string | null | undefined): string[] {
+  const home = homedir();
+  const codexHome = process.env.CODEX_HOME ?? join(home, ".codex");
+  const roots = [
+    ...defaultSkillRoots().map((root) => root.path),
+    join(codexHome, "skills", ".system"),
+    "/etc/codex/skills",
+  ];
+  if (!cwd) return roots;
+  let current = resolve(cwd);
+  for (let depth = 0; depth < 64; depth++) {
+    roots.push(join(current, ".agents", "skills"), join(current, ".codex", "skills"));
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return roots;
 }
 
 function defaultSkillRoots(): SkillScanRoot[] {

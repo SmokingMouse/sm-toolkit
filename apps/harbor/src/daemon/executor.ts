@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { DaemonMsg, RunAttachment, RunSpec } from "../protocol.js";
+import { detectEnvironmentSkillNames } from "./capabilities.js";
 import { ensureWorktree, resolveWorktreeGitCommonDir } from "./worktree.js";
 
 const FLUSH_MS = 200;
@@ -122,12 +123,18 @@ export class Executor {
         actionEnvironment.HARBOR_AGENT_ACTION_TOKEN = spec.agentActionToken;
       }
       const interactive = spec.permission === "default";
+      const environmentSkillNames =
+        spec.backend === "codex" ? detectEnvironmentSkillNames(effectiveDir) : [];
       for await (const ev of backend.run(prompt, {
         ...(effectiveDir ? { workspace: effectiveDir, cwd: effectiveDir } : {}),
         ...(additionalWritableDirs.length > 0 ? { additionalWritableDirs } : {}),
         additionalWorkspaces: spec.additionalRepositoryRoots,
         permission: spec.permission,
         systemPrompt: spec.systemPrompt,
+        // Agent 的能力边界只来自 Harbor 配置：scheduler 注入 instruction + 已绑定
+        // Skill；Device 用户目录、checkout 或 Runtime bundled Skill 一律不继承。
+        environmentSkills: false,
+        ...(environmentSkillNames.length > 0 ? { environmentSkillNames } : {}),
         resume: spec.resume,
         model: spec.model ?? undefined,
         env: { ...(spec.envOverrides ?? {}), ...actionEnvironment },

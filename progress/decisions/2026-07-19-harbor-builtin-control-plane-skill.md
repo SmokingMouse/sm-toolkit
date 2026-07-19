@@ -30,3 +30,4 @@ The protocol belongs to Harbor, not a Device and not any one role. A required bu
 - `harbor` is now a reserved Skill name; an existing non-built-in collision stops startup rather than being overwritten.
 - Every Agent gains the Skill's prompt footprint. Role instructions should stay small and avoid restating its protocol.
 - Future action schema or lifecycle changes must update this Skill and its contract tests in the same release.
+- Runtime-local Skills are import sources only; Harbor Runs isolate them and execute solely from the Agent instruction plus bound Workspace Skill snapshots. See `2026-07-19-harbor-agent-skill-runtime-isolation.md`.

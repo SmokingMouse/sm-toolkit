@@ -356,6 +356,7 @@ function AgentDetail({
         {editingConfig && (
           <AgentConfigEditor
             agent={agent}
+            device={device}
             repositories={repositories}
             onSaved={() => {
               setEditingConfig(false);
@@ -450,10 +451,12 @@ function AgentDetail({
 
 function AgentConfigEditor({
   agent,
+  device,
   repositories,
   onSaved,
 }: {
   agent: HarborAgent;
+  device: Device | undefined;
   repositories: RepositoryWithMounts[];
   onSaved: () => void;
 }) {
@@ -469,6 +472,30 @@ function AgentConfigEditor({
   const [environment, setEnvironment] = useState("");
   const [repositoryIds, setRepositoryIds] = useState(agent.repositoryIds);
   const [busy, setBusy] = useState(false);
+  const modelRoutes = useMemo(() => routesForDevice(device), [device]);
+  const runtimeModelRoutes = useMemo(
+    () => modelRoutes.filter((candidate) => candidate.runtime === agent.backend),
+    [agent.backend, modelRoutes],
+  );
+  const routeGroups = useMemo(() => {
+    const groups = new Map<string, ModelRouteCapability[]>();
+    for (const route of runtimeModelRoutes) {
+      const rows = groups.get(route.provider) ?? [];
+      rows.push(route);
+      groups.set(route.provider, rows);
+    }
+    return [...groups.entries()];
+  }, [runtimeModelRoutes]);
+  const readyRoutes = runtimeModelRoutes.filter((route) => route.ready).length;
+  const knownModelValues = new Set(
+    agent.backend === "claude"
+      ? [
+          ...NATIVE_TIER_ALIASES,
+          ...routeGroups.flatMap(([, routes]) => routes.map((route) => route.id)),
+        ]
+      : routeGroups.flatMap(([, routes]) => routes.map((route) => route.model)),
+  );
+  const showCurrentModel = !!model && !knownModelValues.has(model);
   const mounted = repositories.filter((repository) =>
     repository.mounts.some((mount) => mount.deviceId === agent.deviceId),
   );
@@ -535,14 +562,86 @@ function AgentConfigEditor({
             onChange={(event) => setDescription(event.target.value)}
           />
         </Field>
-        <Field label="Model override">
-          <input
-            className={inputCls}
-            value={model}
-            onChange={(event) => setModel(event.target.value)}
-            placeholder="Runtime default"
-          />
-        </Field>
+        {agent.backend === "claude" ? (
+          <Field label="Model route">
+            <select
+              className={inputCls}
+              value={model}
+              onChange={(event) => setModel(event.target.value)}
+            >
+              <option value="">Runtime default</option>
+              {showCurrentModel && (
+                <option value={model}>{model} · current override</option>
+              )}
+              <optgroup label="Claude aliases">
+                {NATIVE_TIER_ALIASES.map((alias) => (
+                  <option key={alias} value={alias}>
+                    {alias}
+                  </option>
+                ))}
+              </optgroup>
+              {routeGroups.map(([provider, routes]) => (
+                <optgroup key={provider} label={`${provider} · sm-toolkit`}>
+                  {routes.map((route) => (
+                    <option
+                      key={route.id}
+                      value={route.id}
+                      disabled={!route.ready}
+                    >
+                      {route.label ?? route.model} · {provider}
+                      {route.ready ? "" : " · missing key"}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            <RouteSyncState
+              total={runtimeModelRoutes.length}
+              ready={readyRoutes}
+            />
+          </Field>
+        ) : routeGroups.length > 0 ? (
+          <Field label="Model">
+            <select
+              className={inputCls}
+              value={model}
+              onChange={(event) => setModel(event.target.value)}
+            >
+              <option value="">Runtime default（跟随 Codex CLI 配置）</option>
+              {showCurrentModel && (
+                <option value={model}>{model} · current override</option>
+              )}
+              {routeGroups.map(([provider, routes]) => (
+                <optgroup
+                  key={provider}
+                  label={`${provider} · 本机 models cache`}
+                >
+                  {routes.map((route) => (
+                    <option key={route.id} value={route.model}>
+                      {route.label ?? route.model}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            <p className="mt-2 text-xs leading-5 text-dim">
+              清单来自该设备 codex CLI 按登录态缓存的可用模型。
+            </p>
+          </Field>
+        ) : (
+          <Field label="Model override">
+            <input
+              className={inputCls}
+              value={model}
+              onChange={(event) => setModel(event.target.value)}
+              placeholder="留空跟随 Codex CLI 配置"
+            />
+            <p className="mt-2 text-xs leading-5 text-dim">
+              该设备未上报 codex 模型清单（models_cache.json
+              缺失）；这里透传其本地 model 名。
+            </p>
+          </Field>
+        )}
         <Field label="Concurrency">
           <input
             type="number"

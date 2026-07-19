@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { PermissionPolicy } from "../backend.js";
-import { buildCodexArgs } from "./codex.js";
+import { buildCodexArgs, codexEnvironmentSkillArgs } from "./codex.js";
 
 function args(
   policy: PermissionPolicy,
@@ -18,6 +18,30 @@ function args(
 }
 
 describe("Codex argument construction", () => {
+  test("isolates user, plugin and explicit environment Skills for initial and resumed Runs", () => {
+    const isolation = codexEnvironmentSkillArgs(["reviewer", "browser", "reviewer", " "]);
+    expect(isolation).toEqual([
+      "--ignore-user-config",
+      "--ignore-rules",
+      "--disable",
+      "plugins",
+      "-c",
+      "skills.include_instructions=false",
+      "-c",
+      'skills.config=[{ name = "browser", enabled = false }, { name = "reviewer", enabled = false }]',
+    ]);
+
+    for (const resume of [null, "thread-1"]) {
+      const isolated = args("auto-edit", {
+        resume,
+        environmentSkills: false,
+        environmentSkillNames: ["reviewer"],
+      });
+      for (const token of isolation.slice(0, 6)) expect(isolated).toContain(token);
+      expect(isolated).toContain('skills.config=[{ name = "reviewer", enabled = false }]');
+    }
+  });
+
   test("passes every additional writable dir to an initial workspace-write exec", () => {
     expect(
       args("auto-edit", {

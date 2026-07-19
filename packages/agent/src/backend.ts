@@ -46,6 +46,17 @@ export interface RunOptions {
   tools?: string[] | "all";
   /** 是否加载项目/全局配置(claude CLAUDE.md)。false = 砍掉省 context。默认 true */
   settingSources?: boolean;
+  /**
+   * 是否暴露 Runtime 所在机器的 Skills。默认 true，保持通用 Backend 的历史行为。
+   * false 时调用方提供的 systemPrompt 仍会生效，但 Claude/Codex 不再向模型暴露
+   * 用户目录、项目目录、插件或 Runtime bundled Skills。
+   */
+  environmentSkills?: boolean;
+  /**
+   * Runtime 启动时已发现的环境 Skill 名称。Codex 没有单一 safe-mode 参数，
+   * environmentSkills=false 时用这份快照禁用显式 `$skill` 注入；Claude 忽略此字段。
+   */
+  environmentSkillNames?: string[];
   /** 会话持久化。false = 不落盘(claude --no-session-persistence / codex --ephemeral)。默认 true */
   persistence?: boolean;
   /**

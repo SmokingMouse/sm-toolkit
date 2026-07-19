@@ -107,6 +107,13 @@ export class ClaudeBackend implements Backend {
     if (opts.resume && opts.forkSession) args.push("--fork-session");
     if (opts.persistence === false) args.push("--no-session-persistence");
     if (opts.systemPrompt) args.push("--system-prompt", opts.systemPrompt);
+    if (opts.environmentSkills === false) {
+      // Harbor 的 Skill 由 control plane 直接写入 systemPrompt；Runtime 本机的
+      // CLAUDE.md / Skills / plugins / hooks / MCP 不属于 Agent 配置，必须隔离。
+      // --safe-mode 是 Claude Code 2.1.183+ 提供的完整 customization 隔离；
+      // --disable-slash-commands 再显式封住 Skill/command 入口，避免边界依赖隐含语义。
+      args.push(...claudeEnvironmentSkillArgs(false));
+    }
     if (opts.settingSources === false) {
       // 砍全局 CLAUDE.md + 默认 MCP 省 context。实测一句 OK $0.28→$0.0015(↓184x)。
       // 等号形式而非 ("--setting-sources", ""):独立的空字符串 argv 在部分 runtime
@@ -321,6 +328,11 @@ export class ClaudeBackend implements Backend {
       }
     }
   }
+}
+
+/** 导出纯参数构造，避免隔离边界只能靠集成运行肉眼验证。 */
+export function claudeEnvironmentSkillArgs(enabled = true): string[] {
+  return enabled ? [] : ["--safe-mode", "--disable-slash-commands"];
 }
 
 function claudePermissionArgs(p: PermissionPolicy): string[] {

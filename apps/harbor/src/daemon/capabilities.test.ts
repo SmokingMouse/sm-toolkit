@@ -3,7 +3,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EndpointInfo } from "@sm/llm";
-import { buildCodexModelRoutes, buildModelRoutes, detectInstalledSkills } from "./capabilities.js";
+import {
+  buildCodexModelRoutes,
+  buildModelRoutes,
+  detectEnvironmentSkillNames,
+  detectInstalledSkills,
+} from "./capabilities.js";
 
 describe("buildModelRoutes", () => {
   test("only exposes routes Claude Code can execute and preserves readiness", () => {
@@ -42,6 +47,27 @@ describe("detectInstalledSkills", () => {
       expect(skills[0]?.instruction).toContain("Check correctness first");
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("detectEnvironmentSkillNames", () => {
+  test("uses frontmatter names and includes every configured Runtime root", () => {
+    const first = mkdtempSync(join(tmpdir(), "harbor-environment-skills-"));
+    const second = mkdtempSync(join(tmpdir(), "harbor-environment-skills-"));
+    try {
+      mkdirSync(join(first, "folder-name"));
+      writeFileSync(join(first, "folder-name", "SKILL.md"), "---\nname: canonical-name\n---\n");
+      mkdirSync(join(second, "fallback-name"));
+      writeFileSync(join(second, "fallback-name", "SKILL.md"), "No frontmatter\n");
+
+      expect(detectEnvironmentSkillNames(null, [first, second, first])).toEqual([
+        "canonical-name",
+        "fallback-name",
+      ]);
+    } finally {
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
     }
   });
 });

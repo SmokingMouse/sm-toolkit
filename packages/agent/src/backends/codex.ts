@@ -56,6 +56,8 @@ export class CodexBackend implements Backend {
       imagePaths: (opts.attachments ?? []).map((a) => a.path),
       prompt: finalPrompt,
       additionalDirs: opts.additionalWorkspaces ?? [],
+      environmentSkills: opts.environmentSkills,
+      environmentSkillNames: opts.environmentSkillNames,
     });
 
     let sid: string | null = opts.resume ?? null;
@@ -140,8 +142,13 @@ export function buildCodexArgs(o: {
   imagePaths: string[];
   prompt: string;
   additionalDirs?: string[];
+  environmentSkills?: boolean;
+  environmentSkillNames?: string[];
 }): string[] {
   const common = ["--json", "--skip-git-repo-check"];
+  if (o.environmentSkills === false) {
+    common.push(...codexEnvironmentSkillArgs(o.environmentSkillNames));
+  }
   if (o.model) common.push("-m", o.model);
   // `codex exec resume` 当前没有 --add-dir；新会话才显式开放额外 Repository。
   if (!o.resume) {
@@ -178,6 +185,35 @@ export function buildCodexArgs(o: {
   const additionalWritableDirs = writableDirs.flatMap((dir) => ["--add-dir", dir]);
   const ephemeral = o.ephemeral ? ["--ephemeral"] : [];
   return ["exec", ...common, ...ephemeral, ...sandbox, ...additionalWritableDirs, ...imageArgs, o.prompt];
+}
+
+/**
+ * Codex 没有 Claude `--safe-mode` 的单一等价项：
+ * - ignore user config/rules，阻止本机配置和 exec policy 进入 Run；
+ * - 关闭 plugins，阻止插件携带的 Skills；
+ * - 不生成自动 Skills catalog；
+ * - 对启动时发现的名字逐一 disabled，阻止用户在 Issue prompt 中用 `$skill` 显式注入。
+ *
+ * 不使用 `skills.bundled.enabled=false`：Codex 0.144.x 会删除共享
+ * `$CODEX_HOME/skills/.system`，会影响 Harbor 之外的并发 Codex 会话。
+ */
+export function codexEnvironmentSkillArgs(skillNames: string[] = []): string[] {
+  const args = [
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--disable",
+    "plugins",
+    "-c",
+    "skills.include_instructions=false",
+  ];
+  const names = [...new Set(skillNames.map((name) => name.trim()).filter(Boolean))].sort();
+  if (names.length > 0) {
+    const rules = names
+      .map((name) => `{ name = ${JSON.stringify(name)}, enabled = false }`)
+      .join(", ");
+    args.push("-c", `skills.config=[${rules}]`);
+  }
+  return args;
 }
 
 function ev(

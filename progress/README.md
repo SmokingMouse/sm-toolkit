@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、Agent Device 安全迁移、事件驱动 Agent team、内置 `harbor` control-plane Skill 与 Local launchd Deployment Provider 已完成：Orchestrator 负责受控路由，Developer 从固定 Issue branch 创建/登记 PR，Reviewer 使用 Run-scoped capability request changes/approve/merge；所有 Agent 共享版本化、Device 无关且不可误改的 Harbor Skill，Review 由可重放领域事件 Automation 派发，merge 后的 exact revision 部署由独立、确定性的 host worker 执行，不把高权限发布交给 LLM。下一步只做真实环境验收与管理员 bootstrap：最小权限 GitHub token、Device push credential、可信 deployment target、`bitscli codebase`、真双机 checkout、真飞书群、automation 7 天与真实负载一周。
+Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、Agent Device 安全迁移、事件驱动 Agent team、内置 `harbor` control-plane Skill、Runtime Skill 隔离与 Local launchd Deployment Provider 已完成：Orchestrator 负责受控路由，Developer 从固定 Issue branch 创建/登记 PR，Reviewer 使用 Run-scoped capability request changes/approve/merge；所有 Agent 只继承 Harbor 配置的 instruction + 已绑定 Skills，不继承 Device 用户目录/checkout/插件的环境 Skills；Review 由可重放领域事件 Automation 派发，merge 后的 exact revision 部署由独立、确定性的 host worker 执行，不把高权限发布交给 LLM。下一步只做真实环境验收与管理员 bootstrap：最小权限 GitHub token、Device push credential、可信 deployment target、`bitscli codebase`、真双机 checkout、真飞书群、automation 7 天与真实负载一周。
 
 ## Goals
 
@@ -36,6 +36,8 @@ Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、A
 - **Agent 的 Device 是可迁移的当前执行绑定，不是历史归属**（2026-07-18 实测）：Agent 详情提供 Change Device；目标 Device 必须具备原 Runtime/model 能力，并复用或先登记同一 Repository 的 checkout mount。active Run 或未清理 worktree 会拒绝迁移；确认后只更新未来派发，历史 Run 的 Device/mount/execution root 快照不变，旧 Device 独占的 runtime Skills 自动解除，manual Skills 保留。
 - **Harbor 的 Mew parity 边界是“确定性 control plane + 可替换外部适配器”**（2026-07-19 实测）：Codebase webhook/refresh/CLI 输出先归一化成 SCM events，再投影 Issue/Delivery；Agent 只能用短期、单 Run token 创建同 Workspace backlog follow-up，不能绕过 review/check/merge policy。Workspace RBAC、private Agent、env redaction、Lark binding 和多 Bot ownership 都由 server 判定，外部消息本身不构成权限。
 - **Skill 与 Agent 配置已经是可执行资源，而非展示字段**（2026-07-19 实测）：Skill 保存 group、多文件 bundle、dependencies/hash/source 并支持 runtime/Codebase/GitHub/ZIP import 与 auto-sync；版本化 `builtin` Harbor Skill 在每个 Workspace 自动创建/升级并强制保留到所有 Agent，Device 无关、REST/UI 不可编辑归档，统一承载 Run/Issue/Delivery/Review/Automation 协议与三类角色 playbook；scheduler 只保留无条件 secret/lifecycle safety。Agent 的 concurrency/visibility/env/setup/多 Repository 在 scheduler/daemon 真正生效，env 不进入 prompt/run event，setup 按配置 hash 缓存。完整决策见 `progress/decisions/2026-07-19-harbor-builtin-control-plane-skill.md`。
+- **Harbor Agent 的 Skill 边界由 control plane 决定，不继承 Device 环境**（2026-07-19 参数测试 + Codex prompt debugger 实测）：scheduler 仍只注入 Agent instruction + 当前绑定的 Harbor Skill 快照；daemon 对 Claude 强制 `--safe-mode --disable-slash-commands`，对 Codex 忽略用户 config/rules、关闭 plugins/自动 Skill catalog，并把用户、bundled、admin、checkout 祖先 Skill 名逐一禁用，显式 `$skill` 也无法注入。通用 `@sm/agent` 默认行为不变，只有 Harbor Run fail-closed。Codex 不使用会删除共享 system Skill cache 的 `skills.bundled.enabled=false`。完整决策见 `progress/decisions/2026-07-19-harbor-agent-skill-runtime-isolation.md`。
+- **Agent 编辑与创建使用同一 Device 模型能力**（2026-07-19 typecheck/build）：Claude 下拉固定提供原生 aliases，并追加该 Agent 当前 Device 上报的 sm-toolkit Anthropic routes；Codex 使用该 Device 的 `models_cache.json`，无 cache 才回落手输。缺 key route 禁用，旧/未知 override 作为 current value 保留，不会因编辑被静默清空。
 - **Harbor Prompt 配置是 Workspace 级两段式 pipeline**（2026-07-17 实测）：Issue / Chat 在 dispatch 时组合稳定 `session context` 与本次 `event trigger`；Automation 只选 schedule/manual event。Run 持久化 `promptEvent` 与 `triggerRef`，不从可变 Conversation 事后猜触发来源；event block 停用时透传原始请求，旧 wrapper 无损迁移且不会重复拼接。
 - **Repository 的唯一产品配置源是 Agent**（2026-07-17 实测）：Workspace 只隔离 Agents / Skills / Conversations / Automations / prompt settings / Usage，不配置仓库地址；每个 Agent 必须绑定一个 Repository，且该 Repository 在 Agent Device 上必须有 checkout mount。Issue / Chat / AI draft / Automation 拒绝任务级 override，指派时继承 Agent Repository；Run 冻结 repository / mount / execution root，Review Agent 必须绑定实现仓库。
 - **Issue Done 与 Agent 自报完成解耦**（2026-07-17 实测）：代码 Issue 建立 Delivery 后，人工验收只更新 `review_status`，不会直接 Done；只有 CI passed + merged，且无需部署或 deployment succeeded，control plane 才以 system actor 推进 Done 并清理 worktree。新 implementation 或 MR/branch 引用变化都会使未合并 Delivery 的人工验收和 CI 证据失效；merged 后在原 Issue 返工会被调度层拒绝。
@@ -54,6 +56,13 @@ Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、A
 - **Next**：Issue 交人工验收；lockfile 双轨问题待决策。
 
 ## Session Log
+
+### 2026-07-19 — Agent Runtime Skill 隔离 + 编辑模型下拉
+- **Root cause**：Harbor 过去只控制 system prompt 中绑定哪些 Skills，但启动的 Claude/Codex 仍会独立扫描 Device 用户目录、checkout 与插件，因此“只绑定 Harbor Skill”不是运行时能力边界；New Agent 已有 Device 模型下拉，AgentConfigEditor 却只渲染文本框。
+- **Decision**：Harbor Run 默认关闭环境 Skills，`@sm/agent` 其他调用方保持兼容默认。Claude 使用官方 safe mode；Codex 关闭 catalog/plugins，并用启动时的有界名字快照禁掉显式 Skill 注入。模型清单始终来自 Agent 当前 Device，不在 server 伪造全局目录。完整隔离理由见 ADR。
+- **Done**：新增跨 Runtime `environmentSkills` 契约、Codex 环境 Skill 轻量扫描与初次/resume 参数隔离；Agent 编辑页复用 Device 的 Claude aliases/sm-toolkit routes 和 Codex model cache，保留 unknown current override。
+- **Verified**：定向 `@sm/agent` 8 tests / 34 assertions、daemon 21 tests / 61 assertions ✓；全量 **342 tests / 1626 assertions** ✓；root typecheck、全部 workspace production build（Next 12 static pages）、`git diff --check` ✓；Codex `debug prompt-input` 实测 disabled `$agent-browser` 不注入 Skill 内容。
+- **Next**：合并后待 production active Run 结束，再由 exact-revision Deployment Provider 或人工安全重启上线；旧 Claude/Codex session 的历史 transcript 不会被回写清理，新 Run 起严格生效。
 
 ### 2026-07-19 — Built-in Harbor control-plane Skill
 - **Decision**：控制面协议属于 Harbor Workspace/server，不属于某台 Device 或某个角色 Agent；因此使用 release-versioned、必选的 `builtin` Skill，Agent instruction 只保留角色判断与责任边界。完整理由见 ADR。
