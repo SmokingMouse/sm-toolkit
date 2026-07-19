@@ -11,7 +11,8 @@ Every Harbor Run disables environment-provided Skills while retaining the contro
 - `@sm/agent` gains an opt-in `environmentSkills=false` boundary; its default remains compatible for non-Harbor callers.
 - Claude runs with `--safe-mode --disable-slash-commands`. Harbor-provided instruction and Skill text still enters through `--system-prompt`.
 - Codex runs with `--ignore-user-config`, `--ignore-rules`, plugins disabled, and `skills.include_instructions=false`. At Run start the daemon scans the bounded Runtime roots and passes name-based `skills.config` disable rules so an Issue containing an explicit `$skill` cannot inject it.
-- The scan covers the Device user roots, Codex bundled/admin roots, and `.agents/.codex` Skill roots between the checkout and filesystem root. Bad, unreadable, or oversized Skills are not advertised as usable.
+- The scan covers the Device user roots, Codex bundled/admin roots, and `.agents/.codex` Skill roots between the checkout and filesystem root. An incomplete scan or a name set over the safe CLI limit fails the Run closed instead of continuing with a partial denylist.
+- Agent environment cannot override `HOME`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or `PATH`; server writes and daemon spawn both enforce this so the scanned roots and CLI identity cannot diverge from the child Runtime.
 - Do not set `skills.bundled.enabled=false`: current Codex removes the shared `$CODEX_HOME/skills/.system` cache under that setting, creating a cross-process side effect outside Harbor.
 
 ## Rationale

@@ -11,6 +11,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { join, resolve } from "node:path";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { assertAgentEnvironmentSafe } from "../agent-environment.js";
 import type {
   BackendKind,
   AutomationOutputMode,
@@ -129,6 +130,11 @@ function parseAgentEnvironment(value: unknown): Record<string, string> {
     bytes += key.length + raw.length;
     if (bytes > 64 * 1024) bad("environment 总大小不能超过 64KB");
     result[key] = raw;
+  }
+  try {
+    assertAgentEnvironmentSafe(result);
+  } catch (error) {
+    bad(error instanceof Error ? error.message : String(error));
   }
   return result;
 }

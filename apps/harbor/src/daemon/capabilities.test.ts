@@ -70,6 +70,34 @@ describe("detectEnvironmentSkillNames", () => {
       rmSync(second, { recursive: true, force: true });
     }
   });
+
+  test("fails closed instead of truncating an oversized environment Skill set", () => {
+    const root = mkdtempSync(join(tmpdir(), "harbor-environment-skills-"));
+    try {
+      for (const name of ["one", "two"]) {
+        mkdirSync(join(root, name));
+        writeFileSync(join(root, name, "SKILL.md"), `---\nname: ${name}\n---\n`);
+      }
+      expect(() => detectEnvironmentSkillNames(null, [root], 1)).toThrow(
+        "环境 Skill 超过安全上限 1",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("fails closed when an environment Skill cannot be safely inspected", () => {
+    const root = mkdtempSync(join(tmpdir(), "harbor-environment-skills-"));
+    try {
+      mkdirSync(join(root, "oversized"));
+      writeFileSync(join(root, "oversized", "SKILL.md"), "x".repeat(128 * 1024 + 1));
+      expect(() => detectEnvironmentSkillNames(null, [root])).toThrow(
+        "无法确认环境 Skill",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("buildCodexModelRoutes", () => {

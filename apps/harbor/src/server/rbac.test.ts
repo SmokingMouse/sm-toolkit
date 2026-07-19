@@ -54,6 +54,15 @@ test("workspace member tokens enforce RBAC, private visibility, and env redactio
   expect(denied.status).toBe(403);
 
   await request("owner-token", "PATCH", `/api/members/${member.id}`, { role: "admin" });
+  const unsafeEnvironment = await request(memberToken, "POST", "/api/agents", {
+    name: "unsafe-builder",
+    device: device.id,
+    repository: repository.id,
+    environment: { CODEX_HOME: "/tmp/other-codex-home" },
+  });
+  expect(unsafeEnvironment.status).toBe(400);
+  expect(await unsafeEnvironment.text()).toContain("Runtime 保留变量");
+
   const created = await request(memberToken, "POST", "/api/agents", {
     name: "private-builder",
     device: device.id,

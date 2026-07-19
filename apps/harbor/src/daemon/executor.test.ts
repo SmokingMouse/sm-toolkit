@@ -11,6 +11,7 @@ import {
   runAgentSetup,
 } from "./executor.js";
 import { ensureWorktree } from "./worktree.js";
+import { assertAgentEnvironmentSafe } from "../agent-environment.js";
 
 function event(type: AgentEvent["type"], text: string, sessionId = "session_1"): AgentEvent {
   return { type, backend: "claude", sessionId, data: { text } };
@@ -33,6 +34,13 @@ test("coalesces only adjacent text/thinking chunks from the same stream", () => 
       data: { name: "Read" },
     }),
   ).toBeNull();
+});
+
+test("rejects Agent environment overrides that can change Runtime identity or Skill roots", () => {
+  expect(() => assertAgentEnvironmentSafe({ HOME: "/tmp/other" })).toThrow("HOME");
+  expect(() => assertAgentEnvironmentSafe({ codex_home: "/tmp/other" })).toThrow("codex_home");
+  expect(() => assertAgentEnvironmentSafe({ PATH: "/tmp/bin" })).toThrow("PATH");
+  expect(() => assertAgentEnvironmentSafe({ API_TOKEN: "allowed" })).not.toThrow();
 });
 
 function git(cwd: string, args: string[]): void {

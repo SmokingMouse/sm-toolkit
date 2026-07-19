@@ -17,6 +17,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { assertAgentEnvironmentSafe } from "../agent-environment.js";
 import type { DaemonMsg, RunAttachment, RunSpec } from "../protocol.js";
 import { detectEnvironmentSkillNames } from "./capabilities.js";
 import { ensureWorktree, resolveWorktreeGitCommonDir } from "./worktree.js";
@@ -97,6 +98,9 @@ export class Executor {
     let errMsg: string | null = null;
     let attachmentDir: string | null = null;
     try {
+      const agentEnvironment = spec.envOverrides ?? {};
+      // 老 DB / 旧 server 也不能绕过新 API 校验：daemon 在真正 spawn 前再次 fail-closed。
+      assertAgentEnvironmentSafe(agentEnvironment);
       const { executionRoot: effectiveDir, shouldReportWorktreeReady } = prepareRunExecution(spec);
       if (shouldReportWorktreeReady && effectiveDir && spec.conversationId) {
         this.send({ type: "worktree_ready", runId, conversationId: spec.conversationId, path: effectiveDir });
@@ -105,7 +109,7 @@ export class Executor {
 
       if (spec.setupScript?.trim()) {
         if (!effectiveDir) throw new Error("Agent setup 需要 Repository mount");
-        await runAgentSetup(effectiveDir, spec.setupScript, spec.setupKey, spec.envOverrides ?? {}, signal);
+        await runAgentSetup(effectiveDir, spec.setupScript, spec.setupKey, agentEnvironment, signal);
       }
 
       const materialized = materializeRunAttachments(runId, spec.attachments ?? []);
@@ -137,7 +141,7 @@ export class Executor {
         ...(environmentSkillNames.length > 0 ? { environmentSkillNames } : {}),
         resume: spec.resume,
         model: spec.model ?? undefined,
-        env: { ...(spec.envOverrides ?? {}), ...actionEnvironment },
+        env: { ...agentEnvironment, ...actionEnvironment },
         attachments: materialized.paths
           .filter((attachment) => attachment.mime.startsWith("image/"))
           .map((attachment) => ({ path: attachment.path, mime: attachment.mime })),

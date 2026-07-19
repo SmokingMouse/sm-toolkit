@@ -113,27 +113,42 @@ export function detectInstalledSkills(roots: SkillScanRoot[] = defaultSkillRoots
 export function detectEnvironmentSkillNames(
   cwd: string | null | undefined,
   roots: string[] = environmentSkillRoots(cwd),
+  maxNames = MAX_ENVIRONMENT_SKILL_NAMES,
 ): string[] {
   const names = new Set<string>();
   for (const root of [...new Set(roots)]) {
-    if (names.size >= MAX_ENVIRONMENT_SKILL_NAMES || !existsSync(root)) continue;
+    if (!existsSync(root)) continue;
     let entries: Dirent[];
     try {
       entries = readdirSync(root, { withFileTypes: true, encoding: "utf8" });
-    } catch {
-      continue;
+    } catch (error) {
+      throw new Error(
+        `无法完整扫描环境 Skill root ${root}：${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     for (const entry of entries) {
-      if (names.size >= MAX_ENVIRONMENT_SKILL_NAMES) break;
       const candidate = join(root, entry.name, "SKILL.md");
       if (!existsSync(candidate)) continue;
       try {
-        if (statSync(candidate).size > MAX_SKILL_BYTES) continue;
+        if (statSync(candidate).size > MAX_SKILL_BYTES) {
+          throw new Error(`Skill 文件超过 ${MAX_SKILL_BYTES} bytes 安全扫描上限`);
+        }
         const frontmatter = readSkillFrontmatter(readFileSync(realpathSync(candidate), "utf8"));
         const name = frontmatter.name?.trim() || entry.name.trim();
-        if (name) names.add(name);
-      } catch {
-        // 坏 symlink / 无权限 / 非 UTF-8：不把不确定名字写入 CLI config。
+        if (!name || names.has(name)) continue;
+        if (names.size >= maxNames) {
+          throw new Error(
+            `环境 Skill 超过安全上限 ${maxNames}，拒绝启动 Codex Run；请清理 Device 的 Runtime/checkout Skill 安装`,
+          );
+        }
+        names.add(name);
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("环境 Skill 超过安全上限")) {
+          throw error;
+        }
+        throw new Error(
+          `无法确认环境 Skill ${candidate} 的禁用名称：${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
   }
