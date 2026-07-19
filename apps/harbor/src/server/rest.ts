@@ -2535,6 +2535,7 @@ export function buildRest(
       skills?: unknown;
       repository?: string;
       repositories?: unknown;
+      name?: string;
       description?: string | null;
       model?: string | null;
       permission?: string;
@@ -2549,6 +2550,13 @@ export function buildRest(
       dropIncompatibleSkills?: boolean;
     };
     if (Object.keys(b).length === 0) bad("没有可更新的 Agent 字段");
+    const name = b.name?.trim();
+    if (b.name !== undefined && !name) bad("Agent name 不能为空");
+    if (name && name !== agent.name) {
+      const existing = store.getAgentByNameInWorkspace(workspace.id, name);
+      if (existing && existing.id !== agent.id)
+        bad(`agent 名 "${name}" 已存在于当前 Workspace`);
+    }
     if (
       b.dropIncompatibleSkills !== undefined &&
       typeof b.dropIncompatibleSkills !== "boolean"
@@ -2674,6 +2682,7 @@ export function buildRest(
     )
       bad("setupScript 不能超过 64KB");
     const configPatch = {
+      ...(name !== undefined ? { name } : {}),
       ...(b.description !== undefined
         ? { description: b.description?.trim() || null }
         : {}),

@@ -143,6 +143,47 @@ describe("Workspace REST scope", () => {
     });
     expect(patchOverride.status).toBe(400);
   });
+
+  test("renames an Agent without changing its identity and rejects workspace collisions", async () => {
+    const { store, request } = restHarness();
+    const device = store.upsertDevice("worker", "hash", { clis: { codex: "1.0" }, endpoints: [] }, 1);
+    const repository = store.createRepository({ workspaceId: "ws_personal", name: "app" }, 2);
+    store.setRepositoryMount(repository.id, device.id, "/code/app", 2);
+    const builder = store.createAgent({
+      name: "builder",
+      deviceId: device.id,
+      backend: "codex",
+      repositoryId: repository.id,
+    }, 3);
+    const reviewer = store.createAgent({
+      name: "reviewer",
+      deviceId: device.id,
+      backend: "codex",
+      repositoryId: repository.id,
+    }, 4);
+
+    const renamedResponse = await request(`/api/agents/${builder.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "  Feature Builder  " }),
+    });
+    expect(renamedResponse.status).toBe(200);
+    const renamed = (await renamedResponse.json()) as { id: string; name: string };
+    expect(renamed).toMatchObject({ id: builder.id, name: "Feature Builder" });
+    expect(store.getAgent(builder.id)?.name).toBe("Feature Builder");
+
+    const collision = await request(`/api/agents/${reviewer.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Feature Builder" }),
+    });
+    expect(collision.status).toBe(400);
+    expect(store.getAgent(reviewer.id)?.name).toBe("reviewer");
+
+    const blank = await request(`/api/agents/${reviewer.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "   " }),
+    });
+    expect(blank.status).toBe(400);
+  });
 });
 
 describe("Agent Device migration", () => {

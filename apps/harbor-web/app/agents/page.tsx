@@ -461,6 +461,7 @@ function AgentConfigEditor({
   onSaved: () => void;
 }) {
   const toast = useToast();
+  const [name, setName] = useState(agent.name);
   const [description, setDescription] = useState(agent.description ?? "");
   const [model, setModel] = useState(agent.model ?? "");
   const [permission, setPermission] = useState(agent.permission);
@@ -523,6 +524,7 @@ function AgentConfigEditor({
         parsedEnvironment = parsed as Record<string, string>;
       }
       await updateAgent(agent.id, {
+        name: name.trim(),
         description: description.trim() || null,
         model: model.trim() || null,
         permission,
@@ -536,7 +538,7 @@ function AgentConfigEditor({
           ? { environment: parsedEnvironment }
           : {}),
       });
-      toast(`${agent.name} 配置已保存`, "success");
+      toast(`${name.trim()} 配置已保存`, "success");
       onSaved();
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), "error");
@@ -555,6 +557,13 @@ function AgentConfigEditor({
         </div>
       </div>
       <div className="grid gap-x-5 p-5 md:grid-cols-2">
+        <Field label="Name">
+          <input
+            className={inputCls}
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+          />
+        </Field>
         <Field label="Description">
           <input
             className={inputCls}
@@ -755,7 +764,7 @@ function AgentConfigEditor({
       <div className="flex justify-end border-t border-accent/15 bg-white/35 px-5 py-4">
         <button
           className={btnPrimary}
-          disabled={busy || concurrency < 1 || concurrency > 64}
+          disabled={busy || !name.trim() || concurrency < 1 || concurrency > 64}
           onClick={save}
         >
           {busy ? "保存中…" : "Save Agent config"}

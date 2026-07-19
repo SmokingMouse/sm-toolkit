@@ -2003,6 +2003,7 @@ export class HarborStore {
   updateAgentConfig(
     id: string,
     patch: {
+      name?: string;
       description?: string | null;
       model?: string | null;
       permission?: PermissionPolicy;
@@ -2018,6 +2019,7 @@ export class HarborStore {
     const sets: string[] = [];
     const params: (string | number | null)[] = [];
     const add = (column: string, value: string | number | null) => { sets.push(`${column} = ?`); params.push(value); };
+    if (patch.name !== undefined) add("name", patch.name);
     if (patch.description !== undefined) add("description", patch.description);
     if (patch.model !== undefined) add("model", patch.model);
     if (patch.permission !== undefined) add("permission", patch.permission);
