@@ -288,7 +288,8 @@ export class HostLaunchd implements LaunchdControl {
     for (let attempt = 0; attempt < LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS; attempt++) {
       const result = await raw(this.processRunner, argv);
       if (result.exitCode === 0 && !result.timedOut) return;
-      lastOutput = result.stderr || result.stdout || (result.timedOut ? "timeout" : `exit ${result.exitCode}`);
+      lastOutput = [result.stdout, result.stderr].filter(Boolean).join("\n")
+        || (result.timedOut ? "timeout" : `exit ${result.exitCode}`);
       if (!isTransientLaunchdBootstrapEio(lastOutput)) {
         throw new Error(`launchctl bootstrap failed: ${lastOutput}`);
       }

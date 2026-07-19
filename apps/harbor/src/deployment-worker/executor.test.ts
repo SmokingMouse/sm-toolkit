@@ -4,6 +4,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DeploymentServiceConfig, DeploymentTargetConfig } from "../config.js";
+import {
+  LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS,
+  LAUNCHD_BOOTSTRAP_RETRY_INTERVAL_MS,
+} from "../daemon/service.js";
 import type { DeploymentJob, DeploymentMaintenanceGate } from "../protocol.js";
 import {
   LocalLaunchdDeploymentExecutor,
@@ -564,6 +568,21 @@ test("launchctl cutover bootstrap retries only bounded transient EIO", async () 
   await expect(new HostLaunchd(ambiguous, async () => { throw new Error("must not pause"); })
     .bootstrap("gui/1", "/server.plist")).rejects.toThrow("Operation already in progress");
   expect(ambiguousCalls).toBe(1);
+
+  let exhaustionCalls = 0;
+  let exhaustionWaitedMs = 0;
+  const exhausted: DeploymentProcess = {
+    run: async () => {
+      exhaustionCalls++;
+      return result(5, "Bootstrap failed: 5: Input/output error", "");
+    },
+  };
+  await expect(new HostLaunchd(exhausted, async (ms) => { exhaustionWaitedMs += ms; })
+    .bootstrap("gui/1", "/server.plist")).rejects.toThrow("remained EIO after bounded retry");
+  expect(exhaustionCalls).toBe(LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS);
+  expect(exhaustionWaitedMs).toBe(
+    (LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS - 1) * LAUNCHD_BOOTSTRAP_RETRY_INTERVAL_MS,
+  );
 });
 
 test("launchctl PID proof uses exact /bin/kill facts and fails closed on ambiguous errors", async () => {
