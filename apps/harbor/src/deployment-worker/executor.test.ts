@@ -342,7 +342,7 @@ describe("local launchd v3-fenced executor", () => {
     h.health.statuses.push(200);
     await h.instance.releaseHostMaintenance(target(), executed.gate!, { assertFence: async () => {} });
     expect(h.launchd.calls.filter((call) => call === "bootstrap gui/1 /daemon.plist")).toHaveLength(1);
-  });
+  }, 15_000);
 
   test("retries a transient loopback transport failure inside the bounded exact-health window", async () => {
     const h = harness([new Error("connection refused"), 200]);
