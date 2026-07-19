@@ -23,7 +23,11 @@
 - **AI Issue draft**：`kind=issue_draft` 的隐藏创建器状态。只读 Agent 先把自然语言请求分诊为可编辑的标题、范围与验收标准；只有人工确认发布后才原位转为 Issue，发布前不出现在 Chats、Issues 或 Automation target 列表。
 - **Assignee**：Issue 当前的 implementation Agent，可空、可在没有 active Run 时更换。Reviewer 是独立 Run 的执行者，不覆盖 Assignee；更换 Assignee 会清空旧 Agent 的 resume session。
 - **Issue stage**：`backlog(Inbox) → todo(Ready) → doing(Running) → review → done/canceled`。`doing/review` 由 implementation Run 自动推进，人工只做分诊、要求修改、验收或取消，避免拖拽制造假状态。
-- **Run purpose**：一次执行的意图快照：`triage` 只读分诊 AI Issue draft，不建 worktree、不推进阶段；`implementation` 推进 Issue 阶段并续接 Assignee session；`review` / `verification` 只在 Review 内运行，不改变 Assignee、不自动 Done。
+- **Run purpose**：一次执行的意图快照：`triage` 只读分诊 AI Issue draft；`coordination` 只读取控制面上下文并按用户定义策略派生 Run，不改 Issue stage/Assignee/Delivery；`implementation` 推进 Issue 阶段并续接 Assignee session；`review` / `verification` 只在 Review 内运行，不改变 Assignee、不自动 Done。
+- **Domain Event**：由 Harbor 已提交领域事实产生的持久、幂等事件，例如 `issue.created`、`issue.ready`、`issue.review_ready`、`delivery.merge_ready`、`delivery.merged`。Automation Trigger 消费事件，而不是轮询状态；重启后可重放未投递事件，新建 Trigger 不追溯消费其创建时间之前的历史事件。
+- **Run dispatch**：action-capable Run 使用短期 Run token 查询安全上下文并显式指定目标 Agent 派生 child Run 的能力。Harbor 校验 Workspace、Conversation 串行、Repository、purpose、lineage 深度和稳定 dispatch key，但绝不替用户选择 Agent，也不要求存在 Orchestrator。
+- **Run lineage**：child Run 持久化的 `parentRunId / rootRunId / depth / dispatchKey`。它用于审计、幂等和防无限递归，不表达内置角色层级。
+- **Review checkout**：跨 Device Review 的 per-Run detached checkout。server 必须先从 SCM Delivery Provider 获得可信 exact head revision 与 remote identity；daemon fetch 后证明 `FETCH_HEAD` 等于该 revision 才创建 linked worktree，并在 Run 完成或重连恢复时 fail-loud 清理。没有可信远端 revision 时仍只允许原 Issue worktree 本地 Review。
 - **Additional writable dirs**：`@sm/agent` Run 级、位于 workspace 之外的显式可写根；Codex 初次 exec 映射为重复 `--add-dir`，resume 映射为 `sandbox_workspace_write.writable_roots`。它不是 `full access`，readonly/default 必须忽略。
 - **Worktree Git metadata grant**：harbord 只给 `Codex + implementation + worktree + auto-edit/full` Run 增加的 Git 元数据写授权。授权前必须同时证明：worktree leaf 不是 symlink且 realpath 等于“canonical expected parent + 当前 Issue basename”；Git registry 的原始绝对 leaf（只做 resolve/规范化）严格等于该 expected leaf且本身不是 symlink；symbolic HEAD 是 `refs/heads/harbor/<Issue ID>`；common gitdir 与 Repository 相同。triage/review/verification/readonly/非 worktree 不获得。
 - **Concurrency**：每台 Device 可同时执行的 Run 上限（默认 2）；同一 Conversation 永远串行，防止两个 Run 从同一 session 分叉。并发属于调度器与 Device，不是 Agent 的静态属性。
