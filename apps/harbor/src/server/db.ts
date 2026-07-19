@@ -8,6 +8,8 @@ import { Database } from "bun:sqlite";
 import { chmodSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { applyIdentityNormalization, inspectIdentityNormalization } from "./identity-normalization.js";
+import { summarizeDeviceCapabilities } from "../device-summary.js";
+import type { DeviceCapabilities } from "../protocol.js";
 
 const APPLICATION_MUTATION_TABLES = [
   "devices",
@@ -1797,7 +1799,24 @@ export const MIGRATIONS: string[] = [
     CHECK (kind IN ('personal','team'));
   ALTER TABLE workspaces ADD COLUMN created_by_account_id TEXT REFERENCES accounts(id);
   `,
+  // v24 —— Device 高频列表持久化轻量 projection；完整 capabilities 继续用于 runtime Skill import。
+  `
+  ALTER TABLE devices ADD COLUMN capabilities_summary TEXT NOT NULL DEFAULT '{}';
+  `,
 ];
+
+function backfillDeviceCapabilitySummaries(db: Database): void {
+  const rows = db.query<{ id: string; capabilities: string }, []>(
+    "SELECT id, capabilities FROM devices",
+  ).all();
+  const update = db.query<void, [string, string]>(
+    "UPDATE devices SET capabilities_summary = ? WHERE id = ?",
+  );
+  for (const row of rows) {
+    const capabilities = JSON.parse(row.capabilities) as DeviceCapabilities;
+    update.run(JSON.stringify(summarizeDeviceCapabilities(capabilities)), row.id);
+  }
+}
 
 function hasTable(db: Database, table: string): boolean {
   return !!db
@@ -1920,11 +1939,16 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
       db.transaction(() => {
         if (version === 14) ensureGitHubDeliveryColumns(db);
         // v21 maintenance triggers 正确阻止应用写；migration 自身在同一 SQLite transaction
-        // 内暂时移除两个待 backfill 表的 trigger，提交前原样重装。其他连接在 commit 前看不到该变化。
+        // 内暂时移除待 backfill 表的 trigger，提交前原样重装。其他连接在 commit 前看不到该变化。
         if (version === 22) dropMaintenanceLinearization(db, ["workspace_members", "workspaces"]);
+        if (version === 23) dropMaintenanceLinearization(db, ["devices"]);
         if (sql.trim()) db.exec(sql);
         if (version === 22) {
           applyIdentityNormalization(db, identityReport!);
+          installMaintenanceLinearization(db);
+        }
+        if (version === 23) {
+          backfillDeviceCapabilitySummaries(db);
           installMaintenanceLinearization(db);
         }
         if (version === 20) installMaintenanceLinearization(db);
@@ -1955,6 +1979,11 @@ export function openDb(path: string): Database {
  */
 export function openV22MigrationFixtureDb(path = ":memory:"): Database {
   return openDbAtVersion(path, 22);
+}
+
+/** 只给 v24 projection migration regression fixture 使用。 */
+export function openV23MigrationFixtureDb(path = ":memory:"): Database {
+  return openDbAtVersion(path, 23);
 }
 
 function installMaintenanceLinearization(db: Database): void {

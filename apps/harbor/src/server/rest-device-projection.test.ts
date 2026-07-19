@@ -9,7 +9,8 @@ import { HarborStore } from "./store.js";
 import type { DeviceHub } from "./ws.js";
 
 function harness() {
-  const store = new HarborStore(openDb(":memory:"));
+  const db = openDb(":memory:");
+  const store = new HarborStore(db);
   const online = new Set<string>();
   const hub = {
     onlineIds: () => online,
@@ -32,7 +33,7 @@ function harness() {
       ...init?.headers,
     },
   });
-  return { store, request };
+  return { db, store, request };
 }
 
 describe("Device REST projection", () => {
@@ -98,5 +99,33 @@ describe("Device REST projection", () => {
     expect(response.status).toBe(200);
     const repositories = await response.json() as Array<{ mounts: Array<{ deviceName: string }> }>;
     expect(repositories[0]?.mounts[0]?.deviceName).toBe("worker");
+  });
+
+  test("serves the persisted list projection without parsing the full capability snapshot", async () => {
+    const { db, store, request } = harness();
+    const device = store.upsertDevice("worker", "hash", {
+      clis: { claude: "2.1.0" },
+      endpoints: [],
+      installedSkills: [{
+        name: "runtime-review",
+        description: "Review a change",
+        path: "/skills/runtime-review",
+        runtimes: ["claude"],
+        instruction: "large body".repeat(50_000),
+      }],
+    }, 1);
+    // Summary 是独立持久化读模型；list path 不应接触完整 snapshot blob。
+    db.run("UPDATE devices SET capabilities = 'invalid-full-snapshot' WHERE id = ?", [device.id]);
+
+    const response = await request("/api/devices");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual([
+      expect.objectContaining({
+        id: device.id,
+        capabilities: expect.objectContaining({
+          installedSkills: [expect.objectContaining({ name: "runtime-review", fileCount: 1 })],
+        }),
+      }),
+    ]);
   });
 });

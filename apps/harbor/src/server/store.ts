@@ -42,6 +42,7 @@ import type {
   DeliveryReviewStatus,
   DeliveryStatus,
   Device,
+  DeviceSummary,
   DeviceCapabilities,
   HarborAgent,
   HarborRepository,
@@ -80,6 +81,7 @@ import { DEFAULT_WORKSPACE_ID } from "../protocol.js";
 import type { PermissionPolicy } from "@sm/agent";
 import { newId } from "../ids.js";
 import { redactStructured } from "../deployment-worker/redaction.js";
+import { summarizeDevice, summarizeDeviceCapabilities } from "../device-summary.js";
 
 // ── 行类型（SQLite 返回形状） ───────────────────────────
 
@@ -88,6 +90,7 @@ interface DeviceRow {
   name: string;
   token_hash: string;
   capabilities: string;
+  capabilities_summary?: string;
   last_seen_at: number | null;
   created_at: number;
 }
@@ -428,6 +431,18 @@ function toDevice(r: DeviceRow, online: boolean): Device {
     id: r.id,
     name: r.name,
     capabilities: JSON.parse(r.capabilities) as DeviceCapabilities,
+    online,
+    lastSeenAt: r.last_seen_at,
+    createdAt: r.created_at,
+  };
+}
+
+function toDeviceSummary(r: DeviceRow, online: boolean): DeviceSummary {
+  if (!r.capabilities_summary) return summarizeDevice(toDevice(r, online));
+  return {
+    id: r.id,
+    name: r.name,
+    capabilities: JSON.parse(r.capabilities_summary) as DeviceSummary["capabilities"],
     online,
     lastSeenAt: r.last_seen_at,
     createdAt: r.created_at,
@@ -866,8 +881,14 @@ function parseJsonArray<T>(value: string): T[] {
 
 export class HarborStore {
   private domainEventListener: ((event: DomainEvent) => void) | null = null;
+  private readonly hasDeviceSummaryColumn: boolean;
 
-  constructor(private db: Database) {}
+  constructor(private db: Database) {
+    this.hasDeviceSummaryColumn = db
+      .query<{ name: string }, []>("PRAGMA table_info(devices)")
+      .all()
+      .some((column) => column.name === "capabilities_summary");
+  }
 
   setDomainEventListener(listener: ((event: DomainEvent) => void) | null): void {
     this.domainEventListener = listener;
@@ -1773,19 +1794,34 @@ export class HarborStore {
       .query<DeviceRow, [string]>("SELECT * FROM devices WHERE name = ?")
       .get(name);
     if (existing) {
-      const jobChanged = this.db.run(
-        "UPDATE devices SET token_hash = ?, capabilities = ?, last_seen_at = ? WHERE id = ?",
-        [tokenHash, JSON.stringify(capabilities), now, existing.id],
-      );
+      const serialized = JSON.stringify(capabilities);
+      if (this.hasDeviceSummaryColumn) {
+        this.db.run(
+          "UPDATE devices SET token_hash = ?, capabilities = ?, capabilities_summary = ?, last_seen_at = ? WHERE id = ?",
+          [tokenHash, serialized, JSON.stringify(summarizeDeviceCapabilities(capabilities)), now, existing.id],
+        );
+      } else {
+        this.db.run(
+          "UPDATE devices SET token_hash = ?, capabilities = ?, last_seen_at = ? WHERE id = ?",
+          [tokenHash, serialized, now, existing.id],
+        );
+      }
       const device = toDevice({ ...existing, capabilities: JSON.stringify(capabilities), last_seen_at: now }, true);
       this.autoSyncRuntimeSkills(device, now);
       return device;
     }
     const id = newId("device");
-    this.db.run(
-      "INSERT INTO devices (id, name, token_hash, capabilities, last_seen_at, created_at) VALUES (?,?,?,?,?,?)",
-      [id, name, tokenHash, JSON.stringify(capabilities), now, now],
-    );
+    if (this.hasDeviceSummaryColumn) {
+      this.db.run(
+        "INSERT INTO devices (id, name, token_hash, capabilities, capabilities_summary, last_seen_at, created_at) VALUES (?,?,?,?,?,?,?)",
+        [id, name, tokenHash, JSON.stringify(capabilities), JSON.stringify(summarizeDeviceCapabilities(capabilities)), now, now],
+      );
+    } else {
+      this.db.run(
+        "INSERT INTO devices (id, name, token_hash, capabilities, last_seen_at, created_at) VALUES (?,?,?,?,?,?)",
+        [id, name, tokenHash, JSON.stringify(capabilities), now, now],
+      );
+    }
     const device = this.getDevice(id, true)!;
     this.autoSyncRuntimeSkills(device, now);
     return device;
@@ -1834,6 +1870,17 @@ export class HarborStore {
       .query<DeviceRow, []>("SELECT * FROM devices ORDER BY created_at")
       .all()
       .map((r) => toDevice(r, onlineIds.has(r.id)));
+  }
+
+  /** 高频列表只读取持久化 summary，避免每次反序列化完整 runtime Skill bundle。 */
+  listDeviceSummaries(onlineIds: Set<string>): DeviceSummary[] {
+    if (!this.hasDeviceSummaryColumn) return this.listDevices(onlineIds).map(summarizeDevice);
+    return this.db
+      .query<DeviceRow, []>(
+        "SELECT id, name, capabilities_summary, last_seen_at, created_at FROM devices ORDER BY created_at",
+      )
+      .all()
+      .map((row) => toDeviceSummary(row, onlineIds.has(row.id)));
   }
 
   // ---- agents ----

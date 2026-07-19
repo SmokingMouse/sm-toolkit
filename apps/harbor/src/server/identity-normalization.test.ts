@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createV22IdentityFixture } from "./fixtures/v22-identity.js";
 import { inspectIdentityNormalization } from "./identity-normalization.js";
-import { openDb } from "./db.js";
+import { openDb, openV23MigrationFixtureDb } from "./db.js";
 
 test("v22 identity report projects bootstrap/external/local accounts without merging duplicate email", () => {
   const fixture = createV22IdentityFixture();
@@ -142,7 +142,7 @@ test("v23 migration consumes the same report and preserves membership/reference 
   const ids = fixture.ids;
   fixture.db.close();
   try {
-    const migrated = openDb(path);
+    const migrated = openV23MigrationFixtureDb(path);
     try {
       expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(23);
       expect(migrated.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM accounts").get()?.count).toBe(5);
