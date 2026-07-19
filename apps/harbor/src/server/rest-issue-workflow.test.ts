@@ -308,9 +308,13 @@ test("Chat worktree cleanup is admin-controlled, idle-only, and proof-driven", a
   store.setConversationWorktreePath(chat.id, worktreePath, mount.id, 6);
 
   const sent: ServerMsg[] = [];
+  let deliverySucceeds = true;
   const transport: DeviceTransport = {
     isOnline: () => true,
-    send: (_deviceId, message) => { sent.push(message); return true; },
+    send: (_deviceId, message) => {
+      if (deliverySucceeds) sent.push(message);
+      return deliverySucceeds;
+    },
   };
   const coordinator = new RunCoordinator(store, new RunBus(), transport, 2);
   const app = buildRest(
@@ -353,6 +357,32 @@ test("Chat worktree cleanup is admin-controlled, idle-only, and proof-driven", a
     worktreePath,
   }]);
 
+  coordinator.onWorktreeCleanupResult(chat.id, false, "dirty worktree");
+  expect(store.getConversation(chat.id)?.worktreePath).toBe(worktreePath);
+  const afterFailure = coordinator.enqueueRun(
+    store.getConversation(chat.id)!,
+    agent,
+    "continue after cleanup failure",
+    "implementation",
+  );
+  coordinator.onRunDone({ runId: afterFailure.id, status: "succeeded", claudeSessionId: null, cost: null });
+
+  deliverySucceeds = false;
+  const undelivered = await cleanup();
+  expect(undelivered.status).toBe(400);
+  expect(await undelivered.json()).toEqual(expect.objectContaining({
+    error: expect.stringContaining("未送达目标 Device"),
+  }));
+  const afterUndelivered = coordinator.enqueueRun(
+    store.getConversation(chat.id)!,
+    agent,
+    "continue after undelivered cleanup",
+    "implementation",
+  );
+  coordinator.onRunDone({ runId: afterUndelivered.id, status: "succeeded", claudeSessionId: null, cost: null });
+
+  deliverySucceeds = true;
+  expect((await cleanup()).status).toBe(202);
   coordinator.onWorktreeCleanupResult(chat.id, true, "removed");
   expect(store.getConversation(chat.id)).toEqual(expect.objectContaining({
     status: "open",

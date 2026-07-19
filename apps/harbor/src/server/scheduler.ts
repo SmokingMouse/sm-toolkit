@@ -394,7 +394,7 @@ export class RunCoordinator {
     });
     if (!sent) {
       console.log(`[coordinator] 设备离线，worktree 收尾等重连补发：${conv.id}（${conv.worktreePath}）`);
-    } else {
+    } else if (conv.kind === "chat") {
       this.pendingWorktreeCleanups.add(conv.id);
     }
     return sent;
