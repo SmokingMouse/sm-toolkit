@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-schema v23 identity normalization、Account auth 与 Web 登录面已在独立 worktree 完成并通过全量回归；生产 v22 只读 report 与备份副本 migration drill 均通过，等待提交、合并与 exact-revision 部署。本阶段未修改 daemon credential 或 WS hello。
+schema v23 identity normalization、Account auth 与 Web 登录面已合入 `main@4a08789` 并 exact-revision 部署到 Mac mini；生产 migration、health、Web、双 Device、rollback anchor 全部通过。本阶段未修改 daemon credential 或 WS hello；仅余用户在生产 origin 完成 first-owner Passkey ceremony并保存 recovery codes。
 
 ## Log
 
@@ -19,6 +19,8 @@ schema v23 identity normalization、Account auth 与 Web 登录面已在独立 w
 - 生产 v22 在线一致性 backup 已落 `/Users/smokingmouse/.harbor/backups/pre-v23-identity-20260719/harbor.db`（SHA-256 `4650f9ec2f88bc833bd8dca425cb0f1537ddb3048c97e0c19e8aa6a345756aba`，integrity=ok，FK=0）。
 - 生产 backup 的只读 identity report PASS：`1 legacy member → 1 Account / 1 Membership`，无 blocker/warning，report 前后 SHA 不变；另在一次性本地副本真实演练 v22→v23，schema=23、`ws_personal → acc_bootstrap`、132 个 maintenance triggers、integrity=ok、FK=0，副本已删除。
 - 首次 production deployment attempt 在 maintenance 前卡于 fresh `bun install`；根因是本机默认 registry 把新 WebAuthn tarball 锁到 Mac mini 不可达的 `bnpm.byted.org`。在 gate=0 时终止 child，job 安全落为 failed/rollback_complete；随后重锁到公共 npm 并新增 repo-local `bunfig.toml` 防回归。
+- `main@4a0878905e7290232745f74eceebb8e0fd2aba03` 经 Issue `c_1rqznin12z` / Delivery `del_1jatzxy50i` 部署。首次 cutover 的 exact launchd stop proof fail-closed 到 `needs_recovery`；显式 recovery 验证旧 baseline、恢复服务并清闸，Retry Job `depjob_nkfdb6bmm1` 随后 succeeded/healthy。
+- 生产 DB 已是 v23：Account=1、Membership=1、`ws_personal.created_by_account_id=acc_bootstrap`、legacy member ID 保持不变、integrity=ok、FK=0；public root/login=200、unauth API=401，MacBook/Mac mini 两台 Device 在线。部署前 v22 backup 与 rollback anchor 均为 0600。
 
 ## Decisions
 
@@ -36,9 +38,10 @@ schema v23 identity normalization、Account auth 与 Web 登录面已在独立 w
 - root `bun run typecheck`、root build、Harbor Web typecheck/build、`git diff --check` 全绿。
 - public-registry lock 验证 `bnpm=0`；无显式 `--registry` 的 frozen install 由 repo `bunfig.toml` 固定到 `https://registry.npmjs.org`。
 - daemon、`server/ws.ts`、deployment-worker 无 diff；未修改 credential/hello contract。
+- current release、health 与 Delivery 的 revision 均精确为 `4a0878905e7290232745f74eceebb8e0fd2aba03`；maintenance DB/host gate 均为空。
 
 ## Next
 
-- 提交/合并后，先给生产 `~/.harbor.yaml` 加入 `public_url: https://harbor.home.smokingmouse.cn`，再走既有 maintenance + backup + exact revision release。
-- 部署后验证 schema/auth bootstrap/Web、双 Device heartbeat、current manifest/revision、maintenance gate、integrity/FK 与 rollback anchor。
-- P6.2 才迁移 daemon credential / Device enrollment；不要在本分支追加。
+- 用户访问 `https://harbor.home.smokingmouse.cn/login`，输入 system bootstrap token，用 Touch ID 创建 first-owner Passkey，并离线保存 10 个一次性 recovery codes。
+- 完成后复核 bootstrap.required=false、Passkey=1、RecoveryCode=10，再移除 worktree/feature branch并关闭本 block。
+- P6.2 才迁移 daemon credential / Device enrollment；不要在本分支追加。长驻 deploy-worker 未及时领取 queued Job 的 wakeup 根因另行处理。
