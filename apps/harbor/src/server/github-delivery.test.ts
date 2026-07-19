@@ -192,7 +192,7 @@ function harness(fake = fakeGitHub()) {
   const conversation = store.getConversation(issue.id)!;
   const delivery = service.create(
     conversation,
-    { provider: "github", changeUrl: "https://github.com/acme/harbor/pull/42", deploymentRequired: false },
+    { provider: "github", changeUrl: "https://github.com/acme/harbor/pull/42" },
     7,
   );
   return { store, service, conversation, delivery, fake };
@@ -253,7 +253,7 @@ describe("GitHub Delivery URL and configuration boundaries", () => {
     })).toThrow("跨 Repository");
   });
 
-  test("creates a PR server-side from the fixed Issue branch and preserves deploymentRequired", async () => {
+  test("creates a PR server-side from the fixed Issue branch", async () => {
     let request: { url: string; method: string; body: unknown; authorization: string } | null = null;
     const client = new GitHubRestClient("server-token", {
       baseUrl: "https://api.github.test/",
@@ -318,7 +318,6 @@ describe("GitHub Delivery URL and configuration boundaries", () => {
       body: "PR body",
       headBranch: "harbor/c_1",
       baseBranch: "main",
-      deploymentRequired: true,
     });
     expect(request as unknown).toEqual({
       url: "https://api.github.test/repos/acme/harbor/pulls",
@@ -329,7 +328,6 @@ describe("GitHub Delivery URL and configuration boundaries", () => {
     expect(provider.prepareChange({ repository, conversation: {} as never }, created)).toEqual(expect.objectContaining({
       changeUrl: "https://github.com/acme/harbor/pull/9",
       externalId: "#9",
-      deploymentRequired: true,
       checkStatus: "pending",
     }));
   });

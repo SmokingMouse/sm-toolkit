@@ -61,11 +61,14 @@ const APPLICATION_MUTATION_TABLES = [
   "workspace_invitations",
 ] as const;
 
-function maintenanceLinearizationSql(tables: readonly string[]): string {
+function maintenanceLinearizationSql(tables: readonly string[], includeSelfDeploy = false): string {
+  const activeGate = includeSelfDeploy
+    ? "EXISTS (SELECT 1 FROM deployment_maintenance WHERE lock_id = 1) OR EXISTS (SELECT 1 FROM self_deploy_maintenance WHERE lock_id = 1)"
+    : "EXISTS (SELECT 1 FROM deployment_maintenance WHERE lock_id = 1)";
   return tables.flatMap((table) => (["INSERT", "UPDATE", "DELETE"] as const).map((operation) => `
     CREATE TRIGGER IF NOT EXISTS maintenance_block_${operation.toLowerCase()}_${table}
     BEFORE ${operation} ON ${table}
-    WHEN EXISTS (SELECT 1 FROM deployment_maintenance WHERE lock_id = 1)
+    WHEN ${activeGate}
     BEGIN SELECT RAISE(ABORT, 'deployment maintenance'); END;
   `)).join("\n");
 }
@@ -1939,6 +1942,81 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX idx_automation_triggers_repository ON automation_triggers(repository_id, codebase_event);
   CREATE INDEX idx_automation_trigger_deliveries_ts ON automation_trigger_deliveries(received_at);
   `,
+  // v26 —— Agent-owned Harbor self deployment：独立 durable queue，不再依赖 Delivery 生命周期。
+  // legacy deployment_* 表暂留一个 release，供部署本 migration 的旧 worker 完成 cutover。
+  `
+  CREATE TABLE self_deploy_jobs (
+    id TEXT PRIMARY KEY,
+    source_run_id TEXT NOT NULL REFERENCES runs(id),
+    request_key TEXT NOT NULL,
+    repository_id TEXT NOT NULL REFERENCES repositories(id),
+    generation INTEGER NOT NULL,
+    target_id TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    target_fingerprint TEXT NOT NULL,
+    target_manifest_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('queued','running','recovering','succeeded','failed','needs_recovery')),
+    attempt INTEGER NOT NULL DEFAULT 0,
+    fence_epoch INTEGER,
+    fence_nonce TEXT,
+    lease_token TEXT,
+    lease_expires_at INTEGER,
+    checkpoint TEXT NOT NULL DEFAULT 'queued',
+    log TEXT,
+    error TEXT,
+    failure_kind TEXT CHECK (failure_kind IS NULL OR failure_kind IN (
+      'config_drift','bootstrap_required','deployment_failed','rollback_incomplete'
+    )),
+    rollback_complete INTEGER,
+    rollback_attempt INTEGER,
+    baseline_revision TEXT,
+    baseline_fingerprint TEXT,
+    baseline_manifest_hash TEXT,
+    baseline_health_fingerprint TEXT,
+    database_backup_created INTEGER NOT NULL DEFAULT 0,
+    new_service_pids TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(source_run_id, request_key),
+    UNIQUE(target_id, generation)
+  );
+  CREATE INDEX idx_self_deploy_jobs_claim
+    ON self_deploy_jobs(status, lease_expires_at, created_at);
+  CREATE INDEX idx_self_deploy_jobs_source
+    ON self_deploy_jobs(source_run_id, created_at);
+
+  CREATE TABLE self_deploy_host_fence (
+    lock_id INTEGER PRIMARY KEY CHECK (lock_id = 1),
+    epoch INTEGER NOT NULL
+  );
+  INSERT INTO self_deploy_host_fence(lock_id, epoch)
+    VALUES (1, COALESCE((SELECT epoch FROM deployment_host_fence WHERE lock_id = 1), 0));
+
+  CREATE TABLE self_deploy_maintenance (
+    lock_id INTEGER PRIMARY KEY CHECK (lock_id = 1),
+    fence_epoch INTEGER NOT NULL,
+    fence_nonce TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    job_id TEXT NOT NULL REFERENCES self_deploy_jobs(id),
+    source_run_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    revision TEXT NOT NULL,
+    target_fingerprint TEXT NOT NULL,
+    target_manifest_hash TEXT NOT NULL,
+    rollback_attempt INTEGER NOT NULL,
+    baseline_revision TEXT NOT NULL,
+    baseline_fingerprint TEXT NOT NULL,
+    baseline_manifest_hash TEXT NOT NULL,
+    baseline_health_fingerprint TEXT NOT NULL,
+    expected_revision TEXT NOT NULL,
+    expected_fingerprint TEXT NOT NULL,
+    phase TEXT NOT NULL CHECK (phase IN ('deploying','healthy','rolling_back','releasing','needs_recovery')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  `,
 ];
 
 function backfillDeviceCapabilitySummaries(db: Database): void {
@@ -2084,6 +2162,7 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
           "automation_triggers",
           "automation_trigger_deliveries",
         ]);
+        if (version === 25) dropMaintenanceLinearization(db, APPLICATION_MUTATION_TABLES);
         if (sql.trim()) db.exec(sql);
         if (version === 22) {
           applyIdentityNormalization(db, identityReport!);
@@ -2094,6 +2173,7 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
           installMaintenanceLinearization(db);
         }
         if (version === 20) installMaintenanceLinearization(db);
+        if (version === 25) installMaintenanceLinearization(db);
         db.exec(`PRAGMA user_version = ${version + 1}`);
       })();
     } finally {
@@ -2133,12 +2213,20 @@ export function openV24MigrationFixtureDb(path = ":memory:"): Database {
   return openDbAtVersion(path, 24);
 }
 
-function installMaintenanceLinearization(db: Database): void {
-  const present = new Set(db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
-  db.exec(maintenanceLinearizationSql(APPLICATION_MUTATION_TABLES.filter((table) => present.has(table))));
+/** 只给 v26 Agent-owned Harbor self-deploy migration regression fixture 使用。 */
+export function openV25MigrationFixtureDb(path = ":memory:"): Database {
+  return openDbAtVersion(path, 25);
 }
 
-/** deploy worker 只打开已 bootstrap 的 queue；绝不创建 DB、绝不运行应用 migration。 */
+function installMaintenanceLinearization(db: Database): void {
+  const present = new Set(db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
+  db.exec(maintenanceLinearizationSql(
+    APPLICATION_MUTATION_TABLES.filter((table) => present.has(table)),
+    present.has("self_deploy_maintenance"),
+  ));
+}
+
+/** Harbor self-deployer 只打开已 bootstrap 的 queue；绝不创建 DB、绝不运行应用 migration。 */
 export function openDeploymentDb(path: string): Database {
   assertPrivateDeploymentDatabase(path);
   const db = new Database(path, { create: false, readwrite: true });
@@ -2146,9 +2234,9 @@ export function openDeploymentDb(path: string): Database {
   db.exec("PRAGMA foreign_keys = ON;");
   const row = db.query<{ user_version: number }, []>("PRAGMA user_version").get();
   const version = row?.user_version ?? 0;
-  if (version < 19) {
+  if (version < 26) {
     db.close();
-    throw new Error(`deployment worker 拒绝 schema v${version}；需要 server/admin bootstrap 到至少 v19`);
+    throw new Error(`Harbor self-deployer 拒绝 schema v${version}；需要 server bootstrap 到至少 v26`);
   }
   try { assertDeploymentControlCompatibility(db); }
   catch (error) { db.close(); throw error; }
@@ -2157,17 +2245,14 @@ export function openDeploymentDb(path: string): Database {
 
 function assertDeploymentControlCompatibility(db: Database): void {
   const required: Record<string, string[]> = {
-    deployment_jobs: ["id", "delivery_id", "generation", "target_id", "revision", "target_fingerprint", "target_manifest_hash", "status", "attempt", "fence_epoch", "fence_nonce", "lease_token", "lease_expires_at", "checkpoint", "log", "error", "failure_kind", "rollback_complete", "rollback_attempt", "baseline_revision", "baseline_fingerprint", "baseline_manifest_hash", "baseline_health_fingerprint", "database_backup_created", "new_service_pids", "created_at", "started_at", "finished_at", "updated_at"],
-    deployment_maintenance: ["lock_id", "fence_epoch", "fence_nonce", "target_id", "job_id", "delivery_id", "generation", "revision", "target_fingerprint", "target_manifest_hash", "rollback_attempt", "baseline_revision", "baseline_fingerprint", "baseline_manifest_hash", "baseline_health_fingerprint", "expected_revision", "expected_fingerprint", "phase", "created_at", "updated_at"],
-    deployment_host_fence: ["lock_id", "epoch"],
-    deliveries: ["id", "conversation_id", "review_status", "check_status", "merge_status", "deployment_status", "deployment_target_id", "merged_revision", "deployment_revision", "deployment_generation", "active_deployment_job_id", "deployment_error", "deployed_at", "revision", "updated_at"],
-    delivery_events: ["delivery_id", "kind", "data", "actor", "ts"],
-    conversations: ["id", "status", "updated_at"],
+    self_deploy_jobs: ["id", "source_run_id", "request_key", "repository_id", "generation", "target_id", "revision", "target_fingerprint", "target_manifest_hash", "status", "attempt", "fence_epoch", "fence_nonce", "lease_token", "lease_expires_at", "checkpoint", "log", "error", "failure_kind", "rollback_complete", "rollback_attempt", "baseline_revision", "baseline_fingerprint", "baseline_manifest_hash", "baseline_health_fingerprint", "database_backup_created", "new_service_pids", "created_at", "started_at", "finished_at", "updated_at"],
+    self_deploy_maintenance: ["lock_id", "fence_epoch", "fence_nonce", "target_id", "job_id", "source_run_id", "generation", "revision", "target_fingerprint", "target_manifest_hash", "rollback_attempt", "baseline_revision", "baseline_fingerprint", "baseline_manifest_hash", "baseline_health_fingerprint", "expected_revision", "expected_fingerprint", "phase", "created_at", "updated_at"],
+    self_deploy_host_fence: ["lock_id", "epoch"],
   };
   for (const [table, columns] of Object.entries(required)) {
     const present = new Set(db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().map((row) => row.name));
     const missing = columns.filter((column) => !present.has(column));
-    if (missing.length) throw new Error(`deployment worker control schema incompatible: ${table} 缺少 ${missing.join(",")}`);
+    if (missing.length) throw new Error(`Harbor self-deployer control schema incompatible: ${table} 缺少 ${missing.join(",")}`);
   }
 }
 

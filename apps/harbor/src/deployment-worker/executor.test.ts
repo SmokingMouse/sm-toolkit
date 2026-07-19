@@ -104,7 +104,8 @@ function target(): DeploymentTargetConfig {
 function job(overrides: Partial<DeploymentJob> = {}): DeploymentJob {
   const configured = target();
   return {
-    id: "depjob_1", deliveryId: "del_1", generation: 1, targetId: "local", revision: REVISION,
+    id: "depjob_1", sourceRunId: "run_1", requestKey: "merge-event-1", repositoryId: "repo_1",
+    generation: 1, targetId: "local", revision: REVISION,
     targetFingerprint: FINGERPRINT, targetManifestHash: configured.manifestHash,
     status: "running", attempt: 1, fenceEpoch: 1, fenceNonce: "nonce-1", leaseToken: "lease-1", leaseExpiresAt: 100,
     checkpoint: "queued", log: null, error: null, failureKind: null, rollbackComplete: null,
@@ -256,8 +257,8 @@ class FakeSentinel implements DeploymentMaintenanceSentinel {
 function gate(jobValue = job(), phase: DeploymentMaintenanceGate["phase"] = "deploying"): DeploymentMaintenanceGate {
   const baseline = releaseManifest();
   return {
-    version: 2, fenceEpoch: jobValue.fenceEpoch!, fenceNonce: jobValue.fenceNonce!,
-    targetId: "local", jobId: jobValue.id, deliveryId: jobValue.deliveryId, generation: jobValue.generation,
+    version: 3, fenceEpoch: jobValue.fenceEpoch!, fenceNonce: jobValue.fenceNonce!,
+    targetId: "local", jobId: jobValue.id, sourceRunId: jobValue.sourceRunId, generation: jobValue.generation,
     revision: REVISION, targetFingerprint: FINGERPRINT, targetManifestHash: target().manifestHash,
     rollbackAttempt: jobValue.rollbackAttempt ?? jobValue.attempt, baselineRevision: BASELINE,
     baselineFingerprint: BASELINE_FINGERPRINT, baselineManifestHash: releaseManifestHash(baseline),

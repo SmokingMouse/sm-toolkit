@@ -6,7 +6,7 @@
  *   server_url: http://100.x.x.x:7777   # CLI/daemon 指向 server（Tailscale 内网）
  *   token: <shared secret>
  *   device_name: mac-studio             # daemon 用，缺省 hostname
- *   database_path: /srv/harbor/harbor.db # server/deploy worker durable queue；缺省 ~/.harbor/harbor.db
+ *   database_path: /srv/harbor/harbor.db # server/self-deployer durable queue；缺省 ~/.harbor/harbor.db
  *   feishu:                             # server 用（P2 飞书入口）；缺省 = 入口关闭
  *     app_id: cli_xxx
  *     app_secret: xxx
@@ -16,8 +16,8 @@
  *   github:                            # server-only SCM Delivery provider；缺省 = 仅 manual 可用
  *     token: github_pat_xxx
  *   # feishu.custom_bots 可为特定 Workspace 配置独立 Bot。
- *   deployment_targets:               # server/独立 deploy worker 共用；敏感字段不进 DB/REST
- *     - id: local-harbor
+ *   self_deploy_target:               # Harbor-only sidecar target；敏感字段不进 DB/REST
+ *       id: local-harbor
  *       name: Local Harbor
  *       provider: local-launchd
  *       repository_id: repo_xxx
@@ -32,7 +32,7 @@
  *       services:
  *         - { id: server, role: server, label: com.example.harbor.server, domain: gui/501, plist_path: /Users/me/Library/LaunchAgents/com.example.harbor.server.plist, template_path: /Users/me/.harbor/deploy/server.plist.tpl, template_sha256: <64 hex> }
  *         - { id: daemon, role: daemon, label: com.example.harbor.daemon, domain: gui/501, plist_path: /Users/me/Library/LaunchAgents/com.example.harbor.daemon.plist, template_path: /Users/me/.harbor/deploy/daemon.plist.tpl, template_sha256: <64 hex> }
- *       # secret value 只由 worker 从 env 解析；server 只读取这个非敏感 reference。
+ *       # secret value 只由 self-deployer 从 env 解析；server 只读取这个非敏感 reference。
  *       health: { url: http://127.0.0.1:7777/api/health, headers: { Authorization: { env: HARBOR_DEPLOY_HEALTH_AUTH } }, timeout_ms: 30000, interval_ms: 500 }
  */
 
@@ -75,6 +75,7 @@ interface HarborFileConfig {
     token?: string;
   };
   deployment_targets?: unknown;
+  self_deploy_target?: unknown;
 }
 
 let _file: HarborFileConfig | null = null;
@@ -501,6 +502,27 @@ export function deploymentTargets(options: { resolveSecrets?: boolean } = {}): D
     resolveSecrets: options.resolveSecrets,
     maintenancePath: deploymentMaintenancePath(),
   });
+}
+
+/**
+ * Harbor-only self-deploy target。新配置是单对象；deployment_targets 仅作 v26 首跳兼容，
+ * 因为部署 v26 的旧 worker 仍需读取旧 key。
+ */
+export function harborSelfDeployTarget(options: { resolveSecrets?: boolean } = {}): DeploymentTargetConfig | null {
+  const envTarget = process.env.HARBOR_SELF_DEPLOY_TARGET_JSON;
+  let raw = fileConfig().self_deploy_target;
+  if (envTarget !== undefined) {
+    try { raw = JSON.parse(envTarget); }
+    catch { throw new Error("HARBOR_SELF_DEPLOY_TARGET_JSON 不是合法 JSON"); }
+  }
+  const targets = raw === undefined
+    ? deploymentTargets(options)
+    : parseDeploymentTargets([raw], process.env, {
+        resolveSecrets: options.resolveSecrets,
+        maintenancePath: deploymentMaintenancePath(),
+      });
+  if (targets.length > 1) throw new Error("Harbor self-deployer 只允许一个 Harbor-owned target");
+  return targets[0] ?? null;
 }
 
 function assertMaintenancePathDisjoint(targets: DeploymentTargetConfig[], maintenancePath: string): void {

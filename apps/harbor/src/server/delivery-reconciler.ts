@@ -2,14 +2,14 @@ import type { Conversation } from "../protocol.js";
 import type { HarborStore } from "./store.js";
 import { transitionConversation } from "./statemachine.js";
 
-export interface DeploymentCleanupSink {
+export interface DeliveryCleanupSink {
   requestWorktreeCleanup(conversation: Conversation): void;
 }
 
-/** worker result 已先持久化；server 当前在线或重启后都用同一确定性收尾。 */
-export function reconcileCompletedDeployments(
+/** Delivery facts are already durable; startup and the live server use the same deterministic Issue finalizer. */
+export function reconcileCompletedDeliveries(
   store: HarborStore,
-  cleanup: DeploymentCleanupSink,
+  cleanup: DeliveryCleanupSink,
   now = Date.now(),
 ): string[] {
   const finalized: string[] = [];

@@ -51,23 +51,30 @@ async function activeMaintenanceHarness() {
   const store = new HarborStore(openDb(":memory:"));
   const device = store.upsertDevice("worker", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
   const repository = store.createRepository({ workspaceId: store.defaultWorkspace().id, name: "repo" }, 2);
-  store.setRepositoryMount(repository.id, device.id, "/repo", 3);
+  const mount = store.setRepositoryMount(repository.id, device.id, "/repo", 3);
   const agent = store.createAgent({ name: "builder", deviceId: device.id, backend: "claude", repositoryId: repository.id }, 4);
   const issue = store.createConversation({ kind: "issue", title: "maintenance", agentId: agent.id, origin: "web" }, 5);
   store.setConversationStatus(issue.id, "review", 6);
   const configured = target(repository.id);
-  const deliveries = new DeliveryService(store, [], [{
-    id: configured.id, name: configured.name, provider: configured.provider,
-    repositoryId: configured.repositoryId, fingerprint: configured.fingerprint, manifestHash: configured.manifestHash,
-  }]);
-  let delivery = deliveries.create(store.getConversation(issue.id)!, {
-    changeUrl: "https://example.test/mr/1", deploymentTargetId: configured.id, deploymentRequired: true,
+  const deliveries = new DeliveryService(store);
+  const run = store.createRun({
+    workspaceId: store.defaultWorkspace().id,
+    sourceType: "automation",
+    sourceId: "automation_release",
+    agentId: agent.id,
+    deviceId: device.id,
+    repositoryId: repository.id,
+    repositoryMountId: mount.id,
+    executionRoot: mount.path,
+    prompt: "Deploy Harbor",
+    purpose: "coordination",
+    promptEvent: "event.automation.webhook",
+    triggerContext: { eventType: "merge_request_merged", repositoryId: repository.id, revision: REVISION },
   }, 7);
-  delivery = deliveries.approve(delivery, store.getConversation(issue.id)!, 8);
-  store.updateDeliveryState(delivery.id, { checkStatus: "passed" }, 9);
-  delivery = await deliveries.merge(store.getDelivery(delivery.id)!, store.getConversation(issue.id)!, {
-    confirmed: true, mergedRevision: REVISION,
-  }, 10);
+  store.enqueueDeploymentJob(
+    run.id, "merge-event-1", repository.id, configured.id, REVISION,
+    configured.fingerprint, configured.manifestHash, 10,
+  );
   const job = store.claimDeploymentJob([{ id: configured.id, fingerprint: configured.fingerprint, manifestHash: configured.manifestHash }], 11, 100)!;
   const fence = { leaseToken: job.leaseToken!, fenceEpoch: job.fenceEpoch!, fenceNonce: job.fenceNonce! };
   const gate = store.activateDeploymentMaintenance(job.id, fence, {
@@ -144,7 +151,7 @@ test("DB/file gate disagreement remains fail-closed and never accepts a new 2xx 
   expect(await guard.current()).toEqual(expect.objectContaining({ active: true, exact: false }));
 });
 
-test("conversation detail exposes only the bounded safe deployment job projection", async () => {
+test("conversation detail does not expose the independent self-deployment job", async () => {
   const h = await activeMaintenanceHarness();
   h.store.updateDeploymentCheckpoint(h.job.id, h.fence, "server_started", 13, {
     newServicePids: { "gui/1/com.test.server": 42 },
@@ -159,12 +166,5 @@ test("conversation detail exposes only the bounded safe deployment job projectio
   const response = await app.request(`/api/conversations/${h.issue.id}`, { headers: { Authorization: "Bearer token" } });
   expect(response.status).toBe(200);
   const body = await response.json() as Record<string, unknown>;
-  expect(body.deploymentJob).toEqual(expect.objectContaining({
-    id: h.job.id, checkpoint: "server_started", attempt: 1, fenceEpoch: h.job.fenceEpoch,
-  }));
-  const encoded = JSON.stringify(body.deploymentJob);
-  expect(encoded).not.toContain(h.job.leaseToken!);
-  expect(encoded).not.toContain(h.job.fenceNonce!);
-  expect(encoded).not.toContain(FINGERPRINT);
-  expect(encoded).not.toContain("newServicePids");
+  expect(body).not.toHaveProperty("deploymentJob");
 });

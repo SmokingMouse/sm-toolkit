@@ -68,6 +68,7 @@ import {
   PROMPT_BLOCK_KEYS,
   validatePromptTemplate,
 } from "./prompt-wrapper.js";
+import type { DeploymentTargetConfig } from "../config.js";
 
 const PERMISSIONS = ["readonly", "auto-edit", "full", "default"];
 const MAX_SKILL_INSTRUCTION = 128 * 1024;
@@ -226,6 +227,7 @@ export function buildRest(
     rpName: "Harbor Test",
     secureCookie: false,
   }),
+  selfDeployTarget: DeploymentTargetConfig | null = null,
 ): Hono {
   const app = new Hono();
   type ApiActor =
@@ -627,6 +629,64 @@ export function buildRest(
     });
   });
 
+  /**
+   * Release Agent 唯一可用的 Harbor 自部署动作。Agent 只提交 trusted exact revision；
+   * target、路径、命令、health 与 rollback policy 全由 Harbor host 管理员冻结。
+   */
+  app.post("/hooks/agent-actions/self-deployments", async (c) => {
+    const { run } = runActionContext(c);
+    if (!selfDeployTarget) return c.json({ error: "Harbor self-deployer 未配置" }, 503);
+    let body: Record<string, unknown>;
+    try {
+      const parsed = await c.req.json();
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+      body = parsed as Record<string, unknown>;
+    } catch {
+      return c.json({ error: "body 必须是 JSON object" }, 400);
+    }
+    rejectUnknownFields(body, ["revision", "idempotencyKey"]);
+    const revision = typeof body.revision === "string" ? body.revision.trim().toLowerCase() : "";
+    const requestKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "";
+    if (!/^[a-f0-9]{40,64}$/.test(revision)) return c.json({ error: "revision 必须是完整十六进制 commit id" }, 400);
+    if (!requestKey || requestKey.length > 128) return c.json({ error: "idempotencyKey 需要 1–128 字符" }, 400);
+    const contextRevision = typeof run.triggerContext.revision === "string"
+      ? run.triggerContext.revision.toLowerCase()
+      : "";
+    if (run.sourceType !== "automation" || run.purpose !== "coordination"
+      || run.triggerContext.eventType !== "merge_request_merged") {
+      return c.json({ error: "只有 merge_request_merged Codebase Automation Run 可以触发 Harbor self deployment" }, 403);
+    }
+    if (!run.repositoryId || run.repositoryId !== selfDeployTarget.repositoryId
+      || run.triggerContext.repositoryId !== run.repositoryId) {
+      return c.json({ error: "Automation/Run/self-deploy Repository identity 不匹配" }, 403);
+    }
+    if (!contextRevision || revision !== contextRevision) {
+      return c.json({ error: "revision 必须与 Codebase merged commit 完全一致" }, 409);
+    }
+    try {
+      const result = store.enqueueDeploymentJob(
+        run.id,
+        requestKey,
+        run.repositoryId,
+        selfDeployTarget.id,
+        revision,
+        selfDeployTarget.fingerprint,
+        selfDeployTarget.manifestHash,
+        Date.now(),
+      );
+      return c.json({ job: store.getDeploymentJobView(result.job.id), reused: !result.created }, result.created ? 202 : 200);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+    }
+  });
+
+  app.get("/hooks/agent-actions/self-deployments/:id", (c) => {
+    const { run } = runActionContext(c);
+    const job = store.getDeploymentJob(c.req.param("id"));
+    if (!job || job.sourceRunId !== run.id) return c.json({ error: "self deployment job 不存在" }, 404);
+    return c.json(store.getDeploymentJobView(job.id));
+  });
+
   /** 用户/Skill 明确给出目标 Agent；Harbor 只做 scope、mount、purpose、lineage 和幂等校验。 */
   app.post("/hooks/agent-actions/dispatch", async (c) => {
     const { run } = runActionContext(c);
@@ -786,7 +846,6 @@ export function buildRest(
       baseBranch?: string;
       title?: string;
       body?: string;
-      deploymentRequired?: boolean;
     };
     if (body.provider && !["manual", "github", "codebase"].includes(body.provider)) {
       return c.json({ error: "provider 可选 manual/github/codebase" }, 400);
@@ -804,7 +863,6 @@ export function buildRest(
           baseBranch: body.baseBranch,
           title: body.title?.trim() || conversation.title || `Implement ${conversation.id}`,
           body: body.body?.trim() || conversation.description || "",
-          deploymentRequired: body.deploymentRequired ?? true,
         },
         now,
       );
@@ -1107,8 +1165,6 @@ export function buildRest(
     }
     await next();
   });
-
-  app.get("/api/deployment-targets", (c) => c.json(deliveries.listDeploymentTargets()));
 
   app.get("/api/health", async (c) => {
     const snapshot = await maintenance.current();
@@ -2905,9 +2961,6 @@ export function buildRest(
         .map((r) => ({ ...r, resultText: store.getRunResultText(r.id) })),
       statusLog: store.listStatusLog(conv.id),
       delivery,
-      deploymentJob: delivery?.activeDeploymentJobId
-        ? store.getDeploymentJobView(delivery.activeDeploymentJobId)
-        : null,
       deliveryEvents: (() => {
         return delivery ? store.listDeliveryEvents(delivery.id) : [];
       })(),
@@ -3136,10 +3189,8 @@ export function buildRest(
       externalId?: string;
       headBranch?: string;
       baseBranch?: string;
-      deploymentRequired?: boolean;
-      deploymentTargetId?: string | null;
     };
-    rejectUnknownFields(b as Record<string, unknown>, ["provider", "changeUrl", "externalId", "headBranch", "baseBranch", "deploymentRequired", "deploymentTargetId"]);
+    rejectUnknownFields(b as Record<string, unknown>, ["provider", "changeUrl", "externalId", "headBranch", "baseBranch"]);
     validateDeliveryUrl(b.changeUrl);
     const delivery = await deliveryAction(() => deliveries.create(conv, b));
     return c.json(delivery, 201);
@@ -3201,34 +3252,6 @@ export function buildRest(
   app.post("/api/deliveries/:id/sync", async (c) => {
     const { delivery, conversation: conv } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
     const fresh = await deliveryAction(() => deliveries.sync(delivery, conv));
-    finalizeDelivery(fresh);
-    return c.json(store.getDelivery(fresh.id));
-  });
-
-  app.post("/api/deliveries/:id/deploy", async (c) => {
-    const { delivery, conversation: conv } = assertDeliveryWorkspace(
-      currentWorkspace(c).id,
-      c.req.param("id"),
-    );
-    const b = (await c.req.json()) as { confirmed?: boolean };
-    rejectUnknownFields(b as Record<string, unknown>, ["confirmed"]);
-    return c.json(
-      await deliveryAction(() => deliveries.startDeployment(delivery, conv, b)),
-    );
-  });
-
-  app.post("/api/deliveries/:id/deployment-result", async (c) => {
-    const { delivery } = assertDeliveryWorkspace(
-      currentWorkspace(c).id,
-      c.req.param("id"),
-    );
-    const b = (await c.req.json()) as { status?: "succeeded" | "failed" };
-    rejectUnknownFields(b as Record<string, unknown>, ["status"]);
-    if (b.status !== "succeeded" && b.status !== "failed")
-      bad("status 可选 succeeded/failed");
-    const fresh = await deliveryAction(() =>
-      deliveries.finishDeployment(delivery, b.status!),
-    );
     finalizeDelivery(fresh);
     return c.json(store.getDelivery(fresh.id));
   });

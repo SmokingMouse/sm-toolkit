@@ -11,13 +11,11 @@ import {
   createIssueDraft,
   createConversationMessage,
   dispatchIssue,
-  finishDeliveryDeployment,
   getConversation,
   ISSUE_PRIORITIES,
   ISSUE_STATUSES,
   listAgents,
   listConversations,
-  listDeploymentTargets,
   listDevices,
   listLabels,
   listMembers,
@@ -27,7 +25,6 @@ import {
   mergeDelivery,
   syncDelivery,
   refreshDelivery,
-  startDeliveryDeployment,
   updateConversation,
   updateDelivery,
   type ConversationStatus,
@@ -36,8 +33,6 @@ import {
   type DeliveryCheckStatus,
   type DeliveryEvent,
   type DeliveryProviderKind,
-  type DeploymentJobView,
-  type DeploymentTargetDescriptor,
   type HarborAgent,
   type IssuePriority,
   type IssueLabel,
@@ -114,25 +109,10 @@ const DELIVERY_STATUS: Record<
     note: "门槛全部通过",
     tone: "bg-emerald-50 text-emerald-700",
   },
-  merged: {
-    label: "Merged",
-    note: "等待部署",
-    tone: "bg-teal-50 text-teal-700",
-  },
-  deploying: {
-    label: "Deploying",
-    note: "外部部署进行中",
-    tone: "bg-blue-50 text-blue-700",
-  },
   succeeded: {
     label: "Delivered",
     note: "交付链路完成",
     tone: "bg-emerald-50 text-emerald-700",
-  },
-  failed: {
-    label: "Deploy failed",
-    note: "可重新发起部署",
-    tone: "bg-red-50 text-red-700",
   },
 };
 
@@ -1001,7 +981,6 @@ function IssueDrawer({
   const detail = usePoll(() => getConversation(id), 4_000);
   const members = usePoll(listMembers, 30_000);
   const labels = usePoll(listLabels, 30_000);
-  const deploymentTargets = usePoll(listDeploymentTargets, 30_000);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [action, setAction] = useState<IssueAction | null>(null);
   const [actionAgent, setActionAgent] = useState("");
@@ -1019,7 +998,6 @@ function IssueDrawer({
   const delivery = detail.data?.delivery ?? null;
   const deliveryEvents = detail.data?.deliveryEvents ?? [];
   const discussionMessages = detail.data?.messages ?? [];
-  const deploymentJob = detail.data?.deploymentJob ?? null;
   const activeRun = [...runs]
     .reverse()
     .find((r) => r.status === "queued" || r.status === "running");
@@ -1193,8 +1171,6 @@ function IssueDrawer({
     provider: DeliveryProviderKind;
     changeUrl?: string;
     externalId?: string;
-    deploymentRequired: boolean;
-    deploymentTargetId?: string | null;
   }) => {
     setBusy(true);
     try {
@@ -1281,73 +1257,16 @@ function IssueDrawer({
           ? "确认由 Harbor 调用 bitscli 合并该 Codebase MR？仍会再次校验 Review 与 CI。"
           : "确认该 MR / PR 已在外部 SCM 合并？Harbor 只记录事实，不会替你调用平台。";
     if (!confirm(prompt)) return;
-    const mergedRevision =
-      delivery.provider === "manual" && delivery.deploymentTargetId
-        ? window
-            .prompt(
-              "请输入外部 SCM 已合并的完整 commit id（40/64 位十六进制）；worker 会在配置仓库中再次精确验证。",
-            )
-            ?.trim()
-        : undefined;
-    if (
-      delivery.provider === "manual" &&
-      delivery.deploymentTargetId &&
-      !mergedRevision
-    )
-      return;
     setBusy(true);
     try {
-      await mergeDelivery(delivery.id, mergedRevision);
+      await mergeDelivery(delivery.id);
       toast(
         delivery.provider === "github"
           ? "GitHub PR 已合并"
           : delivery.provider === "codebase"
             ? "Codebase MR 已合并"
-            : delivery.deploymentStatus === "not_required"
-              ? "已记录合并，Issue 交付完成"
-              : "已记录合并，等待部署",
+            : "已记录合并，Issue 交付完成",
         "success",
-      );
-      refresh();
-    } catch (error) {
-      toast(error instanceof Error ? error.message : String(error), "error");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const startDeployment = async () => {
-    if (!delivery) return;
-    if (delivery.deploymentStatus === "needs_recovery") {
-      toast("Host 处于 needs_recovery；管理员必须先运行 deploy-worker recover 并验证旧 baseline。", "error");
-      return;
-    }
-    const prompt = delivery.deploymentTargetId
-      ? `Retry 会为 target ${delivery.deploymentTargetId} 创建新 generation；旧 worker 结果不会覆盖。确认重试？`
-      : "确认外部部署已经开始？这不会主动触发部署。";
-    if (!confirm(prompt)) return;
-    setBusy(true);
-    try {
-      await startDeliveryDeployment(delivery.id);
-      toast(delivery.deploymentTargetId ? "自动部署已重新入队" : "已记录部署开始", "success");
-      refresh();
-    } catch (error) {
-      toast(error instanceof Error ? error.message : String(error), "error");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const finishDeployment = async (status: "succeeded" | "failed") => {
-    if (!delivery) return;
-    const label = status === "succeeded" ? "成功" : "失败";
-    if (!confirm(`确认外部部署结果为${label}？`)) return;
-    setBusy(true);
-    try {
-      await finishDeliveryDeployment(delivery.id, status);
-      toast(
-        status === "succeeded" ? "部署成功，Issue 已完成" : "已记录部署失败",
-        status === "succeeded" ? "success" : "error",
       );
       refresh();
     } catch (error) {
@@ -1483,7 +1402,6 @@ function IssueDrawer({
                 <DeliveryCard
                   issueStatus={conv.status}
                   delivery={delivery}
-                  deploymentJob={deploymentJob}
                   events={deliveryEvents}
                   disabled={busy || !!activeRun}
                   onSetup={() => setDeliverySetup(true)}
@@ -1492,8 +1410,6 @@ function IssueDrawer({
                   onSync={syncFromGitHub}
                   onRefresh={refreshProviderDelivery}
                   onMerge={confirmDeliveryMerge}
-                  onDeploy={startDeployment}
-                  onDeploymentResult={finishDeployment}
                 />
               </div>
 
@@ -1786,7 +1702,6 @@ function IssueDrawer({
             <DeliveryCard
               issueStatus={conv.status}
               delivery={delivery}
-              deploymentJob={deploymentJob}
               events={deliveryEvents}
               disabled={busy || !!activeRun}
               onSetup={() => setDeliverySetup(true)}
@@ -1795,8 +1710,6 @@ function IssueDrawer({
               onSync={syncFromGitHub}
               onRefresh={refreshProviderDelivery}
               onMerge={confirmDeliveryMerge}
-              onDeploy={startDeployment}
-              onDeploymentResult={finishDeployment}
             />
           </div>
 
@@ -1875,7 +1788,6 @@ function IssueDrawer({
       )}
       {deliverySetup && (
         <DeliverySetupModal
-          targets={deploymentTargets.data ?? []}
           busy={busy}
           defaultProvider={
             detail.data?.repository?.scmProvider === "codebase"
@@ -1945,7 +1857,6 @@ function PropertyRow({
 function DeliveryCard({
   issueStatus,
   delivery,
-  deploymentJob,
   events,
   disabled,
   onSetup,
@@ -1954,12 +1865,9 @@ function DeliveryCard({
   onSync,
   onRefresh,
   onMerge,
-  onDeploy,
-  onDeploymentResult,
 }: {
   issueStatus: ConversationStatus;
   delivery: Delivery | null;
-  deploymentJob: DeploymentJobView | null;
   events: DeliveryEvent[];
   disabled: boolean;
   onSetup: () => void;
@@ -1968,8 +1876,6 @@ function DeliveryCard({
   onSync: () => void;
   onRefresh: () => void;
   onMerge: () => void;
-  onDeploy: () => void;
-  onDeploymentResult: (status: "succeeded" | "failed") => void;
 }) {
   if (!delivery) {
     const ready = issueStatus === "review";
@@ -1988,7 +1894,7 @@ function DeliveryCard({
             className="flex items-center gap-1.5"
             aria-label="Delivery stages"
           >
-            {["Review", "Checks", "Merge", "Deploy"].map((label, index) => (
+            {["Review", "Checks", "Merge"].map((label, index) => (
               <div key={label} className="min-w-0 flex-1">
                 <div
                   className={`h-1 rounded-full ${index === 0 && ready ? "bg-review" : "bg-line"}`}
@@ -2001,13 +1907,13 @@ function DeliveryCard({
           </div>
           {issueStatus === "done" ? (
             <p className="mt-3 text-[11px] leading-5 text-dim">
-              该 Issue 通过“无代码交付”路径完成，没有 MR、CI 或部署记录。
+              该 Issue 通过“无代码交付”路径完成，没有 MR 或 CI 记录。
             </p>
           ) : (
             <>
               <p className="mt-3 text-[11px] leading-5 text-dim">
                 {ready
-                  ? "关联主 MR / PR 后，Harbor 才会启用 CI、合并与部署门槛。"
+                  ? "关联主 MR / PR 后，Harbor 才会启用 CI 与合并门槛。"
                   : "Implementation 成功进入 Review 后可建立交付记录。"}
               </p>
               {ready && (
@@ -2026,18 +1932,12 @@ function DeliveryCard({
     );
   }
 
-  const needsRecovery = delivery.deploymentStatus === "needs_recovery" || deploymentJob?.recoveryRequired === true;
-  const meta = needsRecovery
-    ? { label: "Needs recovery", note: "普通 Retry 已禁用，等待 host 管理员恢复并验证旧 baseline", tone: "bg-red-100 text-red-800" }
-    : delivery.mergeStatus === "closed"
+  const meta = delivery.mergeStatus === "closed"
     ? { label: "PR closed", note: "PR 已关闭且未合并", tone: "bg-red-50 text-red-700" }
     : DELIVERY_STATUS[delivery.status];
   const reviewDone = delivery.reviewStatus === "approved";
   const checksDone = delivery.checkStatus === "passed";
   const mergeDone = delivery.mergeStatus === "merged";
-  const deployDone =
-    delivery.deploymentStatus === "not_required" ||
-    delivery.deploymentStatus === "succeeded";
   const steps = [
     { label: "Review", done: reviewDone, active: !reviewDone },
     { label: "Checks", done: checksDone, active: reviewDone && !checksDone },
@@ -2045,11 +1945,6 @@ function DeliveryCard({
       label: "Merge",
       done: mergeDone,
       active: reviewDone && checksDone && !mergeDone,
-    },
-    {
-      label: "Deploy",
-      done: mergeDone && deployDone,
-      active: mergeDone && !deployDone,
     },
   ];
 
@@ -2152,32 +2047,7 @@ function DeliveryCard({
             }
             ok={mergeDone}
           />
-          <DeliveryFact
-            label="Target"
-            value={
-              delivery.deploymentTargetId ??
-              (delivery.deploymentStatus === "not_required"
-                ? "Not required"
-                : "Manual")
-            }
-            ok={
-              !!delivery.deploymentTargetId ||
-              delivery.deploymentStatus === "not_required"
-            }
-          />
-          <DeliveryFact
-            label="Deploy"
-            value={delivery.deploymentStatus.replaceAll("_", " ")}
-            ok={deployDone && mergeDone}
-          />
         </div>
-
-        {delivery.deploymentError && (
-          <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[10px] leading-4 text-red-700">
-            {delivery.deploymentError}
-          </p>
-        )}
-        {deploymentJob && <DeploymentJobPanel job={deploymentJob} />}
 
         <p className="mt-3 rounded-lg bg-bg px-3 py-2 text-[10px] leading-4 text-dim">
           <span className="font-semibold text-ink/70">
@@ -2237,52 +2107,6 @@ function DeliveryCard({
                     : "Confirm externally merged"}
               </button>
             )}
-            {!needsRecovery &&
-              (delivery.status === "merged" || delivery.status === "failed") && (
-              <button
-                className={
-                  delivery.status === "failed" ? btnDanger : btnPrimary
-                }
-                disabled={disabled}
-                onClick={onDeploy}
-              >
-                {delivery.deploymentTargetId
-                  ? "Retry deployment"
-                  : delivery.status === "failed"
-                    ? "Record deploy retry"
-                    : "Record deploy started"}
-              </button>
-            )}
-            {needsRecovery && (
-              <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[10px] leading-4 text-red-700">
-                普通 Retry 已禁用。Host 管理员需执行{" "}
-                <span className="break-all font-mono">
-                  {deploymentJob?.failureKind === "legacy_ack_required"
-                    ? `harbor deploy-worker acknowledge ${delivery.activeDeploymentJobId ?? "<job-id>"} --baseline-revision <verified-baseline-sha> --confirm ${delivery.activeDeploymentJobId ?? "<job-id>"}`
-                    : `harbor deploy-worker recover ${delivery.activeDeploymentJobId ?? "<job-id>"} --target ${delivery.deploymentTargetId ?? "<target-id>"} --confirm ${delivery.activeDeploymentJobId ?? "<job-id>"}`}
-                </span>
-                ；只有明确的 baseline 验证或 legacy 人工处置后才会解锁。
-              </p>
-            )}
-            {delivery.status === "deploying" &&
-              !delivery.deploymentTargetId && (
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  className={btnPrimary}
-                  disabled={disabled}
-                  onClick={() => onDeploymentResult("succeeded")}
-                >
-                  Succeeded
-                </button>
-                <button
-                  className={btnDanger}
-                  disabled={disabled}
-                  onClick={() => onDeploymentResult("failed")}
-                >
-                  Failed
-                </button>
-              </div>
-              )}
           </div>
         )}
 
@@ -2335,24 +2159,6 @@ function DeliveryFact({
   );
 }
 
-function DeploymentJobPanel({ job }: { job: DeploymentJobView }) {
-  return (
-    <details className="mt-3 rounded-xl border border-line bg-bg/55 p-3" open={job.status === "running" || job.status === "recovering" || job.status === "needs_recovery"}>
-      <summary className="cursor-pointer select-none text-[9px] font-bold uppercase tracking-[0.12em] text-dim">
-        Deployment job · {job.checkpoint.replaceAll("_", " ")}
-      </summary>
-      <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-[9px]">
-        <span className="text-dim">Attempt</span><span className="text-right font-mono text-ink/75">{job.attempt}</span>
-        <span className="text-dim">Generation</span><span className="text-right font-mono text-ink/75">{job.generation}</span>
-        <span className="text-dim">Fence epoch</span><span className="text-right font-mono text-ink/75">{job.fenceEpoch ?? "—"}</span>
-        <span className="text-dim">Recovery</span><span className={`text-right font-semibold ${job.recoveryRequired ? "text-canceled" : "text-ink/65"}`}>{job.recoveryRequired ? "Required" : job.rollbackComplete === true ? "Safe" : "—"}</span>
-      </div>
-      {job.error && <p className="mt-3 break-words text-[9px] leading-4 text-red-700">{job.failureKind ? `${job.failureKind}: ` : ""}{job.error}</p>}
-      {job.log && <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-zinc-950 p-2 font-mono text-[8px] leading-4 text-zinc-200">{job.log}</pre>}
-    </details>
-  );
-}
-
 function deliveryLinkLabel(value: string | null): string {
   if (!value) return "MR / PR";
   try {
@@ -2364,13 +2170,11 @@ function deliveryLinkLabel(value: string | null): string {
 }
 
 function DeliverySetupModal({
-  targets,
   busy,
   defaultProvider,
   onClose,
   onSubmit,
 }: {
-  targets: DeploymentTargetDescriptor[];
   busy: boolean;
   defaultProvider: "manual" | "codebase";
   onClose: () => void;
@@ -2378,16 +2182,12 @@ function DeliverySetupModal({
     provider: DeliveryProviderKind;
     changeUrl?: string;
     externalId?: string;
-    deploymentRequired: boolean;
-    deploymentTargetId?: string | null;
   }) => void;
 }) {
   const [provider, setProvider] =
     useState<DeliveryProviderKind>(defaultProvider);
   const [changeUrl, setChangeUrl] = useState("");
   const [externalId, setExternalId] = useState("");
-  const [deploymentRequired, setDeploymentRequired] = useState(true);
-  const [deploymentTargetId, setDeploymentTargetId] = useState("");
   return (
     <Modal title="Set up delivery" onClose={onClose}>
       <div className="mb-5 rounded-xl border border-line bg-bg/65 p-4">
@@ -2400,10 +2200,10 @@ function DeliverySetupModal({
         </div>
         <p className="mt-1.5 text-xs leading-5 text-ink/70">
           {provider === "github"
-            ? "同步已有 GitHub PR 与 checks，并在 Harbor policy 通过后受控合并。选择 target 后由独立 host worker 部署 exact merged revision。"
+            ? "同步已有 GitHub PR 与 checks，并在 Harbor policy 通过后受控合并。"
             : provider === "codebase"
-              ? "填写 MR number 后会立即刷新 Review、CI、branch 与 merge 状态；选择 target 后由独立 host worker 部署。"
-              : "把交付事实纳入 Harbor；选择 target 后自动部署，未选择时保留人工 deployment fallback。"}
+              ? "填写 MR number 后会立即刷新 Review、CI、branch 与 merge 状态。"
+              : "把 Review、CI 与 Merge 事实纳入 Harbor；部署由后续 Agent workflow 负责。"}
         </p>
       </div>
       <Field label="Provider">
@@ -2444,43 +2244,6 @@ function DeliverySetupModal({
           placeholder="https://github.com/org/repo/pull/123"
         />
       </Field>
-      <Field label="Deployment target">
-        <select
-          className={inputCls}
-          value={deploymentTargetId}
-          onChange={(event) => {
-            const target = event.target.value;
-            setDeploymentTargetId(target);
-            if (target) setDeploymentRequired(true);
-          }}
-        >
-          <option value="">Manual / none</option>
-          {targets.map((target) => (
-            <option key={target.id} value={target.id}>
-              {target.name} · {target.provider}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-line p-4 hover:bg-bg/60">
-        <input
-          className="mt-0.5 h-4 w-4 accent-accent"
-          type="checkbox"
-          checked={deploymentRequired}
-          disabled={!!deploymentTargetId}
-          onChange={(event) => setDeploymentRequired(event.target.checked)}
-        />
-        <span>
-          <span className="block text-xs font-semibold text-ink">
-            Merge 后需要部署
-          </span>
-          <span className="mt-1 block text-[11px] leading-5 text-dim">
-            {deploymentTargetId
-              ? "Harbor gates 通过后自动 enqueue；结果只由独立 host worker 写入。"
-              : "开启时使用人工 deployment fallback；关闭则合并即完成。"}
-          </span>
-        </span>
-      </label>
       <ModalFooter>
         <button className={btnGhost} onClick={onClose}>
           取消
@@ -2498,8 +2261,6 @@ function DeliverySetupModal({
               provider,
               ...(changeUrl.trim() ? { changeUrl: changeUrl.trim() } : {}),
               ...(externalId.trim() ? { externalId: externalId.trim() } : {}),
-              deploymentRequired,
-              deploymentTargetId: deploymentTargetId || null,
             })
           }
         >

@@ -257,14 +257,6 @@ export type DeliveryReviewStatus = "pending" | "approved";
 export type DeliveryCheckStatus = "unknown" | "pending" | "passed" | "failed";
 export const DELIVERY_CHECK_STATUSES: DeliveryCheckStatus[] = ["unknown", "pending", "passed", "failed"];
 export type DeliveryMergeStatus = "open" | "closed" | "merged";
-export type DeliveryDeploymentStatus =
-  | "not_required"
-  | "pending"
-  | "queued"
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "needs_recovery";
 /** 只读派生状态；调用方更新正交事实，不能直接写这个字段。 */
 export type DeliveryStatus =
   | "awaiting_change"
@@ -272,10 +264,7 @@ export type DeliveryStatus =
   | "checks_pending"
   | "blocked"
   | "merge_ready"
-  | "merged"
-  | "deploying"
-  | "succeeded"
-  | "failed";
+  | "succeeded";
 
 /** Issue 的主代码交付记录。当前与 Issue 是 0..1，非代码 Issue 可以没有。 */
 export interface Delivery {
@@ -293,21 +282,12 @@ export interface Delivery {
   reviewStatus: DeliveryReviewStatus;
   checkStatus: DeliveryCheckStatus;
   mergeStatus: DeliveryMergeStatus;
-  deploymentStatus: DeliveryDeploymentStatus;
-  /** 可空表示沿用人工 deployment；只保存管理员配置 target 的非敏感 id。 */
-  deploymentTargetId: string | null;
-  /** SCM Provider 观察到的 exact merged commit；自动部署没有它就 fail-safe。 */
+  /** SCM Provider 观察到的 exact merged commit；供审计与 Release Agent 使用。 */
   mergedRevision: string | null;
-  /** 当前 active deployment job 冻结的 exact commit。 */
-  deploymentRevision: string | null;
-  deploymentGeneration: number;
-  activeDeploymentJobId: string | null;
-  deploymentError: string | null;
-  /** 根据四组事实派生，不在 DB 单独存储。 */
+  /** 根据 review/check/merge 三组事实派生，不在 DB 单独存储。 */
   status: DeliveryStatus;
   reviewApprovedAt: number | null;
   mergedAt: number | null;
-  deployedAt: number | null;
   /** 异步 Provider 动作完成时的 compare-and-set 版本。 */
   revision: number;
   createdAt: number;
@@ -344,14 +324,15 @@ export type DeploymentFailureKind =
  * 路径、argv、health URL/header 和环境变量绝不进入该记录。
  */
 export interface DeploymentMaintenanceGate {
-  version: 2;
+  version: 3;
   /** 单机全局 monotonic fencing epoch；SQLite restore 也不得回退。 */
   fenceEpoch: number;
   /** host-private CAS nonce；REST/UI/audit 绝不暴露。 */
   fenceNonce: string;
   targetId: string;
   jobId: string;
-  deliveryId: string;
+  /** 发起这次 Harbor 自部署的 Release Agent Run。 */
+  sourceRunId: string;
   generation: number;
   revision: string;
   targetFingerprint: string;
@@ -370,7 +351,9 @@ export interface DeploymentMaintenanceGate {
 
 export interface DeploymentJob {
   id: string;
-  deliveryId: string;
+  sourceRunId: string;
+  requestKey: string;
+  repositoryId: string;
   generation: number;
   targetId: string;
   revision: string;
@@ -416,6 +399,8 @@ export interface DeploymentFence {
 /** Conversation/REST 的非敏感 projection；刻意不含 lease/fence nonce、路径、URL、argv、header。 */
 export interface DeploymentJobView {
   id: string;
+  sourceRunId: string;
+  repositoryId: string;
   generation: number;
   targetId: string;
   revision: string;

@@ -1,11 +1,11 @@
 ---
 name: harbor
-description: Operate Harbor's Run-scoped control-plane capabilities for context, explicit Agent dispatch, Issues, Deliveries, reviews, merge gates, and deployment handoff. Use whenever work runs inside Harbor, an Agent needs to inspect its source, or follow-up work must be created or routed.
+description: Operate Harbor's Run-scoped control-plane capabilities for context, explicit Agent dispatch, Issues, Deliveries, reviews, merge gates, and Harbor self-deployment. Use whenever work runs inside Harbor, an Agent needs to inspect its source, or follow-up work must be created or routed.
 ---
 
 # Harbor control plane
 
-Use Harbor as the source of truth for workflow state. A Run performs one bounded piece of work; Harbor owns the Issue, Delivery, Automation, and deployment lifecycle around it.
+Use Harbor as the source of truth for workflow state. A Run performs one bounded piece of work; Harbor owns Issue, Delivery, Automation, and Run state. Agents own project-native deployment decisions.
 
 ## Mental model
 
@@ -14,7 +14,7 @@ Use Harbor as the source of truth for workflow state. A Run performs one bounded
 - **Device** is only the execution host. A Device being online does not imply that every Agent belongs to it.
 - **Conversation** is an Issue or Chat. An Issue carries durable workflow state; a Chat is conversational context.
 - **Run** is one bounded execution attempt. `coordination` is a neutral purpose for inspection/routing; it does not imply a built-in Orchestrator role.
-- **Delivery** records the external change, review, CI, merge, and deployment facts. Agent claims never replace those facts.
+- **Delivery** records the external change, review, CI, and merge facts. A merged, approved change with passing checks completes Delivery.
 - **Automation** consumes durable Harbor events, webhooks, or schedules and starts a user-selected Agent. It does not choose Agents or own workflow state.
 
 Harbor exposes mechanisms, not a mandatory team topology. Do not assume an Orchestrator exists, infer a Reviewer Pool, or ask the control plane to choose “the best Agent.” A user may wire direct Automations, a custom routing Agent, manual dispatch, or any combination. Every dispatch still names the target Agent explicitly.
@@ -40,6 +40,7 @@ Harbor exposes capability URLs and a short-lived token through the Run environme
 - `HARBOR_AGENT_REVIEW_URL` submits an independent review decision.
 - `HARBOR_AGENT_CONTEXT_URL` reads a safe snapshot of the current Run source, Delivery, candidate Agents, and lineage.
 - `HARBOR_AGENT_DISPATCH_URL` creates an explicitly targeted child Run on the current source.
+- `HARBOR_AGENT_SELF_DEPLOY_URL` lets the Harbor Release Agent enqueue the trusted merged revision for the Harbor-only self-deployer.
 - `HARBOR_AGENT_ACTION_TOKEN` authenticates those actions.
 
 Send `Authorization: Bearer $HARBOR_AGENT_ACTION_TOKEN` and JSON content. Never print, log, persist, echo, or include the token in output. Never copy these credentials into repository files, commands whose tracing is enabled, or Issue text.
@@ -98,8 +99,7 @@ After implementation is tested and committed, POST to `HARBOR_AGENT_DELIVERY_URL
   "headBranch": "harbor/<current Issue ID>",
   "baseBranch": "main",
   "title": "Change title",
-  "body": "Summary and verification",
-  "deploymentRequired": true
+  "body": "Summary and verification"
 }
 ```
 
@@ -118,7 +118,20 @@ After inspecting the exact diff and running risk-proportionate verification, POS
 }
 ```
 
-Approve only the reviewed head revision. Harbor re-syncs provider facts and enforces head-SHA, CI, merge, and deployment gates. On `request_changes`, identify reproducible blockers and route the repair back to a Developer; do not merge.
+Approve only the reviewed head revision. Harbor re-syncs provider facts and enforces head-SHA, CI, and merge gates. On `request_changes`, identify reproducible blockers and route the repair back to a Developer; do not merge.
+
+### Deploy Harbor after a trusted merge
+
+Only a `coordination` Run started by a Codebase `merge_request_merged` Automation may POST to `HARBOR_AGENT_SELF_DEPLOY_URL`:
+
+```json
+{
+  "revision": "<exact merged commit from trigger.context.revision>",
+  "idempotencyKey": "deploy-<Codebase event id>"
+}
+```
+
+Do not infer the revision from the local checkout or MR head. Use only the trusted merged commit in Run trigger context. Harbor selects its single host target and freezes paths, commands, service definitions, health policy, backup, and rollback; the Agent cannot override them. Other repositories must deploy through their own project Skill/CLI and must not call this Harbor-only action.
 
 ## Composition patterns
 
@@ -139,7 +152,7 @@ A typical path is:
 
 `Inbox/backlog -> todo -> doing -> review -> Delivery gates -> done`
 
-Harbor may return an Issue to `todo` after a failed or interrupted Run. A review request for changes queues new implementation work. Approval does not mean merged; merge does not mean deployed; deployment success must come from the configured Deployment Provider's durable result.
+Harbor may return an Issue to `todo` after a failed or interrupted Run. A review request for changes queues new implementation work. Approval does not mean merged. Deployment is a later Agent-owned workflow and is not part of Delivery completion.
 
 Before requesting merge, expect Harbor to re-check the current head revision and CI state. If checks are pending, approval may be stored while merge remains deferred. A manual Delivery may require a human to perform the external merge even after approval.
 

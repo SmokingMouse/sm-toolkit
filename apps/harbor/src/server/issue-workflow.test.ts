@@ -155,7 +155,7 @@ describe("Mew-style Issue workflow", () => {
     const deliveries = new DeliveryService(h.store);
     let delivery = deliveries.create(
       h.store.getConversation(issue.id)!,
-      { changeUrl: "https://github.com/example/repo/pull/7", deploymentRequired: false },
+      { changeUrl: "https://github.com/example/repo/pull/7" },
       13,
     );
     delivery = deliveries.approve(delivery, h.store.getConversation(issue.id)!, 14);

@@ -28,7 +28,10 @@ export class DeploymentMaintenanceGuard implements MaintenanceGuard {
   ) {}
 
   async current(): Promise<MaintenanceSnapshot> {
-    const databaseGates = this.store.listDeploymentMaintenance();
+    const databaseGates = [
+      ...this.store.listLegacyDeploymentMaintenance(),
+      ...this.store.listDeploymentMaintenance(),
+    ];
     const fileGate = await this.sentinel.read();
     const fileGates = fileGate ? [fileGate] : [];
     if (databaseGates.length === 0 && fileGates.length === 0) return this.snapshot(false, false, null, null);

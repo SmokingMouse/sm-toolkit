@@ -63,7 +63,6 @@ test("REST fails GitHub configuration loudly while manual Delivery remains usabl
   const github = await h.request("POST", `/api/conversations/${githubIssue.id}/delivery`, {
     provider: "github",
     changeUrl: "https://github.com/acme/harbor/pull/42",
-    deploymentRequired: false,
   });
   expect(github.status).toBe(400);
   expect((await github.json()) as { error: string }).toEqual({
@@ -74,7 +73,6 @@ test("REST fails GitHub configuration loudly while manual Delivery remains usabl
   const manual = await h.request("POST", `/api/conversations/${manualIssue.id}/delivery`, {
     provider: "manual",
     changeUrl: "https://code.example.com/acme/harbor/merge_requests/42",
-    deploymentRequired: false,
   });
   expect(manual.status).toBe(201);
   expect((await manual.json()) as Delivery).toEqual(expect.objectContaining({ provider: "manual", checkStatus: "unknown" }));
@@ -124,7 +122,6 @@ test("REST syncs GitHub truth, rejects forged checks, and merges only after poli
   const createdResponse = await h.request("POST", `/api/conversations/${issue.id}/delivery`, {
     provider: "github",
     changeUrl: "https://github.com/acme/harbor/pull/42",
-    deploymentRequired: false,
   });
   expect(createdResponse.status).toBe(201);
   const created = (await createdResponse.json()) as Delivery;
@@ -198,7 +195,6 @@ test("REST does not finalize an Issue when merge HTTP returns after evidence was
   const createdResponse = await h.request("POST", `/api/conversations/${issue.id}/delivery`, {
     provider: "github",
     changeUrl: "https://github.com/acme/harbor/pull/42",
-    deploymentRequired: false,
   });
   const delivery = (await createdResponse.json()) as Delivery;
   expect((await h.request("POST", `/api/deliveries/${delivery.id}/sync`, {})).status).toBe(200);

@@ -24,7 +24,7 @@ import {
   showDeploymentWorkerLogs,
   uninstallDeploymentWorkerService,
 } from "../deployment-worker/service.js";
-import { acknowledgeLegacyLocalDeployment, recoverLocalDeployment } from "../deployment-worker/recovery.js";
+import { recoverLocalDeployment } from "../deployment-worker/recovery.js";
 import { inspectIdentityNormalization } from "../server/identity-normalization.js";
 
 const USAGE = `${c.bold}harbor${c.reset} — 个人多设备 agent 调度
@@ -59,13 +59,12 @@ ${c.bold}设备 daemon${c.reset}
   harbor daemon logs [--lines 100] [--follow]
   harbor daemon uninstall                                  卸服务，保留配置与日志
 
-${c.bold}部署 host worker（独立 LaunchAgent）${c.reset}
-  harbor deploy-worker setup
-  harbor deploy-worker status
-  harbor deploy-worker logs [--lines 100] [--follow]
-  harbor deploy-worker recover <job-id> --target <target-id> --confirm <job-id>
-  harbor deploy-worker acknowledge <legacy-job-id> --baseline-revision <exact-sha> --confirm <legacy-job-id>
-  harbor deploy-worker uninstall
+${c.bold}Harbor self-deployer sidecar（独立 LaunchAgent）${c.reset}
+  harbor self-deployer setup
+  harbor self-deployer status
+  harbor self-deployer logs [--lines 100] [--follow]
+  harbor self-deployer recover <job-id> --target <target-id> --confirm <job-id>
+  harbor self-deployer uninstall
 
 ${c.bold}数据库迁移预检（只读，不启动 server）${c.reset}
   harbor db identity-report [--database <v22.db>] [--json]   P6.1 identity normalization dry-run
@@ -197,10 +196,10 @@ async function main(): Promise<number> {
     throw new Error("用法：harbor daemon setup|status|logs|uninstall");
   }
 
-  if (domain === "deploy-worker") {
+  if (domain === "self-deployer") {
     if (verb === "setup") {
       const status = setupDeploymentWorkerService();
-      console.log(`${c.green}✓${c.reset} deployment worker LaunchAgent 已安装并启动`);
+      console.log(`${c.green}✓${c.reset} Harbor self-deployer LaunchAgent 已安装并启动`);
       console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
       return 0;
     }
@@ -217,27 +216,19 @@ async function main(): Promise<number> {
     }
     if (verb === "recover") {
       const jobId = pos[2];
-      if (!jobId) throw new Error("用法：harbor deploy-worker recover <job-id> --target <target-id> --confirm <job-id>");
+      if (!jobId) throw new Error("用法：harbor self-deployer recover <job-id> --target <target-id> --confirm <job-id>");
       if (flags.confirm !== jobId) throw new Error("recovery 会操作 host service/rollback anchor；--confirm 必须精确重复完整 job-id");
       await recoverLocalDeployment(jobId, req(flags, "target"));
-      console.log(`${c.green}✓${c.reset} deployment ${jobId} 已恢复并验证旧 baseline；现在可从 Delivery 执行普通 Retry`);
-      return 0;
-    }
-    if (verb === "acknowledge") {
-      const jobId = pos[2];
-      if (!jobId) throw new Error("用法：harbor deploy-worker acknowledge <legacy-job-id> --baseline-revision <exact-sha> --confirm <legacy-job-id>");
-      if (flags.confirm !== jobId) throw new Error("legacy ack 会解除不可执行的旧 gate；--confirm 必须精确重复完整 job-id");
-      await acknowledgeLegacyLocalDeployment(jobId, req(flags, "baseline-revision"));
-      console.log(`${c.yellow}!${c.reset} legacy deployment ${jobId} 已记为 failed；必须先 bootstrap trusted baseline manifest 才能 Retry`);
+      console.log(`${c.green}✓${c.reset} Harbor self deployment ${jobId} 已恢复并验证旧 baseline`);
       return 0;
     }
     if (verb === "uninstall") {
       const status = uninstallDeploymentWorkerService();
-      console.log(`${c.green}✓${c.reset} deployment worker LaunchAgent 已卸载（配置与日志保留）`);
+      console.log(`${c.green}✓${c.reset} Harbor self-deployer LaunchAgent 已卸载（配置与日志保留）`);
       console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
       return 0;
     }
-    throw new Error("用法：harbor deploy-worker setup|status|logs|recover|acknowledge|uninstall");
+    throw new Error("用法：harbor self-deployer setup|status|logs|recover|uninstall");
   }
 
   if (domain === "db") {

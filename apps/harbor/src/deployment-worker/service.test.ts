@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { deploymentWorkerProgramArguments, renderDeploymentWorkerLaunchAgent } from "./service.js";
 
-test("deployment worker is a launchd-scheduled one-shot drainer", () => {
+test("Harbor self-deployer is a launchd-scheduled one-shot drainer", () => {
   const plist = renderDeploymentWorkerLaunchAgent({
     home: "/Users/Harbor",
     bunPath: "/opt/bun/bin/bun",
@@ -9,8 +9,8 @@ test("deployment worker is a launchd-scheduled one-shot drainer", () => {
     pathEnv: "/usr/bin:/bin",
     databasePath: "/Users/Harbor/.harbor/control-plane/harbor.db",
     maintenancePath: "/Users/Harbor/.harbor/deployment/maintenance.json",
-    stdoutPath: "/Users/Harbor/.harbor/deploy-worker.log",
-    stderrPath: "/Users/Harbor/.harbor/deploy-worker.err.log",
+    stdoutPath: "/Users/Harbor/.harbor/self-deployer.log",
+    stderrPath: "/Users/Harbor/.harbor/self-deployer.err.log",
   });
 
   expect(plist).toContain("<key>RunAtLoad</key><true/>");
@@ -19,7 +19,7 @@ test("deployment worker is a launchd-scheduled one-shot drainer", () => {
   expect(plist).not.toContain("<key>KeepAlive</key><true/>");
 });
 
-test("deployment worker preserves the private host credential wrapper", () => {
+test("Harbor self-deployer preserves the private host credential wrapper", () => {
   expect(deploymentWorkerProgramArguments(
     "/opt/bun/bin/bun",
     "/Users/Harbor/.harbor/current/apps/harbor/src/deployment-worker/main.ts",

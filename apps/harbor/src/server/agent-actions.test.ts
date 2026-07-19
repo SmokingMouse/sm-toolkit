@@ -9,6 +9,7 @@ import type { DeviceHub } from "./ws.js";
 import type { ApprovalService } from "./approvals.js";
 import type { AutomationService } from "./automation.js";
 import { DeliveryService, type DeliveryProvider } from "./delivery.js";
+import type { DeploymentTargetConfig } from "../config.js";
 
 test("Run action token creates a scoped follow-up Issue and can route it to a Workspace Agent", async () => {
   const store = new HarborStore(openDb(":memory:"));
@@ -255,7 +256,6 @@ test("implementation and review action tokens can open, approve, and policy-merg
       provider: "github",
       headBranch: `harbor/${issue.id}`,
       baseBranch: "main",
-      deploymentRequired: true,
     }),
   });
   const openedBody = await opened.json() as Record<string, unknown>;
@@ -265,7 +265,6 @@ test("implementation and review action tokens can open, approve, and policy-merg
     conversationId: issue.id,
     provider: "github",
     changeUrl: "https://github.com/acme/app/pull/7",
-    deploymentStatus: "pending",
     }),
   });
 
@@ -307,11 +306,116 @@ test("implementation and review action tokens can open, approve, and policy-merg
     }),
   }));
   expect(store.listDeliveryEvents(store.getDeliveryForConversation(issue.id)!.id).map((event) => event.actor)).toContain("agent");
-  expect(transitions).toContainEqual({ before: "merge_ready", after: "merged" });
+  expect(transitions).toContainEqual({ before: "merge_ready", after: "succeeded" });
   expect(store.getDeliveryForConversation(issue.id)).toEqual(expect.objectContaining({
     mergeStatus: "merged",
-    deploymentStatus: "pending",
+    status: "succeeded",
   }));
+});
+
+test("only a Codebase merge Automation Run can enqueue the exact Harbor self deployment", async () => {
+  const store = new HarborStore(openDb(":memory:"));
+  const device = store.upsertDevice("release-runner", "hash", { clis: { codex: "1" }, endpoints: [] }, 1);
+  const repository = store.createRepository({
+    workspaceId: "ws_personal",
+    name: "harbor",
+    remoteUrl: "https://github.com/acme/harbor.git",
+    defaultBranch: "main",
+  }, 2);
+  const mount = store.setRepositoryMount(repository.id, device.id, "/repo", 3);
+  const agent = store.createAgent({
+    name: "Harbor Release",
+    deviceId: device.id,
+    backend: "codex",
+    repositoryId: repository.id,
+  }, 4);
+  const revision = "a".repeat(40);
+  const run = store.createRun({
+    workspaceId: "ws_personal",
+    sourceType: "automation",
+    sourceId: "automation_release",
+    agentId: agent.id,
+    deviceId: device.id,
+    repositoryId: repository.id,
+    repositoryMountId: mount.id,
+    executionRoot: mount.path,
+    prompt: "Deploy the merged revision",
+    purpose: "coordination",
+    promptEvent: "event.automation.webhook",
+    triggerContext: { eventType: "merge_request_merged", repositoryId: repository.id, revision },
+  }, 5);
+  store.markRunRunning(run.id, 6);
+  const token = "release-token";
+  store.createRunActionToken(
+    run.id,
+    createHash("sha256").update(token).digest("hex"),
+    Date.now() + 60_000,
+    7,
+  );
+  const target: DeploymentTargetConfig = {
+    id: "local-harbor",
+    name: "Local Harbor",
+    provider: "local-launchd",
+    repositoryId: repository.id,
+    repositoryPath: "/repo",
+    releasesPath: "/releases",
+    currentSymlinkPath: "/current",
+    sqlitePath: "/db",
+    statePath: "/state",
+    source: { remote: "origin", remoteUrl: "https://github.com/acme/harbor.git", allowedRefs: ["refs/heads/main"] },
+    environment: {},
+    steps: { install: [], build: [], test: [] },
+    services: [{
+      id: "server", role: "server", label: "com.test.harbor.server", domain: "gui/1",
+      plistPath: "/server.plist", templatePath: "/server.plist.tpl", templateSha256: "2".repeat(64),
+    }],
+    health: { url: "http://127.0.0.1:7777/api/health", headers: {}, headerRefs: {}, timeoutMs: 100, intervalMs: 10 },
+    commandTimeoutMs: 100,
+    fingerprint: "c".repeat(64),
+    manifestHash: "d".repeat(64),
+  };
+  const coordinator = new RunCoordinator(store, new RunBus(), { isOnline: () => false, send: () => false }, 2);
+  const app = buildRest(
+    store,
+    new RunBus(),
+    { onlineIds: () => new Set<string>(), isOnline: () => false } as unknown as DeviceHub,
+    coordinator,
+    {} as ApprovalService,
+    {} as AutomationService,
+    "owner-token",
+    undefined,
+    null,
+    "",
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    target,
+  );
+  const post = (body: unknown) => app.request("/hooks/agent-actions/self-deployments", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const created = await post({ revision, idempotencyKey: "merge-event-1" });
+  expect(created.status).toBe(202);
+  const createdBody = await created.json() as { job: { id: string; sourceRunId: string; revision: string }; reused: boolean };
+  expect(createdBody).toEqual({
+    job: expect.objectContaining({ sourceRunId: run.id, repositoryId: repository.id, revision }),
+    reused: false,
+  });
+  const duplicate = await post({ revision, idempotencyKey: "merge-event-1" });
+  expect(duplicate.status).toBe(200);
+  expect(await duplicate.json()).toEqual(expect.objectContaining({ reused: true }));
+  expect((await post({ revision: "b".repeat(40), idempotencyKey: "merge-event-2" })).status).toBe(409);
+  expect((await post({ revision, idempotencyKey: "merge-event-2", targetId: "forged" })).status).toBe(400);
+
+  const status = await app.request(`/hooks/agent-actions/self-deployments/${createdBody.job.id}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  expect(status.status).toBe(200);
+  expect(await status.json()).toEqual(expect.objectContaining({ id: createdBody.job.id, sourceRunId: run.id }));
 });
 
 test("request_changes queues the Developer behind the active review Run without conversation overlap", async () => {

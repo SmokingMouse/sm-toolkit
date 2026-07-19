@@ -32,6 +32,8 @@ interface NormalizedScmEvent {
   headBranch: string | null;
   baseBranch: string | null;
   latestHeadSha: string | null;
+  /** Provider 给出的 merged commit；不能用 MR head 猜测（squash/rebase 会不同）。 */
+  mergedRevision: string | null;
   commentId: string | null;
   commentBody: string | null;
   explicitDispatch: boolean;
@@ -46,6 +48,7 @@ export interface ScmAutomationEventInput {
   eventType: CodebaseAutomationEvent;
   eventId: string;
   payload: Record<string, unknown>;
+  revision: string | null;
   occurredAt: number;
 }
 
@@ -176,6 +179,7 @@ export class ScmService {
           headBranch: normalized.headBranch,
           baseBranch: normalized.baseBranch,
           latestHeadSha: normalized.latestHeadSha,
+          ...(normalized.mergedRevision ? { mergedRevision: normalized.mergedRevision } : {}),
           ...(normalized.reviewStatus ? { reviewStatus: normalized.reviewStatus } : {}),
           ...(normalized.checkStatus ? { checkStatus: normalized.checkStatus } : {}),
           ...(normalized.mergeStatus ? { mergeStatus: normalized.mergeStatus } : {}),
@@ -201,6 +205,7 @@ export class ScmService {
             eventType: automationEvent,
             eventId,
             payload: input.payload,
+            revision: normalized.mergedRevision,
             occurredAt: now,
           }) ?? false
         : false;
@@ -344,6 +349,15 @@ export function normalizeCodebaseEvent(eventType: string, payload: Record<string
         : null;
   const merged = /merged/.test(`${state} ${action ?? ""}`.toLowerCase());
   const mergeStatus = merged ? "merged" as const : /merge.?request|\bmr\b/.test(type) ? "open" as const : null;
+  const mergedRevision = merged ? scalar(payload, paths([
+    "merge_commit_sha",
+    "merge_commit_id",
+    "MergeCommitID",
+    "merged_commit_id",
+    "merged_commit_sha",
+    "merge_result.commit_id",
+    "merge_result.sha",
+  ])) : null;
   const explicitFlag = valueAt(payload, "harbor_dispatch") === true;
   return {
     eventType: type || "unknown",
@@ -366,6 +380,9 @@ export function normalizeCodebaseEvent(eventType: string, payload: Record<string
       "head_sha",
       "sha",
     ])),
+    mergedRevision: mergedRevision && /^[a-f0-9]{40,64}$/i.test(mergedRevision)
+      ? mergedRevision.toLowerCase()
+      : null,
     commentId,
     commentBody,
     explicitDispatch: explicitFlag || /assigned|mentioned/.test(action ?? "") || /@(harbor|mew)\b/i.test(commentBody ?? ""),

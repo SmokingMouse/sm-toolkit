@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { chmodSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LATEST_SCHEMA_VERSION, MIGRATIONS, openDb, openDeploymentDb, openV22MigrationFixtureDb } from "./db.js";
+import { LATEST_SCHEMA_VERSION, MIGRATIONS, openDb, openDeploymentDb, openV22MigrationFixtureDb, openV25MigrationFixtureDb } from "./db.js";
 import { DeliveryService } from "./delivery.js";
 import { renderRunPrompt } from "./prompt-wrapper.js";
 import { HarborStore } from "./store.js";
@@ -583,152 +583,27 @@ test("latest schema converges the historical self-hosting v13 fork without losin
   }
 });
 
-test("latest schema preserves a legitimate pre-provider manual no-target running deployment", () => {
-  const dir = mkdtempSync(join(tmpdir(), "harbor-v16-delivery-"));
-  const path = join(dir, "v16.db");
+test("v26 creates an independent Harbor self-deploy queue and preserves the host fence high-water", () => {
+  const dir = mkdtempSync(join(tmpdir(), "harbor-v25-self-deploy-"));
+  const path = join(dir, "v25.db");
   try {
-    const current = openV22MigrationFixtureDb(path);
-    const store = new HarborStore(current);
-    const device = store.upsertDevice("worker-v13", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
-    const repository = store.createRepository({ workspaceId: store.defaultWorkspace().id, name: "repo-v13" }, 2);
-    store.setRepositoryMount(repository.id, device.id, "/repo-v13", 3);
-    const agent = store.createAgent({ name: "builder-v13", deviceId: device.id, backend: "claude", repositoryId: repository.id }, 4);
-    const issue = store.createConversation({ kind: "issue", title: "v13", agentId: agent.id, origin: "web" }, 5);
-    store.setConversationStatus(issue.id, "review", 6);
-    const delivery = new DeliveryService(store).create(store.getConversation(issue.id)!, {
-      changeUrl: "https://example.test/mr/13", deploymentRequired: true,
-    }, 7);
-    store.updateDeliveryState(delivery.id, { reviewStatus: "approved", checkStatus: "passed", reviewApprovedAt: 8 }, 8);
-    current.run("UPDATE deliveries SET deployment_status = 'running' WHERE id = ?", [delivery.id]);
-    const githubIssue = store.createConversation({ kind: "issue", title: "v13 github", agentId: agent.id, origin: "web" }, 9);
-    store.setConversationStatus(githubIssue.id, "review", 10);
-    const githubDelivery = new DeliveryService(store).create(store.getConversation(githubIssue.id)!, {
-      changeUrl: "https://github.com/example/repo/pull/13", deploymentRequired: true,
-    }, 11);
-    current.run("UPDATE deliveries SET provider = 'github', deployment_status = 'running' WHERE id = ?", [githubDelivery.id]);
-    current.exec("PRAGMA foreign_keys = OFF;");
-    current.exec(`
-      DROP TABLE deployment_jobs;
-      CREATE TABLE deliveries_v16_fixture (
-        id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id),
-        provider TEXT NOT NULL, change_url TEXT, external_id TEXT, head_branch TEXT, base_branch TEXT,
-        review_status TEXT NOT NULL, check_status TEXT NOT NULL, merge_status TEXT NOT NULL,
-        deployment_status TEXT NOT NULL, review_approved_at INTEGER, merged_at INTEGER, deployed_at INTEGER,
-        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-        latest_head_sha TEXT, approved_head_sha TEXT, revision INTEGER NOT NULL DEFAULT 0
-      );
-      INSERT INTO deliveries_v16_fixture
-        SELECT id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
-               review_status, check_status, merge_status, deployment_status, review_approved_at,
-               merged_at, deployed_at, created_at, updated_at, latest_head_sha, approved_head_sha, revision
-        FROM deliveries;
-      DROP TABLE deliveries;
-      ALTER TABLE deliveries_v16_fixture RENAME TO deliveries;
-      CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
-      PRAGMA user_version = 16;
-    `);
+    const current = openV25MigrationFixtureDb(path);
+    current.run("UPDATE deployment_host_fence SET epoch = 17 WHERE lock_id = 1");
     current.close();
 
     const migrated = openDb(path);
     expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(LATEST_SCHEMA_VERSION);
-    expect(migrated.query<{
-      provider: string; review_status: string; check_status: string; deployment_status: string;
-      review_approved_at: number; revision: number; deployment_target_id: null; deployment_generation: number;
-    }, [string]>(
-      `SELECT provider, review_status, check_status, deployment_status, review_approved_at, revision,
-              deployment_target_id, deployment_generation FROM deliveries WHERE id = ?`,
-    ).get(delivery.id)).toEqual({
-      provider: "manual", review_status: "approved", check_status: "passed", deployment_status: "running",
-      review_approved_at: 8, revision: 1, deployment_target_id: null, deployment_generation: 0,
-    });
-    expect(migrated.query<{
-      provider: string; deployment_status: string; deployment_target_id: null; active_deployment_job_id: null;
-    }, [string]>(
-      "SELECT provider, deployment_status, deployment_target_id, active_deployment_job_id FROM deliveries WHERE id = ?",
-    ).get(githubDelivery.id)).toEqual({
-      provider: "github", deployment_status: "running", deployment_target_id: null, active_deployment_job_id: null,
-    });
-    expect(migrated.query<{ kind: string }, [string]>("SELECT kind FROM delivery_events WHERE delivery_id = ?").all(delivery.id)).toEqual([{ kind: "created" }]);
-    expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
-    migrated.close();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("latest schema gives an active phase-1 deployment without fingerprint/anchor an explicit legacy ack path", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "harbor-v17-active-deploy-"));
-  const path = join(dir, "v17.db");
-  try {
-    const current = openV22MigrationFixtureDb(path);
-    const store = new HarborStore(current);
-    const device = store.upsertDevice("worker-v14", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
-    const repository = store.createRepository({ workspaceId: store.defaultWorkspace().id, name: "repo-v14" }, 2);
-    store.setRepositoryMount(repository.id, device.id, "/repo-v14", 3);
-    const agent = store.createAgent({ name: "builder-v14", deviceId: device.id, backend: "claude", repositoryId: repository.id }, 4);
-    const issue = store.createConversation({ kind: "issue", title: "v14 active", agentId: agent.id, origin: "web" }, 5);
-    store.setConversationStatus(issue.id, "review", 6);
-    const fingerprint = "c".repeat(64);
-    const service = new DeliveryService(store, [], [{
-      id: "local", name: "Local", provider: "local-launchd", repositoryId: repository.id, fingerprint,
-      manifestHash: "d".repeat(64),
-    }]);
-    let delivery = service.create(store.getConversation(issue.id)!, {
-      changeUrl: "https://example.test/mr/14", deploymentTargetId: "local", deploymentRequired: true,
-    }, 7);
-    delivery = service.approve(delivery, store.getConversation(issue.id)!, 8);
-    store.updateDeliveryState(delivery.id, { checkStatus: "passed" }, 9);
-    delivery = await service.merge(store.getDelivery(delivery.id)!, store.getConversation(issue.id)!, {
-      confirmed: true, mergedRevision: "a".repeat(40),
-    }, 10);
-    expect(delivery.deploymentStatus).toBe("queued");
-
-    current.exec("PRAGMA foreign_keys = OFF;");
-    current.exec(`
-      DROP TABLE deployment_maintenance;
-      CREATE TABLE deliveries_v17_fixture AS SELECT * FROM deliveries;
-      CREATE TABLE deployment_jobs_v17_fixture (
-        id TEXT PRIMARY KEY, delivery_id TEXT NOT NULL, generation INTEGER NOT NULL, target_id TEXT NOT NULL,
-        revision TEXT NOT NULL, status TEXT NOT NULL, attempt INTEGER NOT NULL, lease_token TEXT,
-        lease_expires_at INTEGER, checkpoint TEXT NOT NULL, log TEXT, error TEXT, rollback_complete INTEGER,
-        created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER, updated_at INTEGER NOT NULL,
-        UNIQUE (delivery_id, generation)
-      );
-      INSERT INTO deployment_jobs_v17_fixture
-        SELECT id, delivery_id, generation, target_id, revision, status, attempt, lease_token,
-               lease_expires_at, checkpoint, log, error, rollback_complete, created_at, started_at, finished_at, updated_at
-        FROM deployment_jobs;
-      DROP TABLE deployment_jobs;
-      DROP TABLE deliveries;
-      ALTER TABLE deliveries_v17_fixture RENAME TO deliveries;
-      ALTER TABLE deployment_jobs_v17_fixture RENAME TO deployment_jobs;
-      CREATE UNIQUE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
-      CREATE INDEX idx_deliveries_deployment_status ON deliveries(deployment_status, updated_at);
-      CREATE INDEX idx_deployment_jobs_claim ON deployment_jobs(status, lease_expires_at, created_at);
-      PRAGMA user_version = 17;
-    `);
-    current.close();
-
-    const migrated = openDb(path);
-    expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(LATEST_SCHEMA_VERSION);
-    expect(migrated.query<{ deployment_status: string; deployment_error: string }, [string]>(
-      "SELECT deployment_status, deployment_error FROM deliveries WHERE id = ?",
-    ).get(delivery.id)).toEqual({
-      deployment_status: "needs_recovery",
-      deployment_error: "legacy automatic deployment 缺少可信 baseline；请执行管理员 ack 后重新 bootstrap",
-    });
-    expect(migrated.query<{ status: string; target_fingerprint: string; checkpoint: string; rollback_complete: number; failure_kind: string }, [string]>(
-      "SELECT status, target_fingerprint, checkpoint, rollback_complete, failure_kind FROM deployment_jobs WHERE delivery_id = ?",
-    ).get(delivery.id)).toEqual({
-      status: "needs_recovery", target_fingerprint: "", checkpoint: "rollback_incomplete",
-      rollback_complete: 0, failure_kind: "legacy_ack_required",
-    });
-    const migratedStore = new HarborStore(migrated);
-    const legacyJob = migratedStore.listDeploymentJobs(delivery.id)[0]!;
-    expect(migratedStore.acknowledgeLegacyDeployment(legacyJob.id, "b".repeat(40), 99)).toEqual(expect.objectContaining({
-      status: "failed", failureKind: "bootstrap_required", rollbackComplete: true,
-    }));
-    expect(migratedStore.getDeploymentMaintenance()).toBeNull();
+    expect(migrated.query<{ epoch: number }, []>(
+      "SELECT epoch FROM self_deploy_host_fence WHERE lock_id = 1",
+    ).get()?.epoch).toBe(17);
+    expect(migrated.query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('self_deploy_jobs','self_deploy_maintenance','self_deploy_host_fence') ORDER BY name",
+    ).all().map((row) => row.name)).toEqual([
+      "self_deploy_host_fence",
+      "self_deploy_jobs",
+      "self_deploy_maintenance",
+    ]);
+    expect(migrated.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM self_deploy_jobs").get()?.count).toBe(0);
     expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
     migrated.close();
   } finally {

@@ -10,12 +10,12 @@ const BASELINE = "b".repeat(40);
 
 function gate(epoch: number, nonce: string, phase: DeploymentMaintenanceGate["phase"] = "deploying"): DeploymentMaintenanceGate {
   return {
-    version: 2,
+    version: 3,
     fenceEpoch: epoch,
     fenceNonce: nonce,
     targetId: "local",
     jobId: "depjob_1",
-    deliveryId: "delivery_1",
+    sourceRunId: "run_1",
     generation: 1,
     revision: REVISION,
     targetFingerprint: "c".repeat(64),

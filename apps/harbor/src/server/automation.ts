@@ -25,6 +25,7 @@ export interface AutomationCodebaseInput {
   eventType: CodebaseAutomationEvent;
   eventId: string;
   payload: Record<string, unknown>;
+  revision?: string | null;
   occurredAt?: number;
 }
 
@@ -143,6 +144,7 @@ export class AutomationService {
           eventId: input.eventId,
           triggerId: trigger.id,
           repositoryId: input.repositoryId,
+          revision: input.revision,
           occurredAt: new Date(input.occurredAt ?? Date.now()).toISOString(),
           payload: input.payload,
         }, input.eventId);

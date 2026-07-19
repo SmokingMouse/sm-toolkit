@@ -18,8 +18,6 @@ import type {
   DeliveryCheckStatus,
   DeliveryEvent,
   DeliveryProviderKind,
-  DeploymentJobView,
-  DeploymentTargetDescriptor,
   DeliveryStatus,
   DeviceSummary,
   HarborAgent,
@@ -65,8 +63,6 @@ export type {
   DeliveryCheckStatus,
   DeliveryEvent,
   DeliveryProviderKind,
-  DeploymentJobView,
-  DeploymentTargetDescriptor,
   DeliveryStatus,
   DeviceSummary,
   HarborAgent,
@@ -157,7 +153,6 @@ export interface ConversationDetail {
     ts: number;
   }[];
   delivery: Delivery | null;
-  deploymentJob: DeploymentJobView | null;
   deliveryEvents: DeliveryEvent[];
   messages: ConversationMessage[];
   labels: IssueLabel[];
@@ -514,8 +509,6 @@ export const approveIssue = (id: string) =>
     "POST",
     `/api/conversations/${encodeURIComponent(id)}/approve`,
   );
-export const listDeploymentTargets = () =>
-  req<DeploymentTargetDescriptor[]>("GET", "/api/deployment-targets");
 export const createDelivery = (
   id: string,
   body: {
@@ -524,8 +517,6 @@ export const createDelivery = (
     externalId?: string;
     headBranch?: string;
     baseBranch?: string;
-    deploymentRequired: boolean;
-    deploymentTargetId?: string | null;
   },
 ) =>
   req<Delivery>(
@@ -552,19 +543,6 @@ export const syncDelivery = (id: string) =>
   req<Delivery>("POST", `/api/deliveries/${encodeURIComponent(id)}/sync`, {});
 export const refreshDelivery = (id: string) =>
   req<Delivery>("POST", `/api/deliveries/${encodeURIComponent(id)}/refresh`);
-export const startDeliveryDeployment = (id: string) =>
-  req<Delivery>("POST", `/api/deliveries/${encodeURIComponent(id)}/deploy`, {
-    confirmed: true,
-  });
-export const finishDeliveryDeployment = (
-  id: string,
-  status: "succeeded" | "failed",
-) =>
-  req<Delivery>(
-    "POST",
-    `/api/deliveries/${encodeURIComponent(id)}/deployment-result`,
-    { status },
-  );
 export const cancelIssue = (id: string) =>
   req<Conversation>(
     "POST",

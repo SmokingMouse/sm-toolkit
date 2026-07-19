@@ -6,7 +6,7 @@
   "bin": {
     "harbor-server": "src/server/main.ts",
     "harbord": "src/daemon/main.ts",
-    "harbor-deploy-worker": "src/deployment-worker/main.ts",
+    "harbor-self-deployer": "src/deployment-worker/main.ts",
     "harbor": "src/cli/main.ts"
   },
   "scripts": {

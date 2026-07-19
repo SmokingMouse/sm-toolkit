@@ -24,9 +24,9 @@ import { SkillSyncService } from "./skill-sync.js";
 import {
   codebaseConfig,
   databasePath,
-  deploymentTargets,
   feishuBotProfiles,
   githubConfig,
+  harborSelfDeployTarget,
   publicAuthConfig,
   token,
 } from "../config.js";
@@ -37,7 +37,7 @@ import {
   type Conversation,
   type Delivery,
 } from "../protocol.js";
-import { reconcileCompletedDeployments } from "./deployment-reconciler.js";
+import { reconcileCompletedDeliveries } from "./delivery-reconciler.js";
 import { HostMaintenanceSentinel } from "../deployment-worker/maintenance.js";
 import { DeploymentMaintenanceGuard } from "./maintenance.js";
 import { ensureBuiltinSkills } from "./builtin-skills.js";
@@ -52,16 +52,16 @@ const concurrency = Number(
 
 const db = openDb(dbPath);
 const store = new HarborStore(db);
+const selfDeployTarget = harborSelfDeployTarget({ resolveSecrets: false });
 const auth = new AuthService(store, publicAuthConfig());
-ensureBuiltinSkills(store);
 const bus = new RunBus();
-const hub = new DeviceHub(store, authToken, () => store.listDeploymentMaintenance().length > 0);
+const hasDatabaseMaintenance = () =>
+  store.listLegacyDeploymentMaintenance().length > 0 || store.listDeploymentMaintenance().length > 0;
+const hub = new DeviceHub(store, authToken, hasDatabaseMaintenance);
 const gc = githubConfig();
-// server 只计算非敏感 routing/fingerprint；health credential value 只允许 worker 解析进内存。
-const configuredDeploymentTargets = deploymentTargets({ resolveSecrets: false });
 const maintenance = new DeploymentMaintenanceGuard(store, new HostMaintenanceSentinel());
 let maintenanceActive = (await maintenance.current()).active;
-const writesBlocked = () => maintenanceActive || store.listDeploymentMaintenance().length > 0;
+const writesBlocked = () => maintenanceActive || hasDatabaseMaintenance();
 hub.setMaintenance(maintenanceActive);
 const deliveries = new DeliveryService(
   store,
@@ -71,9 +71,6 @@ const deliveries = new DeliveryService(
       ? [new GitHubDeliveryProvider(new GitHubRestClient(gc.token))]
       : []),
   ],
-  configuredDeploymentTargets.map(({ id, name, provider, repositoryId, fingerprint, manifestHash }) => ({
-    id, name, provider, repositoryId, fingerprint, manifestHash,
-  })),
 );
 if (!gc) {
   console.log(
@@ -118,8 +115,7 @@ const dispatchMergedEvent = (delivery: Delivery, conversation: Conversation): vo
       repositoryId: conversation.repositoryId,
       changeUrl: delivery.changeUrl,
       baseBranch: delivery.baseBranch,
-      deploymentStatus: delivery.deploymentStatus,
-      deploymentTargetId: delivery.deploymentTargetId,
+      mergedRevision: delivery.mergedRevision,
     },
   }, delivery.mergedAt ?? Date.now());
 };
@@ -275,19 +271,20 @@ const app = buildRest(
   ),
   maintenance,
   auth,
+  selfDeployTarget,
 );
 
-// worker 直接把 durable result 写回 SQLite；server 在运行或重启后确定性推进 Issue/收尾 worktree。
-const finalizeDeployments = async () => {
+// Delivery facts already live in SQLite; startup and live updates deterministically finalize Issues.
+const finalizeDeliveries = async () => {
   try {
     if ((await maintenance.current()).active) return;
   } catch {
     return;
   }
-  reconcileCompletedDeployments(store, coordinator);
+  reconcileCompletedDeliveries(store, coordinator);
 };
-void finalizeDeployments();
-setInterval(() => void finalizeDeployments(), 1_000);
+void finalizeDeliveries();
+setInterval(() => void finalizeDeliveries(), 1_000);
 
 Bun.serve<WsData>({
   port,
@@ -321,6 +318,7 @@ Bun.serve<WsData>({
 hub.startSweeper();
 
 const startControlPlane = () => {
+  ensureBuiltinSkills(store);
   approvals.startSweeper();
   automations.start();
   skillSync.start();

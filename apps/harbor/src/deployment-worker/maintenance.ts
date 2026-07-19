@@ -234,7 +234,7 @@ function missingOnly(error: unknown): void {
 }
 
 function sameRollbackIdentity(left: DeploymentMaintenanceGate, right: DeploymentMaintenanceGate): boolean {
-  return left.targetId === right.targetId && left.jobId === right.jobId && left.deliveryId === right.deliveryId
+  return left.targetId === right.targetId && left.jobId === right.jobId && left.sourceRunId === right.sourceRunId
     && left.generation === right.generation && left.revision === right.revision
     && left.targetFingerprint === right.targetFingerprint && left.targetManifestHash === right.targetManifestHash
     && left.rollbackAttempt === right.rollbackAttempt && left.baselineRevision === right.baselineRevision
@@ -243,12 +243,12 @@ function sameRollbackIdentity(left: DeploymentMaintenanceGate, right: Deployment
 }
 
 export function sameMaintenanceIdentity(left: DeploymentMaintenanceGate, right: DeploymentMaintenanceGate): boolean {
-  return left.version === 2 && right.version === 2
+  return left.version === 3 && right.version === 3
     && left.fenceEpoch === right.fenceEpoch
     && left.fenceNonce === right.fenceNonce
     && left.targetId === right.targetId
     && left.jobId === right.jobId
-    && left.deliveryId === right.deliveryId
+    && left.sourceRunId === right.sourceRunId
     && left.generation === right.generation
     && left.revision === right.revision
     && left.targetFingerprint === right.targetFingerprint
@@ -269,13 +269,18 @@ export function parseMaintenanceGate(value: string): DeploymentMaintenanceGate {
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("maintenance sentinel 必须是对象");
   const gate = raw as Record<string, unknown>;
+  const legacy = gate.version === 2;
+  const sourceRunId = legacy
+    ? (typeof gate.deliveryId === "string" && gate.deliveryId ? `legacy:${gate.deliveryId}` : "")
+    : gate.sourceRunId;
   const strings = [
-    "fenceNonce", "targetId", "jobId", "deliveryId", "revision", "targetFingerprint",
+    "fenceNonce", "targetId", "jobId", "revision", "targetFingerprint",
     "targetManifestHash", "baselineRevision", "baselineFingerprint", "baselineManifestHash",
     "baselineHealthFingerprint", "expectedRevision", "expectedFingerprint", "phase",
   ] as const;
   for (const key of strings) if (typeof gate[key] !== "string" || !gate[key]) throw new Error(`maintenance sentinel ${key} 无效`);
-  if (gate.version !== 2 || !Number.isInteger(gate.fenceEpoch) || Number(gate.fenceEpoch) <= 0
+  if (typeof sourceRunId !== "string" || !sourceRunId) throw new Error("maintenance sentinel sourceRunId 无效");
+  if (!(gate.version === 2 || gate.version === 3) || !Number.isInteger(gate.fenceEpoch) || Number(gate.fenceEpoch) <= 0
     || !Number.isInteger(gate.generation) || !Number.isInteger(gate.rollbackAttempt)
     || !Number.isFinite(gate.createdAt) || !Number.isFinite(gate.updatedAt)) {
     throw new Error("maintenance sentinel version/fence/generation/timestamp 无效");
@@ -289,7 +294,7 @@ export function parseMaintenanceGate(value: string): DeploymentMaintenanceGate {
   for (const key of ["targetFingerprint", "targetManifestHash", "baselineFingerprint", "baselineManifestHash", "baselineHealthFingerprint", "expectedFingerprint"] as const) {
     if (!/^[a-f0-9]{64}$/.test(String(gate[key]))) throw new Error(`maintenance sentinel ${key} 无效`);
   }
-  return gate as unknown as DeploymentMaintenanceGate;
+  return { ...gate, version: 3, sourceRunId } as unknown as DeploymentMaintenanceGate;
 }
 
 async function ensurePrivateDirectory(path: string): Promise<void> {

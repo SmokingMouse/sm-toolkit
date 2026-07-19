@@ -146,7 +146,7 @@ test("AI issue draft triages read-only before publishing a visible Issue", async
   expect(store.listConversations({ kind: "issue" })).toHaveLength(1);
 });
 
-test("Delivery policy keeps Issue in Review until checks, merge and deployment all complete", async () => {
+test("Delivery policy completes an Issue after review, checks and merge", async () => {
   const store = new HarborStore(openDb(":memory:"));
   const device = store.upsertDevice("delivery-worker", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
   const agent = store.createAgent(
@@ -185,11 +185,10 @@ test("Delivery policy keeps Issue in Review until checks, merge and deployment a
 
   const createdResponse = await request("POST", `/api/conversations/${issue.id}/delivery`, {
     changeUrl: "https://github.com/example/repo/pull/42",
-    deploymentRequired: true,
   });
   expect(createdResponse.status).toBe(201);
   const created = (await createdResponse.json()) as Delivery;
-  expect(created).toEqual(expect.objectContaining({ status: "review_pending", deploymentStatus: "pending" }));
+  expect(created).toEqual(expect.objectContaining({ status: "review_pending" }));
 
   const approvedResponse = await request("POST", `/api/conversations/${issue.id}/approve`, {});
   expect(approvedResponse.status).toBe(200);
@@ -216,16 +215,7 @@ test("Delivery policy keeps Issue in Review until checks, merge and deployment a
 
   const mergedResponse = await request("POST", `/api/deliveries/${created.id}/merge`, { confirmed: true });
   expect(mergedResponse.status).toBe(200);
-  expect((await mergedResponse.json()) as Delivery).toEqual(expect.objectContaining({ status: "merged" }));
-  expect(store.getConversation(issue.id)?.status).toBe("review");
-
-  const deployResponse = await request("POST", `/api/deliveries/${created.id}/deploy`, { confirmed: true });
-  expect(deployResponse.status).toBe(200);
-  expect((await deployResponse.json()) as Delivery).toEqual(expect.objectContaining({ status: "deploying" }));
-
-  const completedResponse = await request("POST", `/api/deliveries/${created.id}/deployment-result`, { status: "succeeded" });
-  expect(completedResponse.status).toBe(200);
-  expect((await completedResponse.json()) as Delivery).toEqual(expect.objectContaining({ status: "succeeded" }));
+  expect((await mergedResponse.json()) as Delivery).toEqual(expect.objectContaining({ status: "succeeded" }));
   expect(store.getConversation(issue.id)?.status).toBe("done");
   expect(store.listDeliveryEvents(created.id).map((event) => event.kind)).toEqual([
     "created",
@@ -236,12 +226,10 @@ test("Delivery policy keeps Issue in Review until checks, merge and deployment a
     "review_approved",
     "checks_updated",
     "merged",
-    "deployment_started",
-    "deployment_succeeded",
   ]);
 });
 
-test("Deployment targets expose only safe descriptors and REST rejects request-supplied execution config", async () => {
+test("Delivery REST rejects legacy deployment fields and no longer exposes deployment routes", async () => {
   const store = new HarborStore(openDb(":memory:"));
   const device = store.upsertDevice("target-worker", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
   const repository = store.createRepository({ workspaceId: store.defaultWorkspace().id, name: "target-repo" }, 2);
@@ -249,11 +237,7 @@ test("Deployment targets expose only safe descriptors and REST rejects request-s
   const agent = store.createAgent({ name: "target-builder", deviceId: device.id, backend: "claude", repositoryId: repository.id }, 4);
   const issue = store.createConversation({ kind: "issue", title: "Target", agentId: agent.id, origin: "web" }, 5);
   store.setConversationStatus(issue.id, "review", 6);
-  const deliveries = new DeliveryService(store, [], [{
-    id: "local-target", name: "Local Target", provider: "local-launchd", repositoryId: repository.id,
-    fingerprint: "c".repeat(64),
-    manifestHash: "d".repeat(64),
-  }]);
+  const deliveries = new DeliveryService(store);
   const coordinator = new RunCoordinator(store, new RunBus(), { isOnline: () => false, send: () => false }, 2, deliveries);
   const app = buildRest(
     store, new RunBus(), { onlineIds: () => new Set<string>(), isOnline: () => false } as unknown as DeviceHub,
@@ -265,25 +249,22 @@ test("Deployment targets expose only safe descriptors and REST rejects request-s
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 
-  const targets = await request("GET", "/api/deployment-targets");
-  expect(await targets.json()).toEqual([{ id: "local-target", name: "Local Target", provider: "local-launchd" }]);
+  expect((await request("GET", "/api/deployment-targets")).status).toBe(404);
   const injection = await request("POST", `/api/conversations/${issue.id}/delivery`, {
     provider: "manual", changeUrl: "https://example.test/mr/1", deploymentRequired: true,
     deploymentTargetId: "local-target", commands: [["sh", "-c", "anything"]],
   });
   expect(injection.status).toBe(400);
-  expect(await injection.json()).toEqual(expect.objectContaining({ error: expect.stringContaining("只能来自 server 管理员配置") }));
+  expect(await injection.json()).toEqual(expect.objectContaining({ error: expect.stringContaining("不支持字段") }));
 
   const createdResponse = await request("POST", `/api/conversations/${issue.id}/delivery`, {
-    provider: "manual", changeUrl: "https://example.test/mr/1", deploymentRequired: true,
-    deploymentTargetId: "local-target",
+    provider: "manual", changeUrl: "https://example.test/mr/1",
   });
   expect(createdResponse.status).toBe(201);
   const created = (await createdResponse.json()) as Delivery;
-  expect(created).toEqual(expect.objectContaining({ deploymentTargetId: "local-target", deploymentStatus: "pending" }));
-  const forgedResult = await request("POST", `/api/deliveries/${created.id}/deployment-result`, { status: "succeeded" });
-  expect(forgedResult.status).toBe(400);
-  expect(await forgedResult.json()).toEqual(expect.objectContaining({ error: expect.stringContaining("独立 host worker") }));
+  expect(created).toEqual(expect.objectContaining({ status: "review_pending" }));
+  expect((await request("POST", `/api/deliveries/${created.id}/deploy`, { confirmed: true })).status).toBe(404);
+  expect((await request("POST", `/api/deliveries/${created.id}/deployment-result`, { status: "succeeded" })).status).toBe(404);
 });
 
 test("Chat worktree cleanup is admin-controlled, idle-only, and proof-driven", async () => {

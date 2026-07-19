@@ -136,6 +136,7 @@ export class Executor {
         actionEnvironment.HARBOR_AGENT_REVIEW_URL = `${actionBaseUrl}/reviews`;
         actionEnvironment.HARBOR_AGENT_CONTEXT_URL = `${actionBaseUrl}/context`;
         actionEnvironment.HARBOR_AGENT_DISPATCH_URL = `${actionBaseUrl}/dispatch`;
+        actionEnvironment.HARBOR_AGENT_SELF_DEPLOY_URL = `${actionBaseUrl}/self-deployments`;
         actionEnvironment.HARBOR_AGENT_ACTION_TOKEN = spec.agentActionToken;
       }
       const interactive = spec.permission === "default";

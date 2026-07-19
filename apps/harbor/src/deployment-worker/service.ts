@@ -1,10 +1,11 @@
 import { existsSync, lstatSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { databasePath, deploymentMaintenancePath, deploymentTargets, validateDeploymentWorkerConfigFile } from "../config.js";
+import { databasePath, deploymentMaintenancePath, harborSelfDeployTarget, validateDeploymentWorkerConfigFile } from "../config.js";
 import { bootstrapLaunchAgentWithRetry, buildDaemonServicePath } from "../daemon/service.js";
 
-const LABEL = "com.smokingmouse.harbor.deploy-worker";
+const LABEL = "com.smokingmouse.harbor.self-deployer";
+const LEGACY_LABEL = "com.smokingmouse.harbor.deploy-worker";
 const decoder = new TextDecoder();
 
 export interface DeploymentWorkerServiceStatus {
@@ -36,8 +37,8 @@ function context() {
     databasePath: databasePath(),
     maintenancePath: deploymentMaintenancePath(),
     definitionPath: resolve(home, "Library/LaunchAgents", `${LABEL}.plist`),
-    stdoutPath: resolve(logDir, "deploy-worker.log"),
-    stderrPath: resolve(logDir, "deploy-worker.err.log"),
+    stdoutPath: resolve(logDir, "self-deployer.log"),
+    stderrPath: resolve(logDir, "self-deployer.err.log"),
   };
 }
 
@@ -70,18 +71,18 @@ export function renderDeploymentWorkerLaunchAgent(input: {
 }
 
 export function setupDeploymentWorkerService(): DeploymentWorkerServiceStatus {
-  if (process.env.HARBOR_DEPLOYMENT_TARGETS_JSON) {
-    throw new Error("LaunchAgent 不会把当前 shell env 安全持久化；请把 deployment_targets 写入权限 0600 的 ~/.harbor.yaml 后再 setup");
+  if (process.env.HARBOR_SELF_DEPLOY_TARGET_JSON || process.env.HARBOR_DEPLOYMENT_TARGETS_JSON) {
+    throw new Error("LaunchAgent 不会把当前 shell env 安全持久化；请把 self_deploy_target 写入权限 0600 的 ~/.harbor.yaml 后再 setup");
   }
   const serviceHome = process.env.HARBOR_SERVICE_HOME ?? process.env.HOME ?? homedir();
   validateDeploymentWorkerConfigFile(resolve(serviceHome, ".harbor.yaml"));
   const ctx = context();
   validateDeploymentWorkerEntry(ctx.workerEntry);
-  const safeTargets = deploymentTargets({ resolveSecrets: false });
-  if (safeTargets.length === 0) throw new Error("请先在 env 或 ~/.harbor.yaml 配置 deployment_targets");
+  const safeTarget = harborSelfDeployTarget({ resolveSecrets: false });
+  if (!safeTarget) throw new Error("请先在 ~/.harbor.yaml 配置 self_deploy_target");
   // credential value 永不写 plist。Bun 直启依赖 gui launchd manager；标准
   // 0700 host wrapper 则可在进程启动时解析同一个 reference。
-  for (const envName of new Set(safeTargets.flatMap((target) => Object.values(target.health.headerRefs).map((ref) => ref.env)))) {
+  for (const envName of new Set(Object.values(safeTarget.health.headerRefs).map((ref) => ref.env))) {
     const credential = command(["launchctl", "getenv", envName], true);
     if (!credential.ok || !credential.out) {
       throw new Error(`health credential env ${envName} 未注入 launchd manager；请先安全执行 launchctl setenv ${envName} <secret>`);
@@ -89,6 +90,7 @@ export function setupDeploymentWorkerService(): DeploymentWorkerServiceStatus {
   }
   atomicWrite(ctx.definitionPath, renderDeploymentWorkerLaunchAgent(ctx));
   const domain = launchdDomain();
+  command(["launchctl", "bootout", `${domain}/${LEGACY_LABEL}`], true);
   command(["launchctl", "bootout", `${domain}/${LABEL}`], true);
   bootstrapLaunchAgentWithRetry(domain, ctx.definitionPath, command);
   command(["launchctl", "enable", `${domain}/${LABEL}`]);
@@ -138,7 +140,10 @@ export async function showDeploymentWorkerLogs(lines = 100, follow = false): Pro
 export function uninstallDeploymentWorkerService(): DeploymentWorkerServiceStatus {
   const ctx = context();
   command(["launchctl", "bootout", `${launchdDomain()}/${LABEL}`], true);
+  command(["launchctl", "bootout", `${launchdDomain()}/${LEGACY_LABEL}`], true);
   if (existsSync(ctx.definitionPath)) unlinkSync(ctx.definitionPath);
+  const legacyDefinition = resolve(ctx.home, "Library/LaunchAgents", `${LEGACY_LABEL}.plist`);
+  if (existsSync(legacyDefinition)) unlinkSync(legacyDefinition);
   return deploymentWorkerServiceStatus();
 }
 
