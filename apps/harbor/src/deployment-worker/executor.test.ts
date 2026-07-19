@@ -813,6 +813,7 @@ os._exit(0)
 }, 10_000);
 
 test("HostProcess verifies sensitive stdout internally while returning only redacted output", async () => {
+  if (process.platform === "darwin" && !canInspectCurrentProcessGroup()) return;
   const runner = new HostProcess(process.env);
   const sensitive = "/private/harbor/repository.git";
   const matched = await runner.run(["/bin/echo", sensitive], {
@@ -852,14 +853,18 @@ function pidAlive(pid: number): boolean {
 }
 
 function canInspectCurrentProcessGroup(): boolean {
-  const pgidResult = Bun.spawnSync(["/bin/ps", "-o", "pgid=", "-p", String(process.pid)], {
-    stdin: "ignore", stdout: "pipe", stderr: "pipe",
-  });
-  if (pgidResult.exitCode !== 0) return false;
-  const pgid = Number(new TextDecoder().decode(pgidResult.stdout).trim());
-  if (!Number.isSafeInteger(pgid) || pgid <= 1) return false;
-  const stateResult = Bun.spawnSync(["/bin/ps", "-o", "stat=", "-g", String(pgid)], {
-    stdin: "ignore", stdout: "pipe", stderr: "pipe",
-  });
-  return stateResult.exitCode === 0 && new TextDecoder().decode(stateResult.stdout).trim().length > 0;
+  try {
+    const pgidResult = Bun.spawnSync(["/bin/ps", "-o", "pgid=", "-p", String(process.pid)], {
+      stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    });
+    if (pgidResult.exitCode !== 0) return false;
+    const pgid = Number(new TextDecoder().decode(pgidResult.stdout).trim());
+    if (!Number.isSafeInteger(pgid) || pgid <= 1) return false;
+    const stateResult = Bun.spawnSync(["/bin/ps", "-o", "stat=", "-g", String(pgid)], {
+      stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    });
+    return stateResult.exitCode === 0 && new TextDecoder().decode(stateResult.stdout).trim().length > 0;
+  } catch {
+    return false;
+  }
 }
