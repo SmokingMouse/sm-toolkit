@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { renderDeploymentWorkerLaunchAgent } from "./service.js";
+import { deploymentWorkerProgramArguments, renderDeploymentWorkerLaunchAgent } from "./service.js";
 
 test("deployment worker is a launchd-scheduled one-shot drainer", () => {
   const plist = renderDeploymentWorkerLaunchAgent({
@@ -17,4 +17,21 @@ test("deployment worker is a launchd-scheduled one-shot drainer", () => {
   expect(plist).toContain("<key>StartInterval</key><integer>3</integer>");
   expect(plist).toContain("<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>");
   expect(plist).not.toContain("<key>KeepAlive</key><true/>");
+});
+
+test("deployment worker preserves the private host credential wrapper", () => {
+  expect(deploymentWorkerProgramArguments(
+    "/opt/bun/bin/bun",
+    "/Users/Harbor/.harbor/current/apps/harbor/src/deployment-worker/main.ts",
+  )).toEqual([
+    "/opt/bun/bin/bun",
+    "/Users/Harbor/.harbor/current/apps/harbor/src/deployment-worker/main.ts",
+  ]);
+  expect(deploymentWorkerProgramArguments(
+    "/opt/bun/bin/bun",
+    "/Users/Harbor/.harbor/deployment/worker-entry.zsh",
+  )).toEqual([
+    "/bin/zsh",
+    "/Users/Harbor/.harbor/deployment/worker-entry.zsh",
+  ]);
 });

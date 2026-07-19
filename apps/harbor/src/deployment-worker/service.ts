@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { databasePath, deploymentMaintenancePath, deploymentTargets, validateDeploymentWorkerConfigFile } from "../config.js";
@@ -24,7 +24,9 @@ function context() {
   }
   const home = process.env.HARBOR_SERVICE_HOME ?? process.env.HOME ?? homedir();
   const bunPath = process.env.HARBOR_BUN_PATH ?? process.execPath;
-  const workerEntry = process.env.HARBOR_DEPLOY_WORKER_ENTRY ?? resolve(import.meta.dir, "main.ts");
+  const standardWrapper = resolve(home, ".harbor/deployment/worker-entry.zsh");
+  const workerEntry = process.env.HARBOR_DEPLOY_WORKER_ENTRY
+    ?? (existsSync(standardWrapper) ? standardWrapper : resolve(import.meta.dir, "main.ts"));
   const logDir = resolve(home, ".harbor");
   return {
     home,
@@ -42,11 +44,14 @@ function context() {
 export function renderDeploymentWorkerLaunchAgent(input: {
   home: string; bunPath: string; workerEntry: string; pathEnv: string; databasePath: string; maintenancePath?: string; stdoutPath: string; stderrPath: string;
 }): string {
+  const programArguments = deploymentWorkerProgramArguments(input.bunPath, input.workerEntry)
+    .map((value) => `<string>${xml(value)}</string>`)
+    .join("");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>${LABEL}</string>
-  <key>ProgramArguments</key><array><string>${xml(input.bunPath)}</string><string>${xml(input.workerEntry)}</string></array>
+  <key>ProgramArguments</key><array>${programArguments}</array>
   <key>WorkingDirectory</key><string>${xml(input.home)}</string>
   <key>EnvironmentVariables</key><dict>
     <key>HOME</key><string>${xml(input.home)}</string>
@@ -71,10 +76,11 @@ export function setupDeploymentWorkerService(): DeploymentWorkerServiceStatus {
   const serviceHome = process.env.HARBOR_SERVICE_HOME ?? process.env.HOME ?? homedir();
   validateDeploymentWorkerConfigFile(resolve(serviceHome, ".harbor.yaml"));
   const ctx = context();
+  validateDeploymentWorkerEntry(ctx.workerEntry);
   const safeTargets = deploymentTargets({ resolveSecrets: false });
   if (safeTargets.length === 0) throw new Error("请先在 env 或 ~/.harbor.yaml 配置 deployment_targets");
-  // LaunchAgent 不继承当前交互 shell 的临时 env。credential value 不写 plist；管理员必须
-  // 先把 reference 写入当前 gui launchd manager（worker 只在进程内收到它）。
+  // credential value 永不写 plist。Bun 直启依赖 gui launchd manager；标准
+  // 0700 host wrapper 则可在进程启动时解析同一个 reference。
   for (const envName of new Set(safeTargets.flatMap((target) => Object.values(target.health.headerRefs).map((ref) => ref.env)))) {
     const credential = command(["launchctl", "getenv", envName], true);
     if (!credential.ok || !credential.out) {
@@ -88,6 +94,20 @@ export function setupDeploymentWorkerService(): DeploymentWorkerServiceStatus {
   command(["launchctl", "enable", `${domain}/${LABEL}`]);
   command(["launchctl", "kickstart", "-k", `${domain}/${LABEL}`]);
   return deploymentWorkerServiceStatus();
+}
+
+export function deploymentWorkerProgramArguments(bunPath: string, workerEntry: string): string[] {
+  return workerEntry.endsWith(".zsh") ? ["/bin/zsh", workerEntry] : [bunPath, workerEntry];
+}
+
+function validateDeploymentWorkerEntry(path: string): void {
+  if (!path.endsWith(".zsh")) return;
+  const metadata = lstatSync(path);
+  const uid = process.getuid?.();
+  if (metadata.isSymbolicLink() || !metadata.isFile() || (uid !== undefined && metadata.uid !== uid)) {
+    throw new Error("deployment worker wrapper 必须是当前 uid 拥有的 non-symlink regular file");
+  }
+  if ((metadata.mode & 0o777) !== 0o700) throw new Error("deployment worker wrapper 权限必须精确为 0700");
 }
 
 export function deploymentWorkerServiceStatus(): DeploymentWorkerServiceStatus {
