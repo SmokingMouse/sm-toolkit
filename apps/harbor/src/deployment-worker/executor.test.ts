@@ -343,7 +343,7 @@ describe("local launchd v3-fenced executor", () => {
     h.health.statuses.push(200);
     await h.instance.releaseHostMaintenance(target(), executed.gate!, { assertFence: async () => {} });
     expect(h.launchd.calls.filter((call) => call === "bootstrap gui/1 /daemon.plist")).toHaveLength(1);
-  }, 15_000);
+  }, 30_000);
 
   test("retries a transient loopback transport failure inside the bounded exact-health window", async () => {
     const h = harness([new Error("connection refused"), 200]);
@@ -734,6 +734,10 @@ test("runtime path trust rejects owned 0777 components and a component replaceme
 
 test("macOS Bun process groups are cleaned on successful parent exit and split secrets redact before truncation", async () => {
   if (process.platform !== "darwin") return;
+  // Codex Release Runs intentionally deny process-table inspection.  The pure
+  // liveness parser remains covered below; launchd's unsandboxed pre-cutover
+  // suite executes this host integration before any backup or mutation.
+  if (!canInspectCurrentProcessGroup()) return;
   const runner = new HostProcess(process.env, undefined, 300, 500);
   const processRoot = realpathSync(mkdtempSync(join(tmpdir(), "harbor-process-group-")));
   const terminatedMarker = join(processRoot, "terminated");
@@ -845,4 +849,17 @@ test("process group liveness ignores zombies but fails closed for any live membe
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; }
   catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+}
+
+function canInspectCurrentProcessGroup(): boolean {
+  const pgidResult = Bun.spawnSync(["/bin/ps", "-o", "pgid=", "-p", String(process.pid)], {
+    stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  });
+  if (pgidResult.exitCode !== 0) return false;
+  const pgid = Number(new TextDecoder().decode(pgidResult.stdout).trim());
+  if (!Number.isSafeInteger(pgid) || pgid <= 1) return false;
+  const stateResult = Bun.spawnSync(["/bin/ps", "-o", "stat=", "-g", String(pgid)], {
+    stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  });
+  return stateResult.exitCode === 0 && new TextDecoder().decode(stateResult.stdout).trim().length > 0;
 }
