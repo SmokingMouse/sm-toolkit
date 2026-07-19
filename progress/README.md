@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、Agent Device 安全迁移、事件驱动 Agent team、版本化内置 `harbor` control-plane Skill 与 Local launchd Deployment Provider 已完成：Orchestrator 负责受控路由，Developer 从固定 Issue branch 创建/登记 PR，Reviewer 使用 Run-scoped capability request changes/approve/merge；merge 后的 exact revision 由独立、确定性的 host worker 部署，不把高权限发布交给 LLM。v21 application guard + v19-compatible worker 通过 v3 immutable host-fence journal、全局双 maintenance gate、epoch/nonce fencing、逐 service PID 停机证明、SQLite backup、server-only health、原 baseline 回滚与 daemon 延迟放闸保证任何不确定性都 fail-closed 为 needs recovery。下一步只做真实环境管理员 bootstrap 与验收：最小权限 GitHub token、Device push credential、可信 deployment target、`bitscli codebase`、真双机 checkout、真飞书群、automation 7 天与真实负载一周。
+Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、Agent Device 安全迁移、事件驱动 Agent team、版本化内置 `harbor` control-plane Skill 与 Local launchd Deployment Provider 已完成：Orchestrator 负责受控路由，Developer 从固定 Issue branch 创建/登记 PR，Reviewer 使用 Run-scoped capability request changes/approve/merge；merge 后的 exact revision 由独立、确定性的 host worker 部署，不把高权限发布交给 LLM。v21 application guard + v19-compatible worker 通过 v3 immutable host-fence journal、全局双 maintenance gate、epoch/nonce fencing、逐 service PID 停机证明、SQLite backup、server-only health、原 baseline 回滚与 daemon 延迟放闸保证任何不确定性都 fail-closed。Mac 本机可信 baseline、target、独立 worker 与真实 Delivery 已启动验收；当前在修复首次真实 job 暴露的“脱敏 stdout 被误用于 remote drift 比较”，随后重试 cutover，再进入 Mac mini 双 Device 协同。
 
 ## Goals
 
@@ -56,10 +56,11 @@ Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、A
 ## Session Log
 
 ### 2026-07-19 — Deployment safety integration与真实bootstrap
-- **Done**：独立 Mac mini Claude Review 对最终 fencing 修复返回 APPROVE；将 application guard 按 canonical migration 线重编号为 v21，worker compatibility 下限重映射为 v19，并保留 v20 built-in Skill、Agent team、GitHub/Codebase 与 Mew UI。Feishu maintenance 测试按多 Bot constructor 正确装配；新增所有非 deployment application table 的 INSERT/UPDATE/DELETE trigger 覆盖断言。
-- **Verified**：合入提交 `49c5744`；全量 **357 tests / 1707 assertions**、root typecheck、Harbor build、Next production build 12 pages 与 `git diff --check` 全绿。live DB schema=v19、maintenance gate=0，已创建一致性 bootstrap backup `/Users/bytedance/.harbor/bootstrap-backups/20260719-073951/harbor.db`（integrity=ok，SHA-256 `37d8d52b8a148550994d9d600f8ac2830380368ec6d8012f5e42638e86def4d4`）。
+- **Done**：独立 Mac mini Claude Review 对最终 fencing 修复返回 APPROVE；将 application guard 按 canonical migration 线重编号为 v21，worker compatibility 下限重映射为 v19，并保留 v20 built-in Skill、Agent team、GitHub/Codebase 与 Mew UI。Feishu maintenance 测试按多 Bot constructor 正确装配；新增所有非 deployment application table 的 INSERT/UPDATE/DELETE trigger 覆盖断言。随后创建 0600 管理员 target、bare deployment repository、可信 release/manifest、launchd templates 与独立 worker；live server/daemon 已从 exact baseline release 启动，DB v19→v21、105 个 maintenance triggers、integrity/FK/health/Device heartbeat 均通过。
+- **Verified**：合入提交 `49c5744` 与 plist 修复 `a09e346`；全量 **357 tests / 1709 assertions**、root typecheck、Harbor build、Next production build 12 pages 与 `git diff --check` 全绿。bootstrap backup `/Users/bytedance/.harbor/bootstrap-backups/20260719-073951/harbor.db`（integrity=ok，SHA-256 `37d8d52b8a148550994d9d600f8ac2830380368ec6d8012f5e42638e86def4d4`）；baseline release `a09e3466a6e9f44554ae3d54c642bda1c0697109` 与 target fingerprint `2655b26438fe7d3273ffed3df5aac1b55b0a743246d227efd80e867ec2fc04d3`。
 - **Root cause / fix**：真实标准 launchd plist 含 XML declaration → 换行 → Apple DOCTYPE；strict parser 已识别 declaration/DOCTYPE，却未跳过 document-level whitespace，导致合法模板被误拒。root parse 前现仅跳过纯空白 text token，不放宽 entity/comment/root Label 语义；两份真实模板同时通过 `plutil -lint` 与 Harbor strict parser，worker 23 tests / 117 assertions、Harbor build 通过。
-- **Next**：增量 Review 通过后创建 trusted baseline release/manifest，迁移 live DB v19→v21，安装独立 deployment worker，再做自动 job acceptance；随后迁移 Mac mini control plane 与双 Device。
+- **Acceptance finding / fix**：真实 Delivery `del_3pt0q35wzx` / job `depjob_1pq6a3222n` 在 maintenance 前安全失败并完整回滚，误报 `configured git remote URL drifted`。根因是 `HostProcess` 在返回前正确脱敏 remote URL，而 executor 又拿脱敏文本做功能比较。现改为流式、无原文留存的 exact-trim matcher：process 仅暴露 nullable boolean，audit/stdout 仍只返回脱敏值；生产进程级回归验证真实路径不泄露且匹配/漂移可区分，executor **24 tests / 122 assertions**、全量 **359 tests / 1719 assertions**、root typecheck 与 Next production build 12 pages 全绿。
+- **Next**：全量验证并提交 stdout matcher，Mac mini 增量 Review 后用新版独立 worker Retry 同一 Delivery，确认 exact cutover；随后迁移 Mac mini control plane 与双 Device。
 
 ### 2026-07-19 — Built-in Harbor control-plane Skill
 - **Decision**：控制面协议属于 Harbor Workspace/server，不属于某台 Device 或某个角色 Agent；因此使用 release-versioned、必选的 `builtin` Skill，Agent instruction 只保留角色判断与责任边界。完整理由见 ADR。

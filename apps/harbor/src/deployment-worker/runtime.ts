@@ -219,7 +219,13 @@ export class HostProcess implements DeploymentProcess {
       finishDrain(stdoutDrain, this.drainDeadlineMs),
       finishDrain(stderrDrain, this.drainDeadlineMs),
     ]);
-    return { exitCode: exitCode ?? -1, stdout, stderr, timedOut };
+    return {
+      exitCode: exitCode ?? -1,
+      stdout,
+      stderr,
+      timedOut,
+      stdoutMatched: stdoutDrain.expectedMatched(),
+    };
   }
 
 }
@@ -408,8 +414,12 @@ function startDrain(
   stream: ReadableStream<Uint8Array>,
   name: "stdout" | "stderr",
   options: DeploymentProcessOptions,
-): { promise: Promise<string>; cancel: () => Promise<void> } {
+): { promise: Promise<string>; cancel: () => Promise<void>; expectedMatched: () => boolean | null } {
   const reader = stream.getReader();
+  const matcher = name === "stdout" && options.expectedStdout !== undefined
+    ? new ExactTrimmedOutputMatcher(options.expectedStdout)
+    : null;
+  let expectedMatched: boolean | null = null;
   const promise = (async () => {
     const streamDecoder = new TextDecoder();
     const secrets = options.redactValues ?? [];
@@ -428,9 +438,14 @@ function startDrain(
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      appendRaw(streamDecoder.decode(value, { stream: true }));
+      const chunk = streamDecoder.decode(value, { stream: true });
+      matcher?.append(chunk);
+      appendRaw(chunk);
     }
-    appendRaw(streamDecoder.decode());
+    const tail = streamDecoder.decode();
+    matcher?.append(tail);
+    appendRaw(tail);
+    expectedMatched = matcher?.finish() ?? null;
     const safe = redactStructured(raw, secrets);
     options.onOutput(name, safe);
     const safeBytes = Buffer.from(safe);
@@ -441,7 +456,47 @@ function startDrain(
     const bodyBytes = Math.max(0, options.maxCaptureBytes - marker.byteLength);
     return `${new TextDecoder().decode(bytes.subarray(0, bodyBytes))}${marker.toString()}`;
   })();
-  return { promise, cancel: async () => { try { await reader.cancel(); } catch { /* already closed */ } } };
+  return {
+    promise,
+    cancel: async () => { try { await reader.cancel(); } catch { /* already closed */ } },
+    expectedMatched: () => expectedMatched,
+  };
+}
+
+/** Incrementally implements `stdout.trim() === expected` without retaining stdout. */
+class ExactTrimmedOutputMatcher {
+  private position = 0;
+  private started = false;
+  private mismatched = false;
+
+  constructor(private readonly expected: string) {}
+
+  append(chunk: string): void {
+    if (this.mismatched) return;
+    for (let index = 0; index < chunk.length; index++) {
+      const character = chunk[index]!;
+      if (!this.started && isTrimWhitespace(character)) continue;
+      this.started = true;
+      if (this.position < this.expected.length) {
+        if (character !== this.expected[this.position]) {
+          this.mismatched = true;
+          return;
+        }
+        this.position++;
+      } else if (!isTrimWhitespace(character)) {
+        this.mismatched = true;
+        return;
+      }
+    }
+  }
+
+  finish(): boolean {
+    return !this.mismatched && this.position === this.expected.length;
+  }
+}
+
+function isTrimWhitespace(character: string): boolean {
+  return character.trim() === "";
 }
 
 async function finishDrain(drain: ReturnType<typeof startDrain>, timeoutMs: number): Promise<string> {

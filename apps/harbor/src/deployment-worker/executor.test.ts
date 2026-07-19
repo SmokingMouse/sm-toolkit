@@ -142,7 +142,13 @@ class FakeProcess implements DeploymentProcess {
   unreachable = false;
   async run(argv: string[], options: DeploymentProcessOptions) {
     this.calls.push(argv);
-    if (argv.includes("get-url")) return result(0, `${this.remoteDrift ? "https://evil.test/repo" : REMOTE_URL}\n`);
+    if (argv.includes("get-url")) {
+      const stdout = `${this.remoteDrift ? "https://evil.test/repo" : REMOTE_URL}\n`;
+      return {
+        ...result(0, stdout),
+        stdoutMatched: options.expectedStdout === undefined ? null : stdout.trim() === options.expectedStdout,
+      };
+    }
     if (argv.includes("fetch")) { this.fetched = true; return result(); }
     if (argv.includes("rev-parse")) {
       if (this.missingUntilFetch && !this.fetched) return result(1, "", "missing");
@@ -734,6 +740,33 @@ os._exit(0)
     rmSync(processRoot, { recursive: true, force: true });
   }
 }, 10_000);
+
+test("HostProcess verifies sensitive stdout internally while returning only redacted output", async () => {
+  const runner = new HostProcess(process.env);
+  const sensitive = "/private/harbor/repository.git";
+  const matched = await runner.run(["/bin/echo", sensitive], {
+    env: {},
+    timeoutMs: 2_000,
+    maxCaptureBytes: 1_024,
+    redactValues: [sensitive],
+    expectedStdout: sensitive,
+    onOutput: () => {},
+  });
+  expect(matched.stdout).toContain("[redacted]");
+  expect(matched.stdout).not.toContain(sensitive);
+  expect(matched.stdoutMatched).toBeTrue();
+
+  const mismatched = await runner.run(["/bin/echo", `${sensitive}-drifted`], {
+    env: {},
+    timeoutMs: 2_000,
+    maxCaptureBytes: 1_024,
+    redactValues: [sensitive],
+    expectedStdout: sensitive,
+    onOutput: () => {},
+  });
+  expect(mismatched.stdout).not.toContain(sensitive);
+  expect(mismatched.stdoutMatched).toBeFalse();
+});
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; }

@@ -64,6 +64,8 @@ export interface DeploymentProcessOptions {
   timeoutMs: number;
   maxCaptureBytes: number;
   redactValues?: string[];
+  /** Compare complete stdout internally without returning the unredacted value. */
+  expectedStdout?: string;
   onOutput(stream: "stdout" | "stderr", chunk: string): void;
 }
 
@@ -72,6 +74,7 @@ export interface DeploymentProcessResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  stdoutMatched?: boolean | null;
 }
 
 export interface DeploymentProcess {
@@ -557,8 +560,15 @@ export class LocalLaunchdDeploymentExecutor {
     releasePath: string,
     logger: ReturnType<LocalLaunchdDeploymentExecutor["logger"]>,
   ): Promise<void> {
-    const remote = await this.command(["git", "-C", target.repositoryPath, "remote", "get-url", target.source.remote], target, undefined, logger);
-    if (remote.stdout.trim() !== target.source.remoteUrl) throw new DeploymentFailure("configured git remote URL drifted");
+    const remote = await this.command(
+      ["git", "-C", target.repositoryPath, "remote", "get-url", target.source.remote],
+      target,
+      undefined,
+      logger,
+      false,
+      target.source.remoteUrl,
+    );
+    if (remote.stdoutMatched !== true) throw new DeploymentFailure("configured git remote URL drifted");
     const temporaryRefs = target.source.allowedRefs.map((allowedRef, index) =>
       `refs/harbor-deploy/${job.id}/a${job.attempt}/${index}-${sha256(allowedRef).slice(0, 12)}`);
     for (const ref of temporaryRefs) {
@@ -788,6 +798,7 @@ export class LocalLaunchdDeploymentExecutor {
     cwd: string | undefined,
     logger: ReturnType<LocalLaunchdDeploymentExecutor["logger"]>,
     allowFailure = false,
+    expectedStdout?: string,
   ): Promise<DeploymentProcessResult> {
     const sensitive = targetSensitiveValues(target);
     assertSafeArgv(argv, Object.values(target.health.headers));
@@ -798,6 +809,7 @@ export class LocalLaunchdDeploymentExecutor {
       timeoutMs: target.commandTimeoutMs,
       maxCaptureBytes: 16_384,
       redactValues: sensitive,
+      expectedStdout,
       // HostProcess 始终流式 drain；audit 等 bounded capture 完整后统一 redaction，避免
       // credential 刚好跨 stdout chunk 边界时被逐 chunk 处理而泄漏。
       onOutput: () => {},
