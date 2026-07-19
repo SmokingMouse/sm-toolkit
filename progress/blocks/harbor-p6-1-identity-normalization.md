@@ -18,6 +18,7 @@ schema v23 identity normalization、Account auth 与 Web 登录面已在独立 w
 - Web 新增 `/login`，Settings 分为 Workspace / Account / Membership+Invitation；构建输出 13 个静态页面。
 - 生产 v22 在线一致性 backup 已落 `/Users/smokingmouse/.harbor/backups/pre-v23-identity-20260719/harbor.db`（SHA-256 `4650f9ec2f88bc833bd8dca425cb0f1537ddb3048c97e0c19e8aa6a345756aba`，integrity=ok，FK=0）。
 - 生产 backup 的只读 identity report PASS：`1 legacy member → 1 Account / 1 Membership`，无 blocker/warning，report 前后 SHA 不变；另在一次性本地副本真实演练 v22→v23，schema=23、`ws_personal → acc_bootstrap`、132 个 maintenance triggers、integrity=ok、FK=0，副本已删除。
+- 首次 production deployment attempt 在 maintenance 前卡于 fresh `bun install`；根因是本机默认 registry 把新 WebAuthn tarball 锁到 Mac mini 不可达的 `bnpm.byted.org`。在 gate=0 时终止 child，job 安全落为 failed/rollback_complete；随后重锁到公共 npm 并新增 repo-local `bunfig.toml` 防回归。
 
 ## Decisions
 
@@ -33,6 +34,7 @@ schema v23 identity normalization、Account auth 与 Web 登录面已在独立 w
 - `harbor db identity-report` 的 PASS 与 BLOCKED fixture 前后 SQLite SHA-256 一致；BLOCKED path 精确返回 exit 2。
 - `bun test`：414 pass / 0 fail / 2136 assertions（src + build dist）；生产 backup migration drill 同样通过。
 - root `bun run typecheck`、root build、Harbor Web typecheck/build、`git diff --check` 全绿。
+- public-registry lock 验证 `bnpm=0`；无显式 `--registry` 的 frozen install 由 repo `bunfig.toml` 固定到 `https://registry.npmjs.org`。
 - daemon、`server/ws.ts`、deployment-worker 无 diff；未修改 credential/hello contract。
 
 ## Next
