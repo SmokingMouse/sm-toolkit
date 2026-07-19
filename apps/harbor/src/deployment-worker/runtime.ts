@@ -278,13 +278,13 @@ export class HostLaunchd implements LaunchdControl {
     await required(this.processRunner, ["launchctl", "bootstrap", domain, plistPath]);
   }
   async isPidAlive(pid: number) {
-    try { process.kill(pid, 0); return true; }
-    catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ESRCH") return false;
-      if (code === "EPERM") return true;
-      throw error;
-    }
+    const safePid = positivePgid(pid);
+    const result = await raw(this.processRunner, ["/bin/kill", "-0", "--", String(safePid)]);
+    if (result.exitCode === 0) return true;
+    const output = `${result.stdout}\n${result.stderr}`;
+    if (/no such process/i.test(output)) return false;
+    if (/operation not permitted/i.test(output)) return true;
+    throw new Error(`exact PID liveness probe failed: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`);
   }
 }
 

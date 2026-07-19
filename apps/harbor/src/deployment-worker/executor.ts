@@ -712,13 +712,19 @@ export class LocalLaunchdDeploymentExecutor {
       url.searchParams.set("deployment_job_id", gate.jobId);
       url.searchParams.set("revision", manifest.revision);
       url.searchParams.set("target_fingerprint", manifest.targetFingerprint);
-      const response = await this.deps.health.get(url.toString(), headers, Math.min(5_000, manifest.health.timeoutMs));
-      const body = response.body as Record<string, unknown> | null;
-      if (response.status >= 200 && response.status < 300
-        && body?.ok === true && body.revision === manifest.revision
-        && body.targetFingerprint === manifest.targetFingerprint
-        && body.deploymentJobId === gate.jobId && body.maintenance === true) return;
-      if (response.status >= 200 && response.status < 300) logger.record("health 2xx but revision/job/fingerprint body mismatch");
+      try {
+        const response = await this.deps.health.get(url.toString(), headers, Math.min(5_000, manifest.health.timeoutMs));
+        const body = response.body as Record<string, unknown> | null;
+        if (response.status >= 200 && response.status < 300
+          && body?.ok === true && body.revision === manifest.revision
+          && body.targetFingerprint === manifest.targetFingerprint
+          && body.deploymentJobId === gate.jobId && body.maintenance === true) return;
+        if (response.status >= 200 && response.status < 300) logger.record("health 2xx but revision/job/fingerprint body mismatch");
+      } catch {
+        // launchd reports running before the loopback listener is necessarily bound.
+        // Transport failures are transient only inside this bounded exact-health window.
+        logger.record("health transport unavailable; retrying exact probe");
+      }
       await this.deps.clock.sleep(manifest.health.intervalMs);
     }
     throw new DeploymentFailure("revision-aware health check timeout");

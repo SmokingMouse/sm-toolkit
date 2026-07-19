@@ -207,10 +207,11 @@ class FakeSqlite implements SqliteBackupControl {
 class FakeHealth implements HealthClient {
   calls: string[] = [];
   wrongRevision = false;
-  constructor(readonly statuses: number[] = [200]) {}
+  constructor(readonly statuses: Array<number | Error> = [200]) {}
   async get(url: string) {
     this.calls.push(url);
     const status = this.statuses.shift() ?? 500;
+    if (status instanceof Error) throw status;
     const query = new URL(url).searchParams;
     return {
       status,
@@ -288,7 +289,7 @@ function fakeHooks(initial: DeploymentMaintenanceGate | null = null) {
   return { hooks, checkpoints, boundaries, current: () => current };
 }
 
-function harness(statuses = [200]) {
+function harness(statuses: Array<number | Error> = [200]) {
   const fs = new FakeFs();
   const process = new FakeProcess();
   const launchd = new FakeLaunchd();
@@ -337,6 +338,14 @@ describe("local launchd v3-fenced executor", () => {
     h.health.statuses.push(200);
     await h.instance.releaseHostMaintenance(target(), executed.gate!, { assertFence: async () => {} });
     expect(h.launchd.calls.filter((call) => call === "bootstrap gui/1 /daemon.plist")).toHaveLength(1);
+  });
+
+  test("retries a transient loopback transport failure inside the bounded exact-health window", async () => {
+    const h = harness([new Error("connection refused"), 200]);
+    const executed = await h.instance.execute(job(), target(), fakeHooks().hooks);
+    expect(executed.status).toBe("succeeded");
+    expect(h.health.calls).toHaveLength(2);
+    expect(executed.log).toContain("health transport unavailable; retrying exact probe");
   });
 
   test("any ambiguous bootout failure leaves DB/plists/symlink untouched and needs recovery", async () => {
@@ -531,6 +540,20 @@ test("launchctl only treats an exact-label missing response as unloaded", async 
     .rejects.toThrow("ambiguous failure");
   await expect(new HostLaunchd(runner('Could not find service "com.other" in domain for user gui: 1')).inspect("gui/1", "com.test"))
     .rejects.toThrow("ambiguous failure");
+});
+
+test("launchctl PID proof uses exact /bin/kill facts and fails closed on ambiguous errors", async () => {
+  const runner = (exitCode: number, stderr = ""): DeploymentProcess => ({
+    run: async (argv) => {
+      expect(argv.slice(0, 3)).toEqual(["/bin/kill", "-0", "--"]);
+      return { exitCode, stdout: "", stderr, timedOut: false };
+    },
+  });
+  expect(await new HostLaunchd(runner(0)).isPidAlive(42)).toBeTrue();
+  expect(await new HostLaunchd(runner(1, "kill: 42: No such process")).isPidAlive(42)).toBeFalse();
+  expect(await new HostLaunchd(runner(1, "kill: 42: Operation not permitted")).isPidAlive(42)).toBeTrue();
+  await expect(new HostLaunchd(runner(2, "kill: invalid host state")).isPidAlive(42))
+    .rejects.toThrow("exact PID liveness probe failed");
 });
 
 test("minimal process env never inherits Harbor/GitHub/credential variables", () => {
