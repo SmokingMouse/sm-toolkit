@@ -376,11 +376,11 @@ export class RunCoordinator {
     }
   }
 
-  /** issue 终结后的 worktree 收尾（保留分支删目录）。设备离线时静默跳过——重连对账补发 */
-  requestWorktreeCleanup(conv: Conversation): void {
-    if (!conv.worktreePath || !conv.worktreeMountId) return;
+  /** worktree 收尾（保留分支删目录）。返回 false 表示当前未送达；终态 Issue 会在重连对账时补发。 */
+  requestWorktreeCleanup(conv: Conversation): boolean {
+    if (!conv.worktreePath || !conv.worktreeMountId) return true;
     const mount = this.store.getRepositoryMount(conv.worktreeMountId);
-    if (!mount) return;
+    if (!mount) return false;
     const sent = this.transport.send(mount.deviceId, {
       type: "worktree_cleanup",
       conversationId: conv.id,
@@ -390,6 +390,7 @@ export class RunCoordinator {
     if (!sent) {
       console.log(`[coordinator] 设备离线，worktree 收尾等重连补发：${conv.id}（${conv.worktreePath}）`);
     }
+    return sent;
   }
 
   onWorktreeCleanupResult(conversationId: string, ok: boolean, message: string): void {
