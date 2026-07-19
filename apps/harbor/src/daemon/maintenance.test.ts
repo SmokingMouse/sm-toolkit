@@ -10,6 +10,7 @@ class FakeSentinel implements DeploymentMaintenanceSentinel {
   async read() { if (this.error) throw this.error; return this.gate; }
   async write(gate: DeploymentMaintenanceGate) { this.gate = gate; }
   async clear() { this.gate = null; }
+  async withLock<T>(action: () => Promise<T> | T) { return action(); }
 }
 
 test("daemon refuses connect/Run while stable host sentinel exists or is unreadable", async () => {

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { assertPrivateConfigMetadata, exactLaunchdTemplateLabel, parseDeploymentTargets } from "./config.js";
+import { assertPrivateConfigMetadata, parseDeploymentTargets } from "./config.js";
 
 const SECRETS = { HEALTH_TOKEN: "TOPSECRET", OTHER_HEALTH_TOKEN: "OTHERSECRET" };
 
@@ -8,7 +8,7 @@ function configured(overrides: Record<string, unknown> = {}) {
     id: "local-harbor", name: "Local Harbor", provider: "local-launchd", repository_id: "repo_1",
     repository_path: "/repo", releases_path: "/releases", current_symlink_path: "/current",
     sqlite_path: "/db", state_path: "/state",
-    source: { remote: "origin", url: "https://example.test/harbor.git", allowed_refs: ["refs/remotes/origin/main"] },
+    source: { remote: "origin", url: "https://example.test/harbor.git", allowed_refs: ["refs/heads/main"] },
     steps: { build: [["bun", "run", "build"]] }, environment: { BUILD_MODE: "production" },
     services: [
       { id: "server", role: "server", label: "com.test.server", domain: "gui/501", plist_path: "/server.plist", template_path: "/server.tpl", template_sha256: "a".repeat(64) },
@@ -81,9 +81,11 @@ test("parser rejects non-canonical paths, remote health, reserved env, missing s
   expect(() => parseDeploymentTargets([configured({ steps: { build: [["curl", "Authorization: Bearer TOPSECRET"]] } })], SECRETS)).toThrow("credential-like");
   expect(() => parseDeploymentTargets([configured({ steps: { build: [["curl", "-H", "Authorization:", "Bearer", "TOPSECRET"]] } })], SECRETS)).toThrow("credential-like");
   expect(() => parseDeploymentTargets([configured({ steps: { build: [["tool", "--password", "not-a-configured-secret"]] } })], SECRETS)).toThrow("credential-like");
+  expect(() => parseDeploymentTargets([configured({ source: {
+    remote: "origin", url: "https://example.test/harbor.git", allowed_refs: ["refs/remotes/origin/main"],
+  } })], SECRETS)).toThrow("固定 remote refs/heads");
   expect(() => parseDeploymentTargets([configured({ source: { remote: "origin", url: "https://user:pass@example.test/repo", allowed_refs: ["refs/heads/main"] } })], SECRETS)).toThrow("credential");
   expect(() => parseDeploymentTargets([configured()], SECRETS, { maintenancePath: "/state/global-maintenance.json" })).toThrow("maintenance sentinel");
-  expect(exactLaunchdTemplateLabel("<key>Label</key><string>a</string><key>Label</key><string>a</string>")).toBeNull();
 });
 
 test("worker YAML metadata must be owned 0600 non-symlink regular file", () => {

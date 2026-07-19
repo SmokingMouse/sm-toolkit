@@ -3,7 +3,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { buildDaemonServicePath, prepareDaemonConfig, renderLaunchAgent, renderSystemdUnit } from "./service.js";
+import {
+  bootstrapLaunchAgentWithRetry,
+  buildDaemonServicePath,
+  prepareDaemonConfig,
+  renderLaunchAgent,
+  renderSystemdUnit,
+} from "./service.js";
 
 describe("daemon service definitions", () => {
   test("launchd definition escapes paths and never contains a token", () => {
@@ -40,6 +46,49 @@ describe("daemon service definitions", () => {
     expect(buildDaemonServicePath("/home/me/.bun/bin/bun", "/usr/bin:/home/me/.bun/bin/:/bin:/usr/bin")).toBe(
       "/home/me/.bun/bin:/usr/bin:/bin",
     );
+  });
+
+  test("launchd bootstrap retries only the bounded post-bootout EIO race", () => {
+    const results = [
+      { ok: false, out: "Bootstrap failed: 5: Input/output error" },
+      { ok: false, out: "Bootstrap failed: 5: Input/output error" },
+      { ok: true, out: "" },
+    ];
+    const calls: string[][] = [];
+    const pauses: number[] = [];
+    bootstrapLaunchAgentWithRetry(
+      "gui/501",
+      "/tmp/worker.plist",
+      (argv) => { calls.push(argv); return results.shift()!; },
+      (ms) => { pauses.push(ms); },
+    );
+    expect(calls).toHaveLength(3);
+    expect(calls[0]).toEqual(["launchctl", "bootstrap", "gui/501", "/tmp/worker.plist"]);
+    expect(pauses).toEqual([50, 50]);
+  });
+
+  test("launchd bootstrap does not retry an ambiguous non-EIO failure", () => {
+    let calls = 0;
+    expect(() => bootstrapLaunchAgentWithRetry(
+      "gui/501",
+      "/tmp/worker.plist",
+      () => { calls++; return { ok: false, out: "Bootstrap failed: 37: Operation already in progress" }; },
+      () => { throw new Error("must not pause"); },
+    )).toThrow("Operation already in progress");
+    expect(calls).toBe(1);
+  });
+
+  test("launchd bootstrap EIO exhaustion is exactly 41 attempts and 2 seconds", () => {
+    let calls = 0;
+    let waitedMs = 0;
+    expect(() => bootstrapLaunchAgentWithRetry(
+      "gui/501",
+      "/tmp/worker.plist",
+      () => { calls++; return { ok: false, out: "Bootstrap failed: 5: Input/output error" }; },
+      (ms) => { waitedMs += ms; },
+    )).toThrow("持续 EIO");
+    expect(calls).toBe(41);
+    expect(waitedMs).toBe(2_000);
   });
 });
 

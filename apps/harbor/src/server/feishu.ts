@@ -448,6 +448,7 @@ export class FeishuEntry implements ApprovalSink {
   // ── run 完成回报（coordinator hook） ──────────────────
 
   notifyRunDone(run: Run, conv: Conversation | null): void {
+    if (this.maintenanceActive()) return;
     void this.notifyRunDoneAsync(run, conv).catch((e) =>
       console.error(
         "[feishu] 结果回报失败：",
@@ -460,6 +461,7 @@ export class FeishuEntry implements ApprovalSink {
     run: Run,
     conv: Conversation | null,
   ): Promise<void> {
+    this.assertOutboundAllowed();
     if (!conv) {
       if (run.sourceType !== "automation") return;
       const automation = this.store.getAutomation(run.sourceId);
@@ -482,6 +484,7 @@ export class FeishuEntry implements ApprovalSink {
             : `automation run \`${run.id}\` 失败：${run.error ?? "（无 error 信息）"}`;
       if (automation?.notifyChatId) {
         if (this.config.allowedChats.includes(automation.notifyChatId)) {
+          this.assertOutboundAllowed();
           if (run.status === "failed") {
             await this.channel.sendToChat(automation.notifyChatId, {
               type: "error",
@@ -501,6 +504,7 @@ export class FeishuEntry implements ApprovalSink {
         }
       }
       if (run.status === "failed" && this.config.adminUserId) {
+        this.assertOutboundAllowed();
         await this.channel.send(this.config.adminUserId, {
           type: "error",
           message: text,
@@ -516,6 +520,7 @@ export class FeishuEntry implements ApprovalSink {
       const ackId = this.ackCards.get(run.id);
       this.ackCards.delete(run.id);
       if (ackId) {
+        this.assertOutboundAllowed();
         await this.channel.update(ackId, content);
       } else {
         await this.replyToConversation(conv, content);
@@ -528,6 +533,7 @@ export class FeishuEntry implements ApprovalSink {
       const auto = this.store.getAutomation(conv.originRef);
       if (auto?.notifyChatId) {
         if (this.config.allowedChats.includes(auto.notifyChatId)) {
+          this.assertOutboundAllowed();
           await this.channel.sendToChat(auto.notifyChatId, content);
         } else {
           console.warn(
@@ -540,6 +546,7 @@ export class FeishuEntry implements ApprovalSink {
     // 无静默失败：非飞书入口的 failed run → admin DM 告警（P5 终验第 4 条）
     // （feishu 入口已在上面 return，走到这里的都是 cli/web/automation 来源）
     if (run.status === "failed" && this.config.adminUserId) {
+      this.assertOutboundAllowed();
       await this.channel.send(this.config.adminUserId, {
         type: "error",
         message: `run \`${run.id}\` 失败（${conv.kind} \`${conv.id}\`，来源 ${conv.origin}）\n${run.error ?? "（无 error 信息）"}\n\n▶︎ \`harbor issue continue ${conv.id} "<指令>"\` 可基于上一轮上下文重试`,
@@ -585,6 +592,7 @@ export class FeishuEntry implements ApprovalSink {
     _run: Run,
     conv: Conversation | null,
   ): void {
+    if (this.maintenanceActive()) return;
     void this.sendApprovalCard(approval, conv).catch((e) =>
       console.error(
         "[feishu] 审批卡片发送失败：",
@@ -597,6 +605,7 @@ export class FeishuEntry implements ApprovalSink {
     approval: Approval,
     conv: Conversation | null,
   ): Promise<void> {
+    this.assertOutboundAllowed();
     if (conv?.origin === "feishu" && !this.ownsConversation(conv)) return;
     if (conv?.origin !== "feishu" && this.scope.botMode !== "global") return;
     const content = this.approvalContent(approval, conv);
@@ -605,25 +614,35 @@ export class FeishuEntry implements ApprovalSink {
       messageId = await this.replyToConversation(conv, content);
     } else if (this.config.adminUserId) {
       // CLI/automation 发起的审批：DM 用户本人（场景②），手机上也能批
+      this.assertOutboundAllowed();
       messageId = await this.channel.send(this.config.adminUserId, content);
     }
     if (messageId) {
+      this.assertOutboundAllowed();
       this.store.setApprovalFeishuMessageId(approval.id, messageId);
       // 竞态补渲染：卡片发送期间已被 CLI 决议 → onApprovalDecided 当时拿不到
       // messageId，没法改卡；这里发现已非 pending 就立即补一次决议态。
       const fresh = this.store.getApproval(approval.id);
       if (fresh && fresh.status !== "pending") {
+        this.assertOutboundAllowed();
         await this.channel.update(messageId, this.approvalContent(fresh, conv));
       }
     }
   }
 
   onApprovalDecided(approval: Approval): void {
+    if (this.maintenanceActive()) return;
     const messageId = this.store.getApprovalFeishuMessageId(approval.id);
     if (!messageId) return;
     const conv = this.convOfRun(approval.runId);
-    void this.channel
-      .update(messageId, this.approvalContent(approval, conv))
+    void Promise.resolve()
+      .then(() => {
+        this.assertOutboundAllowed();
+        return this.channel.update(
+          messageId,
+          this.approvalContent(approval, conv),
+        );
+      })
       .catch((e) =>
         console.error(
           "[feishu] 审批卡片更新失败：",
@@ -814,9 +833,11 @@ export class FeishuEntry implements ApprovalSink {
     conv: Conversation,
     content: Content,
   ): Promise<string | null> {
+    this.assertOutboundAllowed();
     const chatId = conv.originRef?.split("|")[0];
     const binding = chatId ? this.store.getLarkWorkspaceBinding(chatId) : null;
     if (chatId && binding?.responseMode === "message") {
+      this.assertOutboundAllowed();
       const messageId = await this.channel.sendToChat(chatId, content);
       if (messageId) this.store.linkLarkMessage(messageId, conv.id, Date.now());
       return messageId;
@@ -824,6 +845,7 @@ export class FeishuEntry implements ApprovalSink {
     const anchor = this.replyAnchors.get(conv.id);
     if (anchor) {
       try {
+        this.assertOutboundAllowed();
         const messageId = await this.channel.reply(anchor, content);
         if (messageId)
           this.store.linkLarkMessage(messageId, conv.id, Date.now());
@@ -833,6 +855,7 @@ export class FeishuEntry implements ApprovalSink {
       }
     }
     if (!chatId) return null;
+    this.assertOutboundAllowed();
     const messageId = await this.channel.sendToChat(chatId, content);
     if (messageId) this.store.linkLarkMessage(messageId, conv.id, Date.now());
     return messageId;
@@ -892,6 +915,7 @@ export class FeishuEntry implements ApprovalSink {
     content: Content,
     conv?: Conversation | null,
   ): Promise<string | null> {
+    this.assertOutboundAllowed();
     const binding = this.store.getLarkWorkspaceBinding(msg.chatId);
     const messageId =
       binding?.responseMode === "message"
@@ -900,5 +924,9 @@ export class FeishuEntry implements ApprovalSink {
     if (messageId && conv)
       this.store.linkLarkMessage(messageId, conv.id, Date.now());
     return messageId;
+  }
+
+  private assertOutboundAllowed(): void {
+    if (this.maintenanceActive()) throw new Error("deployment maintenance 期间禁止 Feishu outbound");
   }
 }

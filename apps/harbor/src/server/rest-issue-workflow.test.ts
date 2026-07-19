@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { Conversation, Delivery, Run } from "../protocol.js";
+import type { Conversation, Delivery, Run, ServerMsg } from "../protocol.js";
 import type { ApprovalService } from "./approvals.js";
 import type { AutomationService } from "./automation.js";
 import { RunBus } from "./bus.js";
@@ -282,4 +282,120 @@ test("Deployment targets expose only safe descriptors and REST rejects request-s
   const forgedResult = await request("POST", `/api/deliveries/${created.id}/deployment-result`, { status: "succeeded" });
   expect(forgedResult.status).toBe(400);
   expect(await forgedResult.json()).toEqual(expect.objectContaining({ error: expect.stringContaining("独立 host worker") }));
+});
+
+test("Chat worktree cleanup is admin-controlled, idle-only, and proof-driven", async () => {
+  const store = new HarborStore(openDb(":memory:"));
+  const device = store.upsertDevice("chat-worker", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
+  const repository = store.createRepository({ workspaceId: store.defaultWorkspace().id, name: "chat-repo" }, 2);
+  const mount = store.setRepositoryMount(repository.id, device.id, "/repo", 3);
+  const agent = store.createAgent({
+    name: "chat-agent",
+    deviceId: device.id,
+    backend: "claude",
+    repositoryId: repository.id,
+    permission: "readonly",
+    isolation: "worktree",
+  }, 4);
+  const chat = store.createConversation({
+    kind: "chat",
+    title: "Durable chat",
+    agentId: agent.id,
+    repositoryId: repository.id,
+    origin: "web",
+  }, 5);
+  const worktreePath = "/repo/.harbor-worktrees/chat";
+  store.setConversationWorktreePath(chat.id, worktreePath, mount.id, 6);
+
+  const sent: ServerMsg[] = [];
+  let deliverySucceeds = true;
+  const transport: DeviceTransport = {
+    isOnline: () => true,
+    send: (_deviceId, message) => {
+      if (deliverySucceeds) sent.push(message);
+      return deliverySucceeds;
+    },
+  };
+  const coordinator = new RunCoordinator(store, new RunBus(), transport, 2);
+  const app = buildRest(
+    store,
+    new RunBus(),
+    { onlineIds: () => new Set([device.id]), isOnline: () => true } as unknown as DeviceHub,
+    coordinator,
+    {} as ApprovalService,
+    {} as AutomationService,
+    "test-token",
+  );
+  const cleanup = () => app.request(`/api/conversations/${chat.id}/worktree/cleanup`, {
+    method: "POST",
+    headers: { Authorization: "Bearer test-token" },
+  });
+
+  const requested = await cleanup();
+  expect(requested.status).toBe(202);
+  expect(await requested.json()).toEqual(expect.objectContaining({ cleanupRequested: true }));
+  expect(sent.at(-1)).toEqual({
+    type: "worktree_cleanup",
+    conversationId: chat.id,
+    repositoryRoot: mount.path,
+    worktreePath,
+  });
+  expect(store.getConversation(chat.id)?.worktreePath).toBe(worktreePath);
+  expect(() => coordinator.enqueueRun(
+    store.getConversation(chat.id)!,
+    agent,
+    "must wait for cleanup proof",
+    "implementation",
+  )).toThrow("worktree cleanup 进行中");
+
+  sent.length = 0;
+  coordinator.reconcileDevice(device.id, []);
+  expect(sent).toEqual([{
+    type: "worktree_cleanup",
+    conversationId: chat.id,
+    repositoryRoot: mount.path,
+    worktreePath,
+  }]);
+
+  coordinator.onWorktreeCleanupResult(chat.id, false, "dirty worktree");
+  expect(store.getConversation(chat.id)?.worktreePath).toBe(worktreePath);
+  const afterFailure = coordinator.enqueueRun(
+    store.getConversation(chat.id)!,
+    agent,
+    "continue after cleanup failure",
+    "implementation",
+  );
+  coordinator.onRunDone({ runId: afterFailure.id, status: "succeeded", claudeSessionId: null, cost: null });
+
+  deliverySucceeds = false;
+  const undelivered = await cleanup();
+  expect(undelivered.status).toBe(400);
+  expect(await undelivered.json()).toEqual(expect.objectContaining({
+    error: expect.stringContaining("未送达目标 Device"),
+  }));
+  const afterUndelivered = coordinator.enqueueRun(
+    store.getConversation(chat.id)!,
+    agent,
+    "continue after undelivered cleanup",
+    "implementation",
+  );
+  coordinator.onRunDone({ runId: afterUndelivered.id, status: "succeeded", claudeSessionId: null, cost: null });
+
+  deliverySucceeds = true;
+  expect((await cleanup()).status).toBe(202);
+  coordinator.onWorktreeCleanupResult(chat.id, true, "removed");
+  expect(store.getConversation(chat.id)).toEqual(expect.objectContaining({
+    status: "open",
+    worktreePath: null,
+    worktreeMountId: null,
+  }));
+  const idempotent = await cleanup();
+  expect(idempotent.status).toBe(200);
+  expect(await idempotent.json()).toEqual(expect.objectContaining({ cleanupRequested: false }));
+
+  store.setConversationWorktreePath(chat.id, worktreePath, mount.id, 7);
+  coordinator.enqueueRun(store.getConversation(chat.id)!, agent, "continue", "implementation");
+  const blocked = await cleanup();
+  expect(blocked.status).toBe(400);
+  expect(await blocked.json()).toEqual(expect.objectContaining({ error: expect.stringContaining("仍有 Run") }));
 });

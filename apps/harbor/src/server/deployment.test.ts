@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { chmodSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openDb } from "./db.js";
+import { openDb, openDeploymentDb } from "./db.js";
 import { HarborStore } from "./store.js";
 import { reconcileCompletedDeployments } from "./deployment-reconciler.js";
 import {
@@ -12,11 +13,12 @@ import {
   type DeliveryProviderAction,
   type DeliveryProviderContext,
 } from "./delivery.js";
-import type { DeploymentFence, DeploymentJob } from "../protocol.js";
+import type { DeploymentFence, DeploymentJob, DeploymentMaintenanceGate } from "../protocol.js";
 import type { DeploymentTargetConfig } from "../config.js";
 import type { DeploymentExecutionHooks, LocalLaunchdDeploymentExecutor } from "../deployment-worker/executor.js";
 import { DeploymentWorker } from "../deployment-worker/worker.js";
 import { assertSafeRecoveryTruth } from "../deployment-worker/recovery.js";
+import { HostSqliteBackup } from "../deployment-worker/runtime.js";
 
 const REVISION = "a".repeat(40);
 const BASELINE = "b".repeat(40);
@@ -109,6 +111,69 @@ async function mergedDelivery() {
 }
 
 describe("durable automatic deployment queue", () => {
+  test("a v20-compatible worker remains able to health-finalize and rollback after the server migrates application schema to v21", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "harbor-worker-v20-v21-")));
+    const path = join(dir, "harbor.db");
+    const backupPath = join(dir, "state", "database.sqlite");
+    let workerDb: Database | null = null;
+    let serverDb: Database | null = null;
+    try {
+      const h = harness(path);
+      let delivery = h.service.create(h.issue, {
+        provider: "github", changeUrl: "https://github.com/acme/harbor/pull/compat",
+        deploymentRequired: true, deploymentTargetId: h.target.id,
+      }, 7);
+      h.store.updateDeliveryMetadata(delivery.id, { latestHeadSha: REVISION }, 8);
+      delivery = h.service.approve(h.store.getDelivery(delivery.id)!, h.issue, 9);
+      h.store.updateDeliveryState(delivery.id, { checkStatus: "passed" }, 10);
+      await h.service.merge(h.store.getDelivery(delivery.id)!, h.issue, {}, 11);
+      h.db.close();
+
+      const downgrade = new Database(path);
+      for (const row of downgrade.query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'maintenance_block_%'",
+      ).all()) downgrade.exec(`DROP TRIGGER ${row.name}`);
+      downgrade.exec("PRAGMA user_version = 20");
+      downgrade.close();
+      chmodSync(path, 0o600);
+
+      workerDb = openDeploymentDb(path); // old host worker: validates control tables, does not migrate.
+      const workerStore = new HarborStore(workerDb);
+      const claimed = workerStore.claimDeploymentJob(targetClaim(h.target), 20, 100)!;
+      workerStore.activateDeploymentMaintenance(claimed.id, fenceOf(claimed), baselineInput(claimed), 21);
+      workerStore.updateDeploymentMaintenance(claimed.id, fenceOf(claimed), "healthy", REVISION, FINGERPRINT, 22);
+      await new HostSqliteBackup().backup(path, backupPath);
+
+      serverDb = openDb(path); // new server installs v21 application mutation guards.
+      expect(serverDb.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(21);
+      const rollbackGate = workerStore.updateDeploymentMaintenance(
+        claimed.id, fenceOf(claimed), "rolling_back", BASELINE, BASELINE_FINGERPRINT, 23,
+      );
+      workerStore.completeRecoveredDeploymentJob(rollbackGate, fenceOf(claimed), {
+        status: "failed", log: "baseline health exact", error: "new release failed", rollbackComplete: true,
+      }, 24);
+      workerStore.releaseDeploymentMaintenance(workerStore.getDeploymentMaintenance()!, 25);
+      expect(new HarborStore(serverDb).getDelivery(delivery.id)).toEqual(expect.objectContaining({ deploymentStatus: "failed" }));
+
+      workerDb.close();
+      workerDb = null;
+      serverDb.close();
+      serverDb = null;
+      await new HostSqliteBackup().restore(backupPath, path);
+      workerDb = openDeploymentDb(path);
+      expect(workerDb.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(20);
+      const restoredWorker = new HarborStore(workerDb);
+      expect(restoredWorker.getDeploymentMaintenance()).toEqual(expect.objectContaining({ phase: "healthy" }));
+      expect(restoredWorker.updateDeploymentMaintenance(
+        claimed.id, fenceOf(claimed), "rolling_back", BASELINE, BASELINE_FINGERPRINT, 26,
+      )).toEqual(expect.objectContaining({ phase: "rolling_back" }));
+    } finally {
+      workerDb?.close();
+      serverDb?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("persists an enqueued job across a real server DB close/reopen", async () => {
     const dir = mkdtempSync(join(tmpdir(), "harbor-deploy-restart-"));
     try {
@@ -195,41 +260,26 @@ describe("durable automatic deployment queue", () => {
     expect(h.store.listDeliveriesReadyToFinalize().map((item) => item.id)).toEqual([h.delivery.id]);
   });
 
-  test("discards a result when active generation/revision changed", async () => {
+  test("maintenance linearization rejects a generation mutation after the gate and preserves the fenced result", async () => {
     const h = await mergedDelivery();
     const claimed = h.store.claimDeploymentJob(targetClaim(h.target), 20, 100)!;
     markHealthy(h.store, claimed, 21);
-    h.store.updateDeliveryState(h.delivery.id, {
+    expect(() => h.store.updateDeliveryState(h.delivery.id, {
       deploymentGeneration: 2,
       deploymentRevision: "b".repeat(40),
       activeDeploymentJobId: "depjob_new",
-    }, 21);
+    }, 21)).toThrow("deployment maintenance");
     const result = h.store.completeDeploymentJob(claimed.id, fenceOf(claimed), {
       status: "succeeded", log: "stale", rollbackComplete: true,
     }, 22);
     expect(result.applied).toBeFalse();
+    expect(result.job.status).toBe("succeeded");
+    h.store.releaseDeploymentMaintenance(h.store.getDeploymentMaintenance()!, 23);
     expect(h.store.getDelivery(h.delivery.id)).toEqual(expect.objectContaining({
-      deploymentGeneration: 2,
-      deploymentRevision: "b".repeat(40),
-      activeDeploymentJobId: "depjob_new",
-      deploymentStatus: "running",
-    }));
-    expect(result.job.status).toBe("needs_recovery");
-    const recovery = h.store.claimDeploymentRecovery(claimed.id, h.target.id, h.target.fingerprint, h.target.manifestHash, 23, 100);
-    const recoveryGate = h.store.updateDeploymentMaintenance(
-      recovery.id, fenceOf(recovery), "rolling_back", BASELINE, BASELINE_FINGERPRINT, 24,
-    );
-    const recovered = h.store.completeRecoveredDeploymentJob(recoveryGate, fenceOf(recovery), {
-      status: "failed", log: "original baseline verified", error: "stale generation rolled back", rollbackComplete: true,
-    }, 25);
-    expect(recovered).toEqual(expect.objectContaining({ applied: false, job: expect.objectContaining({ status: "failed" }) }));
-    h.store.releaseDeploymentMaintenance(h.store.getDeploymentMaintenance()!, 26);
-    expect(h.store.getDeploymentMaintenance(h.target.id)).toBeNull();
-    expect(h.store.getDelivery(h.delivery.id)).toEqual(expect.objectContaining({
-      deploymentGeneration: 2,
-      deploymentRevision: "b".repeat(40),
-      activeDeploymentJobId: "depjob_new",
-      deploymentStatus: "running",
+      deploymentGeneration: 1,
+      deploymentRevision: REVISION,
+      activeDeploymentJobId: claimed.id,
+      deploymentStatus: "succeeded",
     }));
   });
 
@@ -260,21 +310,49 @@ describe("durable automatic deployment queue", () => {
     expect(h.store.getDeploymentMaintenance(h.target.id)).toBeNull();
   });
 
-  test("generation drift at an irreversible boundary revokes the lease and preserves the global recovery gate", async () => {
+  test("application writes fail closed while fenced deployment bookkeeping remains available", async () => {
     const h = await mergedDelivery();
     const claimed = h.store.claimDeploymentJob(targetClaim(h.target), 20, 100)!;
     h.store.activateDeploymentMaintenance(claimed.id, fenceOf(claimed), baselineInput(claimed), 21);
-    h.store.updateDeliveryState(h.delivery.id, {
+    expect(() => h.store.updateDeliveryState(h.delivery.id, {
       deploymentGeneration: 2,
       deploymentRevision: "b".repeat(40),
       activeDeploymentJobId: "depjob_new",
-    }, 22);
-    expect(h.store.renewDeploymentJob(claimed.id, fenceOf(claimed), 23, 100)).toBeFalse();
-    expect(h.store.getDeploymentJob(claimed.id)).toEqual(expect.objectContaining({
-      status: "needs_recovery", rollbackComplete: false, failureKind: "rollback_incomplete",
-    }));
-    expect(h.store.getDeploymentMaintenance()).toEqual(expect.objectContaining({ phase: "needs_recovery" }));
-    expect(h.store.updateDeploymentCheckpoint(claimed.id, fenceOf(claimed), "stale", 24)).toBeFalse();
+    }, 22)).toThrow("deployment maintenance");
+    expect(h.store.renewDeploymentJob(claimed.id, fenceOf(claimed), 23, 100)).toBeTrue();
+    expect(h.store.updateDeploymentCheckpoint(claimed.id, fenceOf(claimed), "still_fenced", 24)).toBeTrue();
+    expect(h.store.getDeploymentMaintenance()).toEqual(expect.objectContaining({ phase: "deploying" }));
+  });
+
+  test("maintenance guards cover every non-deployment application table", () => {
+    const h = harness();
+    const applicationTables = h.db
+      .query<{ name: string }, []>(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table'
+           AND name NOT LIKE 'sqlite_%'
+           AND name NOT IN ('deployment_jobs', 'deployment_maintenance', 'deployment_host_fence')
+         ORDER BY name`,
+      )
+      .all()
+      .map((row) => row.name);
+    const insertGuardedTables = h.db
+      .query<{ tbl_name: string }, []>(
+        `SELECT tbl_name FROM sqlite_master
+         WHERE type = 'trigger' AND name LIKE 'maintenance_block_insert_%'
+         ORDER BY tbl_name`,
+      )
+      .all()
+      .map((row) => row.tbl_name);
+    const guardCount = h.db
+      .query<{ count: number }, []>(
+        `SELECT COUNT(*) AS count FROM sqlite_master
+         WHERE type = 'trigger' AND name LIKE 'maintenance_block_%'`,
+      )
+      .get()?.count;
+
+    expect(insertGuardedTables).toEqual(applicationTables);
+    expect(guardCount).toBe(applicationTables.length * 3);
   });
 
   test("freezes target fingerprint and rejects a worker with drifted host config", async () => {
@@ -311,23 +389,27 @@ describe("durable automatic deployment queue", () => {
 
   test("host-global maintenance lock serializes cutover across targets", async () => {
     const h = await mergedDelivery();
-    const first = h.store.claimDeploymentJob(targetClaim(h.target), 20, 100)!;
-    h.store.activateDeploymentMaintenance(first.id, fenceOf(first), baselineInput(first), 21);
-
     const target2 = { ...h.target, id: "local-other", fingerprint: "2".repeat(64), manifestHash: "3".repeat(64) };
     const service = new DeliveryService(h.store, [], [h.target, target2]);
-    const issue2 = h.store.createConversation({ kind: "issue", title: "second", agentId: h.issue.agentId, origin: "web" }, 22);
-    h.store.setConversationStatus(issue2.id, "review", 23);
+    const issue2 = h.store.createConversation({ kind: "issue", title: "second", agentId: h.issue.agentId, origin: "web" }, 12);
+    h.store.setConversationStatus(issue2.id, "review", 13);
     let delivery2 = service.create(h.store.getConversation(issue2.id)!, {
       provider: "manual", changeUrl: "https://example.test/mr/2", deploymentRequired: true, deploymentTargetId: target2.id,
-    }, 24);
-    delivery2 = service.approve(delivery2, h.store.getConversation(issue2.id)!, 25);
-    h.store.updateDeliveryState(delivery2.id, { checkStatus: "passed" }, 26);
+    }, 14);
+    delivery2 = service.approve(delivery2, h.store.getConversation(issue2.id)!, 15);
+    h.store.updateDeliveryState(delivery2.id, { checkStatus: "passed" }, 16);
     await service.merge(h.store.getDelivery(delivery2.id)!, h.store.getConversation(issue2.id)!, {
       confirmed: true, mergedRevision: REVISION,
-    }, 27);
-    const second = h.store.claimDeploymentJob(targetClaim(target2), 28, 100)!;
-    expect(() => h.store.activateDeploymentMaintenance(second.id, fenceOf(second), baselineInput(second), 29))
+    }, 17);
+    const first = h.store.claimDeploymentJob(targetClaim(h.target), 20, 100)!;
+    const firstGate = h.store.activateDeploymentMaintenance(first.id, fenceOf(first), baselineInput(first), 21);
+    expect(h.store.assertDeploymentRestoreFence(firstGate)).toBeTrue();
+    const second = h.store.claimDeploymentJob(targetClaim(target2), 22, 100)!;
+    // B observed epoch(first), then C claimed a newer epoch. A restore using B's
+    // backup must be rejected before the file replacement, even though C is only building.
+    expect(second.fenceEpoch).toBeGreaterThan(firstGate.fenceEpoch);
+    expect(h.store.assertDeploymentRestoreFence(firstGate)).toBeFalse();
+    expect(() => h.store.activateDeploymentMaintenance(second.id, fenceOf(second), baselineInput(second), 23))
       .toThrow("另一个 target/job");
   });
 
@@ -380,7 +462,7 @@ describe("durable automatic deployment queue", () => {
     h.store.completeRecoveredDeploymentJob(maintenance, fenceOf(claimed), {
       status: "needs_recovery", log: "ambiguous stop", error: "rollback incomplete", rollbackComplete: false,
     }, 22);
-    expect(h.store.getDelivery(h.delivery.id)).toEqual(expect.objectContaining({ deploymentStatus: "needs_recovery" }));
+    expect(h.store.getDelivery(h.delivery.id)).toEqual(expect.objectContaining({ deploymentStatus: "running" }));
     expect(() => h.service.reconcileAutomaticDeployment(h.delivery.id, 23)).toThrow("needs_recovery");
     expect(h.service.startDeployment(h.store.getDelivery(h.delivery.id)!, h.issue, {}, 24)).rejects.toThrow("needs_recovery");
 
@@ -462,6 +544,7 @@ describe("durable automatic deployment queue", () => {
     const fakeExecutor = {
       validateTarget: async () => {},
       readMaintenance: async () => null,
+      withMaintenanceLock: async <T>(action: () => Promise<T> | T) => action(),
       execute: async () => ({
         status: "failed" as const, log: "bounded", error: "build failed", failureKind: "deployment_failed" as const,
         rollbackComplete: true, gate: null,
@@ -487,9 +570,12 @@ describe("durable automatic deployment queue", () => {
 
   test("worker reports needs_recovery when terminal host release cannot be proven", async () => {
     const h = await mergedDelivery();
+    let sentinel: DeploymentMaintenanceGate | null = null;
     const fakeExecutor = {
       validateTarget: async () => {},
-      readMaintenance: async () => null,
+      readMaintenance: async () => sentinel,
+      writeMaintenance: async (gate: DeploymentMaintenanceGate) => { sentinel = { ...gate }; },
+      withMaintenanceLock: async <T>(action: () => Promise<T> | T) => action(),
       execute: async (_job: DeploymentJob, _target: DeploymentTargetConfig, hooks: DeploymentExecutionHooks) => {
         await hooks.activateMaintenance(baselineInput(_job));
         const healthy = await hooks.updateMaintenance("healthy", REVISION, FINGERPRINT, { checkpoint: "healthy" });
@@ -509,7 +595,45 @@ describe("durable automatic deployment queue", () => {
       status: "needs_recovery", rollbackComplete: false, failureKind: "rollback_incomplete",
     }));
     expect(result.databaseGate).toEqual(expect.objectContaining({ phase: "needs_recovery" }));
-    expect(h.store.getDelivery(h.delivery.id)?.deploymentStatus).toBe("needs_recovery");
+    expect(result.sentinel).toEqual(expect.objectContaining({ phase: "releasing" }));
+    expect(h.store.getDelivery(h.delivery.id)?.deploymentStatus).toBe("running");
+  });
+
+  test("worker synchronizes the terminal DB phase to the host sentinel before exact health release", async () => {
+    const h = await mergedDelivery();
+    let sentinel: DeploymentMaintenanceGate | null = null;
+    const phasesAtRelease: string[] = [];
+    const fakeExecutor = {
+      validateTarget: async () => {},
+      readMaintenance: async () => sentinel,
+      writeMaintenance: async (gate: DeploymentMaintenanceGate) => { sentinel = { ...gate }; },
+      withMaintenanceLock: async <T>(action: () => Promise<T> | T) => action(),
+      execute: async (_job: DeploymentJob, _target: DeploymentTargetConfig, hooks: DeploymentExecutionHooks) => {
+        await hooks.activateMaintenance(baselineInput(_job));
+        const healthy = await hooks.updateMaintenance("healthy", REVISION, FINGERPRINT, { checkpoint: "healthy" });
+        return {
+          status: "succeeded" as const, log: "healthy", error: null, failureKind: null,
+          rollbackComplete: true, gate: healthy,
+        };
+      },
+      releaseHostMaintenance: async (_target: DeploymentTargetConfig, gate: DeploymentMaintenanceGate) => {
+        phasesAtRelease.push(sentinel?.phase ?? "missing");
+        expect(sentinel).toEqual(expect.objectContaining({
+          phase: "releasing", fenceEpoch: gate.fenceEpoch, fenceNonce: gate.fenceNonce,
+        }));
+        sentinel = null;
+      },
+    } as unknown as LocalLaunchdDeploymentExecutor;
+    const worker = new DeploymentWorker(
+      h.store, [h.target as unknown as DeploymentTargetConfig], fakeExecutor,
+      { now: () => 20, sleep: async () => {} }, 100,
+    );
+    const result = await worker.runOnce();
+    expect(phasesAtRelease).toEqual(["releasing"]);
+    expect(result.job).toEqual(expect.objectContaining({ status: "succeeded", rollbackComplete: true }));
+    expect(result.databaseGate).toBeNull();
+    expect(result.sentinel).toBeNull();
+    expect(h.store.getDelivery(h.delivery.id)?.deploymentStatus).toBe("succeeded");
   });
 
   test("target removal or runtime path drift during terminal release stays globally gated", async () => {
@@ -571,5 +695,14 @@ describe("durable automatic deployment queue", () => {
     expect(view.log?.length).toBeLessThanOrEqual(32_000);
     expect(view.log).not.toContain("TOPSECRET");
     expect(view.log).not.toContain(claimed.fenceNonce!);
+
+    h.db.run("UPDATE deployment_jobs SET log = ?, error = ? WHERE id = ?", [
+      "corrupt legacy row Authorization: Bearer TOPSECRET",
+      "password=TOPSECRET",
+      claimed.id,
+    ]);
+    const defended = h.store.getDeploymentJobView(claimed.id)!;
+    expect(defended.log).not.toContain("TOPSECRET");
+    expect(defended.error).not.toContain("TOPSECRET");
   });
 });

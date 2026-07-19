@@ -21,7 +21,9 @@ export function targetSensitiveValues(target: DeploymentTargetConfig): string[] 
     target.statePath,
     target.health.url,
     target.source.remoteUrl,
-    ...target.services.flatMap((service) => [service.plistPath, service.templatePath]),
+    target.source.remote,
+    ...target.services.flatMap((service) => [service.label, service.domain, service.plistPath, service.templatePath]),
+    ...Object.entries(target.health.headerRefs).flatMap(([name, reference]) => [name, reference.env]),
     ...Object.values(target.health.headers),
   ].filter(Boolean).sort((left, right) => right.length - left.length);
 }

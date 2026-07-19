@@ -8,6 +8,55 @@ import { Database } from "bun:sqlite";
 import { chmodSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 
+const APPLICATION_MUTATION_TABLES = [
+  "devices",
+  "agents",
+  "conversations",
+  "runs",
+  "run_events",
+  "automations",
+  "approvals",
+  "status_log",
+  "prompt_templates",
+  "chat_bindings",
+  "automation_log",
+  "workspaces",
+  "repositories",
+  "repository_mounts",
+  "skills",
+  "agent_skills",
+  "workspace_prompt_templates",
+  "workspace_prompt_blocks",
+  "deliveries",
+  "delivery_events",
+  "automation_triggers",
+  "automation_trigger_deliveries",
+  "scm_events",
+  "scm_external_objects",
+  "workspace_members",
+  "agent_repositories",
+  "skill_groups",
+  "skill_files",
+  "skill_dependencies",
+  "lark_workspace_bindings",
+  "conversation_messages",
+  "conversation_labels",
+  "issue_labels",
+  "run_attachments",
+  "run_action_tokens",
+  "workspace_api_tokens",
+  "lark_message_links",
+] as const;
+
+function maintenanceLinearizationSql(tables: readonly string[]): string {
+  return tables.flatMap((table) => (["INSERT", "UPDATE", "DELETE"] as const).map((operation) => `
+    CREATE TRIGGER IF NOT EXISTS maintenance_block_${operation.toLowerCase()}_${table}
+    BEFORE ${operation} ON ${table}
+    WHEN EXISTS (SELECT 1 FROM deployment_maintenance WHERE lock_id = 1)
+    BEGIN SELECT RAISE(ABORT, 'deployment maintenance'); END;
+  `)).join("\n");
+}
+
 /** Exported for migration-lineage regression fixtures; application code should use openDb. */
 export const MIGRATIONS: string[] = [
   // v1 —— 全部领域表
@@ -1507,6 +1556,8 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX idx_skills_workspace ON skills(workspace_id, archived_at, updated_at);
   CREATE INDEX idx_skills_group ON skills(group_id, updated_at);
   `,
+  // v21 —— 把全局 maintenance guard 下沉到 application DB mutation 线性化点。
+  "",
 ];
 
 function hasTable(db: Database, table: string): boolean {
@@ -1612,7 +1663,8 @@ export function openDb(path: string): Database {
     try {
       db.transaction(() => {
         if (version === 14) ensureGitHubDeliveryColumns(db);
-        db.exec(sql);
+        if (sql.trim()) db.exec(sql);
+        if (version === 20) installMaintenanceLinearization(db);
         db.exec(`PRAGMA user_version = ${version + 1}`);
       })();
     } finally {
@@ -1620,6 +1672,7 @@ export function openDb(path: string): Database {
     }
     version++;
   }
+  if (version >= 21) installMaintenanceLinearization(db);
   normalizeLegacyRepositoryNames(db);
   const foreignKeyFailures = db.query<Record<string, unknown>, []>("PRAGMA foreign_key_check").all();
   if (foreignKeyFailures.length > 0) {
@@ -1627,6 +1680,11 @@ export function openDb(path: string): Database {
     throw new Error(`SQLite migration foreign_key_check 失败（${foreignKeyFailures.length} rows）`);
   }
   return db;
+}
+
+function installMaintenanceLinearization(db: Database): void {
+  const present = new Set(db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
+  db.exec(maintenanceLinearizationSql(APPLICATION_MUTATION_TABLES.filter((table) => present.has(table))));
 }
 
 /** deploy worker 只打开已 bootstrap 的 queue；绝不创建 DB、绝不运行应用 migration。 */
@@ -1637,15 +1695,34 @@ export function openDeploymentDb(path: string): Database {
   db.exec("PRAGMA foreign_keys = ON;");
   const row = db.query<{ user_version: number }, []>("PRAGMA user_version").get();
   const version = row?.user_version ?? 0;
-  if (version !== LATEST_SCHEMA_VERSION) {
+  if (version < 19) {
     db.close();
-    throw new Error(`deployment worker 拒绝 schema v${version}；需要 server/admin bootstrap 到 v${LATEST_SCHEMA_VERSION}`);
+    throw new Error(`deployment worker 拒绝 schema v${version}；需要 server/admin bootstrap 到至少 v19`);
   }
+  try { assertDeploymentControlCompatibility(db); }
+  catch (error) { db.close(); throw error; }
   return db;
+}
+
+function assertDeploymentControlCompatibility(db: Database): void {
+  const required: Record<string, string[]> = {
+    deployment_jobs: ["id", "delivery_id", "generation", "target_id", "revision", "target_fingerprint", "target_manifest_hash", "status", "attempt", "fence_epoch", "fence_nonce", "lease_token", "lease_expires_at", "checkpoint", "log", "error", "failure_kind", "rollback_complete", "rollback_attempt", "baseline_revision", "baseline_fingerprint", "baseline_manifest_hash", "baseline_health_fingerprint", "database_backup_created", "new_service_pids", "created_at", "started_at", "finished_at", "updated_at"],
+    deployment_maintenance: ["lock_id", "fence_epoch", "fence_nonce", "target_id", "job_id", "delivery_id", "generation", "revision", "target_fingerprint", "target_manifest_hash", "rollback_attempt", "baseline_revision", "baseline_fingerprint", "baseline_manifest_hash", "baseline_health_fingerprint", "expected_revision", "expected_fingerprint", "phase", "created_at", "updated_at"],
+    deployment_host_fence: ["lock_id", "epoch"],
+    deliveries: ["id", "conversation_id", "review_status", "check_status", "merge_status", "deployment_status", "deployment_target_id", "merged_revision", "deployment_revision", "deployment_generation", "active_deployment_job_id", "deployment_error", "deployed_at", "revision", "updated_at"],
+    delivery_events: ["delivery_id", "kind", "data", "actor", "ts"],
+    conversations: ["id", "status", "updated_at"],
+  };
+  for (const [table, columns] of Object.entries(required)) {
+    const present = new Set(db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+    const missing = columns.filter((column) => !present.has(column));
+    if (missing.length) throw new Error(`deployment worker control schema incompatible: ${table} 缺少 ${missing.join(",")}`);
+  }
 }
 
 function assertPrivateDeploymentDatabase(path: string): void {
   if (!isAbsolute(path) || resolve(path) !== path) throw new Error("deployment worker DB 必须是 canonical 绝对路径");
+  assertTrustedDeploymentDatabaseComponents(path);
   const metadata = lstatSync(path);
   const uid = process.getuid?.();
   if (metadata.isSymbolicLink() || !metadata.isFile()) throw new Error("deployment worker DB 必须是 non-symlink regular file");
@@ -1655,7 +1732,33 @@ function assertPrivateDeploymentDatabase(path: string): void {
   const parent = dirname(path);
   const parentMetadata = lstatSync(parent);
   if (parentMetadata.isSymbolicLink() || !parentMetadata.isDirectory()
-    || (uid !== undefined && parentMetadata.uid !== uid) || realpathSync(parent) !== parent) {
-    throw new Error("deployment worker DB 父目录必须由当前 uid 拥有且不能包含 symlink");
+    || (uid !== undefined && parentMetadata.uid !== uid) || (parentMetadata.mode & 0o022) !== 0
+    || realpathSync(parent) !== parent) {
+    throw new Error("deployment worker DB 父目录必须由当前 uid 拥有、不可写篡改且不能包含 symlink");
+  }
+}
+
+function assertTrustedDeploymentDatabaseComponents(path: string): void {
+  const uid = process.getuid?.();
+  const components: string[] = [];
+  for (let current = path;; current = dirname(current)) {
+    components.push(current);
+    if (dirname(current) === current) break;
+  }
+  components.reverse();
+  for (let index = 0; index < components.length; index++) {
+    const component = components[index]!;
+    const metadata = lstatSync(component);
+    const leaf = index === components.length - 1;
+    if (metadata.isSymbolicLink() || (!leaf && !metadata.isDirectory())) {
+      throw new Error(`deployment worker DB 路径含不可信 component ${component}`);
+    }
+    if (uid !== undefined && metadata.uid !== uid && metadata.uid !== 0) {
+      throw new Error(`deployment worker DB component ${component} owner 不可信`);
+    }
+    if ((metadata.mode & 0o022) !== 0) {
+      const trustedStickySystemParent = !leaf && metadata.uid === 0 && (metadata.mode & 0o1000) !== 0;
+      if (!trustedStickySystemParent) throw new Error(`deployment worker DB component ${component} 不能 group/world writable`);
+    }
   }
 }

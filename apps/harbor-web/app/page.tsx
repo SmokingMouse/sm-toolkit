@@ -2026,7 +2026,8 @@ function DeliveryCard({
     );
   }
 
-  const meta = delivery.deploymentStatus === "needs_recovery"
+  const needsRecovery = delivery.deploymentStatus === "needs_recovery" || deploymentJob?.recoveryRequired === true;
+  const meta = needsRecovery
     ? { label: "Needs recovery", note: "普通 Retry 已禁用，等待 host 管理员恢复并验证旧 baseline", tone: "bg-red-100 text-red-800" }
     : delivery.mergeStatus === "closed"
     ? { label: "PR closed", note: "PR 已关闭且未合并", tone: "bg-red-50 text-red-700" }
@@ -2236,9 +2237,8 @@ function DeliveryCard({
                     : "Confirm externally merged"}
               </button>
             )}
-            {(delivery.status === "merged" ||
-              (delivery.status === "failed" &&
-                delivery.deploymentStatus !== "needs_recovery")) && (
+            {!needsRecovery &&
+              (delivery.status === "merged" || delivery.status === "failed") && (
               <button
                 className={
                   delivery.status === "failed" ? btnDanger : btnPrimary
@@ -2253,7 +2253,7 @@ function DeliveryCard({
                     : "Record deploy started"}
               </button>
             )}
-            {delivery.deploymentStatus === "needs_recovery" && (
+            {needsRecovery && (
               <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[10px] leading-4 text-red-700">
                 普通 Retry 已禁用。Host 管理员需执行{" "}
                 <span className="break-all font-mono">

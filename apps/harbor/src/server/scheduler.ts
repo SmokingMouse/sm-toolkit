@@ -38,6 +38,8 @@ export class RunCoordinator {
   onRunFinished?: (run: Run, conv: Conversation | null) => void;
 
   private readonly deliveries: DeliveryService;
+  /** Chat 显式 cleanup 已送达、尚未收到 daemon proof；期间禁止新 Run 复用正在删除的目录。 */
+  private readonly pendingWorktreeCleanups = new Set<string>();
 
   constructor(
     private store: HarborStore,
@@ -66,6 +68,9 @@ export class RunCoordinator {
   ): Run {
     if (conv.workspaceId !== agent.workspaceId) {
       throw new Error(`Agent "${agent.name}" 不属于当前 Workspace，不能跨作用域执行`);
+    }
+    if (this.pendingWorktreeCleanups.has(conv.id)) {
+      throw new Error("conversation worktree cleanup 进行中，请等待 Device 回报后再执行");
     }
     const active = this.store.activeRunForConversation(conv.id);
     if (active && !options.allowQueuedBehindConversation) {
@@ -376,11 +381,11 @@ export class RunCoordinator {
     }
   }
 
-  /** issue 终结后的 worktree 收尾（保留分支删目录）。设备离线时静默跳过——重连对账补发 */
-  requestWorktreeCleanup(conv: Conversation): void {
-    if (!conv.worktreePath || !conv.worktreeMountId) return;
+  /** worktree 收尾（保留分支删目录）。返回 false 表示当前未送达；终态 Issue 会在重连对账时补发。 */
+  requestWorktreeCleanup(conv: Conversation): boolean {
+    if (!conv.worktreePath || !conv.worktreeMountId) return true;
     const mount = this.store.getRepositoryMount(conv.worktreeMountId);
-    if (!mount) return;
+    if (!mount) return false;
     const sent = this.transport.send(mount.deviceId, {
       type: "worktree_cleanup",
       conversationId: conv.id,
@@ -389,10 +394,14 @@ export class RunCoordinator {
     });
     if (!sent) {
       console.log(`[coordinator] 设备离线，worktree 收尾等重连补发：${conv.id}（${conv.worktreePath}）`);
+    } else if (conv.kind === "chat") {
+      this.pendingWorktreeCleanups.add(conv.id);
     }
+    return sent;
   }
 
   onWorktreeCleanupResult(conversationId: string, ok: boolean, message: string): void {
+    this.pendingWorktreeCleanups.delete(conversationId);
     const conv = this.store.getConversation(conversationId);
     if (!conv) return;
     if (ok) {
@@ -436,6 +445,13 @@ export class RunCoordinator {
     // 设备离线期间人工终结的 issue：worktree 收尾消息已丢，这里补发
     for (const { conversation } of this.store.listWorktreeCleanupsForDevice(deviceId)) {
       this.requestWorktreeCleanup(conversation);
+    }
+    for (const conversationId of this.pendingWorktreeCleanups) {
+      const conversation = this.store.getConversation(conversationId);
+      const mount = conversation?.worktreeMountId
+        ? this.store.getRepositoryMount(conversation.worktreeMountId)
+        : null;
+      if (conversation && mount?.deviceId === deviceId) this.requestWorktreeCleanup(conversation);
     }
     this.pump(deviceId);
   }

@@ -2901,6 +2901,25 @@ export function buildRest(
     return c.json(fresh);
   });
 
+  /**
+   * Chat 没有 Issue 终态；管理员可在无 active Run 时显式释放它的 worktree。
+   * Conversation/Run 历史保留，只有 daemon 回报实际删除成功后才清空 worktree binding。
+   */
+  app.post("/api/conversations/:id/worktree/cleanup", (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
+    if (conv.kind !== "chat") bad("只有 Chat 支持显式 worktree cleanup");
+    if (store.activeRunForConversation(conv.id)) bad("仍有 Run 进行中，不能清理 Chat worktree");
+    if (!conv.worktreePath || !conv.worktreeMountId) {
+      return c.json({ conversation: conv, cleanupRequested: false });
+    }
+    if (!coordinator.requestWorktreeCleanup(conv)) {
+      bad("Chat worktree cleanup 未送达目标 Device，请在设备恢复在线后重试");
+    }
+    return c.json({ conversation: conv, cleanupRequested: true }, 202);
+  });
+
   // ---- runs ----
 
   app.get("/api/runs/:id", (c) => {

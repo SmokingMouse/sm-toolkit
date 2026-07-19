@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { DeploymentServiceConfig, DeploymentTargetConfig } from "../config.js";
+import {
+  LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS,
+  LAUNCHD_BOOTSTRAP_RETRY_INTERVAL_MS,
+} from "../daemon/service.js";
 import type { DeploymentJob, DeploymentMaintenanceGate } from "../protocol.js";
 import {
   LocalLaunchdDeploymentExecutor,
@@ -18,10 +25,13 @@ import {
 } from "./executor.js";
 import type { DeploymentMaintenanceSentinel } from "./maintenance.js";
 import { assertNoCredentialMaterial, assertSafeArgv, redactStructured } from "./redaction.js";
+import { exactPlistRootLabel } from "./plist.js";
 import {
   finishDrainBeforeDeadline,
   assertRuntimePathMetadata,
+  HostFileSystem,
   HostLaunchd,
+  HostProcess,
   minimalProcessEnvironment,
   parseLaunchctlPrint,
   readLinkOrMissing,
@@ -68,7 +78,7 @@ function releaseManifest(
     targetFingerprint: fingerprint,
     targetManifestHash: "",
     healthFingerprint: sha(JSON.stringify(health)),
-    source: { remote: "origin", remoteUrl: REMOTE_URL, allowedRefs: ["refs/remotes/origin/main"] },
+    source: { remote: "origin", remoteUrl: REMOTE_URL, allowedRefs: ["refs/heads/main"] },
     paths: { repositoryPath: "/repo", releasesPath: "/releases", currentSymlinkPath: "/current", sqlitePath: "/db", statePath: "/state" },
     health,
     services: manifestServices,
@@ -81,7 +91,7 @@ function target(): DeploymentTargetConfig {
     id: "local", name: "Local", provider: "local-launchd", repositoryId: "repo_1",
     repositoryPath: "/repo", releasesPath: "/releases", currentSymlinkPath: "/current",
     sqlitePath: "/db", statePath: "/state",
-    source: { remote: "origin", remoteUrl: REMOTE_URL, allowedRefs: ["refs/remotes/origin/main"] },
+    source: { remote: "origin", remoteUrl: REMOTE_URL, allowedRefs: ["refs/heads/main"] },
     environment: { BUILD_MODE: "production" }, steps: { install: [], build: [["build", "--production"]], test: [] },
     services,
     health: { ...healthContract(), headers: { Authorization: `Bearer ${SECRET}` } },
@@ -136,7 +146,13 @@ class FakeProcess implements DeploymentProcess {
   unreachable = false;
   async run(argv: string[], options: DeploymentProcessOptions) {
     this.calls.push(argv);
-    if (argv.includes("get-url")) return result(0, `${this.remoteDrift ? "https://evil.test/repo" : REMOTE_URL}\n`);
+    if (argv.includes("get-url")) {
+      const stdout = `${this.remoteDrift ? "https://evil.test/repo" : REMOTE_URL}\n`;
+      return {
+        ...result(0, stdout),
+        stdoutMatched: options.expectedStdout === undefined ? null : stdout.trim() === options.expectedStdout,
+      };
+    }
     if (argv.includes("fetch")) { this.fetched = true; return result(); }
     if (argv.includes("rev-parse")) {
       if (this.missingUntilFetch && !this.fetched) return result(1, "", "missing");
@@ -195,10 +211,11 @@ class FakeSqlite implements SqliteBackupControl {
 class FakeHealth implements HealthClient {
   calls: string[] = [];
   wrongRevision = false;
-  constructor(readonly statuses: number[] = [200]) {}
+  constructor(readonly statuses: Array<number | Error> = [200]) {}
   async get(url: string) {
     this.calls.push(url);
     const status = this.statuses.shift() ?? 500;
+    if (status instanceof Error) throw status;
     const query = new URL(url).searchParams;
     return {
       status,
@@ -232,6 +249,7 @@ class FakeSentinel implements DeploymentMaintenanceSentinel {
     if (this.gate.fenceEpoch !== expected.fenceEpoch || this.gate.fenceNonce !== expected.fenceNonce) throw new Error("wrong fence");
     this.gate = null;
   }
+  async withLock<T>(action: () => Promise<T> | T) { return action(); }
 }
 
 function gate(jobValue = job(), phase: DeploymentMaintenanceGate["phase"] = "deploying"): DeploymentMaintenanceGate {
@@ -255,6 +273,7 @@ function fakeHooks(initial: DeploymentMaintenanceGate | null = null) {
   const boundaries: string[] = [];
   const hooks: DeploymentExecutionHooks = {
     assertFence: async (boundary) => { boundaries.push(boundary); },
+    assertRestoreFence: async () => {},
     checkpoint: async (value, metadata) => { checkpoints.push(value); if (metadata?.newServicePids) current = current ? { ...current } : current; },
     getMaintenance: async () => current,
     activateMaintenance: async ({ rollbackAttempt, baselineRevision, baselineFingerprint, baselineManifestHash, baselineHealthFingerprint }) => {
@@ -274,7 +293,7 @@ function fakeHooks(initial: DeploymentMaintenanceGate | null = null) {
   return { hooks, checkpoints, boundaries, current: () => current };
 }
 
-function harness(statuses = [200]) {
+function harness(statuses: Array<number | Error> = [200]) {
   const fs = new FakeFs();
   const process = new FakeProcess();
   const launchd = new FakeLaunchd();
@@ -293,7 +312,7 @@ function result(exitCode = 0, stdout = "ok", stderr = "") {
   return { exitCode, stdout, stderr, timedOut: false };
 }
 
-describe("local launchd v16 executor", () => {
+describe("local launchd v3-fenced executor", () => {
   test("fetches exact reachable commit, stops every service, starts server only, and releases daemon after sentinel clear", async () => {
     const h = harness();
     h.process.missingUntilFetch = true;
@@ -323,6 +342,14 @@ describe("local launchd v16 executor", () => {
     h.health.statuses.push(200);
     await h.instance.releaseHostMaintenance(target(), executed.gate!, { assertFence: async () => {} });
     expect(h.launchd.calls.filter((call) => call === "bootstrap gui/1 /daemon.plist")).toHaveLength(1);
+  });
+
+  test("retries a transient loopback transport failure inside the bounded exact-health window", async () => {
+    const h = harness([new Error("connection refused"), 200]);
+    const executed = await h.instance.execute(job(), target(), fakeHooks().hooks);
+    expect(executed.status).toBe("succeeded");
+    expect(h.health.calls).toHaveLength(2);
+    expect(executed.log).toContain("health transport unavailable; retrying exact probe");
   });
 
   test("any ambiguous bootout failure leaves DB/plists/symlink untouched and needs recovery", async () => {
@@ -387,6 +414,15 @@ describe("local launchd v16 executor", () => {
     const restoreResult = await restore.instance.execute(job(), target(), fakeHooks().hooks);
     expect(restoreResult).toEqual(expect.objectContaining({ status: "needs_recovery", rollbackComplete: false }));
     expect(restore.sentinel.gate?.phase).toBe("needs_recovery");
+
+    const reclaimed = harness([500, 500, 500]);
+    const reclaimedHooks = fakeHooks();
+    reclaimedHooks.hooks.assertRestoreFence = async () => {
+      throw new Error("newer epoch claimed after stale restore observation");
+    };
+    const reclaimedResult = await reclaimed.instance.execute(job(), target(), reclaimedHooks.hooks);
+    expect(reclaimedResult).toEqual(expect.objectContaining({ status: "needs_recovery", rollbackComplete: false }));
+    expect(reclaimed.sqlite.restored).toBeFalse();
   });
 
   test("2xx for a stale revision rolls back and can never finalize", async () => {
@@ -485,7 +521,7 @@ describe("local launchd v16 executor", () => {
 
     const unreachable = harness();
     unreachable.process.unreachable = true;
-    expect((await unreachable.instance.execute(job(), target(), fakeHooks().hooks)).error).toContain("不可由 configured");
+    expect((await unreachable.instance.execute(job(), target(), fakeHooks().hooks)).error).toContain("configured remote fetch refs");
     expect(unreachable.process.calls.some((argv) => argv.includes("worktree"))).toBeFalse();
   });
 });
@@ -508,6 +544,59 @@ test("launchctl only treats an exact-label missing response as unloaded", async 
     .rejects.toThrow("ambiguous failure");
   await expect(new HostLaunchd(runner('Could not find service "com.other" in domain for user gui: 1')).inspect("gui/1", "com.test"))
     .rejects.toThrow("ambiguous failure");
+});
+
+test("launchctl cutover bootstrap retries only bounded transient EIO", async () => {
+  const responses = [
+    result(5, "", "Bootstrap failed: 5: Input/output error"),
+    result(5, "", "Bootstrap failed: 5: Input/output error"),
+    result(),
+  ];
+  const calls: string[][] = [];
+  const pauses: number[] = [];
+  const runner: DeploymentProcess = {
+    run: async (argv) => { calls.push(argv); return responses.shift()!; },
+  };
+  await new HostLaunchd(runner, async (ms) => { pauses.push(ms); }).bootstrap("gui/1", "/server.plist");
+  expect(calls).toEqual(Array.from({ length: 3 }, () => ["launchctl", "bootstrap", "gui/1", "/server.plist"]));
+  expect(pauses).toEqual([50, 50]);
+
+  let ambiguousCalls = 0;
+  const ambiguous: DeploymentProcess = {
+    run: async () => { ambiguousCalls++; return result(1, "", "Bootstrap failed: 37: Operation already in progress"); },
+  };
+  await expect(new HostLaunchd(ambiguous, async () => { throw new Error("must not pause"); })
+    .bootstrap("gui/1", "/server.plist")).rejects.toThrow("Operation already in progress");
+  expect(ambiguousCalls).toBe(1);
+
+  let exhaustionCalls = 0;
+  let exhaustionWaitedMs = 0;
+  const exhausted: DeploymentProcess = {
+    run: async () => {
+      exhaustionCalls++;
+      return result(5, "Bootstrap failed: 5: Input/output error", "");
+    },
+  };
+  await expect(new HostLaunchd(exhausted, async (ms) => { exhaustionWaitedMs += ms; })
+    .bootstrap("gui/1", "/server.plist")).rejects.toThrow("remained EIO after bounded retry");
+  expect(exhaustionCalls).toBe(LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS);
+  expect(exhaustionWaitedMs).toBe(
+    (LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS - 1) * LAUNCHD_BOOTSTRAP_RETRY_INTERVAL_MS,
+  );
+});
+
+test("launchctl PID proof uses exact /bin/kill facts and fails closed on ambiguous errors", async () => {
+  const runner = (exitCode: number, stderr = ""): DeploymentProcess => ({
+    run: async (argv) => {
+      expect(argv.slice(0, 3)).toEqual(["/bin/kill", "-0", "--"]);
+      return { exitCode, stdout: "", stderr, timedOut: false };
+    },
+  });
+  expect(await new HostLaunchd(runner(0)).isPidAlive(42)).toBeTrue();
+  expect(await new HostLaunchd(runner(1, "kill: 42: No such process")).isPidAlive(42)).toBeFalse();
+  expect(await new HostLaunchd(runner(1, "kill: 42: Operation not permitted")).isPidAlive(42)).toBeTrue();
+  await expect(new HostLaunchd(runner(2, "kill: invalid host state")).isPidAlive(42))
+    .rejects.toThrow("exact PID liveness probe failed");
 });
 
 test("minimal process env never inherits Harbor/GitHub/credential variables", () => {
@@ -549,8 +638,203 @@ test("timeout terminates the whole process group and a grandchild-held pipe cann
   expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
   expect(code).toBe(137);
 
+  await expect(terminateProcessGroup(
+    { pid: 43, exited: Promise.resolve(0) }, async () => {}, 1, async () => true,
+  )).rejects.toThrow("KILL 后仍无法证明");
+
   let canceled = false;
   const drained = await finishDrainBeforeDeadline(new Promise<string>(() => {}), async () => { canceled = true; }, 1);
   expect(canceled).toBeTrue();
   expect(drained).toContain("drain deadline");
 });
+
+test("bootout-adjacent PID transitions are part of both deploy and rollback stop proofs", async () => {
+  for (const prefix of ["deploy", "rollback"] as const) {
+    let inspections = 0;
+    const launchd: LaunchdControl = {
+      inspect: async () => {
+        inspections++;
+        if (inspections === 1) return { loaded: true, label: services[0]!.label, state: "running", pid: 20 };
+        return { loaded: false, label: null, state: "unloaded", pid: null };
+      },
+      bootout: async () => {},
+      bootstrap: async () => {},
+      isPidAlive: async (pid) => pid === 20,
+    };
+    const h = harness();
+    const executor = new LocalLaunchdDeploymentExecutor({
+      fs: h.fs, process: h.process, launchd, sqlite: h.sqlite, health: h.health, clock: h.clock,
+      maintenance: h.sentinel, validator: { validate: async () => {} },
+    });
+    await expect((executor as unknown as {
+      stopAndProve(
+        services: DeploymentServiceConfig[], prior: Map<string, number | null>, logger: { record(value: string): void },
+        hooks: Pick<DeploymentExecutionHooks, "assertFence">, prefix: string,
+      ): Promise<void>;
+    }).stopAndProve(
+      [services[0]!], new Map([["gui/1/com.test.server", 10]]), { record: () => {} },
+      { assertFence: async () => {} }, prefix,
+    )).rejects.toThrow("observed PID 20 仍存活");
+  }
+});
+
+test("strict plist semantics reject comments, entity duplicates, nested Label and wrong value types", () => {
+  const plist = (body: string) => `<?xml version="1.0"?><plist version="1.0"><dict>${body}</dict></plist>`;
+  const standard = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Label</key><string>com.test</string></dict></plist>`;
+  expect(exactPlistRootLabel(standard)).toBe("com.test");
+  expect(() => exactPlistRootLabel(plist("<!-- <key>Label</key><string>com.test</string> -->"))).toThrow("恰好一个");
+  expect(() => exactPlistRootLabel(plist(
+    "<key>La&#98;el</key><string>com.test</string><key>Label</key><string>com.evil</string>",
+  ))).toThrow("恰好一个");
+  expect(() => exactPlistRootLabel(plist("<key>ProgramArguments</key><dict><key>Label</key><string>com.evil</string></dict>"))).toThrow("恰好一个");
+  expect(() => exactPlistRootLabel(plist("<key>Label</key><integer>7</integer>"))).toThrow("必须是 string");
+  expect(exactPlistRootLabel(plist("<key>La&#98;el</key><string>com.test</string>"))).toBe("com.test");
+});
+
+test("controlled fetch reachability is proved only against this attempt's temporary remote refs", async () => {
+  const h = harness();
+  h.process.unreachable = true; // local object/refs may exist, fetched namespace does not contain it.
+  const executed = await h.instance.execute(job(), target(), fakeHooks().hooks);
+  expect(executed.status).toBe("failed");
+  const refChecks = h.process.calls.filter((argv) => argv.includes("merge-base"));
+  expect(refChecks.length).toBeGreaterThan(0);
+  expect(refChecks.every((argv) => argv.at(-1)?.startsWith("refs/harbor-deploy/"))).toBeTrue();
+  expect(refChecks.some((argv) => argv.at(-1) === "refs/heads/main")).toBeFalse();
+  expect(h.process.calls.some((argv) => argv.includes("worktree"))).toBeFalse();
+});
+
+test("runtime path trust rejects owned 0777 components and a component replacement", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "harbor-path-trust-")));
+  try {
+    const unsafe = join(root, "unsafe");
+    const unsafeFile = join(unsafe, "config.plist");
+    mkdirSync(unsafe, { mode: 0o700 });
+    writeFileSync(unsafeFile, "x", { mode: 0o600 });
+    chmodSync(unsafe, 0o777);
+    chmodSync(unsafeFile, 0o600);
+    await expect(new HostFileSystem().readText(unsafeFile)).rejects.toThrow("group/world writable");
+
+    const stable = join(root, "stable");
+    const moved = join(root, "stable-old");
+    mkdirSync(stable, { mode: 0o700 });
+    writeFileSync(join(stable, "template.plist"), "safe", { mode: 0o600 });
+    chmodSync(stable, 0o700);
+    chmodSync(join(stable, "template.plist"), 0o600);
+    expect(await new HostFileSystem().readText(join(stable, "template.plist"))).toBe("safe");
+    renameSync(stable, moved);
+    symlinkSync(moved, stable);
+    await expect(new HostFileSystem().readText(join(stable, "template.plist"))).rejects.toThrow(/symlink|canonical/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("macOS Bun process groups are cleaned on successful parent exit and split secrets redact before truncation", async () => {
+  if (process.platform !== "darwin") return;
+  const runner = new HostProcess(process.env, undefined, 300, 500);
+  const processRoot = realpathSync(mkdtempSync(join(tmpdir(), "harbor-process-group-")));
+  const terminatedMarker = join(processRoot, "terminated");
+  const supervisorMarker = join(processRoot, "supervisor-terminated");
+  let descendantPid = 0;
+  let supervisorPid = 0;
+  try {
+    const descendant = await runner.run(["/usr/bin/python3", "-c", `
+import os
+import signal
+r, w = os.pipe()
+supervisor = os.fork()
+if supervisor == 0:
+    os.close(r)
+    worker = os.fork()
+    if worker == 0:
+        os.close(w)
+        def worker_stopped(_signal, _frame):
+            with open(${JSON.stringify(terminatedMarker)}, "w") as marker:
+                marker.write("TERM")
+            os._exit(0)
+        signal.signal(signal.SIGTERM, worker_stopped)
+        while True:
+            signal.pause()
+    def supervisor_stopped(_signal, _frame):
+        os.waitpid(worker, 0)
+        with open(${JSON.stringify(supervisorMarker)}, "w") as marker:
+            marker.write("TERM")
+        os._exit(0)
+    signal.signal(signal.SIGTERM, supervisor_stopped)
+    os.write(w, (str(worker) + "\\n").encode())
+    os.close(w)
+    while True:
+        signal.pause()
+os.close(w)
+worker = int(os.read(r, 64).decode().strip())
+os.close(r)
+print(supervisor, worker, os.getpgid(supervisor), flush=True)
+os._exit(0)
+    `], {
+      env: {}, timeoutMs: 2_000, maxCaptureBytes: 1024, onOutput: () => {},
+    });
+    const [supervisorText, pidText, pgidText] = descendant.stdout.trim().split(/\s+/);
+    supervisorPid = Number(supervisorText);
+    descendantPid = Number(pidText);
+    expect(descendant.exitCode).toBe(0);
+    expect(supervisorPid).toBeGreaterThan(1);
+    expect(descendantPid).toBeGreaterThan(1);
+    expect(Number(pgidText)).not.toBe(descendantPid); // descendant inherited the direct parent's PGID.
+    expect(existsSync(terminatedMarker)).toBeTrue();
+    expect(readFileSync(terminatedMarker, "utf8")).toBe("TERM");
+    // The supervisor reaps its worker before recording its own termination.
+    // Some CI pid-1 shims retain the terminated supervisor as a zombie, so
+    // marker + reaped child are the bounded proof that no descendant executes.
+    expect(readFileSync(supervisorMarker, "utf8")).toBe("TERM");
+
+    const secret = await runner.run([process.execPath, "-e", `
+      process.stdout.write("x".repeat(8188) + "TOP");
+      setTimeout(() => process.stdout.write("SECRET"), 5);
+    `], { env: {}, timeoutMs: 2_000, maxCaptureBytes: 8_192, redactValues: [SECRET], onOutput: () => {} });
+    expect(secret.stdout).not.toContain("TOPSECRET");
+    expect(secret.stdout).not.toContain("TOP");
+    expect(secret.stdout).toContain("truncated");
+  } finally {
+    if (descendantPid > 1 && pidAlive(descendantPid)) {
+      try { process.kill(descendantPid, "SIGKILL"); } catch { /* already gone */ }
+    }
+    if (supervisorPid > 1 && !existsSync(supervisorMarker) && pidAlive(supervisorPid)) {
+      try { process.kill(supervisorPid, "SIGKILL"); } catch { /* already gone */ }
+    }
+    rmSync(processRoot, { recursive: true, force: true });
+  }
+}, 10_000);
+
+test("HostProcess verifies sensitive stdout internally while returning only redacted output", async () => {
+  const runner = new HostProcess(process.env);
+  const sensitive = "/private/harbor/repository.git";
+  const matched = await runner.run(["/bin/echo", sensitive], {
+    env: {},
+    timeoutMs: 2_000,
+    maxCaptureBytes: 1_024,
+    redactValues: [sensitive],
+    expectedStdout: sensitive,
+    onOutput: () => {},
+  });
+  expect(matched.stdout).toContain("[redacted]");
+  expect(matched.stdout).not.toContain(sensitive);
+  expect(matched.stdoutMatched).toBeTrue();
+
+  const mismatched = await runner.run(["/bin/echo", `${sensitive}-drifted`], {
+    env: {},
+    timeoutMs: 2_000,
+    maxCaptureBytes: 1_024,
+    redactValues: [sensitive],
+    expectedStdout: sensitive,
+    onOutput: () => {},
+  });
+  expect(mismatched.stdout).not.toContain(sensitive);
+  expect(mismatched.stdoutMatched).toBeFalse();
+});
+
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+}

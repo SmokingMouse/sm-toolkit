@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "no
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { databasePath, deploymentMaintenancePath, deploymentTargets, validateDeploymentWorkerConfigFile } from "../config.js";
-import { buildDaemonServicePath } from "../daemon/service.js";
+import { bootstrapLaunchAgentWithRetry, buildDaemonServicePath } from "../daemon/service.js";
 
 const LABEL = "com.smokingmouse.harbor.deploy-worker";
 const decoder = new TextDecoder();
@@ -81,7 +81,7 @@ export function setupDeploymentWorkerService(): DeploymentWorkerServiceStatus {
   atomicWrite(ctx.definitionPath, renderDeploymentWorkerLaunchAgent(ctx));
   const domain = launchdDomain();
   command(["launchctl", "bootout", `${domain}/${LABEL}`], true);
-  command(["launchctl", "bootstrap", domain, ctx.definitionPath]);
+  bootstrapLaunchAgentWithRetry(domain, ctx.definitionPath, command);
   command(["launchctl", "enable", `${domain}/${LABEL}`]);
   command(["launchctl", "kickstart", "-k", `${domain}/${LABEL}`]);
   return deploymentWorkerServiceStatus();

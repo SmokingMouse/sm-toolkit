@@ -2576,8 +2576,8 @@ export class HarborStore {
       status: job.status,
       attempt: job.attempt,
       checkpoint: job.checkpoint,
-      log: job.log?.slice(0, 32_000) ?? null,
-      error: job.error?.slice(0, 4_000) ?? null,
+      log: job.log === null ? null : redactStructured(job.log).slice(0, 32_000),
+      error: job.error === null ? null : redactStructured(job.error).slice(0, 4_000),
       failureKind: job.failureKind,
       rollbackComplete: job.rollbackComplete,
       fenceEpoch: job.fenceEpoch,
@@ -2600,6 +2600,7 @@ export class HarborStore {
   claimDeploymentJob(targets: { id: string; fingerprint: string; manifestHash: string }[], now: number, leaseMs: number): DeploymentJob | null {
     if (targets.length === 0) return null;
     return this.db.transaction(() => {
+      const applicationWritesAllowed = !this.db.query<{ lock_id: number }, []>("SELECT lock_id FROM deployment_maintenance WHERE lock_id = 1").get();
       const targetPredicate = targets.map(() => "(j.target_id = ? AND j.target_fingerprint = ? AND j.target_manifest_hash = ?)").join(" OR ");
       const row = this.db
         .query<DeploymentJobRow, (string | number)[]>(
@@ -2634,17 +2635,19 @@ export class HarborStore {
         [fenceEpoch, fenceNonce, now, row.id],
       );
       const claimed = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(row.id)!;
-      const deliveryUpdated = this.db.run(
-        `UPDATE deliveries SET deployment_status = 'running', deployment_error = NULL, updated_at = ?, revision = revision + 1
-         WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ?`,
-        [now, claimed.delivery_id, claimed.id, claimed.generation, claimed.revision],
-      );
-      if (deliveryUpdated.changes !== 1) throw new Error("deployment job 已不再是 Delivery active generation");
-      this.db.run(
-        "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
-        [claimed.delivery_id, "deployment_claimed", JSON.stringify({ jobId: claimed.id, targetId: claimed.target_id, generation: claimed.generation, attempt: claimed.attempt }), "provider", now],
-      );
-      this.touchDeliveryConversation(claimed.delivery_id, now);
+      if (applicationWritesAllowed) {
+        const deliveryUpdated = this.db.run(
+          `UPDATE deliveries SET deployment_status = 'running', deployment_error = NULL, updated_at = ?, revision = revision + 1
+           WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ?`,
+          [now, claimed.delivery_id, claimed.id, claimed.generation, claimed.revision],
+        );
+        if (deliveryUpdated.changes !== 1) throw new Error("deployment job 已不再是 Delivery active generation");
+        this.db.run(
+          "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
+          [claimed.delivery_id, "deployment_claimed", JSON.stringify({ jobId: claimed.id, targetId: claimed.target_id, generation: claimed.generation, attempt: claimed.attempt }), "provider", now],
+        );
+        this.touchDeliveryConversation(claimed.delivery_id, now);
+      }
       return toDeploymentJob(claimed);
     })();
   }
@@ -2657,6 +2660,9 @@ export class HarborStore {
     const configured = new Map(targets.map((target) => [target.id, target]));
     return this.db.transaction(() => {
       let changed = 0;
+      const globalGate = this.db.query<{ job_id: string }, []>(
+        "SELECT job_id FROM deployment_maintenance WHERE lock_id = 1",
+      ).get();
       const rows = this.db.query<DeploymentJobRow, []>(
         "SELECT * FROM deployment_jobs WHERE status IN ('queued','running')",
       ).all();
@@ -2664,6 +2670,10 @@ export class HarborStore {
         const target = configured.get(row.target_id);
         if (target && target.fingerprint === row.target_fingerprint && target.manifestHash === row.target_manifest_hash) continue;
         const gate = this.db.query<DeploymentMaintenanceRow, [string]>("SELECT * FROM deployment_maintenance WHERE job_id = ?").get(row.id);
+        // 另一target正处于全局maintenance时，application-table trigger禁止投影
+        // Delivery failure。先保留queued/running，放闸后的下一轮会显式落
+        // config_drift，避免一次worker扫描被trigger中断或产生半终态。
+        if (!gate && globalGate) continue;
         const status = gate ? "needs_recovery" : "failed";
         const failureKind = gate ? "rollback_incomplete" : "config_drift";
         const error = gate
@@ -2674,7 +2684,7 @@ export class HarborStore {
              checkpoint = ?, lease_token = NULL, lease_expires_at = NULL, finished_at = ?, updated_at = ? WHERE id = ?`,
           [status, failureKind, error, gate ? 0 : 1, gate ? "rollback_incomplete" : "failed", now, now, row.id],
         );
-        this.db.run(
+        if (!gate) this.db.run(
           `UPDATE deliveries SET deployment_status = ?, deployment_error = ?, updated_at = ?, revision = revision + 1
            WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ?`,
           [status, error, now, row.delivery_id, row.id, row.generation, row.revision],
@@ -2785,6 +2795,23 @@ export class HarborStore {
       && delivery.deployment_status === "running";
   }
 
+  /**
+   * 必须在 host-global sentinel lock 内、紧邻真实 SQLite replace 调用。
+   * 较新的并行 build claim 会推进 DB high-water；旧 rollback 宁可进入
+   * needs_recovery，也不能用旧 backup 覆盖该 fence truth。
+   */
+  assertDeploymentRestoreFence(gate: DeploymentMaintenanceGate): boolean {
+    const maintenanceRow = this.db.query<DeploymentMaintenanceRow, []>(
+      "SELECT * FROM deployment_maintenance WHERE lock_id = 1",
+    ).get();
+    const highWater = this.db.query<{ epoch: number }, []>(
+      "SELECT epoch FROM deployment_host_fence WHERE lock_id = 1",
+    ).get()?.epoch ?? 0;
+    return !!maintenanceRow
+      && sameMaintenanceIdentity(toDeploymentMaintenance(maintenanceRow), gate)
+      && highWater === gate.fenceEpoch;
+  }
+
   activateDeploymentMaintenance(
     id: string,
     fence: DeploymentFence,
@@ -2807,7 +2834,7 @@ export class HarborStore {
       const delivery = this.db.query<DeliveryRow, [string]>("SELECT * FROM deliveries WHERE id = ?").get(job.delivery_id);
       if (!delivery || delivery.active_deployment_job_id !== job.id
         || delivery.deployment_generation !== job.generation || delivery.deployment_revision !== job.revision
-        || !(delivery.deployment_status === "running" || job.status === "recovering")
+        || !(delivery.deployment_status === "queued" || delivery.deployment_status === "running" || job.status === "recovering")
         || delivery.merge_status !== "merged" || delivery.review_status !== "approved" || delivery.check_status !== "passed") {
         throw new Error("deployment job 已不再是通过 gates 的 active generation；拒绝进入 maintenance/cutover");
       }
@@ -2835,6 +2862,14 @@ export class HarborStore {
       const existing = this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM deployment_maintenance WHERE lock_id = 1").get();
       if (existing && (existing.job_id !== job.id || existing.fence_epoch !== fence.fenceEpoch || existing.fence_nonce !== fence.fenceNonce)) {
         throw new Error("Harbor host 已被另一个 target/job maintenance gate 占用");
+      }
+      if (!existing && delivery.deployment_status === "queued") {
+        const promoted = this.db.run(
+          `UPDATE deliveries SET deployment_status = 'running', deployment_error = NULL, updated_at = ?, revision = revision + 1
+           WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ? AND deployment_status = 'queued'`,
+          [now, job.delivery_id, job.id, job.generation, job.revision],
+        );
+        if (promoted.changes !== 1) throw new Error("deployment Delivery 无法在线性化 cutover 前转为 running");
       }
       const gateChanged = this.db.run(
         `INSERT INTO deployment_maintenance
@@ -3078,14 +3113,6 @@ export class HarborStore {
           [safeLog, staleError, now, now, row.id],
         );
         this.db.run("UPDATE deployment_maintenance SET phase = 'needs_recovery', updated_at = ? WHERE job_id = ?", [now, row.id]);
-        this.db.run(
-          "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
-          [row.delivery_id, "deployment_stale_result_needs_recovery", JSON.stringify({
-            jobId: row.id, targetId: row.target_id, targetFingerprint: row.target_fingerprint,
-            generation: row.generation, revision: row.revision, error: staleError, log: safeLog,
-          }), "provider", now],
-        );
-        this.touchDeliveryConversation(row.delivery_id, now);
         const fresh = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(id)!;
         return { job: toDeploymentJob(fresh), applied: false, duplicate: false };
       }
@@ -3111,7 +3138,7 @@ export class HarborStore {
         if (gateChanged.changes !== 1) throw new Error("terminal maintenance phase CAS 失败");
       }
       let applied = false;
-      if (!maintenance || result.status === "needs_recovery") {
+      if (!maintenance) {
         applied = this.db.run(
           `UPDATE deliveries
            SET deployment_status = ?, deployed_at = ?, deployment_error = ?, updated_at = ?, revision = revision + 1
@@ -3119,12 +3146,6 @@ export class HarborStore {
           [result.status, result.status === "succeeded" ? now : null, safeError, now,
             row.delivery_id, row.id, row.generation, row.revision],
         ).changes === 1;
-      } else {
-        this.db.run(
-          `UPDATE deliveries SET deployment_status = 'running', deployment_error = NULL, updated_at = ?, revision = revision + 1
-           WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ?`,
-          [now, row.delivery_id, row.id, row.generation, row.revision],
-        );
       }
       if (applied) {
         this.db.run(
@@ -3136,21 +3157,6 @@ export class HarborStore {
             generation: row.generation,
             revision: row.revision,
             rollbackComplete: result.rollbackComplete,
-            error: safeError,
-            log: safeLog,
-          }), "provider", now],
-        );
-        this.touchDeliveryConversation(row.delivery_id, now);
-      } else if (verifiedStaleRecovery) {
-        this.db.run(
-          "INSERT INTO delivery_events (delivery_id, kind, data, actor, ts) VALUES (?,?,?,?,?)",
-          [row.delivery_id, "deployment_stale_baseline_recovered", JSON.stringify({
-            jobId: row.id,
-            targetId: row.target_id,
-            targetFingerprint: row.target_fingerprint,
-            generation: row.generation,
-            revision: row.revision,
-            rollbackComplete: true,
             error: safeError,
             log: safeLog,
           }), "provider", now],
@@ -3174,6 +3180,11 @@ export class HarborStore {
         throw new Error("release maintenance 缺少 terminal + rollback proof");
       }
       const error = jobRow.error;
+      const deleted = this.db.run(
+        "DELETE FROM deployment_maintenance WHERE lock_id = 1 AND job_id = ? AND fence_epoch = ? AND fence_nonce = ? AND phase = 'releasing'",
+        [gate.jobId, gate.fenceEpoch, gate.fenceNonce],
+      );
+      if (deleted.changes !== 1) throw new Error("release maintenance CAS 失败");
       const applied = this.db.run(
         `UPDATE deliveries SET deployment_status = ?, deployed_at = ?, deployment_error = ?, updated_at = ?, revision = revision + 1
          WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ?`,
@@ -3183,11 +3194,6 @@ export class HarborStore {
       if (!applied && jobRow.status === "succeeded") {
         throw new Error("release maintenance 的 active Delivery generation/revision CAS 失败");
       }
-      const deleted = this.db.run(
-        "DELETE FROM deployment_maintenance WHERE lock_id = 1 AND job_id = ? AND fence_epoch = ? AND fence_nonce = ? AND phase = 'releasing'",
-        [gate.jobId, gate.fenceEpoch, gate.fenceNonce],
-      );
-      if (deleted.changes !== 1) throw new Error("release maintenance CAS 失败");
       this.touchDeliveryConversation(jobRow.delivery_id, now);
       return { job: toDeploymentJob(jobRow), applied };
     })();
@@ -3206,11 +3212,6 @@ export class HarborStore {
         [safeError, now, gate.jobId],
       );
       this.db.run("UPDATE deployment_maintenance SET phase = 'needs_recovery', updated_at = ? WHERE lock_id = 1", [now]);
-      this.db.run(
-        `UPDATE deliveries SET deployment_status = 'needs_recovery', deployment_error = ?, updated_at = ?, revision = revision + 1
-         WHERE id = ? AND active_deployment_job_id = ? AND deployment_generation = ? AND deployment_revision = ?`,
-        [safeError, now, gate.deliveryId, gate.jobId, gate.generation, gate.revision],
-      );
       return toDeploymentJob(this.db.query<DeploymentJobRow, [string]>("SELECT * FROM deployment_jobs WHERE id = ?").get(gate.jobId)!);
     })();
   }
