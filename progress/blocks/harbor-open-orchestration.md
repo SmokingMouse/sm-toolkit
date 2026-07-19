@@ -41,5 +41,6 @@
 
 ## Next
 
-- 提交并合并到 `main`，更新共享 progress/architecture decision。
-- 推送后按单写原则把 server/DB/worker cut over 到 Mac mini，重连各 Device，并完成生产 smoke test 与回滚点确认。
+- 已以 `60759a6` + `0d2d425` 提交、fast-forward 合并并推送。
+- 已按单写原则把 server/DB/worker cut over 到 Mac mini；两台 Device 重连，生产 revision/schema/manifest/worker/Web smoke 与两端回滚备份均确认。
+- 剩余外部验收：真 SCM credential/webhook、真飞书与时间性负载。
