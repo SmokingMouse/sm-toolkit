@@ -77,6 +77,19 @@ describe("daemon service definitions", () => {
     )).toThrow("Operation already in progress");
     expect(calls).toBe(1);
   });
+
+  test("launchd bootstrap EIO exhaustion is exactly 41 attempts and 2 seconds", () => {
+    let calls = 0;
+    let waitedMs = 0;
+    expect(() => bootstrapLaunchAgentWithRetry(
+      "gui/501",
+      "/tmp/worker.plist",
+      () => { calls++; return { ok: false, out: "Bootstrap failed: 5: Input/output error" }; },
+      (ms) => { waitedMs += ms; },
+    )).toThrow("持续 EIO");
+    expect(calls).toBe(41);
+    expect(waitedMs).toBe(2_000);
+  });
 });
 
 describe("daemon config", () => {

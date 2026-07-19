@@ -219,7 +219,14 @@ interface CommandResult {
 
 type LaunchctlRunner = (argv: string[], allowFailure?: boolean) => CommandResult;
 
-/** launchd may briefly retain a just-booted-out label and return EIO on bootstrap. */
+export const LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS = 41;
+export const LAUNCHD_BOOTSTRAP_RETRY_INTERVAL_MS = 50;
+
+export function isTransientLaunchdBootstrapEio(output: string): boolean {
+  return /Bootstrap failed:\s*5:\s*Input\/output error/i.test(output);
+}
+
+/** launchd may briefly retain a just-booted-out label; 40 × 50ms caps the retry wait at 2s. */
 export function bootstrapLaunchAgentWithRetry(
   domain: string,
   definitionPath: string,
@@ -228,14 +235,14 @@ export function bootstrapLaunchAgentWithRetry(
 ): void {
   const argv = ["launchctl", "bootstrap", domain, definitionPath];
   let lastOutput = "";
-  for (let attempt = 0; attempt < 41; attempt++) {
+  for (let attempt = 0; attempt < LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS; attempt++) {
     const result = run(argv, true);
     if (result.ok) return;
     lastOutput = result.out;
-    if (!/Bootstrap failed:\s*5:\s*Input\/output error/i.test(result.out)) {
+    if (!isTransientLaunchdBootstrapEio(result.out)) {
       throw new Error(`${argv.join(" ")} 失败${result.out ? `：${result.out}` : ""}`);
     }
-    if (attempt < 40) pause(50);
+    if (attempt < LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS - 1) pause(LAUNCHD_BOOTSTRAP_RETRY_INTERVAL_MS);
   }
   throw new Error(`${argv.join(" ")} 在 bootout 后持续 EIO${lastOutput ? `：${lastOutput}` : ""}`);
 }

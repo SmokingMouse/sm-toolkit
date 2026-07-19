@@ -542,6 +542,30 @@ test("launchctl only treats an exact-label missing response as unloaded", async 
     .rejects.toThrow("ambiguous failure");
 });
 
+test("launchctl cutover bootstrap retries only bounded transient EIO", async () => {
+  const responses = [
+    result(5, "", "Bootstrap failed: 5: Input/output error"),
+    result(5, "", "Bootstrap failed: 5: Input/output error"),
+    result(),
+  ];
+  const calls: string[][] = [];
+  const pauses: number[] = [];
+  const runner: DeploymentProcess = {
+    run: async (argv) => { calls.push(argv); return responses.shift()!; },
+  };
+  await new HostLaunchd(runner, async (ms) => { pauses.push(ms); }).bootstrap("gui/1", "/server.plist");
+  expect(calls).toEqual(Array.from({ length: 3 }, () => ["launchctl", "bootstrap", "gui/1", "/server.plist"]));
+  expect(pauses).toEqual([50, 50]);
+
+  let ambiguousCalls = 0;
+  const ambiguous: DeploymentProcess = {
+    run: async () => { ambiguousCalls++; return result(1, "", "Bootstrap failed: 37: Operation already in progress"); },
+  };
+  await expect(new HostLaunchd(ambiguous, async () => { throw new Error("must not pause"); })
+    .bootstrap("gui/1", "/server.plist")).rejects.toThrow("Operation already in progress");
+  expect(ambiguousCalls).toBe(1);
+});
+
 test("launchctl PID proof uses exact /bin/kill facts and fails closed on ambiguous errors", async () => {
   const runner = (exitCode: number, stderr = ""): DeploymentProcess => ({
     run: async (argv) => {

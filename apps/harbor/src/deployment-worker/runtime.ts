@@ -16,6 +16,11 @@ import {
 } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { type DeploymentTargetConfig } from "../config.js";
+import {
+  isTransientLaunchdBootstrapEio,
+  LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS,
+  LAUNCHD_BOOTSTRAP_RETRY_INTERVAL_MS,
+} from "../daemon/service.js";
 import { openDeploymentDb } from "../server/db.js";
 import { HarborStore } from "../server/store.js";
 import type { DeploymentJobStore } from "./worker.js";
@@ -255,7 +260,10 @@ export class MacOsProcessGroupControl implements ProcessGroupControl {
 }
 
 export class HostLaunchd implements LaunchdControl {
-  constructor(private readonly processRunner: DeploymentProcess) {}
+  constructor(
+    private readonly processRunner: DeploymentProcess,
+    private readonly pause: (ms: number) => Promise<void> = Bun.sleep,
+  ) {}
 
   async inspect(domain: string, label: string): Promise<LaunchdServiceState> {
     const result = await raw(this.processRunner, ["launchctl", "print", `${domain}/${label}`]);
@@ -275,7 +283,20 @@ export class HostLaunchd implements LaunchdControl {
     await required(this.processRunner, ["launchctl", "bootout", `${domain}/${label}`]);
   }
   async bootstrap(domain: string, plistPath: string) {
-    await required(this.processRunner, ["launchctl", "bootstrap", domain, plistPath]);
+    const argv = ["launchctl", "bootstrap", domain, plistPath];
+    let lastOutput = "";
+    for (let attempt = 0; attempt < LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS; attempt++) {
+      const result = await raw(this.processRunner, argv);
+      if (result.exitCode === 0 && !result.timedOut) return;
+      lastOutput = result.stderr || result.stdout || (result.timedOut ? "timeout" : `exit ${result.exitCode}`);
+      if (!isTransientLaunchdBootstrapEio(lastOutput)) {
+        throw new Error(`launchctl bootstrap failed: ${lastOutput}`);
+      }
+      if (attempt < LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS - 1) {
+        await this.pause(LAUNCHD_BOOTSTRAP_RETRY_INTERVAL_MS);
+      }
+    }
+    throw new Error(`launchctl bootstrap remained EIO after bounded retry: ${lastOutput}`);
   }
   async isPidAlive(pid: number) {
     const safePid = positivePgid(pid);
