@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、Agent Device 安全迁移、开放式 Run 编排、版本化内置 `harbor` control-plane Skill、Runtime Skill 隔离与 Local launchd Deployment Provider 已完成：Harbor 不内置 Orchestrator、Reviewer Pool 或 Agent 选择策略，只提供持久 Domain Event、可编辑 Automation、Run-scoped context/dispatch、显式 Agent 目标与 exact-revision Review checkout；用户可采用 direct Automation、自定义协调 Agent、人工派发或混合编排。所有 Agent 只继承 Harbor 配置的 instruction + 已绑定 Skills，不继承 Device 用户目录、checkout 或插件的环境 Skills；merge 后的 exact revision 由独立、确定性的 host worker 部署，不把高权限发布交给 LLM。v22 application guard + v19-compatible worker 延续 immutable host-fence journal、全局双 maintenance gate、epoch/nonce fencing、逐 service PID 停机证明、SQLite backup、server-only health、原 baseline 回滚与 daemon 延迟放闸，任何不确定性都 fail-closed。单控制面/DB/worker 已 cut over 到 Mac mini，MacBook 通过 SSH local-forward 作为纯 Device 接入；下一步只剩真 SCM credential/webhook、真飞书与时间性负载验证。
+Harbor 的个人部署 parity、自举闭环、GitHub/Codebase Delivery、Agent Device 安全迁移、开放式 Run 编排、Runtime Skill 隔离与确定性部署已经完成并在 Mac mini 运行。下一阶段的多账户终态方案已批准：引入全局 Account，把 Workspace 升级为资源/授权边界，用 Membership 连接用户，用 WorkspaceDeviceGrant 分离 Device 所有权与使用权，用 Agent ACL 和 Automation ServicePrincipal 统一执行授权；仍不内置 Orchestrator、Reviewer Pool 或 Agent 选择策略。完整方案见 `progress/harbor-account-system.md`，下一轮从 P6.1 identity normalization 开始；真 SCM credential/webhook、真飞书与时间性负载验证继续作为既有 P5 外部验收并行保留。
 
 ## Goals
 
@@ -24,7 +24,7 @@ Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、A
 - [x] @sm/channel-feishu：飞书 Channel 适配（从 SelfAgent 移植，薄实现）
 - [x] 根级 `bun run setup` 引导流程（配模型 + 注册 SDK + 注册全局命令 + 按需装 app）
 - [x] agent-gateway 统一配置源（已迁移——见 2026-07-11 session；agent-gateway 独立仓库整体退役，能力拍平进 @sm/agent）
-- [ ] **Harbor（个人多设备 Agent 调度平台，Mew 复刻）** — 主方案 `progress/harbor.md`。个人部署范围内的产品机制已完整实现：敏捷闭环、AI draft、GitHub/Codebase Delivery、event Automation、Workspace RBAC、Agent 多仓/执行配置与 Device 迁移、版本化内置 Harbor control-plane Skill、Skill bundle、Lark Integration、worktree 自举、event-aware Prompt pipeline 与确定性 Local launchd Deployment Provider；管理员 bootstrap、可信 target 与真实 MacBook + Mac mini 双 Device Run 已验收。仅剩 P5 外部/时间性验证：真 SCM credential + webhook、真飞书群、automation 7 天与真实负载一周
+- [ ] **Harbor（自托管多账户、多设备 Agent 调度平台，Mew 复刻）** — 主方案 `progress/harbor.md`，账户扩展方案 `progress/harbor-account-system.md`。个人部署机制与双 Device 自举已完整实现；下一阶段按 P6.1–P6.5 完成 Account/Auth、Device enrollment/grant、Agent ACL、Automation ServicePrincipal 与 UI contract。既有 P5 外部/时间性验证继续保留：真 SCM credential + webhook、真飞书群、automation 7 天与真实负载一周
 
 ## Verified Facts
 
@@ -58,6 +58,11 @@ Harbor 的 Mew 个人部署 parity、自举闭环、GitHub/Codebase Delivery、A
 - **Next**：Issue 交人工验收；lockfile 双轨问题待决策。
 
 ## Session Log
+
+### 2026-07-19 — Account / Workspace / Device / Agent 终态方案
+- **Decision**：不建立 `Account → Device → Agent → Workspace` 所有权树。Account 是全局人类身份；Workspace 是资源与授权边界；Membership 连接两者；Account owns Device，WorkspaceDeviceGrant 决定 Workspace 使用权；Workspace owns Agent，Agent visibility/ACL 控制 discover/run/edit/manage/audit；Automation 使用独立 ServicePrincipal。完整理由见 ADR `progress/decisions/2026-07-19-harbor-identity-and-resource-ownership.md`。
+- **Done**：完整实施方案落 `progress/harbor-account-system.md`，覆盖实体基数/生命周期、Passkey/Session/PAT、Device enrollment/credential/grant、Agent 可见性矩阵、Automation/Run principal、目标 schema、API/UI、v23–v26 migration、回滚/观测、威胁模型与生产验收；同步更新 glossary 与 Harbor 总方案，`.gitignore` 忽略 macOS `.DS_Store`。
+- **Next**：清空当前开发上下文后新起 worktree，只执行 P6.1：先补 v22 migration fixtures 与 dry-run report，再做 Account/AuthIdentity/Session/Membership/Invitation/PAT 和 Web bootstrap/login/Workspace switcher；本阶段不改 daemon credential。
 
 ### 2026-07-19 — 开放式 Run 编排与跨设备 exact-revision Review
 - **Decision**：推翻“固定三类 Agent 是产品结构”的阶段性假设。Harbor core 只提供事件、Run、lineage、scoped capabilities、Automation 和安全校验；是否配置协调 Agent、Developer、Reviewer，以及由谁响应某个事件，全部由用户决定。

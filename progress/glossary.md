@@ -2,13 +2,22 @@
 
 ## Harbor
 
-- **Workspace**：Harbor 的一级逻辑作用域，隔离 Agents、Skills、Conversations、Automations、prompt settings 与 Usage。它不是 Repository、目录、Device 或团队租户，也不保存统一仓库地址；Repository 的 `workspace_id` 只控制目录可见性。
+- **Account**：Harbor 实例内稳定的人类登录身份。Account 可拥有多个 Device，并通过 Workspace Membership 加入多个 Workspace；Account suspend/delete 不级联删除 Workspace 资源或历史审计。
+- **Auth Identity**：Account 的一种已验证登录身份，例如 Passkey、GitHub 或 Feishu subject。`(provider, subject)` 全局唯一；未验证邮箱和同名外部用户不能自动合并 Account。
+- **Workspace**：Harbor 的资源、协作与授权边界，隔离 Agents、Skills、Conversations、Automations、prompt settings 与 Usage。它不是 Repository、目录或 Device，不保存统一仓库地址；它是实例内安全租户，但不承担计费、席位或跨实例组织能力。
+- **Workspace Membership**：Account 与 Workspace 的多对多授权关系，保存 `owner | admin | member` 角色和 active/disabled 状态。成员失效会动态撤销访问，但不改变其历史 actor 或删除其创建的 Workspace 资源。
+- **Workspace Invitation**：尚未成为成员的短期邀请。接受后事务内创建 Membership；未知邮箱不会提前生成没有登录身份的 Member。
 - **Repository**：Agent 必选的逻辑代码资源，不直接等于本地路径。同一 Repository 可以被多个 Agent 复用，并在多台 Device 上分别 checkout；用户从 Agent 创建/详情配置，不从 Workspace 或任务单独配置。
 - **Repository mount**：Repository 在某台 Device 上的绝对主 checkout 路径，`(repository, device)` 唯一。Agent 绑定 Repository + Device 后确定 mount；`RunSpec.repositoryRoot` 始终保持这个身份锚点，即使 Run 已进入 linked worktree。被 Agent、活跃任务、Run 或 worktree 引用时不能删除。
 - **Execution root**：某一 Run 的实际 cwd 快照。首轮 worktree Run 下发时可先等于 Repository mount，`worktree_ready` 后改为 per-Issue worktree；后续 implementation/reviewer 继续用该 worktree，但不改变 `repositoryRoot` 的 mount 语义。
 - **Chat worktree cleanup**：Chat 没有 Issue 终态，因此 worktree 不自动随 Done/Cancel 收尾。管理员可在没有 active Run 时显式请求 daemon 释放目录；请求送达后 control plane 在当前 server 生命周期内 fence 新 Run并在 Device 重连时补发，Conversation/Run 历史与 branch 保留，只有 daemon 回报实际删除成功后才清空 worktree binding、解除 fence。若 server 在回报前重启，binding 仍保留；后续 Run 会由 daemon 幂等复验或重建同 branch worktree，不静默回退主 checkout。
-- **Device**：运行一个 `harbord` 的真实机器。设备在线状态来自 WebSocket 连接，能力来自 daemon 启动时探测，不是用户手填标签。
-- **Harbor Agent**：固定归属一个 Workspace，并且在任一时刻恰好绑定一台 Device 与一个 Repository 的执行配置。Issue、Chat、AI draft 与 Automation 不另选仓库；指派 Agent 时继承其当前 execution binding。Device 可经显式迁移安全切换，不代表历史 Run 会随之改写。
+- **Device**：运行一个 `harbord` 的真实机器和 daemon principal。首期恰好由一个 Account 拥有；在线状态来自 WebSocket，能力来自 daemon 探测。Device 不属于 Workspace，只有 active Workspace Device Grant 才允许该 Workspace 调度。
+- **Device Enrollment**：Account 创建的短期、单次注册凭证。daemon 消费后换取用途隔离的 Device Credential；设备名只做展示，不再作为全局身份。
+- **Workspace Device Grant**：Device owner 授予某 Workspace 的调度许可。它不授予 SSH、Shell、文件浏览或凭证读取；owner 离开 Workspace 或显式 revoke 后，新 Run 立即被禁止。
+- **Harbor Agent**：固定归属一个 Workspace，并且在任一时刻恰好绑定一台已授权 Device 与一个 Repository 的执行配置。Issue、Chat、AI draft 与 Automation 不另选仓库；指派 Agent 时继承其当前 execution binding。Device 可经显式迁移安全切换，不代表历史 Run 会随之改写，也不改变 Agent 的 Workspace 所有权。
+- **Agent visibility**：Agent 的发现/使用基线：`workspace` 对 active member 默认 discover/run，`private` 对创建者默认开放，`restricted` 只对显式 principal ACL 开放。discover/run/edit/manage/audit 是独立权限；看见 Agent 不等于看见 Device 路径或 secret。
+- **Service Principal**：Workspace 内的非人类授权主体。首期每个 Automation 自动拥有一个 Service Principal，并用显式 Agent ACL 运行；它不借用创建者 Session、PAT 或 system token。
+- **Run Principal**：Run 入队时冻结的真正调用者快照，可为 Account、Service Principal、System 或 External actor。child Run 继承 root principal，dispatching Agent 不因此获得更高权限。
 - **Agent execution binding**：Agent 当前的 `Device + Repository + repository mount` 组合，决定未来 Run 的执行位置。迁移要求目标 Device 具备 Agent Runtime/model 能力与 Repository mount，且 Agent 没有 active Run 或未清理 worktree；历史 Run 继续保留原 Device/mount/execution root 快照，旧 Device 独占的 runtime Skills 在确认后解除。
 - **Provider capability**：某台 Device 上实际可执行的 agent CLI（当前仅 `claude` / `codex`）及其版本。Agent 只能绑定设备已上报的 provider；provider 与模型 endpoint 是两类能力，不能互相代替。
 - **Runtime**：实际执行 coding session 的 CLI，当前是 Claude Code (`claude`) 或 Codex CLI (`codex`)；UI 和代码不再把它称为模型 Provider。
@@ -25,6 +34,7 @@
 - **Issue stage**：`backlog(Inbox) → todo(Ready) → doing(Running) → review → done/canceled`。`doing/review` 由 implementation Run 自动推进，人工只做分诊、要求修改、验收或取消，避免拖拽制造假状态。
 - **Run purpose**：一次执行的意图快照：`triage` 只读分诊 AI Issue draft；`coordination` 只读取控制面上下文并按用户定义策略派生 Run，不改 Issue stage/Assignee/Delivery；`implementation` 推进 Issue 阶段并续接 Assignee session；`review` / `verification` 只在 Review 内运行，不改变 Assignee、不自动 Done。
 - **Domain Event**：由 Harbor 已提交领域事实产生的持久、幂等事件，例如 `issue.created`、`issue.ready`、`issue.review_ready`、`delivery.merge_ready`、`delivery.merged`。Automation Trigger 消费事件，而不是轮询状态；重启后可重放未投递事件，新建 Trigger 不追溯消费其创建时间之前的历史事件。
+- **Automation**：Workspace 内可复用的事件响应规则。Automation 选择目标 Agent、Prompt、output mode 与一个或多个 Trigger；授权上使用自己的 Service Principal，不使用创建者身份。
 - **Run dispatch**：action-capable Run 使用短期 Run token 查询安全上下文并显式指定目标 Agent 派生 child Run 的能力。Harbor 校验 Workspace、Conversation 串行、Repository、purpose、lineage 深度和稳定 dispatch key，但绝不替用户选择 Agent，也不要求存在 Orchestrator。
 - **Run lineage**：child Run 持久化的 `parentRunId / rootRunId / depth / dispatchKey`。它用于审计、幂等和防无限递归，不表达内置角色层级。
 - **Review checkout**：跨 Device Review 的 per-Run detached checkout。server 必须先从 SCM Delivery Provider 获得可信 exact head revision 与 remote identity；daemon fetch 后证明 `FETCH_HEAD` 等于该 revision 才创建 linked worktree，并在 Run 完成或重连恢复时 fail-loud 清理。没有可信远端 revision 时仍只允许原 Issue worktree 本地 Review。
