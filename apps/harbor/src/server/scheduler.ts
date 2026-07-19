@@ -19,6 +19,7 @@ import type {
   RunAttachment,
   RunPurpose,
   RunSpec,
+  ReviewCheckout,
   ServerMsg,
 } from "../protocol.js";
 import type { HarborStore } from "./store.js";
@@ -34,6 +35,7 @@ export interface DeviceTransport {
 }
 
 export class RunCoordinator {
+  static readonly MAX_DISPATCH_DEPTH = 8;
   /** run 终态 hook（main 注入）：审批过期清理 / 飞书结果回报都挂这里 */
   onRunFinished?: (run: Run, conv: Conversation | null) => void;
 
@@ -64,6 +66,10 @@ export class RunCoordinator {
       concurrencyKey?: string | null;
       allowQueuedBehindConversation?: boolean;
       attachments?: RunAttachment[];
+      parentRunId?: string | null;
+      rootRunId?: string;
+      dispatchDepth?: number;
+      dispatchKey?: string | null;
     } = {},
   ): Run {
     if (conv.workspaceId !== agent.workspaceId) {
@@ -102,12 +108,45 @@ export class RunCoordinator {
         `Repository "${repository?.name ?? repositoryId}" 没有挂载到 Agent 设备；请在 Agent 配置中补全该 Device 的本地路径`,
       );
     }
-    const effectiveIsolation = purpose === "triage" ? "none" : agent.isolation;
+    const neutral = purpose === "coordination";
+    const effectiveIsolation = purpose === "triage" || neutral || reviewing ? "none" : agent.isolation;
     if (effectiveIsolation === "worktree" && !mount) {
       throw new Error(`Agent "${agent.name}" 使用 Git worktree 隔离，但当前任务没有 Repository mount`);
     }
-    if (conv.worktreePath && conv.worktreeMountId !== mount?.id) {
-      throw new Error("当前 Issue 已有 worktree，只能继续使用创建该 worktree 的 Repository mount");
+    let reviewCheckout: ReviewCheckout | null = null;
+    if (reviewing) {
+      const delivery = this.store.getDeliveryForConversation(conv.id);
+      if (
+        delivery &&
+        (delivery.provider === "github" || delivery.provider === "codebase") &&
+        delivery.latestHeadSha &&
+        /^[a-f0-9]{40,64}$/i.test(delivery.latestHeadSha) &&
+        delivery.headBranch?.trim() &&
+        repository?.remoteUrl?.trim()
+      ) {
+        const githubPullNumber = delivery.provider === "github"
+          ? /^#(\d+)$/.exec(delivery.externalId ?? "")?.[1]
+          : null;
+        reviewCheckout = {
+          deliveryId: delivery.id,
+          remoteUrl: repository.remoteUrl.trim(),
+          ref: githubPullNumber
+            ? `refs/pull/${githubPullNumber}/head`
+            : `refs/heads/${delivery.headBranch.trim()}`,
+          revision: delivery.latestHeadSha.toLowerCase(),
+        };
+      }
+      if (!reviewCheckout && !conv.worktreePath) {
+        throw new Error("Review 缺少 Provider 证明的 exact head revision，也没有原始 Issue worktree；拒绝审查未知代码");
+      }
+    }
+    const needsIssueWorktree = !neutral && (!reviewing || !reviewCheckout);
+    if (needsIssueWorktree && conv.worktreePath && conv.worktreeMountId !== mount.id) {
+      throw new Error(
+        reviewing
+          ? "当前 Delivery 没有可信 exact revision，只能在原 Repository mount 审查 Issue worktree"
+          : "当前 Issue 已有 worktree，只能继续使用创建该 worktree 的 Repository mount",
+      );
     }
     if (conv.repositoryId !== repositoryId) {
       if (conv.worktreePath) throw new Error("当前 Issue 已有 worktree，不能切换 Repository");
@@ -118,10 +157,9 @@ export class RunCoordinator {
       if (conv.status === "done" || conv.status === "canceled") {
         throw new Error(`issue 已是 ${conv.status}，不能继续执行`);
       }
-      if (purpose === "review" || purpose === "verification") {
+      if (reviewing) {
         if (conv.status !== "review") throw new Error(`${purpose} run 只能在 review 阶段启动`);
-        // worktreeMountId 闸保证 Reviewer 看到 implementation 的真实 checkout。
-      } else {
+      } else if (purpose === "implementation") {
         const now = Date.now();
         // 新实现会改变 commit 集合，旧人工验收与 CI 证据必须失效；已合并交付在这里硬拒绝。
         this.deliveries.prepareImplementation(conv, now);
@@ -141,19 +179,110 @@ export class RunCoordinator {
         deviceId: agent.deviceId,
         repositoryId,
         repositoryMountId: mount.id,
-        executionRoot: conv.worktreePath ?? mount.path,
+        executionRoot: reviewCheckout ? mount.path : neutral ? mount.path : conv.worktreePath ?? mount.path,
         prompt,
         purpose,
         promptEvent: event,
         triggerRef: triggerRef ?? conv.originRef,
         triggerContext: options.triggerContext,
         concurrencyKey: options.concurrencyKey,
+        parentRunId: options.parentRunId,
+        rootRunId: options.rootRunId,
+        dispatchDepth: options.dispatchDepth,
+        dispatchKey: options.dispatchKey,
+        reviewCheckout,
         attachments: options.attachments,
       },
       Date.now(),
     );
     this.pump(agent.deviceId);
     return this.store.getRun(run.id)!;
+  }
+
+  /** 当前 Run 的最小权限派生入口；Harbor 校验目标，不替用户选择 Agent。 */
+  enqueueChildRun(
+    parent: Run,
+    agent: HarborAgent,
+    prompt: string,
+    purpose: RunPurpose,
+    dispatchKey: string,
+  ): Run {
+    const key = dispatchKey.trim();
+    if (!key || key.length > 128) throw new Error("idempotencyKey 需要 1–128 字符");
+    const existing = this.store.getRunByDispatchKey(parent.rootRunId, key);
+    if (existing) {
+      if (existing.agentId !== agent.id || existing.purpose !== purpose || existing.prompt !== prompt) {
+        throw new Error(`idempotencyKey "${key}" 已用于不同的 Agent/purpose/prompt`);
+      }
+      return existing;
+    }
+    const depth = parent.dispatchDepth + 1;
+    if (depth > RunCoordinator.MAX_DISPATCH_DEPTH) {
+      throw new Error(`Run dispatch 深度超过上限 ${RunCoordinator.MAX_DISPATCH_DEPTH}`);
+    }
+    if (agent.workspaceId !== parent.workspaceId || agent.archivedAt) {
+      throw new Error("目标 Agent 不属于当前 Workspace 或已归档");
+    }
+    if (parent.conversationId) {
+      const conversation = this.store.getConversation(parent.conversationId);
+      if (!conversation) throw new Error("当前 Run 的 Conversation 已不存在");
+      return this.enqueueRun(
+        conversation,
+        agent,
+        prompt,
+        purpose,
+        "event.automation.event",
+        parent.id,
+        {
+          triggerContext: { parentRunId: parent.id, dispatchKey: key },
+          concurrencyKey: `conversation:${conversation.id}`,
+          allowQueuedBehindConversation: true,
+          parentRunId: parent.id,
+          rootRunId: parent.rootRunId,
+          dispatchDepth: depth,
+          dispatchKey: key,
+        },
+      );
+    }
+    if (parent.sourceType !== "automation") throw new Error("当前 Run source 不支持派生");
+    if (purpose !== "coordination" && purpose !== "implementation") {
+      throw new Error("无 Conversation 的 Automation source 只支持 coordination/implementation Run");
+    }
+    if (agent.isolation === "worktree" && purpose !== "coordination") {
+      throw new Error("无 Conversation 的派生 Run 要求目标 Agent isolation=none");
+    }
+    const repositoryId = parent.repositoryId;
+    if (!repositoryId || !agent.repositoryIds.includes(repositoryId)) {
+      throw new Error("目标 Agent 看不到当前 Run 的 Repository");
+    }
+    const repository = this.store.getRepository(repositoryId);
+    const mount = this.store.getRepositoryMountForDevice(repositoryId, agent.deviceId);
+    if (!repository || repository.archivedAt || !mount) {
+      throw new Error("目标 Agent 的 Repository mount 不可用");
+    }
+    const run = this.store.createRun({
+      workspaceId: parent.workspaceId,
+      sourceType: parent.sourceType,
+      sourceId: parent.sourceId,
+      conversationId: null,
+      agentId: agent.id,
+      deviceId: agent.deviceId,
+      repositoryId,
+      repositoryMountId: mount.id,
+      executionRoot: mount.path,
+      prompt,
+      purpose,
+      promptEvent: "event.automation.event",
+      triggerRef: parent.triggerRef,
+      triggerContext: { parentRunId: parent.id, dispatchKey: key },
+      concurrencyKey: `source:${parent.sourceType}:${parent.sourceId}`,
+      parentRunId: parent.id,
+      rootRunId: parent.rootRunId,
+      dispatchDepth: depth,
+      dispatchKey: key,
+    }, Date.now());
+    this.pump(agent.deviceId);
+    return run;
   }
 
   /** Mew 式 Automation 直跑：source=automation，不创建伪 Issue/Chat。 */
@@ -285,7 +414,9 @@ export class RunCoordinator {
           .map((repositoryId) => this.store.getRepositoryMountForDevice(repositoryId, agent.deviceId)?.path)
           .filter((path): path is string => !!path),
         // AI draft 只允许读取仓库做分诊，不能在 Issue 尚未确认时改文件或创建 worktree。
-        permission: run.purpose === "triage" ? "readonly" : agent.permission,
+        permission: ["triage", "review", "verification", "coordination"].includes(run.purpose)
+          ? "readonly"
+          : agent.permission,
         systemPrompt: withAgentActionGuidance(
           composeAgentSystemPrompt(agent.instruction, this.store.listSkillsForAgent(agent.id)),
         ),
@@ -294,10 +425,17 @@ export class RunCoordinator {
             ? conv.claudeSessionId
             : null,
         conversationId: conv?.id ?? null,
-        isolation: run.purpose === "triage" ? "none" : agent.isolation,
-        worktreePath: run.purpose === "triage" ? null : conv?.worktreePath ?? null,
+        isolation: ["triage", "review", "verification", "coordination"].includes(run.purpose)
+          ? "none"
+          : agent.isolation,
+        worktreePath: ["triage", "coordination"].includes(run.purpose) || run.reviewCheckout
+          ? null
+          : conv?.worktreePath ?? null,
+        reviewCheckout: run.reviewCheckout,
         envOverrides: agent.environment,
-        setupScript: run.purpose === "triage" ? null : agent.setupScript,
+        setupScript: ["triage", "review", "verification", "coordination"].includes(run.purpose)
+          ? null
+          : agent.setupScript,
         setupKey: agent.setupScript
           ? createHash("sha256").update(`${agent.id}\0${agent.setupScript}`).digest("hex")
           : null,
@@ -381,6 +519,13 @@ export class RunCoordinator {
     }
   }
 
+  onRunExecutionReady(runId: string, path: string): void {
+    const run = this.store.getRun(runId);
+    if (!run || !run.reviewCheckout || run.status !== "running") return;
+    this.store.setRunExecutionRoot(runId, path);
+    console.log(`[coordinator] exact revision checkout 就绪：${runId} → ${path}`);
+  }
+
   /** worktree 收尾（保留分支删目录）。返回 false 表示当前未送达；终态 Issue 会在重连对账时补发。 */
   requestWorktreeCleanup(conv: Conversation): boolean {
     if (!conv.worktreePath || !conv.worktreeMountId) return true;
@@ -423,6 +568,16 @@ export class RunCoordinator {
     const now = Date.now();
     for (const run of this.store.runningRunsForDevice(deviceId)) {
       if (alive.has(run.id)) continue;
+      if (run.reviewCheckout && run.repositoryMountId) {
+        const reviewMount = this.store.getRepositoryMount(run.repositoryMountId);
+        if (reviewMount?.deviceId === deviceId) {
+          this.transport.send(deviceId, {
+            type: "review_checkout_cleanup",
+            runId: run.id,
+            repositoryRoot: reviewMount.path,
+          });
+        }
+      }
       this.store.finishRun(
         run.id,
         "failed",
@@ -435,7 +590,7 @@ export class RunCoordinator {
       );
       this.store.revokeRunActionTokens(run.id, now);
       const conv = run.conversationId ? this.store.getConversation(run.conversationId) : null;
-      if (conv && conv.kind === "issue") {
+      if (conv?.kind === "issue" && run.purpose === "implementation") {
         transitionConversation(this.store, conv, "todo", "system", now);
       }
       const finished = this.store.getRun(run.id)!;

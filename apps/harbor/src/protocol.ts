@@ -21,9 +21,9 @@ export const ISSUE_STATUSES: ConversationStatus[] = ["backlog", "todo", "doing",
 export type IssuePriority = "none" | "low" | "medium" | "high" | "urgent";
 export const ISSUE_PRIORITIES: IssuePriority[] = ["none", "low", "medium", "high", "urgent"];
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
-/** implementation 推进 Issue；triage 只读分诊草稿；review/verification 不覆盖 Assignee。 */
-export type RunPurpose = "implementation" | "triage" | "review" | "verification";
-export const RUN_PURPOSES: RunPurpose[] = ["implementation", "triage", "review", "verification"];
+/** implementation 推进 Issue；triage 只读分诊草稿；review/verification 审查；coordination 中性编排。 */
+export type RunPurpose = "implementation" | "triage" | "review" | "verification" | "coordination";
+export const RUN_PURPOSES: RunPurpose[] = ["implementation", "triage", "review", "verification", "coordination"];
 export type Origin = "cli" | "feishu" | "web" | "automation" | "codebase" | "agent";
 export type PromptSource = "issue" | "chat" | "automation";
 export type PromptBlockPhase = "context" | "event";
@@ -540,6 +540,14 @@ export interface Run {
   triggerContext: Record<string, unknown>;
   /** 非空时同 key 的 Run 串行；Automation overlap=queue 用它防并发启动。 */
   concurrencyKey: string | null;
+  /** Run-scoped dispatch lineage；根 Run 的 rootRunId 等于自身 ID。 */
+  parentRunId: string | null;
+  rootRunId: string;
+  dispatchDepth: number;
+  /** 同一 root Run 下的用户幂等键；null 表示普通入口创建。 */
+  dispatchKey: string | null;
+  /** Review/verification 锁定的可信 Delivery revision；无可信 revision 时均为 null。 */
+  reviewCheckout: ReviewCheckout | null;
   status: RunStatus;
   claudeSessionId: string | null;
   error: string | null;
@@ -588,11 +596,24 @@ export type AutomationOverlapMode = "skip" | "queue";
 /** event 是 Harbor 自己的可信领域事件；webhook 始终视为外部低信任输入。 */
 export type AutomationTriggerType = "schedule" | "webhook" | "event";
 export const AUTOMATION_EVENT_TYPES = [
+  "issue.created",
+  "issue.ready",
   "issue.review_ready",
   "delivery.merge_ready",
   "delivery.merged",
 ] as const;
 export type AutomationEventType = (typeof AUTOMATION_EVENT_TYPES)[number];
+
+/** Harbor 持久化的可信领域事件；Automation 重启后从这里幂等重放。 */
+export interface DomainEvent {
+  id: string;
+  workspaceId: string;
+  type: AutomationEventType;
+  sourceType: "issue" | "delivery";
+  sourceId: string;
+  payload: Record<string, unknown>;
+  createdAt: number;
+}
 export type AutomationWebhookScalar = string | number | boolean | null;
 
 /** webhook filter 同一 Trigger 内按 OR 语义匹配；path 使用点号读取 JSON 字段。 */
@@ -693,6 +714,14 @@ export interface PromptBlockConfig {
 
 // ── Run 下发规格（server → daemon） ─────────────────────
 
+/** 在目标 Device 上按远端身份和 exact revision 创建的只读、单 Run Review checkout。 */
+export interface ReviewCheckout {
+  deliveryId: string;
+  remoteUrl: string;
+  ref: string;
+  revision: string;
+}
+
 export interface RunSpec {
   backend: BackendKind;
   model: string | null;
@@ -714,6 +743,8 @@ export interface RunSpec {
   isolation: IsolationKind;
   /** issue 已有 worktree 则复用（conversations.worktree_path 回填值）；null = daemon 首跑时创建 */
   worktreePath: string | null;
+  /** 存在时 daemon 不复用 Issue worktree，而是在本机验证并检出 exact revision。 */
+  reviewCheckout?: ReviewCheckout | null;
   envOverrides?: Record<string, string>;
   setupScript?: string | null;
   setupKey?: string | null;
@@ -754,6 +785,7 @@ export type DaemonMsg =
   | { type: "approval_req"; runId: string; requestId: string; toolName: string; input: unknown }
   // worktree 生命周期（P2）：daemon 创建成功后回报路径（server 回填 conversations.worktree_path）
   | { type: "worktree_ready"; runId: string; conversationId: string; path: string }
+  | { type: "run_execution_ready"; runId: string; path: string }
   | { type: "worktree_cleanup_result"; conversationId: string; ok: boolean; message: string };
 
 export type ServerMsg =
@@ -771,7 +803,9 @@ export type ServerMsg =
       message?: string;
     }
   // issue → done/canceled 后触发（默认保留分支删目录）；repositoryRoot 是 git 上下文
-  | { type: "worktree_cleanup"; conversationId: string; repositoryRoot: string; worktreePath: string };
+  | { type: "worktree_cleanup"; conversationId: string; repositoryRoot: string; worktreePath: string }
+  // daemon 崩溃恢复：按 deterministic Run path 清理遗留的只读 Review checkout。
+  | { type: "review_checkout_cleanup"; runId: string; repositoryRoot: string };
 
 // ── SSE 帧（GET /api/runs/:id/events） ──────────────────
 

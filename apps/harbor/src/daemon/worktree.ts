@@ -5,8 +5,9 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import type { ReviewCheckout } from "../protocol.js";
 
 interface GitResult {
   ok: boolean;
@@ -81,6 +82,98 @@ export function worktreePathFor(workdir: string, conversationId: string): string
   }
   // 与主仓库同级的 harbor-worktrees/，避免 worktree 嵌在仓库内被工具误扫
   return join(dirname(workdir), "harbor-worktrees", `${basename(workdir)}-${conversationId}`);
+}
+
+export function reviewWorktreePathFor(workdir: string, runId: string): string {
+  if (!/^[A-Za-z0-9_-]+$/.test(runId)) throw new Error(`run id 不能用于 Review checkout 路径：${runId}`);
+  return join(dirname(workdir), "harbor-review-worktrees", `${basename(workdir)}-${runId}`);
+}
+
+function remoteIdentity(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  const scp = /^(?:[^@/]+@)?([^:/]+):(.+)$/.exec(trimmed);
+  if (scp && !trimmed.includes("://")) {
+    return `${scp[1]!.toLowerCase()}/${scp[2]!.replace(/^\/+|\.git$/g, "")}`;
+  }
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol === "file:") return `file:${resolve(decodeURIComponent(url.pathname)).replace(/\.git$/, "")}`;
+    return `${url.hostname.toLowerCase()}/${url.pathname.replace(/^\/+|\.git$/g, "")}`;
+  } catch {
+    return `file:${resolve(trimmed).replace(/\.git$/, "")}`;
+  }
+}
+
+/**
+ * 在用户指定 Device 的 Repository mount 上验证 remote identity，按 ref fetch 后证明
+ * FETCH_HEAD 等于 Provider revision，再创建 detached、单 Run linked worktree。
+ */
+export function ensureReviewCheckout(
+  repositoryRoot: string,
+  runId: string,
+  review: ReviewCheckout,
+): string {
+  if (!/^[a-f0-9]{40,64}$/i.test(review.revision)) throw new Error("Review revision 不是完整 commit id");
+  if (!review.ref.startsWith("refs/heads/") && !/^refs\/pull\/\d+\/head$/.test(review.ref)) {
+    throw new Error("Review ref 必须是 refs/heads/* 或 GitHub refs/pull/<n>/head");
+  }
+  const refCheck = git(repositoryRoot, ["check-ref-format", review.ref]);
+  if (!refCheck.ok) throw new Error(`Review ref 非法：${review.ref}`);
+
+  const configuredRemote = remoteIdentity(review.remoteUrl);
+  const mountedRemoteResult = git(repositoryRoot, ["remote", "get-url", "origin"]);
+  if (!mountedRemoteResult.ok || !mountedRemoteResult.stdout) {
+    throw new Error(`Repository mount 缺少 origin remote：${gitMessage(mountedRemoteResult) || "无输出"}`);
+  }
+  const mountedRemote = remoteIdentity(mountedRemoteResult.stdout);
+  if (mountedRemote !== configuredRemote) {
+    throw new Error(
+      `Repository remote identity 不匹配（configured=${configuredRemote}, mounted=${mountedRemote}）`,
+    );
+  }
+
+  const fetch = git(repositoryRoot, ["fetch", "--no-tags", "--force", "origin", review.ref]);
+  if (!fetch.ok) throw new Error(`Review ref fetch 失败：${gitMessage(fetch) || review.ref}`);
+  const fetchedRevision = gitOutput(repositoryRoot, ["rev-parse", "--verify", "FETCH_HEAD^{commit}"], "Review FETCH_HEAD").toLowerCase();
+  if (fetchedRevision !== review.revision.toLowerCase()) {
+    throw new Error(
+      `Review ref 已变化，拒绝审查错误 revision（expected=${review.revision.toLowerCase()}, fetched=${fetchedRevision}）`,
+    );
+  }
+
+  const path = resolve(reviewWorktreePathFor(repositoryRoot, runId));
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  try {
+    if (lstatSync(path).isSymbolicLink()) throw new Error(`Review checkout leaf 不能是符号链接（path=${path}）`);
+    throw new Error(`Review checkout 路径已存在，拒绝复用未知目录（path=${path}）`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const add = git(repositoryRoot, ["worktree", "add", "--detach", path, fetchedRevision]);
+  if (!add.ok) throw new Error(`Review checkout 创建失败：${gitMessage(add) || "git worktree add 无输出"}`);
+  try {
+    resolveWorktreeGitCommonDir(repositoryRoot, path);
+    const head = gitOutput(path, ["rev-parse", "--verify", "HEAD^{commit}"], "Review checkout HEAD").toLowerCase();
+    if (head !== fetchedRevision) throw new Error(`Review checkout HEAD 不匹配（expected=${fetchedRevision}, actual=${head}）`);
+    const symbolic = git(path, ["symbolic-ref", "--quiet", "HEAD"]);
+    if (symbolic.ok) throw new Error(`Review checkout 必须 detached（actual=${symbolic.stdout}）`);
+    return path;
+  } catch (error) {
+    git(repositoryRoot, ["worktree", "remove", "--force", path]);
+    throw error;
+  }
+}
+
+/** Review checkout 是只读单 Run 目录；若意外变脏则不 force，保留现场并令 Run 失败。 */
+export function removeReviewCheckout(repositoryRoot: string, path: string): { ok: boolean; message: string } {
+  if (!existsSync(path)) {
+    git(repositoryRoot, ["worktree", "prune"]);
+    return { ok: true, message: "目录已不存在，prune 完成" };
+  }
+  const result = git(repositoryRoot, ["worktree", "remove", path]);
+  return result.ok
+    ? { ok: true, message: "exact-revision Review checkout 已删除" }
+    : { ok: false, message: gitMessage(result) || "Review checkout 清理失败（目录可能被意外修改）" };
 }
 
 /**

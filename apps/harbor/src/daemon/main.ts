@@ -16,7 +16,7 @@ import { HEARTBEAT_INTERVAL_MS } from "../protocol.js";
 import { deviceName, serverUrl, serverWsUrl, token } from "../config.js";
 import { detectCapabilities } from "./capabilities.js";
 import { Executor } from "./executor.js";
-import { removeWorktree } from "./worktree.js";
+import { removeReviewCheckout, removeWorktree, reviewWorktreePathFor } from "./worktree.js";
 import { HostMaintenanceSentinel } from "../deployment-worker/maintenance.js";
 import { DaemonMaintenanceLatch } from "./maintenance.js";
 
@@ -41,6 +41,7 @@ const MUST_DELIVER = new Set<DaemonMsg["type"]>([
   "run_done",
   "approval_req",
   "worktree_ready",
+  "run_execution_ready",
   "worktree_cleanup_result",
 ]);
 
@@ -63,7 +64,12 @@ const executor = new Executor(sendOrQueue, `${serverUrl().replace(/\/$/, "")}/ho
 function ownedRunIds(): string[] {
   const ids = new Set(executor.runningIds());
   for (const m of outbox) {
-    if (m.type === "run_done" || m.type === "approval_req" || m.type === "worktree_ready") ids.add(m.runId);
+    if (
+      m.type === "run_done" ||
+      m.type === "approval_req" ||
+      m.type === "worktree_ready" ||
+      m.type === "run_execution_ready"
+    ) ids.add(m.runId);
     else if (m.type === "run_event") for (const e of m.events) ids.add(e.runId);
   }
   return [...ids];
@@ -140,6 +146,12 @@ async function connect(): Promise<void> {
         const r = removeWorktree(msg.repositoryRoot, msg.worktreePath);
         console.log(`[harbord] worktree_cleanup ${msg.conversationId}：${r.ok ? "✓" : "✗"} ${r.message}`);
         sendOrQueue({ type: "worktree_cleanup_result", conversationId: msg.conversationId, ok: r.ok, message: r.message });
+        break;
+      }
+      case "review_checkout_cleanup": {
+        const path = reviewWorktreePathFor(msg.repositoryRoot, msg.runId);
+        const result = removeReviewCheckout(msg.repositoryRoot, path);
+        console.log(`[harbord] review_checkout_cleanup ${msg.runId}：${result.ok ? "✓" : "✗"} ${result.message}`);
         break;
       }
     }

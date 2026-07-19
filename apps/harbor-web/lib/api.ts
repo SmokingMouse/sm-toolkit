@@ -618,6 +618,25 @@ export const setAutomationEnabled = (id: string, enabled: boolean) =>
   req<Automation>("PATCH", `/api/automations/${encodeURIComponent(id)}`, {
     enabled,
   });
+export const updateAutomation = (id: string, body: Record<string, unknown>) =>
+  req<Automation>("PATCH", `/api/automations/${encodeURIComponent(id)}`, body);
+export const createAutomationTrigger = (id: string, body: Record<string, unknown>) =>
+  req<Automation["triggers"][number] & { webhookSecret?: string }>(
+    "POST",
+    `/api/automations/${encodeURIComponent(id)}/triggers`,
+    body,
+  );
+export const updateAutomationTrigger = (id: string, triggerId: string, body: Record<string, unknown>) =>
+  req<Automation["triggers"][number]>(
+    "PATCH",
+    `/api/automations/${encodeURIComponent(id)}/triggers/${encodeURIComponent(triggerId)}`,
+    body,
+  );
+export const deleteAutomationTrigger = (id: string, triggerId: string) =>
+  req<{ ok: boolean }>(
+    "DELETE",
+    `/api/automations/${encodeURIComponent(id)}/triggers/${encodeURIComponent(triggerId)}`,
+  );
 export const runAutomation = (id: string) =>
   req<Run>("POST", `/api/automations/${encodeURIComponent(id)}/run`);
 export const deleteAutomation = (id: string) =>

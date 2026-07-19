@@ -103,6 +103,9 @@ export class DeviceHub implements DeviceTransport {
       case "worktree_ready":
         this.coordinator.onWorktreeReady(msg.runId, msg.conversationId, msg.path);
         break;
+      case "run_execution_ready":
+        this.coordinator.onRunExecutionReady(msg.runId, msg.path);
+        break;
       case "worktree_cleanup_result":
         this.coordinator.onWorktreeCleanupResult(msg.conversationId, msg.ok, msg.message);
         break;

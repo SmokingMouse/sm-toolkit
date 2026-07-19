@@ -15,6 +15,7 @@ import type {
   AutomationTrigger,
   AutomationWebhookFilter,
   Conversation,
+  DomainEvent,
   PromptEventBlockKey,
   Run,
 } from "../protocol.js";
@@ -34,6 +35,8 @@ export interface AutomationEventInput {
   /** 领域事件的稳定幂等键；同一 Trigger 只消费一次。 */
   eventId: string;
   payload: Record<string, unknown>;
+  /** 持久领域事实的发生时间；新建 Trigger 不追溯消费更早的历史事件。 */
+  createdAt?: number;
 }
 
 export type AutomationWebhookResult =
@@ -180,10 +183,12 @@ export class AutomationService {
     if (!eventType) throw new Error("Automation eventType 不能为空");
     if (!input.eventId.trim()) throw new Error("Automation eventId 不能为空");
     const results: AutomationEventResult[] = [];
+    const createdAt = input.createdAt ?? Date.now();
     for (const automation of this.store.listAutomations(input.workspaceId)) {
       if (!automation.enabled) continue;
       for (const trigger of automation.triggers) {
         if (!trigger.enabled || trigger.type !== "event") continue;
+        if (createdAt < trigger.createdAt) continue;
         if (trigger.events.length > 0 && !trigger.events.includes(eventType)) continue;
         if (
           trigger.filters.length > 0 &&
@@ -196,6 +201,7 @@ export class AutomationService {
             eventId: input.eventId,
             note: `internal event ${eventType} 未命中 filter`,
           }, Date.now());
+          this.store.recordAutomationTriggerDelivery(trigger.id, input.eventId, Date.now());
           results.push({
             status: "rejected",
             automationId: automation.id,
@@ -219,7 +225,7 @@ export class AutomationService {
             eventId: input.eventId,
             provider: "harbor",
             triggerId: trigger.id,
-            emittedAt: new Date().toISOString(),
+            emittedAt: new Date(createdAt).toISOString(),
             payload: input.payload,
           }, input.eventId);
           if (run) {
@@ -246,6 +252,37 @@ export class AutomationService {
           results.push({ status: "rejected", automationId: automation.id, triggerId: trigger.id, reason });
         }
       }
+    }
+    return results;
+  }
+
+  /** 重放仍未被各 Trigger 消费的持久事件；新 Trigger 不追溯早于自身创建时间的事实。 */
+  replayEvents(): AutomationEventResult[] {
+    if (this.maintenanceActive()) return [];
+    const pending = new Map<string, DomainEvent>();
+    for (const automation of this.store.listAutomations()) {
+      if (!automation.enabled) continue;
+      for (const trigger of automation.triggers) {
+        if (!trigger.enabled || trigger.type !== "event") continue;
+        for (const event of this.store.listUndeliveredDomainEvents(
+          trigger.id,
+          automation.workspaceId,
+          trigger.createdAt,
+        )) {
+          if (trigger.events.length === 0 || trigger.events.includes(event.type)) pending.set(event.id, event);
+        }
+      }
+    }
+    const results: AutomationEventResult[] = [];
+    for (const event of [...pending.values()].sort((left, right) =>
+      left.createdAt - right.createdAt || left.id.localeCompare(right.id))) {
+      results.push(...this.receiveEvent({
+        workspaceId: event.workspaceId,
+        eventType: event.type,
+        eventId: event.id,
+        payload: event.payload,
+        createdAt: event.createdAt,
+      }));
     }
     return results;
   }

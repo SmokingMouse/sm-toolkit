@@ -4,12 +4,16 @@ import { useEffect, useState } from "react";
 import {
   automationLog,
   createAutomation,
+  createAutomationTrigger,
   deleteAutomation,
+  deleteAutomationTrigger,
   listAgents,
   listAutomations,
   listConversations,
   runAutomation,
   setAutomationEnabled,
+  updateAutomation,
+  updateAutomationTrigger,
   type AutomationLogRow,
   type AutomationWithAgent,
   type ConversationWithAgent,
@@ -22,12 +26,23 @@ import { btnGhost, btnPrimary, Empty, Field, inputCls, Modal, ModalFooter, PageH
 type TriggerType = "schedule" | "webhook" | "event";
 type OutputMode = "run" | "chat" | "issue" | "append" | "source";
 type OverlapMode = "skip" | "queue";
-type Purpose = "implementation" | "review" | "verification";
+type Purpose = "implementation" | "review" | "verification" | "coordination";
+
+type TriggerDraft = {
+  id: string;
+  type: TriggerType;
+  enabled: boolean;
+  cron: string;
+  provider: string;
+  events: string;
+  filters: string;
+};
 
 export default function AutomationsPage() {
   const autos = usePoll(listAutomations, 10_000);
   const agents = usePoll(listAgents, 30_000);
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<AutomationWithAgent | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const current = autos.data ?? [];
   const scheduleCount = current.flatMap((automation) => automation.triggers).filter((trigger) => trigger.type === "schedule").length;
@@ -64,6 +79,7 @@ export default function AutomationsPage() {
                 auto={automation}
                 expanded={expanded === automation.id}
                 onToggleLog={() => setExpanded(expanded === automation.id ? null : automation.id)}
+                onEdit={() => setEditing(automation)}
                 onChanged={autos.reload}
               />
             ))}
@@ -78,6 +94,14 @@ export default function AutomationsPage() {
           onChanged={autos.reload}
         />
       )}
+      {editing && (
+        <EditAutomationModal
+          auto={editing}
+          agents={agents.data ?? []}
+          onClose={() => setEditing(null)}
+          onChanged={() => { autos.reload(); }}
+        />
+      )}
     </div>
   );
 }
@@ -86,11 +110,13 @@ function AutomationRow({
   auto,
   expanded,
   onToggleLog,
+  onEdit,
   onChanged,
 }: {
   auto: AutomationWithAgent;
   expanded: boolean;
   onToggleLog: () => void;
+  onEdit: () => void;
   onChanged: () => void;
 }) {
   const toast = useToast();
@@ -164,6 +190,7 @@ function AutomationRow({
               {running ? "running…" : auto.outputMode === "source" ? "event only" : "run now"}
             </button>
             <button className="text-accent hover:underline" onClick={toggleEnabled}>{auto.enabled ? "disable" : "enable"}</button>
+            <button className="text-accent hover:underline" onClick={onEdit}>edit</button>
             <button className="text-dim hover:underline" onClick={onToggleLog}>log</button>
             <button className="text-canceled hover:underline" onClick={remove}>删除</button>
           </div>
@@ -191,6 +218,207 @@ function AutomationRow({
         </tr>
       )}
     </>
+  );
+}
+
+function triggerDraft(trigger: AutomationWithAgent["triggers"][number]): TriggerDraft {
+  return {
+    id: trigger.id,
+    type: trigger.type,
+    enabled: trigger.enabled,
+    cron: trigger.cron ?? "",
+    provider: trigger.provider ?? (trigger.type === "event" ? "harbor" : "generic"),
+    events: trigger.events.join(", "),
+    filters: JSON.stringify(trigger.filters, null, 2),
+  };
+}
+
+function EditAutomationModal({
+  auto,
+  agents,
+  onClose,
+  onChanged,
+}: {
+  auto: AutomationWithAgent;
+  agents: HarborAgent[];
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const toast = useToast();
+  const [name, setName] = useState(auto.name);
+  const [agent, setAgent] = useState(auto.agentId);
+  const [prompt, setPrompt] = useState(auto.prompt);
+  const [purpose, setPurpose] = useState<Purpose>(auto.purpose === "triage" ? "implementation" : auto.purpose);
+  const [outputMode, setOutputMode] = useState<OutputMode>(auto.outputMode);
+  const [overlapMode, setOverlapMode] = useState<OverlapMode>(auto.overlapMode);
+  const [target, setTarget] = useState(auto.targetConversationId ?? "");
+  const [notifyChat, setNotifyChat] = useState(auto.notifyChatId ?? "");
+  const [enabled, setEnabled] = useState(auto.enabled);
+  const [triggers, setTriggers] = useState<TriggerDraft[]>(auto.triggers.map(triggerDraft));
+  const [conversations, setConversations] = useState<ConversationWithAgent[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [webhookSecret, setWebhookSecret] = useState<string | null>(null);
+  const selectedAgent = agents.find((candidate) => candidate.id === agent);
+  const directWorktreeConflict = outputMode === "run" && purpose !== "coordination" && selectedAgent?.isolation === "worktree";
+
+  useEffect(() => {
+    if (outputMode === "append" && conversations.length === 0) listConversations({}).then(setConversations, () => {});
+  }, [outputMode, conversations.length]);
+
+  const updateDraft = (id: string, patch: Partial<TriggerDraft>) => {
+    setTriggers((current) => current.map((trigger) => trigger.id === id ? { ...trigger, ...patch } : trigger));
+  };
+
+  const addTrigger = async (type: TriggerType) => {
+    try {
+      const created = await createAutomationTrigger(auto.id, type === "schedule"
+        ? { type, cron: "0 9 * * *" }
+        : type === "event"
+          ? { type, events: ["issue.ready"] }
+          : { type, provider: "generic", events: [], filters: [] });
+      setTriggers((current) => [...current, triggerDraft(created)]);
+      if (created.webhookSecret) setWebhookSecret(created.webhookSecret);
+      onChanged();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+
+  const removeTrigger = async (trigger: TriggerDraft) => {
+    if (!confirm(`删除 ${trigger.type} trigger？`)) return;
+    try {
+      await deleteAutomationTrigger(auto.id, trigger.id);
+      setTriggers((current) => current.filter((candidate) => candidate.id !== trigger.id));
+      onChanged();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      await updateAutomation(auto.id, {
+        name: name.trim(),
+        agent,
+        prompt: prompt.trim(),
+        purpose,
+        outputMode,
+        overlapMode,
+        target: outputMode === "append" ? target : null,
+        notifyChat: notifyChat.trim() || null,
+        enabled,
+      });
+      for (const trigger of triggers) {
+        let filters: unknown;
+        try { filters = JSON.parse(trigger.filters || "[]"); }
+        catch { throw new Error(`${trigger.type} trigger filters 不是合法 JSON`); }
+        if (!Array.isArray(filters)) throw new Error(`${trigger.type} trigger filters 必须是数组`);
+        await updateAutomationTrigger(auto.id, trigger.id, {
+          enabled: trigger.enabled,
+          ...(trigger.type === "schedule" ? { cron: trigger.cron.trim() } : {
+            provider: trigger.provider.trim() || (trigger.type === "event" ? "harbor" : "generic"),
+            events: trigger.events.split(",").map((event) => event.trim()).filter(Boolean),
+            filters,
+          }),
+        });
+      }
+      toast(`已更新 ${name}`, "success");
+      onChanged();
+      onClose();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={`Edit Automation · ${auto.name}`} onClose={onClose} wide>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="name"><input className={inputCls} value={name} onChange={(event) => setName(event.target.value)} /></Field>
+        <Field label="agent">
+          <select className={inputCls} value={agent} onChange={(event) => setAgent(event.target.value)}>
+            {agents.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
+          </select>
+        </Field>
+      </div>
+      <Field label="prompt"><textarea className={`${inputCls} h-28 resize-y`} value={prompt} onChange={(event) => setPrompt(event.target.value)} /></Field>
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Field label="purpose">
+          <select className={inputCls} value={purpose} onChange={(event) => setPurpose(event.target.value as Purpose)}>
+            <option value="implementation">Implementation</option>
+            <option value="review">Review</option>
+            <option value="verification">Verification</option>
+            <option value="coordination">Coordination / routing</option>
+          </select>
+        </Field>
+        <Field label="output">
+          <select className={inputCls} value={outputMode} onChange={(event) => setOutputMode(event.target.value as OutputMode)}>
+            <option value="run">Run</option><option value="chat">Chat</option><option value="issue">Issue</option>
+            <option value="append">Append</option><option value="source">Source</option>
+          </select>
+        </Field>
+        <Field label="overlap">
+          <select className={inputCls} value={overlapMode} onChange={(event) => setOverlapMode(event.target.value as OverlapMode)}>
+            <option value="skip">Skip</option><option value="queue">Queue</option>
+          </select>
+        </Field>
+      </div>
+      {outputMode === "append" && (
+        <Field label="target conversation">
+          <select className={inputCls} value={target} onChange={(event) => setTarget(event.target.value)}>
+            <option value="">选择会话…</option>
+            {conversations.map((conversation) => <option key={conversation.id} value={conversation.id}>[{conversation.kind}] {conversation.title || conversation.id}</option>)}
+          </select>
+        </Field>
+      )}
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="notifyChat"><input className={`${inputCls} font-mono`} value={notifyChat} onChange={(event) => setNotifyChat(event.target.value)} /></Field>
+        <Field label="state"><label className="flex h-10 items-center gap-2"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /> enabled</label></Field>
+      </div>
+      {directWorktreeConflict && <div className="rounded-xl border border-canceled/30 bg-canceled/5 px-3 py-2 text-xs text-canceled">非 coordination 的 direct Run 要求 Agent isolation=none。</div>}
+
+      <div className="mt-3 rounded-xl border border-line bg-bg p-3">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div><div className="text-sm font-semibold">Triggers</div><div className="text-xs text-dim">类型不可原地修改；可删除后新增。</div></div>
+          <div className="flex gap-2 text-xs">
+            <button className={btnGhost} onClick={() => addTrigger("schedule")}>+ schedule</button>
+            <button className={btnGhost} onClick={() => addTrigger("event")}>+ event</button>
+            <button className={btnGhost} onClick={() => addTrigger("webhook")}>+ webhook</button>
+          </div>
+        </div>
+        <div className="space-y-3">
+          {triggers.map((trigger) => (
+            <div key={trigger.id} className="rounded-lg border border-line bg-panel p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={trigger.enabled} onChange={(event) => updateDraft(trigger.id, { enabled: event.target.checked })} />{trigger.type}</label>
+                <button className="text-xs text-canceled hover:underline" onClick={() => removeTrigger(trigger)}>删除</button>
+              </div>
+              {trigger.type === "schedule" ? (
+                <input className={`${inputCls} font-mono`} value={trigger.cron} onChange={(event) => updateDraft(trigger.id, { cron: event.target.value })} />
+              ) : (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <input className={`${inputCls} font-mono`} value={trigger.provider} disabled={trigger.type === "event"} onChange={(event) => updateDraft(trigger.id, { provider: event.target.value })} />
+                  <input className={`${inputCls} font-mono`} value={trigger.events} onChange={(event) => updateDraft(trigger.id, { events: event.target.value })} placeholder="issue.created, issue.ready" />
+                  <textarea className={`${inputCls} h-20 resize-y font-mono text-xs sm:col-span-2`} value={trigger.filters} onChange={(event) => updateDraft(trigger.id, { filters: event.target.value })} />
+                </div>
+              )}
+            </div>
+          ))}
+          {triggers.length === 0 && <div className="text-xs text-dim">manual only</div>}
+        </div>
+      </div>
+      {webhookSecret && (
+        <div className="mt-3 rounded-xl border border-review/35 bg-review/5 p-3 text-xs">
+          新 webhook secret 只显示一次：<span className="break-all font-mono">{webhookSecret}</span>
+        </div>
+      )}
+      <ModalFooter>
+        <button className={btnGhost} onClick={onClose}>取消</button>
+        <button className={btnPrimary} disabled={busy || !name.trim() || !prompt.trim() || directWorktreeConflict || (outputMode === "append" && !target)} onClick={submit}>{busy ? "保存中…" : "保存"}</button>
+      </ModalFooter>
+    </Modal>
   );
 }
 
@@ -283,7 +511,7 @@ function NewAutomationModal({
     );
   }
 
-  const directWorktreeConflict = outputMode === "run" && selectedAgent?.isolation === "worktree";
+  const directWorktreeConflict = outputMode === "run" && purpose !== "coordination" && selectedAgent?.isolation === "worktree";
   return (
     <Modal title="New Automation" onClose={onClose} wide>
       <div className="grid gap-4 sm:grid-cols-2">
@@ -326,7 +554,7 @@ function NewAutomationModal({
       {triggerType !== "schedule" && (
         <div className="grid gap-4 rounded-xl border border-line bg-bg p-3 sm:grid-cols-2">
           <Field label={triggerType === "event" ? "Harbor events（逗号分隔）" : "events（逗号分隔；留空接受全部）"}>
-            <input className={`${inputCls} font-mono`} value={events} onChange={(event) => setEvents(event.target.value)} placeholder={triggerType === "event" ? "issue.review_ready, delivery.merge_ready" : "push, merge_request"} />
+            <input className={`${inputCls} font-mono`} value={events} onChange={(event) => setEvents(event.target.value)} placeholder={triggerType === "event" ? "issue.created, issue.ready, issue.review_ready" : "push, merge_request"} />
           </Field>
           <Field label="可选 OR filter">
             <div className="grid grid-cols-2 gap-2">
@@ -347,6 +575,7 @@ function NewAutomationModal({
             <option value="implementation">Implementation</option>
             <option value="review">Review</option>
             <option value="verification">Verification / deployment</option>
+            <option value="coordination">Coordination / routing</option>
           </select>
         </Field>
         <Field label="output">
@@ -388,7 +617,7 @@ function NewAutomationModal({
         <button className={btnGhost} onClick={onClose}>取消</button>
         <button
           className={btnPrimary}
-          disabled={busy || !name.trim() || !agent || !prompt.trim() || (triggerType === "schedule" && !cron.trim()) || (triggerType === "event" && !events.trim()) || (outputMode === "append" && !target) || (outputMode === "source" && triggerType !== "event") || (purpose === "review" && outputMode !== "source" && outputMode !== "append") || directWorktreeConflict}
+          disabled={busy || !name.trim() || !agent || !prompt.trim() || (triggerType === "schedule" && !cron.trim()) || (triggerType === "event" && !events.trim()) || (outputMode === "append" && !target) || (outputMode === "source" && triggerType !== "event") || ((purpose === "review" || purpose === "verification") && outputMode !== "source" && outputMode !== "append") || directWorktreeConflict}
           onClick={submit}
         >
           {busy ? "创建中…" : "创建"}

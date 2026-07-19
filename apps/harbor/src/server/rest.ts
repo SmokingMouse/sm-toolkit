@@ -46,7 +46,7 @@ import {
 import type { HarborStore } from "./store.js";
 import type { RunBus } from "./bus.js";
 import type { DeviceHub } from "./ws.js";
-import type { RunCoordinator } from "./scheduler.js";
+import { RunCoordinator } from "./scheduler.js";
 import type { ApprovalService } from "./approvals.js";
 import { AutomationService, hashWebhookSecret } from "./automation.js";
 import { inactiveMaintenanceGuard, matchesRevisionAwareHealth, type MaintenanceGuard } from "./maintenance.js";
@@ -561,6 +561,108 @@ export function buildRest(
     return { run, agent, conversation };
   };
 
+  /** Run-scoped 只读快照：给用户自定义的 routing Agent 足够信息，但不泄露凭证/环境/指令。 */
+  app.get("/hooks/agent-actions/context", (c) => {
+    const { run, agent, conversation } = runActionContext(c);
+    const repository = run.repositoryId ? store.getRepository(run.repositoryId) : null;
+    const delivery = conversation ? store.getDeliveryForConversation(conversation.id) : null;
+    const agents = store.listAgents(false, run.workspaceId)
+      .filter((candidate) => !candidate.archivedAt)
+      .map((candidate) => ({
+        id: candidate.id,
+        name: candidate.name,
+        description: candidate.description,
+        deviceId: candidate.deviceId,
+        backend: candidate.backend,
+        repositoryIds: candidate.repositoryIds,
+      }));
+    const sourceRuns = store.listRunsBySource(run.sourceType, run.sourceId).map((candidate) => ({
+      id: candidate.id,
+      parentRunId: candidate.parentRunId,
+      rootRunId: candidate.rootRunId,
+      dispatchDepth: candidate.dispatchDepth,
+      agentId: candidate.agentId,
+      deviceId: candidate.deviceId,
+      purpose: candidate.purpose,
+      status: candidate.status,
+      queuedAt: candidate.queuedAt,
+      finishedAt: candidate.finishedAt,
+      error: candidate.error,
+    }));
+    return c.json({
+      run: {
+        id: run.id,
+        rootRunId: run.rootRunId,
+        parentRunId: run.parentRunId,
+        dispatchDepth: run.dispatchDepth,
+        sourceType: run.sourceType,
+        sourceId: run.sourceId,
+        purpose: run.purpose,
+        status: run.status,
+        repositoryId: run.repositoryId,
+        reviewCheckout: run.reviewCheckout,
+      },
+      agent: { id: agent.id, name: agent.name, deviceId: agent.deviceId, backend: agent.backend },
+      conversation: conversation ? {
+        id: conversation.id,
+        kind: conversation.kind,
+        title: conversation.title,
+        description: conversation.description,
+        priority: conversation.priority,
+        status: conversation.status,
+        agentId: conversation.agentId,
+        repositoryId: conversation.repositoryId,
+        origin: conversation.origin,
+        originRef: conversation.originRef,
+        ownerMemberId: conversation.ownerMemberId,
+        labelIds: conversation.labelIds,
+        createdAt: conversation.createdAt,
+        updatedAt: conversation.updatedAt,
+      } : null,
+      delivery,
+      repository: repository ? {
+        id: repository.id,
+        name: repository.name,
+        defaultBranch: repository.defaultBranch,
+        scmProvider: repository.scmProvider,
+      } : null,
+      agents,
+      sourceRuns,
+      limits: { maxDispatchDepth: RunCoordinator.MAX_DISPATCH_DEPTH },
+    });
+  });
+
+  /** 用户/Skill 明确给出目标 Agent；Harbor 只做 scope、mount、purpose、lineage 和幂等校验。 */
+  app.post("/hooks/agent-actions/dispatch", async (c) => {
+    const { run } = runActionContext(c);
+    const body = (await c.req.json()) as {
+      agent?: string;
+      purpose?: RunPurpose;
+      prompt?: string;
+      idempotencyKey?: string;
+    };
+    const prompt = body.prompt?.trim() ?? "";
+    const key = body.idempotencyKey?.trim() ?? "";
+    if (!body.agent?.trim()) return c.json({ error: "缺少目标 agent id/name" }, 400);
+    if (!prompt || prompt.length > 128 * 1024) return c.json({ error: "prompt 需要 1–128KB" }, 400);
+    if (!key || key.length > 128) return c.json({ error: "idempotencyKey 需要 1–128 字符" }, 400);
+    const purpose = body.purpose ?? "implementation";
+    if (!RUN_PURPOSES.includes(purpose) || purpose === "triage") {
+      return c.json({ error: `purpose 可选 ${RUN_PURPOSES.filter((value) => value !== "triage").join("/")}` }, 400);
+    }
+    const target = store.getAgent(body.agent) ?? store.getAgentByNameInWorkspace(run.workspaceId, body.agent);
+    if (!target || target.workspaceId !== run.workspaceId || target.archivedAt) {
+      return c.json({ error: `目标 Agent "${body.agent}" 不存在或已归档` }, 400);
+    }
+    const existing = store.getRunByDispatchKey(run.rootRunId, key);
+    try {
+      const child = coordinator.enqueueChildRun(run, target, prompt, purpose, key);
+      return c.json({ run: child, reused: existing?.id === child.id }, existing ? 200 : 201);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
   /**
    * Run-scoped control-plane action：创建同 Workspace Issue，可受控指派并立即派给目标 Agent。
    * 不复用 HARBOR_TOKEN；目标 Repository 仍完全由目标 Agent 决定。
@@ -783,6 +885,14 @@ export function buildRest(
         delivery = await deliveries.sync(delivery, conversation, now, run.id);
       } else if (delivery.provider === "codebase") {
         delivery = await deliveries.refresh(delivery, now);
+      }
+      if (
+        run.reviewCheckout &&
+        delivery.latestHeadSha?.toLowerCase() !== run.reviewCheckout.revision.toLowerCase()
+      ) {
+        return c.json({
+          error: `Delivery head 已变化；本 Run 审查的是 ${run.reviewCheckout.revision}，当前为 ${delivery.latestHeadSha ?? "unknown"}`,
+        }, 409);
       }
       delivery = deliveries.approve(delivery, conversation, now, run.id, "agent");
       let mergeDeferred: string | null = null;
@@ -3097,8 +3207,8 @@ export function buildRest(
     if ((outputMode === "chat" || outputMode === "issue") && purpose !== "implementation") {
       bad(`${outputMode} output 只支持 implementation purpose`);
     }
-    if (purpose === "review" && outputMode !== "source" && outputMode !== "append") {
-      bad("review purpose 需要 source 或 append conversation output");
+    if ((purpose === "review" || purpose === "verification") && outputMode !== "source" && outputMode !== "append") {
+      bad(`${purpose} purpose 需要 source 或 append conversation output`);
     }
     if (outputMode === "source" && triggerType !== "event") {
       bad("source output 只接受 Harbor event trigger");
@@ -3107,7 +3217,7 @@ export function buildRest(
     if (overlapMode !== "skip" && overlapMode !== "queue") {
       bad(`overlapMode 可选 skip/queue（收到 "${b.overlapMode}"）`);
     }
-    if (outputMode === "run" && agent.isolation === "worktree") {
+    if (outputMode === "run" && purpose !== "coordination" && agent.isolation === "worktree") {
       bad(
         "outputMode=run 当前要求 Agent isolation=none；需要 worktree 时请选择 chat/issue 输出",
       );
@@ -3176,11 +3286,76 @@ export function buildRest(
       throw new HTTPException(404, {
         message: `automation "${c.req.param("id")}" 不存在`,
       });
-    const b = (await c.req.json()) as { enabled?: boolean };
-    if (typeof b.enabled !== "boolean") bad("需要 enabled: true/false");
-    store.setAutomationEnabled(auto.id, b.enabled);
-    const fresh = store.getAutomation(auto.id)!;
-    if (b.enabled) automations.schedule(fresh);
+    const b = (await c.req.json()) as {
+      name?: string;
+      agent?: string;
+      prompt?: string;
+      purpose?: RunPurpose;
+      outputMode?: AutomationOutputMode;
+      overlapMode?: AutomationOverlapMode;
+      target?: string | null;
+      notifyChat?: string | null;
+      enabled?: boolean;
+      repository?: unknown;
+    };
+    if (b.repository !== undefined) bad("Automation 的 Repository 由 Agent 决定，请修改 Agent 配置");
+    const name = b.name === undefined ? auto.name : b.name.trim();
+    if (!name) bad("name 不能为空");
+    if (store.listAutomations(workspace.id).some((candidate) => candidate.id !== auto.id && candidate.name === name)) {
+      bad(`automation 名 "${name}" 已存在于当前 Workspace`);
+    }
+    const prompt = b.prompt === undefined ? auto.prompt : b.prompt.trim();
+    if (!prompt) bad("prompt 不能为空");
+    const agent = b.agent === undefined ? store.getAgent(auto.agentId) : scopedAgent(c, workspace.id, b.agent);
+    if (!agent || agent.archivedAt) bad(`agent "${b.agent ?? auto.agentId}" 不存在或已归档`);
+    const purpose = b.purpose ?? auto.purpose;
+    if (!RUN_PURPOSES.includes(purpose) || purpose === "triage") bad(`purpose 可选 ${RUN_PURPOSES.filter((value) => value !== "triage").join("/")}`);
+    const outputMode = b.outputMode ?? auto.outputMode;
+    if (!["run", "chat", "issue", "append", "source"].includes(outputMode)) bad("outputMode 可选 run/chat/issue/append/source");
+    if ((outputMode === "chat" || outputMode === "issue") && purpose !== "implementation") {
+      bad(`${outputMode} output 只支持 implementation purpose`);
+    }
+    if ((purpose === "review" || purpose === "verification") && outputMode !== "source" && outputMode !== "append") {
+      bad(`${purpose} purpose 需要 source 或 append conversation output`);
+    }
+    if (outputMode === "source" && auto.triggers.some((trigger) => trigger.type !== "event")) {
+      bad("source output 只接受 Harbor event trigger；请先删除 schedule/webhook trigger");
+    }
+    if (outputMode === "run" && purpose !== "coordination" && agent.isolation === "worktree") {
+      bad("outputMode=run 要求 Agent isolation=none；coordination purpose 除外");
+    }
+    const overlapMode = b.overlapMode ?? auto.overlapMode;
+    if (overlapMode !== "skip" && overlapMode !== "queue") bad("overlapMode 可选 skip/queue");
+    let targetId = auto.targetConversationId;
+    if (outputMode === "append") {
+      const targetKey = b.target === undefined ? auto.targetConversationId : b.target;
+      if (!targetKey) bad("outputMode=append 需要 target conversation");
+      const target = store.resolveConversationPrefix(targetKey);
+      if (!target || target.workspaceId !== workspace.id) bad(`target conversation "${targetKey}" 不存在`);
+      if (target.repositoryId && !agent.repositoryIds.includes(target.repositoryId)) {
+        bad("append target Repository 不在 Agent 可见范围");
+      }
+      targetId = target.id;
+    } else {
+      targetId = null;
+    }
+    const repository = store.getRepository(agent.repositoryId);
+    if (!repository || repository.archivedAt || !store.getRepositoryMountForDevice(repository.id, agent.deviceId)) {
+      bad(`Agent "${agent.name}" 的 Repository mount 不可用`);
+    }
+    const fresh = store.updateAutomation(auto.id, {
+      name,
+      agentId: agent.id,
+      repositoryId: repository.id,
+      prompt,
+      purpose,
+      outputMode,
+      overlapMode,
+      targetConversationId: targetId,
+      ...(b.notifyChat !== undefined ? { notifyChatId: b.notifyChat?.trim() || null } : {}),
+      ...(b.enabled !== undefined ? { enabled: b.enabled } : {}),
+    }, Date.now());
+    if (fresh.enabled) automations.schedule(fresh);
     else automations.unschedule(auto.id);
     return c.json(fresh);
   });
@@ -3239,6 +3414,17 @@ export function buildRest(
     };
     if (b.type !== "schedule" && b.type !== "webhook" && b.type !== "event")
       bad("type 可选 schedule/webhook/event");
+    if (auto.outputMode === "source" && b.type !== "event") {
+      bad("source output 只接受 Harbor event trigger");
+    }
+    if (b.events !== undefined && (!Array.isArray(b.events) || b.events.some((event) => typeof event !== "string"))) {
+      bad("events 必须是 string[]");
+    }
+    if (b.filters !== undefined && (!Array.isArray(b.filters) || b.filters.some((filter) =>
+      !filter || typeof filter !== "object" || typeof filter.path !== "string" || !filter.path.trim()
+    ))) {
+      bad("filters 必须是包含非空 path 的数组");
+    }
     if (b.type === "schedule") {
       if (!b.cron?.trim()) bad("schedule trigger 缺少 cron");
       try {
@@ -3289,6 +3475,50 @@ export function buildRest(
     store.deleteAutomationTrigger(trigger.id);
     automations.schedule(store.getAutomation(auto.id)!);
     return c.json({ ok: true });
+  });
+
+  app.patch("/api/automations/:id/triggers/:triggerId", async (c) => {
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const auto = store.resolveAutomationPrefix(c.req.param("id"), workspace.id);
+    const trigger = store.getAutomationTrigger(c.req.param("triggerId"));
+    if (!auto || !trigger || trigger.automationId !== auto.id) {
+      throw new HTTPException(404, { message: "automation trigger 不存在" });
+    }
+    const b = (await c.req.json()) as {
+      enabled?: boolean;
+      cron?: string | null;
+      provider?: string | null;
+      events?: unknown;
+      filters?: unknown;
+    };
+    if (trigger.type === "schedule" && b.cron !== undefined) {
+      if (!b.cron?.trim()) bad("schedule trigger 缺少 cron");
+      try { AutomationService.validateCron(b.cron.trim()); }
+      catch (error) { bad(`cron 表达式非法：${error instanceof Error ? error.message : String(error)}`); }
+    }
+    if (b.events !== undefined && (!Array.isArray(b.events) || b.events.some((event) => typeof event !== "string"))) {
+      bad("events 必须是 string[]");
+    }
+    const events = b.events === undefined
+      ? undefined
+      : [...new Set((b.events as string[]).map((event) => event.trim()).filter(Boolean))];
+    if (trigger.type === "event" && events?.length === 0) bad("event trigger 至少需要一个 Harbor event type");
+    if (trigger.type === "event" && events?.some((event) => !AUTOMATION_EVENT_TYPES.includes(event as (typeof AUTOMATION_EVENT_TYPES)[number]))) {
+      bad(`Harbor event 可选 ${AUTOMATION_EVENT_TYPES.join(", ")}`);
+    }
+    if (b.filters !== undefined && (!Array.isArray(b.filters) || b.filters.some((filter) =>
+      !filter || typeof filter !== "object" || typeof (filter as AutomationWebhookFilter).path !== "string" || !(filter as AutomationWebhookFilter).path.trim()
+    ))) bad("filters 必须是包含非空 path 的数组");
+    const fresh = store.updateAutomationTrigger(trigger.id, {
+      ...(b.enabled !== undefined ? { enabled: b.enabled } : {}),
+      ...(b.cron !== undefined ? { cron: b.cron?.trim() ?? null } : {}),
+      ...(b.provider !== undefined ? { provider: b.provider?.trim() || "generic" } : {}),
+      ...(events !== undefined ? { events } : {}),
+      ...(b.filters !== undefined ? { filters: b.filters as AutomationWebhookFilter[] } : {}),
+    }, Date.now());
+    automations.schedule(store.getAutomation(auto.id)!);
+    return c.json(fresh);
   });
 
   // ---- usage（P3 报表） ----

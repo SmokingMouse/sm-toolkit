@@ -20,7 +20,12 @@ import { basename, join } from "node:path";
 import { assertAgentEnvironmentSafe } from "../agent-environment.js";
 import type { DaemonMsg, RunAttachment, RunSpec } from "../protocol.js";
 import { detectEnvironmentSkillNames } from "./capabilities.js";
-import { ensureWorktree, resolveWorktreeGitCommonDir } from "./worktree.js";
+import {
+  ensureReviewCheckout,
+  ensureWorktree,
+  removeReviewCheckout,
+  resolveWorktreeGitCommonDir,
+} from "./worktree.js";
 
 const FLUSH_MS = 200;
 const FLUSH_COUNT = 20;
@@ -97,13 +102,18 @@ export class Executor {
     let cost: Cost | null = null;
     let errMsg: string | null = null;
     let attachmentDir: string | null = null;
+    let reviewCheckoutPath: string | null = null;
     try {
       const agentEnvironment = spec.envOverrides ?? {};
       // 老 DB / 旧 server 也不能绕过新 API 校验：daemon 在真正 spawn 前再次 fail-closed。
       assertAgentEnvironmentSafe(agentEnvironment);
-      const { executionRoot: effectiveDir, shouldReportWorktreeReady } = prepareRunExecution(spec);
+      const { executionRoot: effectiveDir, shouldReportWorktreeReady } = prepareRunExecution(spec, runId);
+      reviewCheckoutPath = spec.reviewCheckout ? effectiveDir : null;
       if (shouldReportWorktreeReady && effectiveDir && spec.conversationId) {
         this.send({ type: "worktree_ready", runId, conversationId: spec.conversationId, path: effectiveDir });
+      }
+      if (reviewCheckoutPath) {
+        this.send({ type: "run_execution_ready", runId, path: reviewCheckoutPath });
       }
       const additionalWritableDirs = resolveRunAdditionalWritableDirs(spec, effectiveDir);
 
@@ -124,6 +134,8 @@ export class Executor {
         actionEnvironment.HARBOR_AGENT_ISSUE_URL = `${actionBaseUrl}/issues`;
         actionEnvironment.HARBOR_AGENT_DELIVERY_URL = `${actionBaseUrl}/deliveries`;
         actionEnvironment.HARBOR_AGENT_REVIEW_URL = `${actionBaseUrl}/reviews`;
+        actionEnvironment.HARBOR_AGENT_CONTEXT_URL = `${actionBaseUrl}/context`;
+        actionEnvironment.HARBOR_AGENT_DISPATCH_URL = `${actionBaseUrl}/dispatch`;
         actionEnvironment.HARBOR_AGENT_ACTION_TOKEN = spec.agentActionToken;
       }
       const interactive = spec.permission === "default";
@@ -185,6 +197,10 @@ export class Executor {
       clearInterval(timer);
       flush();
       if (attachmentDir) rmSync(attachmentDir, { recursive: true, force: true });
+      if (reviewCheckoutPath && spec.repositoryRoot) {
+        const cleanup = removeReviewCheckout(spec.repositoryRoot, reviewCheckoutPath);
+        if (!cleanup.ok) errMsg = [errMsg, cleanup.message].filter(Boolean).join("; ");
+      }
     }
 
     this.send({
@@ -202,10 +218,21 @@ export class Executor {
  * 解析 daemon 实际 cwd。Repository mount 只作为仓库身份锚点；executionRoot/worktreePath
  * 是独立的执行位置。worktree 模式始终从 mount 校验/创建，已有路径只做幂等复用。
  */
-export function prepareRunExecution(spec: RunSpec): {
+export function prepareRunExecution(spec: RunSpec, runId?: string): {
   executionRoot: string | null;
   shouldReportWorktreeReady: boolean;
 } {
+  if (spec.reviewCheckout) {
+    if (!spec.repositoryRoot) throw new Error("exact-revision Review 需要 Repository mount");
+    if (spec.purpose !== "review" && spec.purpose !== "verification") {
+      throw new Error("reviewCheckout 只允许 review/verification purpose");
+    }
+    if (!runId) throw new Error("exact-revision Review 缺少 Run ID");
+    return {
+      executionRoot: ensureReviewCheckout(spec.repositoryRoot, runId, spec.reviewCheckout),
+      shouldReportWorktreeReady: false,
+    };
+  }
   if (spec.isolation !== "worktree") {
     return { executionRoot: spec.executionRoot ?? spec.repositoryRoot, shouldReportWorktreeReady: false };
   }

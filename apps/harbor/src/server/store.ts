@@ -34,6 +34,7 @@ import type {
   DeploymentJobStatus,
   DeploymentMaintenanceGate,
   DeploymentMaintenancePhase,
+  DomainEvent,
   DeliveryMergeStatus,
   DeliveryProviderKind,
   DeliveryReviewStatus,
@@ -57,6 +58,7 @@ import type {
   RunPurpose,
   RunSourceType,
   RunStatus,
+  ReviewCheckout,
   RepositoryMount,
   ScmEvent,
   ScmExternalObject,
@@ -257,6 +259,14 @@ interface RunRow {
   trigger_ref: string | null;
   trigger_context: string;
   concurrency_key: string | null;
+  parent_run_id: string | null;
+  root_run_id: string;
+  dispatch_depth: number;
+  dispatch_key: string | null;
+  review_delivery_id: string | null;
+  review_revision: string | null;
+  review_ref: string | null;
+  review_remote_url: string | null;
   status: string;
   claude_session_id: string | null;
   error: string | null;
@@ -267,6 +277,16 @@ interface RunRow {
   queued_at: number;
   started_at: number | null;
   finished_at: number | null;
+}
+
+interface DomainEventRow {
+  id: string;
+  workspace_id: string;
+  event_type: string;
+  source_type: string;
+  source_id: string;
+  payload: string;
+  created_at: number;
 }
 
 interface RunEventDbRow {
@@ -713,6 +733,18 @@ function toRun(r: RunRow): Run {
     triggerRef: r.trigger_ref,
     triggerContext: parseJsonRecord(r.trigger_context),
     concurrencyKey: r.concurrency_key,
+    parentRunId: r.parent_run_id,
+    rootRunId: r.root_run_id,
+    dispatchDepth: r.dispatch_depth,
+    dispatchKey: r.dispatch_key,
+    reviewCheckout: r.review_delivery_id && r.review_revision && r.review_ref && r.review_remote_url
+      ? {
+          deliveryId: r.review_delivery_id,
+          revision: r.review_revision,
+          ref: r.review_ref,
+          remoteUrl: r.review_remote_url,
+        }
+      : null,
     status: r.status as RunStatus,
     claudeSessionId: r.claude_session_id,
     error: r.error,
@@ -727,6 +759,18 @@ function toRun(r: RunRow): Run {
     queuedAt: r.queued_at,
     startedAt: r.started_at,
     finishedAt: r.finished_at,
+  };
+}
+
+function toDomainEvent(r: DomainEventRow): DomainEvent {
+  return {
+    id: r.id,
+    workspaceId: r.workspace_id,
+    type: r.event_type as DomainEvent["type"],
+    sourceType: r.source_type as DomainEvent["sourceType"],
+    sourceId: r.source_id,
+    payload: parseJsonRecord(r.payload),
+    createdAt: r.created_at,
   };
 }
 
@@ -812,7 +856,23 @@ function parseJsonArray<T>(value: string): T[] {
 // ── Store ───────────────────────────────────────────────
 
 export class HarborStore {
+  private domainEventListener: ((event: DomainEvent) => void) | null = null;
+
   constructor(private db: Database) {}
+
+  setDomainEventListener(listener: ((event: DomainEvent) => void) | null): void {
+    this.domainEventListener = listener;
+  }
+
+  private notifyDomainEvent(event: DomainEvent | null): void {
+    if (!event || !this.domainEventListener) return;
+    try {
+      this.domainEventListener(event);
+    } catch (error) {
+      // 领域事实已经提交；Automation 消费失败由启动重放补偿，不能回滚业务事务。
+      console.error(`[domain-event] dispatch failed for ${event.id}:`, error);
+    }
+  }
 
   // ---- workspaces / repositories ----
 
@@ -1724,6 +1784,7 @@ export class HarborStore {
     const agent = c.agentId ? this.getAgent(c.agentId) : null;
     const workspaceId = c.workspaceId ?? agent?.workspaceId ?? DEFAULT_WORKSPACE_ID;
     const repositoryId = c.repositoryId === undefined ? (agent?.repositoryId ?? null) : c.repositoryId;
+    let createdEvent: DomainEvent | null = null;
     this.db.transaction(() => {
       this.db.run(
         `INSERT INTO conversations
@@ -1749,7 +1810,23 @@ export class HarborStore {
         ],
       );
       this.setConversationLabels(id, c.labelIds ?? [], now);
+      if (c.kind === "issue") {
+        createdEvent = this.insertDomainEvent({
+          id: `issue.created:${id}`,
+          workspaceId,
+          type: "issue.created",
+          sourceType: "issue",
+          sourceId: id,
+          payload: {
+            conversationId: id,
+            repositoryId,
+            status,
+            title: c.title ?? null,
+          },
+        }, now);
+      }
     })();
+    this.notifyDomainEvent(createdEvent);
     return this.getConversation(id)!;
   }
 
@@ -1792,7 +1869,29 @@ export class HarborStore {
   }
 
   setConversationStatus(id: string, status: ConversationStatus, now: number): void {
-    this.db.run("UPDATE conversations SET status = ?, updated_at = ? WHERE id = ?", [status, now, id]);
+    let readyEvent: DomainEvent | null = null;
+    this.db.transaction(() => {
+      this.db.run("UPDATE conversations SET status = ?, updated_at = ? WHERE id = ?", [status, now, id]);
+      if (status === "todo") {
+        const conversation = this.getConversation(id);
+        if (conversation?.kind === "issue") {
+          readyEvent = this.insertDomainEvent({
+            id: `issue.ready:${id}`,
+            workspaceId: conversation.workspaceId,
+            type: "issue.ready",
+            sourceType: "issue",
+            sourceId: id,
+            payload: {
+              conversationId: id,
+              repositoryId: conversation.repositoryId,
+              status,
+              title: conversation.title,
+            },
+          }, now);
+        }
+      }
+    })();
+    this.notifyDomainEvent(readyEvent);
   }
 
   updateConversation(
@@ -2274,6 +2373,7 @@ export class HarborStore {
       externalId?: string | null;
       headBranch?: string | null;
       baseBranch?: string | null;
+      latestHeadSha?: string | null;
       deploymentRequired?: boolean;
       deploymentTargetId?: string | null;
       checkStatus?: DeliveryCheckStatus;
@@ -2283,9 +2383,9 @@ export class HarborStore {
     const id = newId("delivery");
     this.db.run(
       `INSERT INTO deliveries
-       (id, conversation_id, provider, change_url, external_id, head_branch, base_branch, check_status,
+       (id, conversation_id, provider, change_url, external_id, head_branch, base_branch, latest_head_sha, check_status,
         deployment_status, deployment_target_id, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?, ?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?, ?,?,?,?)`,
       [
         id,
         input.conversationId,
@@ -2294,6 +2394,7 @@ export class HarborStore {
         input.externalId ?? null,
         input.headBranch ?? null,
         input.baseBranch ?? null,
+        input.latestHeadSha?.toLowerCase() ?? null,
         input.checkStatus ?? "unknown",
         input.deploymentRequired ? "pending" : "not_required",
         input.deploymentTargetId ?? null,
@@ -3286,6 +3387,11 @@ export class HarborStore {
       triggerRef?: string | null;
       triggerContext?: Record<string, unknown>;
       concurrencyKey?: string | null;
+      parentRunId?: string | null;
+      rootRunId?: string;
+      dispatchDepth?: number;
+      dispatchKey?: string | null;
+      reviewCheckout?: ReviewCheckout | null;
       attachments?: RunAttachment[];
     },
     now: number,
@@ -3302,12 +3408,21 @@ export class HarborStore {
     if (sourceType !== "automation" && !conversation) {
       throw new Error(`${sourceType}-source Run 必须绑定 Conversation`);
     }
+    const parent = r.parentRunId ? this.getRun(r.parentRunId) : null;
+    if (r.parentRunId && !parent) throw new Error("parent Run 不存在");
+    const rootRunId = r.rootRunId ?? parent?.rootRunId ?? id;
+    const dispatchDepth = r.dispatchDepth ?? (parent ? parent.dispatchDepth + 1 : 0);
+    if (parent && (parent.workspaceId !== workspaceId || parent.sourceType !== sourceType || parent.sourceId !== sourceId)) {
+      throw new Error("派生 Run 必须与 parent Run 保持相同 Workspace 和 source");
+    }
+    if (parent && rootRunId !== parent.rootRunId) throw new Error("派生 Run rootRunId 与 parent 不一致");
     this.db.run(
       `INSERT INTO runs
        (id, workspace_id, source_type, source_id, conversation_id, agent_id, device_id, repository_id,
         repository_mount_id, execution_root, prompt, purpose, prompt_event, trigger_ref, trigger_context,
-        concurrency_key, status, queued_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?)`,
+        concurrency_key, parent_run_id, root_run_id, dispatch_depth, dispatch_key,
+        review_delivery_id, review_revision, review_ref, review_remote_url, status, queued_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?)`,
       [
         id,
         workspaceId,
@@ -3325,6 +3440,14 @@ export class HarborStore {
         r.triggerRef ?? null,
         JSON.stringify(r.triggerContext ?? {}),
         r.concurrencyKey ?? null,
+        r.parentRunId ?? null,
+        rootRunId,
+        dispatchDepth,
+        r.dispatchKey ?? null,
+        r.reviewCheckout?.deliveryId ?? null,
+        r.reviewCheckout?.revision.toLowerCase() ?? null,
+        r.reviewCheckout?.ref ?? null,
+        r.reviewCheckout?.remoteUrl ?? null,
         now,
       ],
     );
@@ -3384,6 +3507,13 @@ export class HarborStore {
   getRun(id: string): Run | null {
     const r = this.db.query<RunRow, [string]>("SELECT * FROM runs WHERE id = ?").get(id);
     return r ? toRun(r) : null;
+  }
+
+  getRunByDispatchKey(rootRunId: string, dispatchKey: string): Run | null {
+    const row = this.db.query<RunRow, [string, string]>(
+      "SELECT * FROM runs WHERE root_run_id = ? AND dispatch_key = ?",
+    ).get(rootRunId, dispatchKey);
+    return row ? toRun(row) : null;
   }
 
   resolveRunPrefix(prefix: string): Run | null {
@@ -3655,6 +3785,72 @@ export class HarborStore {
     return r?.feishu_message_id ?? null;
   }
 
+  // ---- durable domain events ----
+
+  private insertDomainEvent(
+    event: Omit<DomainEvent, "createdAt">,
+    now: number,
+  ): DomainEvent | null {
+    const result = this.db.run(
+      `INSERT OR IGNORE INTO domain_events
+       (id, workspace_id, event_type, source_type, source_id, payload, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      [
+        event.id,
+        event.workspaceId,
+        event.type,
+        event.sourceType,
+        event.sourceId,
+        JSON.stringify(event.payload),
+        now,
+      ],
+    );
+    return result.changes === 1
+      ? { ...event, createdAt: now }
+      : null;
+  }
+
+  /** 以稳定 event ID 写入；首次写入才通知消费者，重放由 listDomainEvents 驱动。 */
+  recordDomainEvent(event: Omit<DomainEvent, "createdAt">, now: number): DomainEvent {
+    const inserted = this.insertDomainEvent(event, now);
+    const durable = inserted ?? this.getDomainEvent(event.id);
+    if (!durable) throw new Error(`领域事件 ${event.id} 写入失败`);
+    this.notifyDomainEvent(inserted);
+    return durable;
+  }
+
+  getDomainEvent(id: string): DomainEvent | null {
+    const row = this.db.query<DomainEventRow, [string]>(
+      "SELECT * FROM domain_events WHERE id = ?",
+    ).get(id);
+    return row ? toDomainEvent(row) : null;
+  }
+
+  listDomainEvents(workspaceId?: string): DomainEvent[] {
+    const rows = workspaceId
+      ? this.db.query<DomainEventRow, [string]>(
+        "SELECT * FROM domain_events WHERE workspace_id = ? ORDER BY created_at, id",
+      ).all(workspaceId)
+      : this.db.query<DomainEventRow, []>(
+        "SELECT * FROM domain_events ORDER BY created_at, id",
+      ).all();
+    return rows.map(toDomainEvent);
+  }
+
+  listUndeliveredDomainEvents(
+    triggerId: string,
+    workspaceId: string,
+    createdAtOrAfter: number,
+  ): DomainEvent[] {
+    return this.db.query<DomainEventRow, [string, string, number]>(
+      `SELECT event.* FROM domain_events event
+       LEFT JOIN automation_trigger_deliveries delivery
+         ON delivery.trigger_id = ? AND delivery.delivery_id = event.id
+       WHERE event.workspace_id = ? AND event.created_at >= ? AND delivery.delivery_id IS NULL
+       ORDER BY event.created_at, event.id`,
+    ).all(triggerId, workspaceId, createdAtOrAfter).map(toDomainEvent);
+  }
+
   // ---- automations（P3 cron） ----
 
   createAutomation(
@@ -3742,6 +3938,48 @@ export class HarborStore {
 
   setAutomationEnabled(id: string, enabled: boolean): void {
     this.db.run("UPDATE automations SET enabled = ?, updated_at = ? WHERE id = ?", [enabled ? 1 : 0, Date.now(), id]);
+  }
+
+  updateAutomation(
+    id: string,
+    patch: {
+      name?: string;
+      agentId?: string;
+      repositoryId?: string | null;
+      prompt?: string;
+      purpose?: RunPurpose;
+      outputMode?: AutomationOutputMode;
+      overlapMode?: AutomationOverlapMode;
+      targetConversationId?: string | null;
+      notifyChatId?: string | null;
+      enabled?: boolean;
+    },
+    now: number,
+  ): Automation {
+    const fields: string[] = [];
+    const values: (string | number | null)[] = [];
+    const add = (field: string, value: string | number | null) => {
+      fields.push(`${field} = ?`);
+      values.push(value);
+    };
+    if (patch.name !== undefined) add("name", patch.name);
+    if (patch.agentId !== undefined) add("agent_id", patch.agentId);
+    if (patch.repositoryId !== undefined) add("repository_id", patch.repositoryId);
+    if (patch.prompt !== undefined) add("prompt", patch.prompt);
+    if (patch.purpose !== undefined) add("purpose", patch.purpose);
+    if (patch.outputMode !== undefined) add("output_mode", patch.outputMode);
+    if (patch.overlapMode !== undefined) add("overlap_mode", patch.overlapMode);
+    if (patch.targetConversationId !== undefined) add("target_conversation_id", patch.targetConversationId);
+    if (patch.notifyChatId !== undefined) add("notify_chat_id", patch.notifyChatId);
+    if (patch.enabled !== undefined) add("enabled", patch.enabled ? 1 : 0);
+    if (fields.length > 0) {
+      add("updated_at", now);
+      values.push(id);
+      this.db.run(`UPDATE automations SET ${fields.join(", ")} WHERE id = ?`, values);
+    }
+    const automation = this.getAutomation(id);
+    if (!automation) throw new Error(`automation "${id}" 不存在`);
+    return automation;
   }
 
   deleteAutomation(id: string): void {
@@ -3884,6 +4122,38 @@ export class HarborStore {
 
   setAutomationTriggerEnabled(id: string, enabled: boolean, now: number): void {
     this.db.run("UPDATE automation_triggers SET enabled = ?, updated_at = ? WHERE id = ?", [enabled ? 1 : 0, now, id]);
+  }
+
+  updateAutomationTrigger(
+    id: string,
+    patch: {
+      enabled?: boolean;
+      cron?: string | null;
+      provider?: string | null;
+      events?: string[];
+      filters?: AutomationWebhookFilter[];
+    },
+    now: number,
+  ): AutomationTrigger {
+    const trigger = this.getAutomationTrigger(id);
+    if (!trigger) throw new Error(`automation trigger "${id}" 不存在`);
+    const fields: string[] = [];
+    const values: (string | number | null)[] = [];
+    const add = (field: string, value: string | number | null) => {
+      fields.push(`${field} = ?`);
+      values.push(value);
+    };
+    if (patch.enabled !== undefined) add("enabled", patch.enabled ? 1 : 0);
+    if (patch.cron !== undefined) add("cron", trigger.type === "schedule" ? patch.cron : null);
+    if (patch.provider !== undefined) add("provider", trigger.type === "webhook" ? patch.provider : trigger.provider);
+    if (patch.events !== undefined) add("events", JSON.stringify(patch.events));
+    if (patch.filters !== undefined) add("filters", JSON.stringify(patch.filters));
+    if (fields.length > 0) {
+      add("updated_at", now);
+      values.push(id);
+      this.db.run(`UPDATE automation_triggers SET ${fields.join(", ")} WHERE id = ?`, values);
+    }
+    return this.getAutomationTrigger(id)!;
   }
 
   markAutomationTriggerFired(id: string, now: number): void {

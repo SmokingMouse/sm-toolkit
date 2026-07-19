@@ -388,8 +388,13 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
       head,
       base,
     });
-    if (!Number.isSafeInteger(pull.number) || pull.number <= 0 || !pull.html_url?.trim()) {
-      throw new Error("GitHub 创建 PR 的响应缺少可信 number/html_url");
+    if (
+      !Number.isSafeInteger(pull.number) ||
+      pull.number <= 0 ||
+      !pull.html_url?.trim() ||
+      !pull.head?.sha?.trim()
+    ) {
+      throw new Error("GitHub 创建 PR 的响应缺少可信 number/html_url/head SHA");
     }
     return {
       ...input,
@@ -397,6 +402,7 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
       externalId: `#${pull.number}`,
       headBranch: head,
       baseBranch: base,
+      latestHeadSha: pull.head.sha.trim(),
     };
   }
 
@@ -406,8 +412,9 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
       ...input,
       changeUrl: canonicalPullUrl(ref),
       externalId: `#${ref.number}`,
-      headBranch: null,
-      baseBranch: null,
+      // server-side createChange 已从 GitHub 响应证明 head/base/SHA；外部 URL 注册则仍等 sync。
+      headBranch: input.latestHeadSha ? input.headBranch ?? null : null,
+      baseBranch: input.latestHeadSha ? input.baseBranch ?? null : null,
       checkStatus: "pending",
     };
   }

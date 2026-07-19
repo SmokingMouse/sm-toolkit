@@ -38,6 +38,8 @@ export interface DeliveryChangeInput {
   externalId?: string | null;
   headBranch?: string | null;
   baseBranch?: string | null;
+  /** Provider 证明的当前 head commit；Agent 自报不会被当作可信事实。 */
+  latestHeadSha?: string | null;
   deploymentRequired?: boolean;
   deploymentTargetId?: string | null;
   checkStatus?: DeliveryCheckStatus;
@@ -50,6 +52,7 @@ export interface DeliveryProviderSnapshot {
   externalId?: string | null;
   headBranch?: string | null;
   baseBranch?: string | null;
+  latestHeadSha?: string | null;
   reviewStatus?: Delivery["reviewStatus"];
   checkStatus?: Delivery["checkStatus"];
   mergeStatus?: Delivery["mergeStatus"];
@@ -143,15 +146,7 @@ export class DeliveryService {
 
   create(
     conv: Conversation,
-    input: {
-      provider?: DeliveryProviderKind;
-      changeUrl?: string | null;
-      externalId?: string | null;
-      headBranch?: string | null;
-      baseBranch?: string | null;
-      deploymentRequired?: boolean;
-      deploymentTargetId?: string | null;
-    },
+    input: DeliveryChangeInput & { provider?: DeliveryProviderKind },
     now = Date.now(),
   ): Delivery {
     if (conv.kind !== "issue" || conv.status !== "review") {
@@ -247,6 +242,7 @@ export class DeliveryService {
         externalId: clean(prepared.externalId),
         headBranch: clean(prepared.headBranch),
         baseBranch: clean(prepared.baseBranch),
+        latestHeadSha: clean(prepared.latestHeadSha),
         checkStatus: prepared.checkStatus,
         deploymentRequired: deploymentTargetId ? true : prepared.deploymentRequired ?? false,
         deploymentTargetId,
@@ -567,6 +563,7 @@ export class DeliveryService {
       ...(snapshot.externalId !== undefined ? { externalId: clean(snapshot.externalId) } : {}),
       ...(snapshot.headBranch !== undefined ? { headBranch: clean(snapshot.headBranch) } : {}),
       ...(snapshot.baseBranch !== undefined ? { baseBranch: clean(snapshot.baseBranch) } : {}),
+      ...(snapshot.latestHeadSha !== undefined ? { latestHeadSha: clean(snapshot.latestHeadSha)?.toLowerCase() ?? null } : {}),
     };
     this.store.updateDeliveryMetadata(delivery.id, metadata, now);
     this.store.updateDeliveryState(delivery.id, {

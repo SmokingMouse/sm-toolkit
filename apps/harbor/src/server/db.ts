@@ -44,6 +44,7 @@ const APPLICATION_MUTATION_TABLES = [
   "issue_labels",
   "run_attachments",
   "run_action_tokens",
+  "domain_events",
   "workspace_api_tokens",
   "lark_message_links",
 ] as const;
@@ -1558,6 +1559,128 @@ export const MIGRATIONS: string[] = [
   `,
   // v21 —— 把全局 maintenance guard 下沉到 application DB mutation 线性化点。
   "",
+  // v22 —— 开放编排：中性 coordination Run、Run lineage、exact-revision Review 与持久领域事件。
+  `
+  CREATE TABLE runs_v22 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    source_type TEXT NOT NULL CHECK (source_type IN ('issue','chat','automation')),
+    source_id TEXT NOT NULL,
+    conversation_id TEXT REFERENCES conversations(id),
+    agent_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    repository_id TEXT REFERENCES repositories(id),
+    repository_mount_id TEXT REFERENCES repository_mounts(id),
+    execution_root TEXT,
+    prompt TEXT NOT NULL,
+    purpose TEXT NOT NULL DEFAULT 'implementation'
+      CHECK (purpose IN ('implementation','triage','review','verification','coordination')),
+    prompt_event TEXT NOT NULL CHECK (prompt_event IN (
+      'event.issue.assigned','event.issue.mentioned','event.issue.message_created',
+      'event.chat.message_created','event.automation.schedule','event.automation.manual',
+      'event.automation.webhook','event.automation.event'
+    )),
+    trigger_ref TEXT,
+    trigger_context TEXT NOT NULL DEFAULT '{}',
+    concurrency_key TEXT,
+    parent_run_id TEXT REFERENCES runs(id),
+    root_run_id TEXT NOT NULL,
+    dispatch_depth INTEGER NOT NULL DEFAULT 0 CHECK (dispatch_depth >= 0),
+    dispatch_key TEXT,
+    review_delivery_id TEXT REFERENCES deliveries(id),
+    review_revision TEXT,
+    review_ref TEXT,
+    review_remote_url TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    claude_session_id TEXT,
+    error TEXT,
+    cost_usd REAL,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cached_tokens INTEGER,
+    queued_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    CHECK (
+      (source_type = 'automation' AND conversation_id IS NULL) OR
+      (source_type IN ('issue','chat') AND conversation_id IS NOT NULL AND source_id = conversation_id)
+    ),
+    CHECK (
+      (review_delivery_id IS NULL AND review_revision IS NULL AND review_ref IS NULL AND review_remote_url IS NULL) OR
+      (review_delivery_id IS NOT NULL AND review_revision IS NOT NULL AND review_ref IS NOT NULL AND review_remote_url IS NOT NULL)
+    )
+  );
+  INSERT INTO runs_v22
+    (id, workspace_id, source_type, source_id, conversation_id, agent_id, device_id,
+     repository_id, repository_mount_id, execution_root, prompt, purpose, prompt_event, trigger_ref,
+     trigger_context, concurrency_key, parent_run_id, root_run_id, dispatch_depth, dispatch_key,
+     review_delivery_id, review_revision, review_ref, review_remote_url,
+     status, claude_session_id, error, cost_usd, input_tokens, output_tokens, cached_tokens,
+     queued_at, started_at, finished_at)
+    SELECT id, workspace_id, source_type, source_id, conversation_id, agent_id, device_id,
+           repository_id, repository_mount_id, execution_root, prompt, purpose, prompt_event, trigger_ref,
+           trigger_context, concurrency_key, NULL, id, 0, NULL,
+           NULL, NULL, NULL, NULL,
+           status, claude_session_id, error, cost_usd, input_tokens, output_tokens, cached_tokens,
+           queued_at, started_at, finished_at
+    FROM runs;
+  DROP TABLE runs;
+  ALTER TABLE runs_v22 RENAME TO runs;
+  CREATE INDEX idx_runs_device_status ON runs(device_id, status);
+  CREATE INDEX idx_runs_conversation ON runs(conversation_id);
+  CREATE INDEX idx_runs_workspace ON runs(workspace_id, queued_at);
+  CREATE INDEX idx_runs_source ON runs(source_type, source_id, queued_at);
+  CREATE INDEX idx_runs_trigger_ref ON runs(trigger_ref, status, queued_at);
+  CREATE INDEX idx_runs_concurrency ON runs(concurrency_key, status, queued_at);
+  CREATE INDEX idx_runs_parent ON runs(parent_run_id, queued_at);
+  CREATE UNIQUE INDEX idx_runs_dispatch_key ON runs(root_run_id, dispatch_key) WHERE dispatch_key IS NOT NULL;
+
+  CREATE TABLE automations_v22 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    name TEXT NOT NULL,
+    agent_id TEXT NOT NULL REFERENCES agents(id),
+    repository_id TEXT REFERENCES repositories(id),
+    prompt TEXT NOT NULL,
+    purpose TEXT NOT NULL DEFAULT 'implementation'
+      CHECK (purpose IN ('implementation','triage','review','verification','coordination')),
+    output_mode TEXT NOT NULL DEFAULT 'run' CHECK (output_mode IN ('run','chat','issue','append','source')),
+    overlap_mode TEXT NOT NULL DEFAULT 'skip' CHECK (overlap_mode IN ('skip','queue')),
+    target_conversation_id TEXT REFERENCES conversations(id),
+    notify_chat_id TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_fired_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, name),
+    CHECK (
+      (output_mode = 'append' AND target_conversation_id IS NOT NULL) OR
+      (output_mode <> 'append' AND target_conversation_id IS NULL)
+    )
+  );
+  INSERT INTO automations_v22
+    (id, workspace_id, name, agent_id, repository_id, prompt, purpose, output_mode, overlap_mode,
+     target_conversation_id, notify_chat_id, enabled, last_fired_at, created_at, updated_at)
+    SELECT id, workspace_id, name, agent_id, repository_id, prompt, purpose, output_mode, overlap_mode,
+           target_conversation_id, notify_chat_id, enabled, last_fired_at, created_at, updated_at
+    FROM automations;
+  DROP TABLE automations;
+  ALTER TABLE automations_v22 RENAME TO automations;
+  CREATE INDEX idx_automations_workspace ON automations(workspace_id, name);
+
+  CREATE TABLE IF NOT EXISTS domain_events (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL CHECK (event_type IN (
+      'issue.created','issue.ready','issue.review_ready','delivery.merge_ready','delivery.merged'
+    )),
+    source_type TEXT NOT NULL CHECK (source_type IN ('issue','delivery')),
+    source_id TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_domain_events_workspace ON domain_events(workspace_id, created_at, id);
+  `,
 ];
 
 function hasTable(db: Database, table: string): boolean {
@@ -1658,7 +1781,8 @@ export function openDb(path: string): Database {
       version === 16 ||
       version === 17 ||
       version === 18 ||
-      version === 19;
+      version === 19 ||
+      version === 21;
     if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = OFF;");
     try {
       db.transaction(() => {

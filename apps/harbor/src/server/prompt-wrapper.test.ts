@@ -81,6 +81,11 @@ function fixtures(
     triggerRef: null,
     triggerContext: {},
     concurrencyKey: null,
+    parentRunId: null,
+    rootRunId: "run_1",
+    dispatchDepth: 0,
+    dispatchKey: null,
+    reviewCheckout: null,
     status: "queued",
     claudeSessionId: null,
     error: null,
@@ -98,7 +103,7 @@ describe("prompt blocks", () => {
     const version = db
       .query<{ user_version: number }, []>("PRAGMA user_version")
       .get()?.user_version;
-    expect(version).toBe(21);
+    expect(version).toBe(22);
     const store = new HarborStore(db);
     const input = fixtures();
     const rendered = renderRunPrompt(store, input);

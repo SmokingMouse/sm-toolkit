@@ -62,6 +62,8 @@ test("Issue action API supports Inbox → Assign & Run → Review → AI Review 
   const implementation = (await dispatchResponse.json()) as Run;
   expect(implementation).toEqual(expect.objectContaining({ purpose: "implementation", status: "queued" }));
   expect(store.getConversation(issue.id)).toEqual(expect.objectContaining({ status: "todo", agentId: builder.id }));
+  const builderMount = store.getRepositoryMountForDevice(builder.repositoryId, builder.deviceId)!;
+  store.setConversationWorktreePath(issue.id, "/repo/harbor-worktree-test", builderMount.id, 4);
 
   coordinator.onRunDone({
     runId: implementation.id,

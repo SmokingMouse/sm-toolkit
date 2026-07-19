@@ -27,6 +27,63 @@ function setup(online = false) {
 }
 
 describe("Mew-style Automation runtime", () => {
+  test("durable issue events dispatch live and do not retroactively trigger newer Automations", () => {
+    const { store, agent, service } = setup();
+    const historical = store.createConversation({
+      workspaceId: "ws_personal",
+      kind: "issue",
+      title: "Historical",
+      agentId: agent.id,
+      repositoryId: agent.repositoryId,
+    }, 3);
+    store.setConversationStatus(historical.id, "todo", 4);
+    expect(store.listDomainEvents().map((event) => event.id)).toEqual([
+      `issue.created:${historical.id}`,
+      `issue.ready:${historical.id}`,
+    ]);
+    const automation = store.createAutomation({
+      name: "ready-router",
+      agentId: agent.id,
+      prompt: "Apply the user-defined routing policy.",
+      purpose: "coordination",
+      outputMode: "source",
+      triggers: [{ type: "event", events: ["issue.ready"] }],
+    }, 5);
+    const historicalEvent = store.getDomainEvent(`issue.ready:${historical.id}`)!;
+    expect(service.receiveEvent({
+      workspaceId: historicalEvent.workspaceId,
+      eventType: historicalEvent.type,
+      eventId: historicalEvent.id,
+      payload: historicalEvent.payload,
+      createdAt: historicalEvent.createdAt,
+    })).toEqual([]);
+
+    store.setDomainEventListener((event) => {
+      service.receiveEvent({
+        workspaceId: event.workspaceId,
+        eventType: event.type,
+        eventId: event.id,
+        payload: event.payload,
+        createdAt: event.createdAt,
+      });
+    });
+    const live = store.createConversation({
+      workspaceId: "ws_personal",
+      kind: "issue",
+      title: "Live",
+      agentId: agent.id,
+      repositoryId: agent.repositoryId,
+    }, 6);
+    store.setConversationStatus(live.id, "todo", 7);
+    expect(store.listRunsByConversation(live.id)).toEqual([
+      expect.objectContaining({
+        purpose: "coordination",
+        triggerRef: automation.id,
+        sourceId: live.id,
+      }),
+    ]);
+  });
+
   test("direct output persists Automation as the Run source without creating a Conversation", () => {
     const { store, agent, coordinator, service } = setup();
     const automation = store.createAutomation({
@@ -131,6 +188,8 @@ describe("Mew-style Automation runtime", () => {
       repositoryId: agent.repositoryId,
     }, 3);
     store.setConversationStatus(issue.id, "review", 4);
+    const mount = store.getRepositoryMountForDevice(agent.repositoryId, agent.deviceId)!;
+    store.setConversationWorktreePath(issue.id, "/repo-review", mount.id, 4);
     const automation = store.createAutomation({
       name: "auto-review",
       agentId: agent.id,
@@ -254,6 +313,7 @@ describe("Mew-style Automation runtime", () => {
     });
     expect(createdResponse.status).toBe(201);
     const created = (await createdResponse.json()) as {
+      id: string;
       webhookSecret: string;
       triggers: { id: string; webhookPath: string }[];
     };
@@ -279,5 +339,37 @@ describe("Mew-style Automation runtime", () => {
     });
     expect(accepted.status).toBe(202);
     expect((await accepted.json()) as { status: string }).toEqual(expect.objectContaining({ status: "started" }));
+
+    const editedResponse = await app.request(`/api/automations/${created.id}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer harbor-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "incoming-edited",
+        prompt: "Route this event using the configured policy",
+        purpose: "coordination",
+        overlapMode: "skip",
+      }),
+    });
+    expect(editedResponse.status).toBe(200);
+    expect(await editedResponse.json()).toEqual(expect.objectContaining({
+      name: "incoming-edited",
+      prompt: "Route this event using the configured policy",
+      purpose: "coordination",
+      overlapMode: "skip",
+    }));
+    const triggerResponse = await app.request(
+      `/api/automations/${created.id}/triggers/${created.triggers[0]!.id}`,
+      {
+        method: "PATCH",
+        headers: { Authorization: "Bearer harbor-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "generic", events: ["push", "tag"], enabled: false }),
+      },
+    );
+    expect(triggerResponse.status).toBe(200);
+    expect(await triggerResponse.json()).toEqual(expect.objectContaining({
+      provider: "generic",
+      events: ["push", "tag"],
+      enabled: false,
+    }));
   });
 });

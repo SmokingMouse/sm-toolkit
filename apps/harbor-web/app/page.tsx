@@ -500,7 +500,7 @@ function IssueCard({
             <span
               className={`h-1.5 w-1.5 rounded-full ${run.status === "running" ? "animate-pulse bg-doing" : run.status === "failed" ? "bg-canceled" : run.status === "succeeded" ? "bg-done" : "bg-backlog"}`}
             />
-            {run.purpose === "review" ? "review · " : ""}
+            {run.purpose !== "implementation" ? `${run.purpose} · ` : ""}
             {run.status}
           </span>
         )}
@@ -2523,7 +2523,7 @@ function IssueRunComment({
   const [expanded, setExpanded] = useState(active);
   const agent = agents.find((candidate) => candidate.id === run.agentId);
   const elapsed = runDuration(run);
-  const showPrompt = index > 0 || run.purpose === "review";
+  const showPrompt = index > 0 || run.purpose !== "implementation";
 
   useEffect(() => {
     if (active) setExpanded(true);
@@ -2536,7 +2536,11 @@ function IssueRunComment({
           <div className="mb-1 text-[9px] font-bold uppercase tracking-[0.12em] text-dim">
             {run.purpose === "review"
               ? "AI review requested"
-              : "Changes requested"}
+              : run.purpose === "coordination"
+                ? "Coordination requested"
+                : run.purpose === "verification"
+                  ? "Verification requested"
+                  : "Changes requested"}
           </div>
           {run.prompt}
         </div>

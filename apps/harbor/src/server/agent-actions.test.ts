@@ -90,6 +90,47 @@ test("Run action token creates a scoped follow-up Issue and can route it to a Wo
     status: "queued",
   }));
 
+  const contextResponse = await app.request("/hooks/agent-actions/context", {
+    headers: { Authorization: `Bearer ${raw}` },
+  });
+  expect(contextResponse.status).toBe(200);
+  expect(await contextResponse.json()).toEqual(expect.objectContaining({
+    run: expect.objectContaining({ id: run.id, rootRunId: run.id, dispatchDepth: 0 }),
+    agents: expect.arrayContaining([expect.objectContaining({ id: developer.id, name: developer.name })]),
+    limits: { maxDispatchDepth: 8 },
+  }));
+
+  const dispatchBody = {
+    agent: developer.name,
+    purpose: "coordination",
+    prompt: "Inspect this source and apply the configured routing policy.",
+    idempotencyKey: "route-parent-once",
+  };
+  const childResponse = await app.request("/hooks/agent-actions/dispatch", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${raw}`, "Content-Type": "application/json" },
+    body: JSON.stringify(dispatchBody),
+  });
+  expect(childResponse.status).toBe(201);
+  const childBody = await childResponse.json() as { run: { id: string; parentRunId: string; rootRunId: string; dispatchDepth: number }; reused: boolean };
+  expect(childBody).toEqual(expect.objectContaining({ reused: false }));
+  expect(childBody.run).toEqual(expect.objectContaining({
+    parentRunId: run.id,
+    rootRunId: run.id,
+    dispatchDepth: 1,
+  }));
+  const duplicateResponse = await app.request("/hooks/agent-actions/dispatch", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${raw}`, "Content-Type": "application/json" },
+    body: JSON.stringify(dispatchBody),
+  });
+  expect(duplicateResponse.status).toBe(200);
+  expect(await duplicateResponse.json()).toEqual(expect.objectContaining({
+    reused: true,
+    run: expect.objectContaining({ id: childBody.run.id }),
+  }));
+  expect(store.getConversation(parent.id)?.status).toBe("backlog");
+
   store.revokeRunActionTokens(run.id, Date.now());
   const denied = await app.request("/hooks/agent-actions/issues", {
     method: "POST",

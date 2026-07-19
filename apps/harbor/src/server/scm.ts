@@ -31,6 +31,7 @@ interface NormalizedScmEvent {
   authorName: string | null;
   headBranch: string | null;
   baseBranch: string | null;
+  latestHeadSha: string | null;
   commentId: string | null;
   commentBody: string | null;
   explicitDispatch: boolean;
@@ -149,6 +150,7 @@ export class ScmService {
             externalId: normalized.externalId,
             headBranch: normalized.headBranch,
             baseBranch: normalized.baseBranch,
+            latestHeadSha: normalized.latestHeadSha,
           }, now);
         }
         const snapshot: DeliveryProviderSnapshot = {
@@ -156,6 +158,7 @@ export class ScmService {
           externalId: normalized.externalId,
           headBranch: normalized.headBranch,
           baseBranch: normalized.baseBranch,
+          latestHeadSha: normalized.latestHeadSha,
           ...(normalized.reviewStatus ? { reviewStatus: normalized.reviewStatus } : {}),
           ...(normalized.checkStatus ? { checkStatus: normalized.checkStatus } : {}),
           ...(normalized.mergeStatus ? { mergeStatus: normalized.mergeStatus } : {}),
@@ -298,6 +301,14 @@ export function normalizeCodebaseEvent(eventType: string, payload: Record<string
     authorName,
     headBranch: scalar(payload, paths(["source_branch", "SourceBranchName", "head_branch"])),
     baseBranch: scalar(payload, paths(["target_branch", "TargetBranchName", "base_branch"])),
+    latestHeadSha: scalar(payload, paths([
+      "last_commit_id",
+      "LastCommitID",
+      "last_commit_sha",
+      "source_commit_id",
+      "head_sha",
+      "sha",
+    ])),
     commentId,
     commentBody,
     explicitDispatch: explicitFlag || /assigned|mentioned/.test(action ?? "") || /@(harbor|mew)\b/i.test(commentBody ?? ""),

@@ -111,7 +111,7 @@ async function mergedDelivery() {
 }
 
 describe("durable automatic deployment queue", () => {
-  test("a v20-compatible worker remains able to health-finalize and rollback after the server migrates application schema to v21", async () => {
+  test("a v20-compatible worker remains able to health-finalize and rollback after the server migrates application schema to v22", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "harbor-worker-v20-v21-")));
     const path = join(dir, "harbor.db");
     const backupPath = join(dir, "state", "database.sqlite");
@@ -144,8 +144,8 @@ describe("durable automatic deployment queue", () => {
       workerStore.updateDeploymentMaintenance(claimed.id, fenceOf(claimed), "healthy", REVISION, FINGERPRINT, 22);
       await new HostSqliteBackup().backup(path, backupPath);
 
-      serverDb = openDb(path); // new server installs v21 application mutation guards.
-      expect(serverDb.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(21);
+      serverDb = openDb(path); // new server installs v22 application mutation guards.
+      expect(serverDb.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(22);
       const rollbackGate = workerStore.updateDeploymentMaintenance(
         claimed.id, fenceOf(claimed), "rolling_back", BASELINE, BASELINE_FINGERPRINT, 23,
       );
