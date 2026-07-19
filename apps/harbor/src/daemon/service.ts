@@ -217,6 +217,29 @@ interface CommandResult {
   out: string;
 }
 
+type LaunchctlRunner = (argv: string[], allowFailure?: boolean) => CommandResult;
+
+/** launchd may briefly retain a just-booted-out label and return EIO on bootstrap. */
+export function bootstrapLaunchAgentWithRetry(
+  domain: string,
+  definitionPath: string,
+  run: LaunchctlRunner = command,
+  pause: (ms: number) => void = Bun.sleepSync,
+): void {
+  const argv = ["launchctl", "bootstrap", domain, definitionPath];
+  let lastOutput = "";
+  for (let attempt = 0; attempt < 41; attempt++) {
+    const result = run(argv, true);
+    if (result.ok) return;
+    lastOutput = result.out;
+    if (!/Bootstrap failed:\s*5:\s*Input\/output error/i.test(result.out)) {
+      throw new Error(`${argv.join(" ")} 失败${result.out ? `：${result.out}` : ""}`);
+    }
+    if (attempt < 40) pause(50);
+  }
+  throw new Error(`${argv.join(" ")} 在 bootout 后持续 EIO${lastOutput ? `：${lastOutput}` : ""}`);
+}
+
 function command(argv: string[], allowFailure = false): CommandResult {
   const result = Bun.spawnSync(argv, {
     stdin: "ignore",
@@ -260,7 +283,7 @@ export async function setupDaemonService(options: DaemonSetupOptions): Promise<D
     );
     const domain = launchdTarget();
     command(["launchctl", "bootout", `${domain}/${LAUNCHD_LABEL}`], true);
-    command(["launchctl", "bootstrap", domain, ctx.definitionPath]);
+    bootstrapLaunchAgentWithRetry(domain, ctx.definitionPath);
     command(["launchctl", "enable", `${domain}/${LAUNCHD_LABEL}`]);
     command(["launchctl", "kickstart", "-k", `${domain}/${LAUNCHD_LABEL}`]);
   } else {
