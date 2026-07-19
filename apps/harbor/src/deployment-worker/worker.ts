@@ -150,6 +150,17 @@ export class DeploymentWorker {
   private async releaseTerminal(target: DeploymentTargetConfig, gate: DeploymentMaintenanceGate): Promise<DeploymentWorkerResult> {
     return this.executor.withMaintenanceLock(async () => {
       try {
+        if (!this.store.assertDeploymentReleaseFence(gate)) throw new Error("terminal release fence 已失效");
+        // DB completion advances the phase to `releasing`; publish that exact state to
+        // the host journal before asking the server's dual gate for exact health.
+        await this.executor.writeMaintenance(gate);
+        const sentinel = await this.executor.readMaintenance();
+        if (!sentinel || !sameMaintenanceIdentity(sentinel, gate)
+          || sentinel.phase !== gate.phase || sentinel.expectedRevision !== gate.expectedRevision
+          || sentinel.expectedFingerprint !== gate.expectedFingerprint) {
+          throw new Error("terminal DB/host maintenance phase 未同步");
+        }
+        if (!this.store.assertDeploymentReleaseFence(gate)) throw new Error("terminal release fence 在 host phase 同步后失效");
         await this.executor.releaseHostMaintenance(target, gate, {
           assertFence: async () => {
             if (!this.store.assertDeploymentReleaseFence(gate)) throw new Error("terminal release fence 已失效");

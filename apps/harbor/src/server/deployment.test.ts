@@ -13,7 +13,7 @@ import {
   type DeliveryProviderAction,
   type DeliveryProviderContext,
 } from "./delivery.js";
-import type { DeploymentFence, DeploymentJob } from "../protocol.js";
+import type { DeploymentFence, DeploymentJob, DeploymentMaintenanceGate } from "../protocol.js";
 import type { DeploymentTargetConfig } from "../config.js";
 import type { DeploymentExecutionHooks, LocalLaunchdDeploymentExecutor } from "../deployment-worker/executor.js";
 import { DeploymentWorker } from "../deployment-worker/worker.js";
@@ -570,9 +570,11 @@ describe("durable automatic deployment queue", () => {
 
   test("worker reports needs_recovery when terminal host release cannot be proven", async () => {
     const h = await mergedDelivery();
+    let sentinel: DeploymentMaintenanceGate | null = null;
     const fakeExecutor = {
       validateTarget: async () => {},
-      readMaintenance: async () => null,
+      readMaintenance: async () => sentinel,
+      writeMaintenance: async (gate: DeploymentMaintenanceGate) => { sentinel = { ...gate }; },
       withMaintenanceLock: async <T>(action: () => Promise<T> | T) => action(),
       execute: async (_job: DeploymentJob, _target: DeploymentTargetConfig, hooks: DeploymentExecutionHooks) => {
         await hooks.activateMaintenance(baselineInput(_job));
@@ -593,7 +595,45 @@ describe("durable automatic deployment queue", () => {
       status: "needs_recovery", rollbackComplete: false, failureKind: "rollback_incomplete",
     }));
     expect(result.databaseGate).toEqual(expect.objectContaining({ phase: "needs_recovery" }));
+    expect(result.sentinel).toEqual(expect.objectContaining({ phase: "releasing" }));
     expect(h.store.getDelivery(h.delivery.id)?.deploymentStatus).toBe("running");
+  });
+
+  test("worker synchronizes the terminal DB phase to the host sentinel before exact health release", async () => {
+    const h = await mergedDelivery();
+    let sentinel: DeploymentMaintenanceGate | null = null;
+    const phasesAtRelease: string[] = [];
+    const fakeExecutor = {
+      validateTarget: async () => {},
+      readMaintenance: async () => sentinel,
+      writeMaintenance: async (gate: DeploymentMaintenanceGate) => { sentinel = { ...gate }; },
+      withMaintenanceLock: async <T>(action: () => Promise<T> | T) => action(),
+      execute: async (_job: DeploymentJob, _target: DeploymentTargetConfig, hooks: DeploymentExecutionHooks) => {
+        await hooks.activateMaintenance(baselineInput(_job));
+        const healthy = await hooks.updateMaintenance("healthy", REVISION, FINGERPRINT, { checkpoint: "healthy" });
+        return {
+          status: "succeeded" as const, log: "healthy", error: null, failureKind: null,
+          rollbackComplete: true, gate: healthy,
+        };
+      },
+      releaseHostMaintenance: async (_target: DeploymentTargetConfig, gate: DeploymentMaintenanceGate) => {
+        phasesAtRelease.push(sentinel?.phase ?? "missing");
+        expect(sentinel).toEqual(expect.objectContaining({
+          phase: "releasing", fenceEpoch: gate.fenceEpoch, fenceNonce: gate.fenceNonce,
+        }));
+        sentinel = null;
+      },
+    } as unknown as LocalLaunchdDeploymentExecutor;
+    const worker = new DeploymentWorker(
+      h.store, [h.target as unknown as DeploymentTargetConfig], fakeExecutor,
+      { now: () => 20, sleep: async () => {} }, 100,
+    );
+    const result = await worker.runOnce();
+    expect(phasesAtRelease).toEqual(["releasing"]);
+    expect(result.job).toEqual(expect.objectContaining({ status: "succeeded", rollbackComplete: true }));
+    expect(result.databaseGate).toBeNull();
+    expect(result.sentinel).toBeNull();
+    expect(h.store.getDelivery(h.delivery.id)?.deploymentStatus).toBe("succeeded");
   });
 
   test("target removal or runtime path drift during terminal release stays globally gated", async () => {
