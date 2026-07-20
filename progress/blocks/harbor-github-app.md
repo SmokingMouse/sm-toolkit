@@ -22,8 +22,9 @@
 - 2026-07-21：验证完成：`bun run build` 通过（含 Next production export），全量 `bun test` 449 pass / 0 fail，`git diff --check` 通过；旧 schema lineage 断言已推进到 v29。
 - 2026-07-21：PR #3 合并为 `e72e75e`；真实 merge webhook 首投因 Harbor 10s 响应超时未触发，使用同一 GitHub delivery id、GitHub API 的真实 PR 数据与主机内 webhook secret 做签名 replay 后，Release Agent 正常创建 generation 6 sidecar job。
 - 2026-07-21：generation 6 在切换前的 launchd stop proof 遇到 label/PID 短暂过渡态并 fail-closed；首次管理员 recovery 因手工注入 raw health token 超时，改用 worker-entry 原格式 `Bearer <token>` 后验证旧 `6566418` baseline、释放 gate，DB 保持 v28。根因是 `bootout` 后只有一次即时 proof，修复为在任何 DB/plist/symlink 变更前有界重试 exact unload + 全部 observed PID death，超时仍 fail-closed。
+- 2026-07-21：PR #4 合并为 `6970525`，真实 GitHub webhook 202 并由 Agent 创建 generation 7；新 server 启动时发现 production 仅有旧独立 `github.webhook_secret`，GitHub App all-or-nothing parser 将其误判为半配置并退出，sidecar 验证 PID 失败后自动完整回滚，DB 仍为 v28、旧 baseline 健康。rolling config 修复为仅 App 字段出现时才激活完整校验，standalone legacy webhook secret 在新 GitHub App runtime 中保持 disabled。
 
 ## Next
 
-- 合并 launchd stop-proof 竞态修复，并由既有 Harbor sidecar 重新部署 `e72e75e` 之后的 exact merge revision。
+- 合并 GitHub App rolling-config 修复，并由既有 Harbor sidecar 部署新的 exact merge revision。
 - 在 GitHub 创建/安装 App，安全落配置并完成真实登录、Repository sync、Delivery/Automation 验收。

@@ -245,15 +245,20 @@ export function parseGitHubAppConfig(
 ): GitHubAppConfig | null {
   const app = value?.app ?? {};
   const rawAppId = environment.HARBOR_GITHUB_APP_ID ?? app.app_id;
-  const raw = {
+  const rawApp = {
     appId: rawAppId === undefined ? "" : String(rawAppId).trim(),
     clientId: (environment.HARBOR_GITHUB_APP_CLIENT_ID ?? app.client_id ?? "").trim(),
     clientSecret: (environment.HARBOR_GITHUB_APP_CLIENT_SECRET ?? app.client_secret ?? "").trim(),
     slug: (environment.HARBOR_GITHUB_APP_SLUG ?? app.slug ?? "").trim().toLowerCase(),
     privateKeyPath: (environment.HARBOR_GITHUB_APP_PRIVATE_KEY_PATH ?? app.private_key_path ?? "").trim(),
+  };
+  // Rolling migration：旧版本允许单独配置 repository webhook secret。它不能在 App
+  // 字段尚未落盘时把新 server 误判成“半配置”，否则首次部署永远无法启动。
+  if (Object.values(rawApp).every((entry) => !entry)) return null;
+  const raw = {
+    ...rawApp,
     webhookSecret: (environment.HARBOR_GITHUB_WEBHOOK_SECRET ?? value?.webhook_secret ?? "").trim(),
   };
-  if (Object.values(raw).every((entry) => !entry)) return null;
   const missing = Object.entries(raw).filter(([, entry]) => !entry).map(([key]) => key);
   if (missing.length) throw new Error(`GitHub App 配置不完整：缺少 ${missing.join(", ")}`);
   if (!/^[1-9][0-9]*$/.test(raw.appId)) throw new Error("github.app.app_id 必须是正整数 GitHub App id");
