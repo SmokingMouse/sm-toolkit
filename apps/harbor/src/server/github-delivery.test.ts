@@ -199,8 +199,8 @@ function harness(fake = fakeGitHub()) {
 }
 
 describe("GitHub Delivery URL and configuration boundaries", () => {
-  test("requires an explicit server token without exposing it", () => {
-    expect(() => new GitHubRestClient(" ")).toThrow("HARBOR_GITHUB_TOKEN");
+  test("requires an explicit credential provider without exposing it", () => {
+    expect(() => new GitHubRestClient(" ")).toThrow("credential 未配置");
   });
 
   test("redacts the token from transport failures", async () => {
@@ -215,6 +215,33 @@ describe("GitHub Delivery URL and configuration boundaries", () => {
     }
     expect(message).toContain("[redacted]");
     expect(message).not.toContain("fake-token");
+  });
+
+  test("refreshes an expired installation token once after GitHub returns 401", async () => {
+    const forces: (boolean | undefined)[] = [];
+    const authorizations: string[] = [];
+    const client = new GitHubRestClient((force) => {
+      forces.push(force);
+      return force ? "fresh-installation-token" : "stale-installation-token";
+    }, {
+      fetch: (async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("Authorization") ?? "";
+        authorizations.push(authorization);
+        if (authorization.includes("stale")) return json({ message: "Bad credentials" }, 401);
+        return json({
+          number: 42,
+          state: "open",
+          merged: false,
+          merged_at: null,
+          html_url: "https://github.com/acme/harbor/pull/42",
+          head: { ref: "feature", sha: "a".repeat(40) },
+          base: { ref: "main" },
+        });
+      }) as typeof fetch,
+    });
+    expect((await client.getPullRequest({ owner: "acme", repo: "harbor", number: 42 })).number).toBe(42);
+    expect(forces).toEqual([false, true]);
+    expect(authorizations).toEqual(["Bearer stale-installation-token", "Bearer fresh-installation-token"]);
   });
 
   test("accepts canonical GitHub mappings and rejects malformed, non-GitHub, or cross-repository URLs", () => {

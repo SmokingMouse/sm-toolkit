@@ -25,8 +25,7 @@ import {
   codebaseConfig,
   databasePath,
   feishuBotProfiles,
-  githubConfig,
-  githubWebhookSecret,
+  githubAppConfig,
   harborSelfDeployTarget,
   publicAuthConfig,
   token,
@@ -43,6 +42,8 @@ import { HostMaintenanceSentinel } from "../deployment-worker/maintenance.js";
 import { DeploymentMaintenanceGuard } from "./maintenance.js";
 import { ensureBuiltinSkills } from "./builtin-skills.js";
 import { AuthService } from "./auth.js";
+import { GitHubAppClient } from "./github-app.js";
+import { GitHubIntegrationService } from "./github-integration.js";
 
 const authToken = token();
 const port = Number(process.env.HARBOR_PORT ?? DEFAULT_PORT);
@@ -59,7 +60,11 @@ const bus = new RunBus();
 const hasDatabaseMaintenance = () =>
   store.listDeploymentMaintenance().length > 0;
 const hub = new DeviceHub(store, authToken, hasDatabaseMaintenance);
-const gc = githubConfig();
+const gc = githubAppConfig();
+const githubAppClient = gc ? new GitHubAppClient(gc) : null;
+const githubIntegration = githubAppClient
+  ? new GitHubIntegrationService(store, auth, githubAppClient)
+  : null;
 const maintenance = new DeploymentMaintenanceGuard(store, new HostMaintenanceSentinel());
 let maintenanceActive = (await maintenance.current()).active;
 const writesBlocked = () => maintenanceActive || hasDatabaseMaintenance();
@@ -68,14 +73,18 @@ const deliveries = new DeliveryService(
   store,
   [
     new CodebaseDeliveryProvider(store),
-    ...(gc
-      ? [new GitHubDeliveryProvider(new GitHubRestClient(gc.token))]
+    ...(githubAppClient
+      ? [new GitHubDeliveryProvider((repository) => {
+          const connection = store.githubRepositoryConnectionForRepository(repository.id);
+          if (!connection) throw new Error(`Repository "${repository.name}" 尚未连接 GitHub App installation`);
+          return new GitHubRestClient((forceRefresh) => githubAppClient.installationToken(connection.installationId, forceRefresh));
+        })]
       : []),
   ],
 );
-if (!gc) {
+if (!githubAppClient) {
   console.log(
-    "[harbor-server] GitHub Delivery 未配置（HARBOR_GITHUB_TOKEN 或 ~/.harbor.yaml github.token），manual provider 仍可用",
+    "[harbor-server] GitHub App 未配置，GitHub Delivery/OAuth/webhook 关闭；manual provider 仍可用",
   );
 }
 const coordinator = new RunCoordinator(store, bus, hub, concurrency, deliveries);
@@ -84,7 +93,14 @@ const automations = new AutomationService(store, coordinator, writesBlocked);
 const scm = new ScmService(store, coordinator, deliveries);
 scm.setAutomationListener((input) => automations.receiveCodebase(input).length > 0);
 const codebase = codebaseConfig();
-const skillImports = new SkillImportService();
+const skillImports = new SkillImportService(undefined, undefined, githubAppClient
+  ? async ({ workspaceId, owner, repository }) => {
+      const fullName = `${owner}/${repository}`.toLowerCase();
+      const connection = store.listGitHubRepositoryConnections(workspaceId)
+        .find((candidate) => candidate.status === "active" && candidate.fullName === fullName);
+      return connection ? githubAppClient.installationToken(connection.installationId) : null;
+    }
+  : null);
 const skillSync = new SkillSyncService(store, skillImports);
 hub.coordinator = coordinator;
 hub.approvals = approvals;
@@ -273,7 +289,8 @@ const app = buildRest(
   maintenance,
   auth,
   selfDeployTarget,
-  githubWebhookSecret(),
+  gc?.webhookSecret ?? "",
+  githubIntegration,
 );
 
 // Delivery facts already live in SQLite; startup and live updates deterministically finalize Issues.

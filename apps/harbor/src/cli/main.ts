@@ -26,6 +26,7 @@ import {
 } from "../deployment-worker/service.js";
 import { recoverLocalDeployment } from "../deployment-worker/recovery.js";
 import { inspectIdentityNormalization } from "../server/identity-normalization.js";
+import { inspectGitHubAppMigration } from "../server/github-app-migration.js";
 
 const USAGE = `${c.bold}harbor${c.reset} — 个人多设备 agent 调度
 
@@ -69,6 +70,7 @@ ${c.bold}Harbor self-deployer sidecar（独立 LaunchAgent）${c.reset}
 
 ${c.bold}数据库迁移预检（只读，不启动 server）${c.reset}
   harbor db identity-report [--database <v22.db>] [--json]   P6.1 identity normalization dry-run
+  harbor db github-app-report [--database <v28.db>] [--json] GitHub App v29 dry-run
 
 ${c.bold}审批${c.reset}（permission=default 的 agent 用工具时上抛）
   harbor approvals [--status pending]                      审批列表
@@ -233,12 +235,38 @@ async function main(): Promise<number> {
   }
 
   if (domain === "db") {
-    if (verb !== "identity-report")
-      throw new Error("用法：harbor db identity-report [--database <v22.db>] [--json]");
+    if (verb !== "identity-report" && verb !== "github-app-report")
+      throw new Error("用法：harbor db identity-report|github-app-report [--database <db>] [--json]");
     const path = resolve(typeof flags.database === "string" ? flags.database : databasePath());
     if (!existsSync(path)) throw new Error(`数据库不存在：${path}`);
     const db = new Database(path, { readonly: true });
     try {
+      if (verb === "github-app-report") {
+        const report = inspectGitHubAppMigration(db);
+        if (flags.json === true) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          const state = report.migratable ? `${c.green}PASS${c.reset}` : `${c.red}BLOCKED${c.reset}`;
+          console.log(`${c.bold}Harbor GitHub App v29 dry-run${c.reset}  ${state}`);
+          console.log(`${c.dim}database=${path} schema=v${report.sourceSchemaVersion} report=v${report.reportVersion}${c.reset}`);
+          console.log(
+            `accounts=${report.counts.accounts} workspaces=${report.counts.workspaces}` +
+            ` repositories=${report.counts.repositories} github-remotes=${report.counts.githubRemoteRepositories}` +
+            ` github-identities=${report.counts.githubAuthIdentities} github-deliveries=${report.counts.githubDeliveries}`,
+          );
+          console.log(
+            `installation/repository connections=0（不会从 remote 或静态 token 猜测）` +
+            ` github-remote-alias-groups=${report.counts.githubRemoteAliasGroups}`,
+          );
+          for (const entry of report.issues) {
+            const marker = entry.severity === "error" ? `${c.red}ERROR${c.reset}` : `${c.yellow}WARN${c.reset}`;
+            console.log(`${marker} ${entry.code}: ${entry.message}`);
+            console.log(`${c.dim}  refs=${entry.refs.join(", ") || "-"}${c.reset}`);
+          }
+          if (report.issues.length === 0) console.log(`${c.green}✓${c.reset} 未发现阻断项或警告`);
+        }
+        return report.migratable ? 0 : 2;
+      }
       const report = inspectIdentityNormalization(db);
       if (flags.json === true) {
         console.log(JSON.stringify(report, null, 2));

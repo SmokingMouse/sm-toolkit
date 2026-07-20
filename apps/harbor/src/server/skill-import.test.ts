@@ -98,4 +98,29 @@ describe("Skill bundle imports", () => {
     }));
     expect(store.getSkill(skill.id)?.bundleHash).not.toBe(oldHash);
   });
+
+  test("GitHub import resolves a Workspace installation token and never reads a static PAT", async () => {
+    const authorizations: string[] = [];
+    const fetchMock = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const url = new URL(String(input));
+      authorizations.push(new Headers(init?.headers).get("Authorization") ?? "");
+      if (url.hostname === "api.github.com") {
+        return Response.json([{
+          path: "skills/review/SKILL.md",
+          type: "file",
+          download_url: "https://raw.githubusercontent.com/acme/repo/main/skills/review/SKILL.md",
+        }]);
+      }
+      return new Response("---\nname: review\ndescription: Review\n---\nDo review.");
+    }) as typeof fetch;
+    const resolverCalls: unknown[] = [];
+    const service = new SkillImportService(undefined, fetchMock, (input) => {
+      resolverCalls.push(input);
+      return "installation-token-only";
+    });
+    const bundle = await service.fromGitHub("https://github.com/acme/repo/tree/main/skills/review", undefined, "ws_team");
+    expect(bundle.files).toEqual([expect.objectContaining({ path: "SKILL.md" })]);
+    expect(resolverCalls).toEqual([{ workspaceId: "ws_team", owner: "acme", repository: "repo" }]);
+    expect(authorizations).toEqual(["Bearer installation-token-only", "Bearer installation-token-only"]);
+  });
 });

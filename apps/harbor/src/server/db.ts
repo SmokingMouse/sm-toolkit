@@ -8,6 +8,7 @@ import { Database } from "bun:sqlite";
 import { chmodSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { applyIdentityNormalization, inspectIdentityNormalization } from "./identity-normalization.js";
+import { inspectGitHubAppMigration } from "./github-app-migration.js";
 import { summarizeDeviceCapabilities } from "../device-summary.js";
 import type { DeviceCapabilities } from "../protocol.js";
 
@@ -60,6 +61,10 @@ const APPLICATION_MUTATION_TABLES = [
   "webauthn_challenges",
   "personal_access_tokens",
   "workspace_invitations",
+  "github_oauth_states",
+  "github_installations",
+  "github_workspace_installations",
+  "github_repository_connections",
 ] as const;
 
 function maintenanceLinearizationSql(
@@ -2138,6 +2143,79 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE agents ADD COLUMN sandbox_network_access INTEGER NOT NULL DEFAULT 0
     CHECK (sandbox_network_access IN (0,1));
   `,
+  // v29 —— GitHub Account identity + GitHub App installation；短期 token 不落库。
+  `
+  CREATE TABLE github_oauth_states (
+    id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    flow TEXT NOT NULL CHECK (flow IN ('login','link','install','invite')),
+    account_id TEXT REFERENCES accounts(id),
+    workspace_id TEXT REFERENCES workspaces(id),
+    invitation_id TEXT REFERENCES workspace_invitations(id),
+    installation_id TEXT CHECK (
+      installation_id IS NULL OR
+      (installation_id <> '' AND installation_id NOT GLOB '*[^0-9]*' AND installation_id NOT GLOB '0*')
+    ),
+    return_to TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    consumed_at INTEGER,
+    CHECK (
+      (flow = 'login' AND account_id IS NULL AND workspace_id IS NULL AND invitation_id IS NULL) OR
+      (flow = 'link' AND account_id IS NOT NULL AND workspace_id IS NULL AND invitation_id IS NULL) OR
+      (flow = 'install' AND account_id IS NOT NULL AND workspace_id IS NOT NULL AND invitation_id IS NULL) OR
+      (flow = 'invite' AND account_id IS NULL AND workspace_id IS NULL AND invitation_id IS NOT NULL)
+    )
+  );
+  CREATE INDEX idx_github_oauth_states_expiry
+    ON github_oauth_states(expires_at, consumed_at);
+
+  CREATE TABLE github_installations (
+    installation_id TEXT PRIMARY KEY CHECK (installation_id <> '' AND installation_id NOT GLOB '*[^0-9]*' AND installation_id NOT GLOB '0*'),
+    app_id TEXT NOT NULL CHECK (app_id <> '' AND app_id NOT GLOB '*[^0-9]*' AND app_id NOT GLOB '0*'),
+    target_id TEXT NOT NULL CHECK (target_id <> '' AND target_id NOT GLOB '*[^0-9]*' AND target_id NOT GLOB '0*'),
+    target_type TEXT NOT NULL CHECK (target_type IN ('User','Organization')),
+    target_login TEXT NOT NULL,
+    repository_selection TEXT NOT NULL CHECK (repository_selection IN ('all','selected')),
+    permissions TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL CHECK (status IN ('active','suspended','deleted')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX idx_github_installations_target
+    ON github_installations(target_type, target_id, status);
+
+  CREATE TABLE github_workspace_installations (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    installation_id TEXT NOT NULL REFERENCES github_installations(installation_id),
+    connected_by_account_id TEXT NOT NULL REFERENCES accounts(id),
+    status TEXT NOT NULL CHECK (status IN ('active','disconnected')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(workspace_id, installation_id)
+  );
+  CREATE INDEX idx_github_workspace_installations_installation
+    ON github_workspace_installations(installation_id, status);
+
+  CREATE TABLE github_repository_connections (
+    workspace_id TEXT NOT NULL,
+    repository_id TEXT PRIMARY KEY REFERENCES repositories(id),
+    installation_id TEXT NOT NULL,
+    github_repository_id TEXT NOT NULL CHECK (github_repository_id <> '' AND github_repository_id NOT GLOB '*[^0-9]*' AND github_repository_id NOT GLOB '0*'),
+    full_name TEXT NOT NULL,
+    default_branch TEXT NOT NULL,
+    private INTEGER NOT NULL CHECK (private IN (0,1)),
+    status TEXT NOT NULL CHECK (status IN ('active','removed')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(workspace_id, installation_id)
+      REFERENCES github_workspace_installations(workspace_id, installation_id)
+  );
+  CREATE INDEX idx_github_repository_connections_installation
+    ON github_repository_connections(installation_id, github_repository_id, status);
+  CREATE INDEX idx_github_repository_connections_workspace_repo
+    ON github_repository_connections(workspace_id, github_repository_id, status);
+  `,
 ];
 
 function backfillDeviceCapabilitySummaries(db: Database): void {
@@ -2269,6 +2347,15 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
       db.close();
       throw new Error(`schema v23 identity normalization preflight 失败：${blockers}`);
     }
+    const githubAppReport = version === 28 ? inspectGitHubAppMigration(db) : null;
+    if (githubAppReport && !githubAppReport.migratable) {
+      const blockers = githubAppReport.issues
+        .filter((entry) => entry.severity === "error")
+        .map((entry) => `${entry.code}[${entry.refs.join(",")}]`)
+        .join("; ");
+      db.close();
+      throw new Error(`schema v29 GitHub App preflight 失败：${blockers}`);
+    }
     const rebuildsReferencedTables =
       version === 8 ||
       version === 9 ||
@@ -2362,6 +2449,11 @@ export function openV26MigrationFixtureDb(path = ":memory:"): Database {
 /** 只给 v28 Agent sandbox network capability migration regression fixture 使用。 */
 export function openV27MigrationFixtureDb(path = ":memory:"): Database {
   return openDbAtVersion(path, 27);
+}
+
+/** 只给 v29 GitHub App integration migration regression fixture 使用。 */
+export function openV28MigrationFixtureDb(path = ":memory:"): Database {
+  return openDbAtVersion(path, 28);
 }
 
 function installMaintenanceLinearization(db: Database): void {

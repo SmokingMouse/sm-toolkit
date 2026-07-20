@@ -8,6 +8,7 @@ import type {
   Approval,
   ApprovalStatus,
   Account,
+  AuthIdentity,
   Automation,
   AutomationLogRow,
   BackendKind,
@@ -24,6 +25,9 @@ import type {
   HarborRepository,
   HarborSkill,
   HarborWorkspace,
+  GitHubInstallation,
+  GitHubRepositoryConnection,
+  GitHubWorkspaceInstallation,
   IssueLabel,
   IssuePriority,
   ModelRouteCapability,
@@ -53,6 +57,7 @@ export type {
   Approval,
   ApprovalStatus,
   Account,
+  AuthIdentity,
   Automation,
   AutomationLogRow,
   BackendKind,
@@ -69,6 +74,9 @@ export type {
   HarborRepository,
   HarborSkill,
   HarborWorkspace,
+  GitHubInstallation,
+  GitHubRepositoryConnection,
+  GitHubWorkspaceInstallation,
   IssueLabel,
   IssuePriority,
   ModelRouteCapability,
@@ -228,7 +236,7 @@ async function requestJson<T>(
   }
   if (res.status === 401 && options.redirectOnUnauthorized !== false) {
     if (typeof window !== "undefined" && !location.pathname.startsWith("/login")) location.href = "/login";
-    throw new ApiError("登录已失效，请重新使用 Passkey 登录", 401);
+    throw new ApiError("登录已失效，请重新使用 GitHub 或 Passkey 登录", 401);
   }
   if (!res.ok) {
     let message = res.statusText;
@@ -251,6 +259,14 @@ async function req<T>(
 export const bootstrapStatus = () => requestJson<{ required: boolean }>(
   "GET", "/api/auth/bootstrap/status", undefined, { redirectOnUnauthorized: false },
 );
+export const githubAuthStatus = () => requestJson<{ configured: boolean; appSlug?: string }>(
+  "GET", "/api/auth/github/status", undefined, { redirectOnUnauthorized: false },
+);
+export const beginGitHubLogin = (invitationToken?: string) =>
+  requestJson<{ url: string }>(
+    "POST", "/api/auth/github/login", invitationToken ? { invitationToken } : {},
+    { redirectOnUnauthorized: false },
+  );
 export const beginBootstrap = (displayName: string, bootstrapToken: string) =>
   requestJson<unknown>("POST", "/api/auth/bootstrap/options", { displayName }, {
     bootstrapToken, redirectOnUnauthorized: false,
@@ -585,6 +601,9 @@ export const createPersonalAccessToken = (body: {
 export const revokePersonalAccessToken = (id: string) =>
   req<{ ok: boolean }>("DELETE", `/api/accounts/me/pats/${encodeURIComponent(id)}`);
 
+export const listAuthIdentities = () => req<AuthIdentity[]>("GET", "/api/accounts/me/identities");
+export const beginGitHubLink = () => req<{ url: string }>("POST", "/api/accounts/me/github/link", {});
+
 export const listPasskeys = () => req<PasskeyCredential[]>("GET", "/api/accounts/me/passkeys");
 export const beginPasskeyRegistration = () =>
   req<unknown>("POST", "/api/accounts/me/passkeys/options", {});
@@ -592,6 +611,35 @@ export const finishPasskeyRegistration = (response: unknown, label?: string) =>
   req<{ account: Account }>(
     "POST", "/api/accounts/me/passkeys/verify", { response, label },
   );
+
+export type GitHubIntegrationView =
+  | { configured: false }
+  | {
+      configured: true;
+      appSlug: string;
+      identity: AuthIdentity | null;
+      installations: {
+        installation: GitHubInstallation;
+        connection: GitHubWorkspaceInstallation;
+        repositories: GitHubRepositoryConnection[];
+      }[];
+    };
+
+export const getGitHubIntegration = () =>
+  req<GitHubIntegrationView>("GET", "/api/integrations/github");
+export const beginGitHubInstallation = () =>
+  req<{ url: string }>("POST", "/api/integrations/github/install", {});
+export const syncGitHubInstallation = (installationId: string) =>
+  req<{
+    installationId: string;
+    connected: number;
+    created: number;
+    reused: number;
+    aliases: number;
+    removed: number;
+  }>("POST", `/api/integrations/github/installations/${encodeURIComponent(installationId)}/sync`, {});
+export const disconnectGitHubInstallation = (installationId: string) =>
+  req<{ ok: true }>("DELETE", `/api/integrations/github/installations/${encodeURIComponent(installationId)}`);
 
 export const listLabels = () => req<IssueLabel[]>("GET", "/api/labels");
 export const createLabel = (body: { name: string; color: string }) =>

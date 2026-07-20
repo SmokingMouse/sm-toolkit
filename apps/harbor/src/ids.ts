@@ -35,6 +35,7 @@ const PREFIXES = {
   invitation: "inv",
   personalAccessToken: "pat",
   authChallenge: "chal",
+  githubOAuthState: "ghstate",
 } as const;
 
 export function newId(kind: keyof typeof PREFIXES): string {

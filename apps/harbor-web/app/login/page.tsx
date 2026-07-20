@@ -5,12 +5,14 @@ import { useEffect, useState } from "react";
 import {
   acceptInvitation,
   beginBootstrap,
+  beginGitHubLogin,
   beginInvitationRegistration,
   beginLogin,
   bootstrapStatus,
   finishBootstrap,
   finishInvitationRegistration,
   finishLogin,
+  githubAuthStatus,
   recoverSession,
 } from "../../lib/api";
 import { btnGhost, btnPrimary, Field, inputCls } from "../../components/ui";
@@ -38,12 +40,18 @@ export default function LoginPage() {
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [githubConfigured, setGitHubConfigured] = useState(false);
 
   useEffect(() => {
     const invitation = new URLSearchParams(location.search).get("invite") ?? "";
     setInvitationToken(invitation);
-    bootstrapStatus()
-      .then((state) => setMode(state.required ? "bootstrap" : invitation ? "invitation" : "login"))
+    const githubError = new URLSearchParams(location.search).get("github_error");
+    if (githubError) setError(githubError);
+    Promise.all([bootstrapStatus(), githubAuthStatus()])
+      .then(([state, github]) => {
+        setGitHubConfigured(github.configured);
+        setMode(state.required ? "bootstrap" : invitation ? "invitation" : "login");
+      })
       .catch((cause) => {
         setError(cause instanceof Error ? cause.message : String(cause));
         setMode("login");
@@ -120,6 +128,18 @@ export default function LoginPage() {
     }
   };
 
+  const loginWithGitHub = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const started = await beginGitHubLogin(invitationToken || undefined);
+      location.assign(started.url);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setBusy(false);
+    }
+  };
+
   return (
     <main className="harbor-grid relative grid min-h-screen overflow-hidden bg-bg lg:grid-cols-[minmax(320px,0.9fr)_minmax(520px,1.1fr)]">
       <section className="relative hidden overflow-hidden bg-harbor p-12 text-white lg:flex lg:flex-col lg:justify-between">
@@ -139,7 +159,7 @@ export default function LoginPage() {
             Local control plane
           </div>
           <h1 className="max-w-lg text-5xl font-semibold leading-[1.08] tracking-[-0.04em]">Your agents wait behind one human identity.</h1>
-          <p className="mt-6 max-w-md text-sm leading-7 text-white/50">Passkey 把浏览器登录与 Workspace 授权分开；长期 API 访问由 Account 自己签发 PAT，不再把共享 token 留在 localStorage。</p>
+          <p className="mt-6 max-w-md text-sm leading-7 text-white/50">GitHub 证明外部身份，Passkey 保留为本机登录；Workspace 授权仍由 Harbor 独立控制，不把长期 GitHub token 留在浏览器或数据库。</p>
         </div>
         <div className="relative grid grid-cols-3 gap-3 border-t border-white/8 pt-6 text-[10px] uppercase tracking-[0.13em] text-white/35">
           <span>Passkey</span><span>Session</span><span>Workspace RBAC</span>
@@ -170,7 +190,7 @@ export default function LoginPage() {
                   {mode === "bootstrap" ? "绑定第一枚 Passkey" : mode === "invitation" ? "创建 Account 并加入" : mode === "recovery" ? "使用一次性恢复码" : "回到你的 Workspace"}
                 </h2>
                 <p className="mt-3 text-sm leading-6 text-dim">
-                  {mode === "bootstrap" ? "首次设置同时需要 system bootstrap token。它只停留在这个表单的内存中。" : mode === "invitation" ? "Invitation 与 WebAuthn challenge 服务端绑定；验证成功后才创建 Membership。" : mode === "recovery" ? "Account ID 可在 Account settings 中查看；成功后该 code 立即失效。" : "使用设备上的 discoverable Passkey，无需输入邮箱或共享 token。"}
+                  {mode === "bootstrap" ? "首次设置同时需要 system bootstrap token。它只停留在这个表单的内存中。" : mode === "invitation" ? "可由 GitHub identity 或 Passkey 接收 Invitation；Membership 只在验证成功后创建。" : mode === "recovery" ? "Account ID 可在 Account settings 中查看；成功后该 code 立即失效。" : "使用已绑定的 GitHub identity，或设备上的 discoverable Passkey。"}
                 </p>
 
                 {mode === "bootstrap" && <div className="mt-7"><Field label="Display name"><input autoComplete="name" className={inputCls} value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></Field><Field label="System bootstrap token"><input autoComplete="off" type="password" className={inputCls} value={bootstrapToken} onChange={(event) => setBootstrapToken(event.target.value)} /></Field></div>}
@@ -178,7 +198,9 @@ export default function LoginPage() {
                 {mode === "recovery" && <div className="mt-7"><Field label="Account ID"><input autoComplete="username" className={`${inputCls} font-mono`} value={accountId} onChange={(event) => setAccountId(event.target.value)} placeholder="acc_…" /></Field><Field label="Recovery code"><input autoComplete="one-time-code" className={`${inputCls} font-mono uppercase`} value={recoveryCode} onChange={(event) => setRecoveryCode(event.target.value)} placeholder="XXXXX-XXXXX-XXXXX-XXXXX" /></Field></div>}
 
                 {error && <div role="alert" className="mt-5 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-canceled">{error}</div>}
-                {mode === "loading" ? <div className="mt-8 text-sm text-dim">正在读取 Harbor bootstrap 状态…</div> : mode === "bootstrap" ? <button className={`${btnPrimary} mt-7 w-full`} disabled={busy || !displayName.trim() || !bootstrapToken.trim()} onClick={() => void bootstrap()}>{busy ? "等待 Passkey…" : "Create first-owner Passkey"}</button> : mode === "invitation" ? <button className={`${btnPrimary} mt-7 w-full`} disabled={busy || !displayName.trim()} onClick={() => void registerFromInvitation()}>{busy ? "等待 Passkey…" : "Register with Passkey"}</button> : mode === "recovery" ? <button className={`${btnPrimary} mt-7 w-full`} disabled={busy || !accountId.trim() || !recoveryCode.trim()} onClick={() => void recover()}>{busy ? "验证中…" : "Use recovery code"}</button> : <button className={`${btnPrimary} mt-7 w-full`} disabled={busy} onClick={() => void login()}>{busy ? "等待 Passkey…" : "Continue with Passkey"}</button>}
+                {mode === "loading" ? <div className="mt-8 text-sm text-dim">正在读取 Harbor 登录方式…</div> : mode === "bootstrap" ? <button className={`${btnPrimary} mt-7 w-full`} disabled={busy || !displayName.trim() || !bootstrapToken.trim()} onClick={() => void bootstrap()}>{busy ? "等待 Passkey…" : "Create first-owner Passkey"}</button> : mode === "invitation" ? <button className={`${btnPrimary} mt-7 w-full`} disabled={busy || !displayName.trim()} onClick={() => void registerFromInvitation()}>{busy ? "等待 Passkey…" : "Register with Passkey"}</button> : mode === "recovery" ? <button className={`${btnPrimary} mt-7 w-full`} disabled={busy || !accountId.trim() || !recoveryCode.trim()} onClick={() => void recover()}>{busy ? "验证中…" : "Use recovery code"}</button> : <button className={`${btnPrimary} mt-7 w-full`} disabled={busy} onClick={() => void login()}>{busy ? "等待 Passkey…" : "Continue with Passkey"}</button>}
+
+                {githubConfigured && (mode === "login" || mode === "invitation") && <><div className="my-4 flex items-center gap-3 text-[10px] uppercase tracking-[0.16em] text-dim"><span className="h-px flex-1 bg-line" /><span>or</span><span className="h-px flex-1 bg-line" /></div><button className={`${btnGhost} w-full`} disabled={busy} onClick={() => void loginWithGitHub()}>{busy ? "Redirecting…" : mode === "invitation" ? "Accept with GitHub" : "Continue with GitHub"}</button></>}
 
                 {mode !== "loading" && mode !== "bootstrap" && <button type="button" className="mt-4 w-full text-xs font-semibold text-dim hover:text-ink" onClick={() => { setError(""); setMode(mode === "recovery" ? "login" : "recovery"); }}>{mode === "recovery" ? "返回 Passkey 登录" : "Passkey 不可用？使用 recovery code"}</button>}
                 {mode === "invitation" && <button type="button" className="mt-3 w-full text-xs font-semibold text-dim hover:text-ink" onClick={() => { setError(""); setMode("login"); }}>已有 Account？先登录并接受邀请</button>}

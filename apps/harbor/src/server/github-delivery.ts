@@ -84,6 +84,8 @@ export interface GitHubClientOptions {
   fetch?: typeof fetch;
 }
 
+export type GitHubAccessTokenProvider = (forceRefresh?: boolean) => string | Promise<string>;
+
 class GitHubApiError extends Error {
   constructor(
     readonly status: number,
@@ -100,12 +102,12 @@ export class GitHubRestClient {
   private readonly fetchImpl: typeof fetch;
 
   constructor(
-    private readonly token: string,
+    private readonly credential: string | GitHubAccessTokenProvider,
     options: GitHubClientOptions = {},
   ) {
-    if (!token.trim()) {
+    if (typeof credential === "string" && !credential.trim()) {
       throw new Error(
-        "GitHub Delivery provider 未配置：请在 harbor-server 设置 HARBOR_GITHUB_TOKEN（或 ~/.harbor.yaml github.token）",
+        "GitHub Delivery provider credential 未配置",
       );
     }
     this.baseUrl = new URL(options.baseUrl ?? "https://api.github.com/");
@@ -185,7 +187,7 @@ export class GitHubRestClient {
       { method: "PUT", body: { sha: expectedHeadSha } },
     );
     if (result.merged !== true) {
-      throw new Error(`GitHub 拒绝合并 PR #${ref.number}：${this.redact(result.message?.trim() || "未返回原因")}`);
+      throw new Error(`GitHub 拒绝合并 PR #${ref.number}：${result.message?.trim() || "未返回原因"}`);
     }
     return { sha: result.sha ?? null, message: result.message?.trim() || `GitHub PR #${ref.number} 已合并` };
   }
@@ -325,21 +327,36 @@ export class GitHubRestClient {
     options: { method?: "GET" | "POST" | "PUT"; body?: unknown } = {},
   ): Promise<T> {
     const method = options.method ?? "GET";
-    let response: Response;
-    try {
-      response = await this.fetchImpl(new URL(path, this.baseUrl), {
-        method,
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${this.token}`,
-          "X-GitHub-Api-Version": "2026-03-10",
-          ...(options.body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        body: options.body === undefined ? undefined : JSON.stringify(options.body),
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`GitHub API ${method} /${path} 网络失败：${this.redact(message)}`);
+    let token = typeof this.credential === "string"
+      ? this.credential
+      : await this.credential(false);
+    if (!token.trim()) throw new Error("GitHub Delivery provider credential 为空");
+    const issuedTokens = [token];
+    const request = async (credential: string): Promise<Response> => {
+      try {
+        return await this.fetchImpl(new URL(path, this.baseUrl), {
+          method,
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${credential}`,
+            "X-GitHub-Api-Version": "2026-03-10",
+            ...(options.body === undefined ? {} : { "Content-Type": "application/json" }),
+          },
+          body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const safeMessage = issuedTokens.reduce((result, issued) => this.redact(result, issued), message);
+        throw new Error(`GitHub API ${method} /${path} 网络失败：${safeMessage}`);
+      }
+    };
+    let response = await request(token);
+    const staleToken = token;
+    if (response.status === 401 && typeof this.credential === "function") {
+      token = await this.credential(true);
+      if (!token.trim()) throw new Error("GitHub Delivery provider refreshed credential 为空");
+      issuedTokens.push(token);
+      response = await request(token);
     }
     if (!response.ok) {
       let message = response.statusText;
@@ -349,7 +366,7 @@ export class GitHubRestClient {
       } catch {
         // 非 JSON 错误仍只报告 status；绝不回显 request headers。
       }
-      const safeMessage = this.redact(message || "unknown error");
+      const safeMessage = this.redact(this.redact(message || "unknown error", token), staleToken);
       throw new GitHubApiError(
         response.status,
         `GitHub API ${method} /${path} 失败（${response.status}）：${safeMessage}`,
@@ -358,16 +375,24 @@ export class GitHubRestClient {
     return (await response.json()) as T;
   }
 
-  private redact(value: string): string {
-    return value.replaceAll(this.token, "[redacted]");
+  private redact(value: string, token: string): string {
+    return value.replaceAll(token, "[redacted]");
   }
 }
+
+export type GitHubRestClientResolver = (repository: HarborRepository) => GitHubRestClient;
 
 export class GitHubDeliveryProvider implements DeliveryProvider {
   readonly kind = "github" as const;
   readonly mode = "automatic" as const;
 
-  constructor(private readonly client: GitHubRestClient) {}
+  constructor(private readonly clientOrResolver: GitHubRestClient | GitHubRestClientResolver) {}
+
+  private client(repository: HarborRepository): GitHubRestClient {
+    return typeof this.clientOrResolver === "function"
+      ? this.clientOrResolver(repository)
+      : this.clientOrResolver;
+  }
 
   async createChange(
     context: DeliveryProviderContext,
@@ -382,7 +407,7 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
     if (!title) throw new Error("GitHub PR 创建需要 title");
     if (!head) throw new Error("GitHub PR 创建需要 headBranch");
     const repository = parseGitHubRepository(context.repository.remoteUrl);
-    const pull = await this.client.createPullRequest(repository, {
+    const pull = await this.client(context.repository).createPullRequest(repository, {
       title,
       body: input.body?.trim() ?? "",
       head,
@@ -421,7 +446,9 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
 
   async sync(delivery: Delivery, context: DeliveryProviderContext): Promise<DeliveryProviderSyncResult> {
     const ref = resolveGitHubPullRequest(delivery.changeUrl, context.repository);
-    const pull = await this.client.getPullRequest(ref);
+    if (!context.repository) throw new Error("GitHub Delivery 需要 Issue 关联 Repository");
+    const client = this.client(context.repository);
+    const pull = await client.getPullRequest(ref);
     if (
       pull.number !== ref.number ||
       (!pull.merged && pull.state !== "open" && pull.state !== "closed") ||
@@ -431,7 +458,7 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
     ) {
       throw new Error(`GitHub PR #${ref.number} 响应缺少必要的 head/base 信息`);
     }
-    const snapshot = await this.client.getCheckSnapshot(ref, pull.head.sha, pull.base.ref);
+    const snapshot = await client.getCheckSnapshot(ref, pull.head.sha, pull.base.ref);
     const checkStatus = evaluateGitHubChecks(snapshot);
     const mergeStatus: DeliveryMergeStatus = pull.merged
       ? "merged"
@@ -469,14 +496,16 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
     const ref = resolveGitHubPullRequest(delivery.changeUrl, context.repository);
     if (!delivery.latestHeadSha) throw new Error(`GitHub PR #${ref.number} 尚未同步 head SHA`);
     // merge 只能重验已获人工 approval 的同一 SHA，不能自动升级到 GitHub 上的新 head。
-    const pull = await this.client.getPullRequest(ref);
+    if (!context.repository) throw new Error("GitHub Delivery 需要 Issue 关联 Repository");
+    const client = this.client(context.repository);
+    const pull = await client.getPullRequest(ref);
     if (!pull.head?.sha || !pull.base?.ref) {
       throw new Error(`GitHub PR #${ref.number} 当前不可合并；请 Sync 后检查 PR 状态`);
     }
     if (pull.head.sha !== delivery.latestHeadSha) {
       throw new Error(`GitHub PR #${ref.number} head 已变化；请 Sync from GitHub 并重新验收后再合并`);
     }
-    const snapshot = await this.client.getCheckSnapshot(ref, pull.head.sha, pull.base.ref);
+    const snapshot = await client.getCheckSnapshot(ref, pull.head.sha, pull.base.ref);
     const latestChecks = evaluateGitHubChecks(snapshot);
     if (latestChecks !== "passed") {
       throw new Error(`GitHub 最新 CI checks 为 ${latestChecks}；请 Sync 并等待通过后再合并`);
@@ -490,7 +519,7 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
     if (pull.state !== "open") {
       throw new Error(`GitHub PR #${ref.number} 当前不可合并；请 Sync 后检查 PR 状态`);
     }
-    const result = await this.client.mergePullRequest(ref, delivery.latestHeadSha);
+    const result = await client.mergePullRequest(ref, delivery.latestHeadSha);
     return {
       message: result.message,
       mergedRevision: result.sha,
