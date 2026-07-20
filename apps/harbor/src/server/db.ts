@@ -48,6 +48,7 @@ const APPLICATION_MUTATION_TABLES = [
   "conversation_labels",
   "issue_labels",
   "run_attachments",
+  "message_attachments",
   "run_action_tokens",
   "domain_events",
   "workspace_api_tokens",
@@ -2133,6 +2134,17 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE deliveries_v27 RENAME TO deliveries;
   CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
   `,
+  // v28 —— Web 图片附件：消息持久化一份，Run 继续使用既有附件管线。
+  `
+  CREATE TABLE message_attachments (
+    message_id TEXT NOT NULL REFERENCES conversation_messages(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    data_base64 TEXT NOT NULL,
+    PRIMARY KEY (message_id, position)
+  );
+  `,
 ];
 
 function backfillDeviceCapabilitySummaries(db: Database): void {
@@ -2293,6 +2305,7 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
         ]);
         if (version === 25) dropMaintenanceLinearization(db, APPLICATION_MUTATION_TABLES);
         if (version === 26) dropMaintenanceLinearization(db, APPLICATION_MUTATION_TABLES);
+        if (version === 27) dropMaintenanceLinearization(db, APPLICATION_MUTATION_TABLES);
         if (sql.trim()) db.exec(sql);
         if (version === 22) {
           applyIdentityNormalization(db, identityReport!);
@@ -2305,6 +2318,7 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
         if (version === 20) installMaintenanceLinearization(db);
         if (version === 25) installMaintenanceLinearization(db);
         if (version === 26) installMaintenanceLinearization(db);
+        if (version === 27) installMaintenanceLinearization(db);
         db.exec(`PRAGMA user_version = ${version + 1}`);
       })();
     } finally {

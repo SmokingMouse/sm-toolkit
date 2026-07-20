@@ -849,12 +849,16 @@ function parseJsonArray<T>(value: string): T[] {
 export class HarborStore {
   private domainEventListener: ((event: DomainEvent) => void) | null = null;
   private readonly hasDeviceSummaryColumn: boolean;
+  private readonly hasMessageAttachmentsTable: boolean;
 
   constructor(private db: Database) {
     this.hasDeviceSummaryColumn = db
       .query<{ name: string }, []>("PRAGMA table_info(devices)")
       .all()
       .some((column) => column.name === "capabilities_summary");
+    this.hasMessageAttachmentsTable = !!db.query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'message_attachments'",
+    ).get();
   }
 
   setDomainEventListener(listener: ((event: DomainEvent) => void) | null): void {
@@ -2549,6 +2553,7 @@ export class HarborStore {
     conversationId: string,
     input: Omit<ConversationMessage, "id" | "conversationId" | "createdAt">,
     now: number,
+    attachments: RunAttachment[] = [],
   ): ConversationMessage {
     const existing = input.externalId
       ? this.db.query<{ id: string }, [string, string]>(
@@ -2557,13 +2562,22 @@ export class HarborStore {
       : null;
     if (existing) return this.getConversationMessage(existing.id)!;
     const id = newId("message");
-    this.db.run(
-      `INSERT INTO conversation_messages
-       (id, conversation_id, author_type, author_id, author_name, body, external_id, created_at)
-       VALUES (?,?,?,?,?,?,?,?)`,
-      [id, conversationId, input.authorType, input.authorId, input.authorName, input.body, input.externalId, now],
-    );
-    this.db.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, conversationId]);
+    this.db.transaction(() => {
+      this.db.run(
+        `INSERT INTO conversation_messages
+         (id, conversation_id, author_type, author_id, author_name, body, external_id, created_at)
+         VALUES (?,?,?,?,?,?,?,?)`,
+        [id, conversationId, input.authorType, input.authorId, input.authorName, input.body, input.externalId, now],
+      );
+      if (attachments.length > 0) {
+        const insert = this.db.prepare(
+          "INSERT INTO message_attachments (message_id, position, name, mime, data_base64) VALUES (?,?,?,?,?)",
+        );
+        attachments.forEach((attachment, position) =>
+          insert.run(id, position, attachment.name, attachment.mime, attachment.dataBase64));
+      }
+      this.db.run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, conversationId]);
+    })();
     return this.getConversationMessage(id)!;
   }
 
@@ -2580,6 +2594,7 @@ export class HarborStore {
       authorName: row.author_name,
       body: row.body,
       externalId: row.external_id,
+      attachments: this.listMessageAttachmentMeta(row.id),
       createdAt: row.created_at,
     } : null;
   }
@@ -2588,6 +2603,20 @@ export class HarborStore {
     return this.db.query<{ id: string }, [string]>(
       "SELECT id FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at, rowid",
     ).all(conversationId).map((row) => this.getConversationMessage(row.id)!);
+  }
+
+  listMessageAttachmentMeta(messageId: string): { name: string; mime: string }[] {
+    if (!this.hasMessageAttachmentsTable) return [];
+    return this.db.query<{ name: string; mime: string }, [string]>(
+      "SELECT name, mime FROM message_attachments WHERE message_id = ? ORDER BY position",
+    ).all(messageId);
+  }
+
+  getMessageAttachment(messageId: string, position: number): RunAttachment | null {
+    const row = this.db.query<{ name: string; mime: string; data_base64: string }, [string, number]>(
+      "SELECT name, mime, data_base64 FROM message_attachments WHERE message_id = ? AND position = ?",
+    ).get(messageId, position);
+    return row ? { name: row.name, mime: row.mime, dataBase64: row.data_base64 } : null;
   }
 
   /** AI 分诊草稿在人工确认时才进入 Issue 看板；保留 triage Run 与 session 作为来源证据。 */
@@ -3852,6 +3881,19 @@ export class HarborStore {
       )
       .all(runId)
       .map((row) => ({ name: row.name, mime: row.mime, dataBase64: row.data_base64 }));
+  }
+
+  listRunAttachmentMeta(runId: string): { name: string; mime: string }[] {
+    return this.db.query<{ name: string; mime: string }, [string]>(
+      "SELECT name, mime FROM run_attachments WHERE run_id = ? ORDER BY position",
+    ).all(runId);
+  }
+
+  getRunAttachment(runId: string, position: number): RunAttachment | null {
+    const row = this.db.query<{ name: string; mime: string; data_base64: string }, [string, number]>(
+      "SELECT name, mime, data_base64 FROM run_attachments WHERE run_id = ? AND position = ?",
+    ).get(runId, position);
+    return row ? { name: row.name, mime: row.mime, dataBase64: row.data_base64 } : null;
   }
 
   createRunActionToken(runId: string, tokenHash: string, expiresAt: number, now: number): string {

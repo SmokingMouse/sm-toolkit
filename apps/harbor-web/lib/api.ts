@@ -134,7 +134,8 @@ export type ConversationWithAgent = Conversation & {
   latestRun: Run | null;
 };
 export type AutomationWithAgent = Automation & { agentName: string };
-export type RunWithResult = Run & { resultText: string | null };
+export type RunWithResult = Run & { resultText: string | null; attachments?: { name: string; mime: string }[] };
+export type ImageAttachmentInput = { name: string; mime: string; dataBase64: string };
 export type SkillWithAgents = HarborSkill & {
   agents: { id: string; name: string }[];
 };
@@ -474,7 +475,7 @@ export const updateConversation = (id: string, body: Record<string, unknown>) =>
 export const createRun = (
   conversationId: string,
   prompt: string,
-  options?: { agent?: string; purpose?: string },
+  options?: { agent?: string; purpose?: string; attachments?: ImageAttachmentInput[] },
 ) =>
   req<Run>(
     "POST",
@@ -483,7 +484,7 @@ export const createRun = (
   );
 export const dispatchIssue = (
   id: string,
-  body: { agent?: string; prompt?: string },
+  body: { agent?: string; prompt?: string; attachments?: ImageAttachmentInput[] },
 ) =>
   req<Run>(
     "POST",
@@ -492,7 +493,7 @@ export const dispatchIssue = (
   );
 export const requestIssueChanges = (
   id: string,
-  body: { feedback: string; agent?: string },
+  body: { feedback: string; agent?: string; attachments?: ImageAttachmentInput[] },
 ) =>
   req<Run>(
     "POST",
@@ -552,7 +553,7 @@ export const cancelRun = (runId: string) =>
   req<Run>("POST", `/api/runs/${encodeURIComponent(runId)}/cancel`);
 export const createConversationMessage = (
   id: string,
-  body: { body: string; agent?: string; dispatch?: boolean },
+  body: { body: string; agent?: string; dispatch?: boolean; attachments?: ImageAttachmentInput[] },
 ) =>
   req<{ message: ConversationMessage; run?: Run }>(
     "POST",

@@ -29,6 +29,7 @@ import type {
   Origin,
   PromptBlockKey,
   Run,
+  RunAttachment,
   RunPurpose,
   RunStreamFrame,
   Account,
@@ -73,6 +74,8 @@ import type { DeploymentTargetConfig } from "../config.js";
 const PERMISSIONS = ["readonly", "auto-edit", "full", "default"];
 const MAX_SKILL_INSTRUCTION = 128 * 1024;
 const MAX_AGENT_SETUP = 64 * 1024;
+const MAX_IMAGE_ATTACHMENTS = 8;
+const MAX_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const ISSUE_TRIAGE_PROMPT = `You are triaging a request before an Issue is created.
 Read the repository only as needed to replace ambiguity with concrete evidence. Do not edit files, create branches, commit, push, or implement the request.
 
@@ -462,6 +465,7 @@ export function buildRest(
     c: Context,
     conversationId: string,
     body: string,
+    attachments: RunAttachment[] = [],
   ) => {
     const actor = requestActor(c);
     const conversation = store.getConversation(conversationId);
@@ -478,7 +482,32 @@ export function buildRest(
         externalId: null,
       },
       Date.now(),
+      attachments,
     );
+  };
+
+  const parseImageAttachments = (value: unknown): RunAttachment[] => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value)) bad("attachments 需要是数组");
+    if (value.length > MAX_IMAGE_ATTACHMENTS) bad(`单次最多上传 ${MAX_IMAGE_ATTACHMENTS} 张图片`);
+    let total = 0;
+    return value.map((item, index) => {
+      if (!item || typeof item !== "object") bad(`附件 ${index + 1} 格式无效`);
+      const candidate = item as Record<string, unknown>;
+      const mime = typeof candidate.mime === "string" ? candidate.mime.trim().toLowerCase() : "";
+      const dataBase64 = typeof candidate.dataBase64 === "string" ? candidate.dataBase64.trim() : "";
+      if (!mime.startsWith("image/")) bad(`附件 ${index + 1} 不是图片`);
+      if (!dataBase64 || !/^[A-Za-z0-9+/]*={0,2}$/.test(dataBase64) || dataBase64.length % 4 !== 0) {
+        bad(`附件 ${index + 1} 的 base64 无效`);
+      }
+      const bytes = Buffer.from(dataBase64, "base64");
+      if (bytes.toString("base64") !== dataBase64) bad(`附件 ${index + 1} 的 base64 无效`);
+      total += bytes.byteLength;
+      if (total > MAX_IMAGE_ATTACHMENT_BYTES) bad("图片总大小不能超过 20MB");
+      const suppliedName = typeof candidate.name === "string" ? candidate.name.trim() : "";
+      const name = suppliedName || `image-${index + 1}.${mime.split("/")[1]?.replace(/[^a-z0-9.+-]/g, "") || "bin"}`;
+      return { name, mime, dataBase64 };
+    });
   };
 
   const scopedAgent = (
@@ -3123,7 +3152,7 @@ export function buildRest(
       // resultText：Chat/Issue 历史渲染用；run_events 7 天 prune 后为 null（UI 显示「记录已过期」）
       runs: store
         .listRunsByConversation(conv.id)
-        .map((r) => ({ ...r, resultText: store.getRunResultText(r.id) })),
+        .map((r) => ({ ...r, resultText: store.getRunResultText(r.id), attachments: store.listRunAttachmentMeta(r.id) })),
       statusLog: store.listStatusLog(conv.id),
       delivery,
       deliveryEvents: (() => {
@@ -3251,6 +3280,7 @@ export function buildRest(
       prompt?: string;
       agent?: string;
       purpose?: string;
+      attachments?: unknown;
     };
     if (!b.prompt?.trim()) bad("缺少 prompt");
     const purpose = (b.purpose ?? "implementation") as RunPurpose;
@@ -3260,8 +3290,9 @@ export function buildRest(
     const agent = scopedAgent(c, workspace.id, agentKey);
     if (!agent) bad("Issue 尚未指派 Agent，请先选择 Assignee");
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
-    appendRequestMessage(c, conv.id, b.prompt.trim());
-    const run = enqueue(conv, agent, b.prompt.trim(), purpose);
+    const attachments = parseImageAttachments(b.attachments);
+    appendRequestMessage(c, conv.id, b.prompt.trim(), attachments);
+    const run = enqueue(conv, agent, b.prompt.trim(), purpose, undefined, undefined, { attachments });
     return c.json(run, 201);
   });
 
@@ -3270,15 +3301,16 @@ export function buildRest(
     const workspace = currentWorkspace(c);
     const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
     if (conv.kind !== "issue") bad("dispatch 只适用于 Issue");
-    const b = (await c.req.json()) as { agent?: string; prompt?: string };
+    const b = (await c.req.json()) as { agent?: string; prompt?: string; attachments?: unknown };
     const agentKey = b.agent ?? conv.agentId;
     const agent = scopedAgent(c, workspace.id, agentKey);
     if (!agent) bad("请选择要执行的 Agent");
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
     const prompt = b.prompt?.trim() || conv.description?.trim();
     if (!prompt) bad("Issue 缺少任务描述，无法派发");
-    appendRequestMessage(c, conv.id, prompt);
-    return c.json(enqueue(conv, agent, prompt, "implementation"), 201);
+    const attachments = parseImageAttachments(b.attachments);
+    appendRequestMessage(c, conv.id, prompt, attachments);
+    return c.json(enqueue(conv, agent, prompt, "implementation", undefined, undefined, { attachments }), 201);
   });
 
   app.post("/api/conversations/:id/request-changes", async (c) => {
@@ -3286,15 +3318,16 @@ export function buildRest(
     const conv = assertConversationWorkspace(workspace.id, c.req.param("id"));
     if (conv.kind !== "issue" || conv.status !== "review")
       bad("只有 Review 中的 Issue 可以要求修改");
-    const b = (await c.req.json()) as { feedback?: string; agent?: string };
+    const b = (await c.req.json()) as { feedback?: string; agent?: string; attachments?: unknown };
     if (!b.feedback?.trim()) bad("请填写修改意见");
     const agentKey = b.agent ?? conv.agentId;
     const agent = scopedAgent(c, workspace.id, agentKey);
     if (!agent) bad("请选择返工 Agent");
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
-    appendRequestMessage(c, conv.id, b.feedback.trim());
+    const attachments = parseImageAttachments(b.attachments);
+    appendRequestMessage(c, conv.id, b.feedback.trim(), attachments);
     return c.json(
-      enqueue(conv, agent, b.feedback.trim(), "implementation"),
+      enqueue(conv, agent, b.feedback.trim(), "implementation", undefined, undefined, { attachments }),
       201,
     );
   });
@@ -3322,10 +3355,12 @@ export function buildRest(
       body?: string;
       agent?: string;
       dispatch?: boolean;
+      attachments?: unknown;
     };
     const body = b.body?.trim() ?? "";
     if (!body) bad("message body 不能为空");
-    const message = appendRequestMessage(c, conv.id, body);
+    const attachments = parseImageAttachments(b.attachments);
+    const message = appendRequestMessage(c, conv.id, body, attachments);
     if (b.dispatch === false) return c.json({ message }, 201);
     const agent = scopedAgent(c, workspace.id, b.agent ?? conv.agentId);
     if (!agent) bad("请选择响应消息的 Agent");
@@ -3339,7 +3374,7 @@ export function buildRest(
         : conv.kind === "chat"
           ? ("event.chat.message_created" as const)
           : ("event.issue.message_created" as const);
-    const run = enqueue(conv, agent, body, purpose, promptEvent, message.id);
+    const run = enqueue(conv, agent, body, purpose, promptEvent, message.id, { attachments });
     return c.json({ message, run }, 201);
   });
 
@@ -3490,6 +3525,33 @@ export function buildRest(
   app.get("/api/runs/:id", (c) => {
     const run = assertRunWorkspace(currentWorkspace(c).id, c.req.param("id"));
     return c.json(run);
+  });
+
+  const attachmentResponse = (c: Context, attachment: RunAttachment | null) => {
+    if (!attachment) throw new HTTPException(404, { message: "附件不存在" });
+    return c.body(Buffer.from(attachment.dataBase64, "base64"), 200, {
+      "Content-Type": attachment.mime,
+      "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(attachment.name)}`,
+      "Cache-Control": "private, max-age=3600",
+      "Content-Security-Policy": "sandbox",
+      "X-Content-Type-Options": "nosniff",
+    });
+  };
+
+  app.get("/api/messages/:id/attachments/:pos", (c) => {
+    const message = store.getConversationMessage(c.req.param("id"));
+    if (!message) throw new HTTPException(404, { message: "消息不存在" });
+    assertConversationWorkspace(currentWorkspace(c).id, message.conversationId);
+    const position = Number(c.req.param("pos"));
+    if (!Number.isInteger(position) || position < 0) bad("附件位置无效");
+    return attachmentResponse(c, store.getMessageAttachment(message.id, position));
+  });
+
+  app.get("/api/runs/:id/attachments/:pos", (c) => {
+    const run = assertRunWorkspace(currentWorkspace(c).id, c.req.param("id"));
+    const position = Number(c.req.param("pos"));
+    if (!Number.isInteger(position) || position < 0) bad("附件位置无效");
+    return attachmentResponse(c, store.getRunAttachment(run.id, position));
   });
 
   app.post("/api/runs/:id/cancel", (c) => {

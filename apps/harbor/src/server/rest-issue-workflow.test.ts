@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { Conversation, Delivery, Run, ServerMsg } from "../protocol.js";
+import type { Conversation, ConversationMessage, Delivery, Run, ServerMsg } from "../protocol.js";
 import type { ApprovalService } from "./approvals.js";
 import type { AutomationService } from "./automation.js";
 import { RunBus } from "./bus.js";
@@ -87,6 +87,48 @@ test("Issue action API supports Inbox → Assign & Run → Review → AI Review 
   const approvalResponse = await request(`/api/conversations/${issue.id}/approve`, {});
   expect(approvalResponse.status).toBe(200);
   expect((await approvalResponse.json()) as Conversation).toEqual(expect.objectContaining({ status: "done" }));
+});
+
+test("Web image attachments persist as message meta and flow into the Run", async () => {
+  const store = new HarborStore(openDb(":memory:"));
+  const device = store.upsertDevice("worker", "hash", { clis: { claude: "2.1" }, endpoints: [] }, 1);
+  const agent = store.createAgent({ name: "builder", deviceId: device.id, backend: "claude", workdir: "/repo" }, 2);
+  const coordinator = new RunCoordinator(store, new RunBus(), { isOnline: () => false, send: () => false }, 2);
+  const app = buildRest(store, new RunBus(), { onlineIds: () => new Set(), isOnline: () => false } as unknown as DeviceHub, coordinator, {} as ApprovalService, {} as AutomationService, "test-token");
+  const request = (path: string, body?: unknown) => app.request(path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { Authorization: "Bearer test-token", ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const created = await request("/api/conversations", { kind: "chat", agent: agent.id, title: "Screenshot", origin: "web" });
+  const conversation = (await created.json()) as Conversation;
+  const image = { name: "screen.png", mime: "image/png", dataBase64: Buffer.from("png-bytes").toString("base64") };
+
+  const sent = await request(`/api/conversations/${conversation.id}/runs`, { prompt: "inspect", attachments: [image] });
+  expect(sent.status).toBe(201);
+  const run = (await sent.json()) as Run;
+  expect(store.listRunAttachments(run.id)).toEqual([image]);
+
+  const detail = await request(`/api/conversations/${conversation.id}`);
+  const payload = await detail.json() as { messages: ConversationMessage[]; runs: Array<Run & { attachments: unknown[] }> };
+  expect(payload.messages[0]?.attachments).toEqual([{ name: "screen.png", mime: "image/png" }]);
+  expect(payload.runs[0]?.attachments).toEqual([{ name: "screen.png", mime: "image/png" }]);
+  expect(JSON.stringify(payload)).not.toContain(image.dataBase64);
+
+  const messageImage = await request(`/api/messages/${payload.messages[0]!.id}/attachments/0`);
+  expect(messageImage.status).toBe(200);
+  expect(messageImage.headers.get("content-type")).toBe("image/png");
+  expect(await messageImage.text()).toBe("png-bytes");
+  expect((await request(`/api/runs/${run.id}/attachments/0`)).status).toBe(200);
+
+  expect((await request(`/api/conversations/${conversation.id}/runs`, {
+    prompt: "bad",
+    attachments: [{ ...image, mime: "text/plain" }],
+  })).status).toBe(400);
+  expect((await request(`/api/conversations/${conversation.id}/runs`, {
+    prompt: "too many",
+    attachments: Array.from({ length: 9 }, () => image),
+  })).status).toBe(400);
 });
 
 test("AI issue draft triages read-only before publishing a visible Issue", async () => {

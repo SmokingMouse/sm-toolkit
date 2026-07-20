@@ -33,6 +33,7 @@
 - **Assignee**：Issue 当前的 implementation Agent，可空、可在没有 active Run 时更换。Reviewer 是独立 Run 的执行者，不覆盖 Assignee；更换 Assignee 会清空旧 Agent 的 resume session。
 - **Issue stage**：`backlog(Inbox) → todo(Ready) → doing(Running) → review → done/canceled`。`doing/review` 由 implementation Run 自动推进，人工只做分诊、要求修改、验收或取消，避免拖拽制造假状态。
 - **Run purpose**：一次执行的意图快照：`triage` 只读分诊 AI Issue draft；`coordination` 只读取控制面上下文并按用户定义策略派生 Run，不改 Issue stage/Assignee/Delivery；`implementation` 推进 Issue 阶段并续接 Assignee session；`review` / `verification` 只在 Review 内运行，不改变 Assignee、不自动 Done。
+- **Conversation image attachment**：Issue/Chat 中某条用户消息的有序图片子资源；消息表保存展示副本，触发 Run 时同时复制到 `run_attachments` 供 daemon 落盘。会话详情只返回 name/mime meta，二进制必须通过当前 Workspace 鉴权的单附件端点读取。
 - **Domain Event**：由 Harbor 已提交领域事实产生的持久、幂等内部审计事实，例如 `issue.created`、`issue.ready`、`issue.review_ready`、`delivery.merge_ready`、`delivery.merged`。它不直接暴露为 Automation Trigger；用户自动化只面对 Schedule 或 SCM 归一化后的 Codebase 事件。
 - **Automation**：Workspace 内可复用的 Agent 执行规则，恰好选择一个 Output 与一个 Trigger。Output 为 `Run`（仅 Run history）、`Chat`（报告到新 Chat）或 `Issue`（创建可执行工作）；Trigger 为 `Schedule`（cron + timezone）或 `Codebase`（Repository + 单一 SCM event）。Run purpose 与单飞并发策略由 control plane 从 Output 推导，不是用户配置；授权使用自己的 Service Principal，不借创建者身份。
 - **Run dispatch**：action-capable Run 使用短期 Run token 查询安全上下文并显式指定目标 Agent 派生 child Run 的能力。Harbor 校验 Workspace、Conversation 串行、Repository、purpose、lineage 深度和稳定 dispatch key，但绝不替用户选择 Agent，也不要求存在 Orchestrator。

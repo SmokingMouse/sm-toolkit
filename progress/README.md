@@ -62,6 +62,12 @@ Harbor P6.1 identity normalization、Device/Agent 加载性能、Agent roster、
 
 ## Session Log
 
+### 2026-07-20 — Issue / Chat 图片附件端到端（Issue c_1d0ymfs03b）
+- **Decision**：图片附件是 Conversation message 的有序子资源；触发 Run 时显式双写既有 `run_attachments`，详情只投影 meta，下载端点按 Conversation/Run 的 Workspace 归属鉴权，避免列表加载 base64。
+- **Done**：schema v28 新增 `message_attachments`；四个消息/派发 REST 入口统一校验 image/*、最多 8 张、解码后合计 20MB，并透传 daemon 既有落盘管线；Issue/Chat composer 支持粘贴、文件选择、预览删除，Discussion/Chat 历史支持图片展示。
+- **Verified**：Harbor server 131 tests / 748 assertions ✓；Harbor build、harbor-web typecheck、Next production build ✓；`git diff --check` ✓。
+- **Next**：本地提交已完成；当前 Runtime DNS 禁止访问 `github.com`，需由具备网络的后续 Run push `harbor/c_1d0ymfs03b` 并登记 GitHub Delivery，再交独立 Reviewer。生产升级时由 server 执行 v27→v28 migration。
+
 ### 2026-07-19 — Mew Automation Output/Trigger normalization（已部署）
 - **Decision**：Automation 产品契约固定为一个 Output（Run/Chat/Issue）+ 一个 Trigger（Schedule/Codebase）；purpose、append/source、overlap、notify、内部 Domain Event 与 generic webhook 退出用户模型。Run/Chat 派生 coordination，Issue 派生 implementation；同 Automation 固定单飞。Codebase 是真实 Repository event，不是 webhook 换名。ADR：`progress/decisions/2026-07-19-harbor-mew-automation-model.md`。
 - **Done**：协议、SQLite v25、Store/Automation/Scheduler、SCM event normalization、REST/CLI、Prompt blocks 与 Web 创建/编辑页全部收敛到同一契约；旧 webhook endpoint 与 1:N Trigger CRUD 删除。v25 fixture 同时覆盖 schedule/Codebase 保留、legacy 归档、delivery 去重保留与 FK/integrity；生产现有 `Auto review and merge` 将因 `review + source + internal event` 进入 archive，历史 Run 保留。

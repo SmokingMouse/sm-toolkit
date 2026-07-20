@@ -16,6 +16,7 @@ import { useToast } from "../../components/toast";
 import { btnGhost, btnPrimary, Empty, Field, inputCls, Modal, ModalFooter } from "../../components/ui";
 import { foldFrames, ToolCard, useRunFrames } from "../../components/run-stream";
 import { Markdown } from "../../components/markdown";
+import { AttachmentImages, AttachmentPreview, useImageAttachments } from "../../components/attachments";
 
 export default function ChatsPage() {
   const convs = usePoll(() => listConversations({ kind: "chat" }), 10_000);
@@ -180,6 +181,7 @@ function ChatView({
   const [liveRunId, setLiveRunId] = useState<string | null>(null);
   const [pendingPrompt, setPendingPrompt] = useState("");
   const [busy, setBusy] = useState(false);
+  const imageAttachments = useImageAttachments((message) => toast(message, "error"));
   const { frames, streaming, doneRun } = useRunFrames(liveRunId);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -204,7 +206,7 @@ function ChatView({
   const repositoryName = detail.data?.repository?.name ?? null;
 
   const send = async () => {
-    const prompt = input.trim();
+    const prompt = input.trim() || (imageAttachments.attachments.length ? "请查看附件。" : "");
     if (!prompt) return;
     setBusy(true);
     try {
@@ -219,9 +221,10 @@ function ChatView({
         });
         convId = conv.id;
       }
-      const run = await createRun(convId, prompt);
+      const run = await createRun(convId, prompt, { attachments: imageAttachments.attachments });
       setPendingPrompt(prompt);
       setInput("");
+      imageAttachments.clear();
       setLiveRunId(run.id);
       if (!conversationId) onConversationCreated(convId);
       else detail.reload();
@@ -249,7 +252,7 @@ function ChatView({
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-6">
         <div className="mx-auto max-w-3xl">
           {runs.filter((r) => r.id !== liveRunId).map((r) => <HistoryBubbles key={r.id} run={r} agentName={agentName} />)}
-          {liveRunId && <>{livePrompt && <UserBubble text={livePrompt} />}<LiveAssistantBubble frames={frames} streaming={streaming} agentName={agentName} /></>}
+          {liveRunId && <>{livePrompt && <UserBubble text={livePrompt} run={runs.find((r) => r.id === liveRunId)} />}<LiveAssistantBubble frames={frames} streaming={streaming} agentName={agentName} /></>}
           {runs.length === 0 && !liveRunId && (
             <div className="grid min-h-56 place-items-center text-center">
               <div>
@@ -268,14 +271,16 @@ function ChatView({
             placeholder={sending ? "上一轮还在跑…（串行闸）" : `Message ${agentName}`}
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            onPaste={imageAttachments.onPaste}
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send();
             }}
             disabled={sending}
           />
+          <AttachmentPreview attachments={imageAttachments.attachments} onRemove={imageAttachments.remove} />
           <div className="flex items-center justify-between border-t border-line/70 px-3 py-2">
-            <div className="text-[10px] text-dim">同一会话串行执行 · <span className="font-mono">⌘↵</span> 发送</div>
-            <button className={`${btnPrimary} min-h-8 px-3 py-1.5 text-xs`} disabled={sending || !input.trim()} onClick={send}>发送</button>
+            <div className="flex items-center gap-2">{imageAttachments.picker}<span className="text-[10px] text-dim">同一会话串行执行 · <span className="font-mono">⌘↵</span> 发送</span></div>
+            <button className={`${btnPrimary} min-h-8 px-3 py-1.5 text-xs`} disabled={sending || (!input.trim() && imageAttachments.attachments.length === 0)} onClick={send}>发送</button>
           </div>
         </div>
       </div>
@@ -283,11 +288,12 @@ function ChatView({
   );
 }
 
-function UserBubble({ text }: { text: string }) {
+function UserBubble({ text, run }: { text: string; run?: RunWithResult }) {
   return (
     <div className="mb-5 flex justify-end">
       <div className="max-w-[80%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-[#e9eeeb] px-4 py-2.5 text-sm leading-6 text-ink shadow-[0_1px_2px_rgba(20,35,30,.04)]">
         {text}
+        <AttachmentImages owner="runs" id={run?.id ?? ""} attachments={run?.attachments} />
       </div>
     </div>
   );
@@ -312,7 +318,7 @@ function HistoryBubbles({ run, agentName }: { run: RunWithResult; agentName: str
   const duration = run.startedAt && run.finishedAt ? Math.max(1, Math.round((run.finishedAt - run.startedAt) / 1000)) : null;
   return (
     <>
-      <UserBubble text={run.prompt} />
+      <UserBubble text={run.prompt} run={run} />
       <AssistantShell agentName={agentName} state={duration ? `Worked for ${duration}s` : run.status === "running" ? "Working…" : undefined}>
         {run.status === "queued" || run.status === "running" ? (
           <span className="text-dim">（进行中…）</span>

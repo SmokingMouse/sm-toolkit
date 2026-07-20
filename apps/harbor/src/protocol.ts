@@ -526,7 +526,13 @@ export interface ConversationMessage {
   authorName: string | null;
   body: string;
   externalId: string | null;
+  attachments?: AttachmentMeta[];
   createdAt: number;
+}
+
+export interface AttachmentMeta {
+  name: string;
+  mime: string;
 }
 
 export type ScmObjectKind = "issue" | "change";

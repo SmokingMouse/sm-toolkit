@@ -57,6 +57,7 @@ import {
 } from "../components/ui";
 import { RunTrace } from "../components/run-stream";
 import { Markdown } from "../components/markdown";
+import { AttachmentImages, AttachmentPreview, useImageAttachments } from "../components/attachments";
 
 type BoardStatus = (typeof BOARD_STATUSES)[number];
 type IssueAction = "dispatch" | "changes" | "review";
@@ -992,6 +993,7 @@ function IssueDrawer({
   const [priority, setPriority] = useState<IssuePriority>("medium");
   const [deliverySetup, setDeliverySetup] = useState(false);
   const [busy, setBusy] = useState(false);
+  const imageAttachments = useImageAttachments((message) => toast(message, "error"));
 
   const conv = detail.data?.conversation;
   const runs = detail.data?.runs ?? [];
@@ -1103,7 +1105,7 @@ function IssueDrawer({
 
   const sendMessage = async () => {
     if (!conv || !composerAgent || activeRun) return;
-    const prompt = composerText.trim();
+    const prompt = composerText.trim() || (imageAttachments.attachments.length ? "请查看附件。" : "");
     if (!prompt && conv.status !== "backlog" && conv.status !== "todo") return;
     setBusy(true);
     try {
@@ -1111,18 +1113,21 @@ function IssueDrawer({
         await requestIssueChanges(id, {
           agent: composerAgent,
           feedback: prompt,
+          attachments: imageAttachments.attachments,
         });
         toast("修改意见已发给实现 Agent", "success");
       } else if (conv.status === "backlog" || conv.status === "todo") {
         await dispatchIssue(id, {
           agent: composerAgent,
           prompt: prompt || conv.description || undefined,
+          attachments: imageAttachments.attachments,
         });
         toast("Implementation Run 已排队", "success");
       } else {
         throw new Error("当前阶段不能发送新消息");
       }
       setComposerText("");
+      imageAttachments.clear();
       refresh();
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), "error");
@@ -1132,12 +1137,13 @@ function IssueDrawer({
   };
 
   const addNote = async () => {
-    const body = composerText.trim();
+    const body = composerText.trim() || (imageAttachments.attachments.length ? "图片附件" : "");
     if (!body) return;
     setBusy(true);
     try {
-      await createConversationMessage(id, { body, dispatch: false });
+      await createConversationMessage(id, { body, dispatch: false, attachments: imageAttachments.attachments });
       setComposerText("");
+      imageAttachments.clear();
       toast("消息已记录，不触发 Agent", "success");
       refresh();
     } catch (error) {
@@ -1481,6 +1487,7 @@ function IssueDrawer({
                 value={composerText}
                 disabled={composerDisabled}
                 onChange={(event) => setComposerText(event.target.value)}
+                onPaste={imageAttachments.onPaste}
                 onKeyDown={(event) => {
                   if (
                     (event.metaKey || event.ctrlKey) &&
@@ -1492,7 +1499,9 @@ function IssueDrawer({
                 }}
                 placeholder={composerPlaceholder}
               />
+              <AttachmentPreview attachments={imageAttachments.attachments} onRemove={imageAttachments.remove} />
               <div className="mt-2 flex flex-wrap items-center gap-2">
+                {imageAttachments.picker}
                 <select
                   className="h-8 max-w-[250px] rounded-lg border border-transparent bg-bg px-2 text-[11px] font-medium hover:border-line"
                   value={composerAgent}
@@ -1521,7 +1530,7 @@ function IssueDrawer({
                 </span>
                 <button
                   className="h-8 rounded-lg border border-line bg-bg px-2.5 text-[10px] font-semibold text-dim hover:text-ink"
-                  disabled={composerDisabled || !composerText.trim()}
+                  disabled={composerDisabled || (!composerText.trim() && imageAttachments.attachments.length === 0)}
                   onClick={addNote}
                 >
                   Note only
@@ -1531,7 +1540,7 @@ function IssueDrawer({
                   disabled={
                     composerDisabled ||
                     !composerAgent ||
-                    (conv.status === "review" && !composerText.trim())
+                    (conv.status === "review" && !composerText.trim() && imageAttachments.attachments.length === 0)
                   }
                   onClick={sendMessage}
                   aria-label={
@@ -1835,6 +1844,7 @@ function ConversationMessageCard({
         text={message.body}
         className="text-[13px] leading-6 text-ink/82"
       />
+      <AttachmentImages owner="messages" id={message.id} attachments={message.attachments} />
     </article>
   );
 }
