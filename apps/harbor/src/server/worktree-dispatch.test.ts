@@ -126,6 +126,7 @@ describe("scheduler → RunSpec → daemon worktree identity", () => {
         repositoryId: repository.id,
         isolation: "worktree",
         permission: "auto-edit",
+        sandboxNetworkAccess: true,
       }, 4);
       const reviewer = store.createAgent({
         name: "reviewer",
@@ -159,6 +160,7 @@ describe("scheduler → RunSpec → daemon worktree identity", () => {
         repositoryRoot: mount.path,
         executionRoot: mount.path,
         worktreePath: null,
+        sandboxNetworkAccess: true,
       }));
       const firstExecution = prepareRunExecution(firstSpec);
       expect(firstExecution.shouldReportWorktreeReady).toBe(true);

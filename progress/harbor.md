@@ -150,8 +150,9 @@ daemon → server
   approval_req {runId, requestId, toolName, input}
 
 server → daemon
-  run_start    {runId, spec: {backend, model, prompt, workdir, worktree?, permission,
-                systemPrompt, resume?, envOverrides?}}
+  run_start    {runId, spec: {backend, model, prompt, repositoryRoot, executionRoot,
+                worktreePath?, permission, sandboxNetworkAccess?, systemPrompt,
+                resume?, envOverrides?}}
   run_cancel   {runId}
   approval_res {requestId, behavior: allow|deny, updatedInput?, message?}
 ```

@@ -73,6 +73,48 @@ describe("provider capability validation", () => {
     expect(((await res.json()) as { error: string }).error).toContain("不支持 Harbor 动态审批");
   });
 
+  test("stores explicit Codex sandbox network access and rejects false promises for Claude", async () => {
+    const { store, request } = harness();
+    store.upsertDevice("hybrid-box", "hash", {
+      clis: { codex: "0.144.5", claude: "2.1.0" },
+      endpoints: [],
+    }, 1);
+
+    const created = await request("/api/agents", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "online-builder",
+        device: "hybrid-box",
+        backend: "codex",
+        workdir: "/repo",
+        sandboxNetworkAccess: true,
+      }),
+    });
+    expect(created.status).toBe(201);
+    const agent = (await created.json()) as { id: string; sandboxNetworkAccess: boolean };
+    expect(agent.sandboxNetworkAccess).toBe(true);
+
+    const disabled = await request(`/api/agents/${agent.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ sandboxNetworkAccess: false }),
+    });
+    expect(disabled.status).toBe(200);
+    expect(((await disabled.json()) as { sandboxNetworkAccess: boolean }).sandboxNetworkAccess).toBe(false);
+
+    const unsupported = await request("/api/agents", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "claude-network",
+        device: "hybrid-box",
+        backend: "claude",
+        workdir: "/repo-claude",
+        sandboxNetworkAccess: true,
+      }),
+    });
+    expect(unsupported.status).toBe(400);
+    expect(((await unsupported.json()) as { error: string }).error).toContain("只支持 Codex CLI");
+  });
+
   test("accepts only ready sm-toolkit model routes", async () => {
     const { store, request } = harness();
     store.upsertDevice("claude-box", "hash", {

@@ -2500,6 +2500,7 @@ export function buildRest(
       backend?: string;
       model?: string;
       permission?: string;
+      sandboxNetworkAccess?: boolean;
       repository?: string;
       repositories?: unknown;
       /** legacy CLI compatibility */
@@ -2528,6 +2529,12 @@ export function buildRest(
     const permission = b.permission ?? "auto-edit";
     if (!PERMISSIONS.includes(permission))
       bad(`permission 可选 ${PERMISSIONS.join("/")}（收到 "${b.permission}"）`);
+    if (
+      b.sandboxNetworkAccess !== undefined &&
+      typeof b.sandboxNetworkAccess !== "boolean"
+    ) {
+      bad("sandboxNetworkAccess 需要 true/false");
+    }
     const isolation = (b.isolation ?? "none") as IsolationKind;
     if (isolation !== "none" && isolation !== "worktree")
       bad(`isolation 可选 none/worktree（收到 "${b.isolation}"）`);
@@ -2580,6 +2587,9 @@ export function buildRest(
       bad(
         'codex CLI 不支持 Harbor 动态审批；permission 请选 readonly/auto-edit/full（"default" 仅 Claude 可用）',
       );
+    }
+    if (backend !== "codex" && b.sandboxNetworkAccess === true) {
+      bad("sandboxNetworkAccess 当前只支持 Codex CLI");
     }
 
     // Claude 接入 endpoints.yaml，需前置校验；CodexBackend 不接 endpoints，model 由 codex CLI 校验。
@@ -2655,6 +2665,7 @@ export function buildRest(
         backend,
         model: b.model ?? null,
         permission: permission as import("@sm/agent").PermissionPolicy,
+        sandboxNetworkAccess: b.sandboxNetworkAccess === true,
         repositoryId: repository.id,
         repositoryIds: repositories,
         isolation,
@@ -2693,6 +2704,7 @@ export function buildRest(
       description?: string | null;
       model?: string | null;
       permission?: string;
+      sandboxNetworkAccess?: boolean;
       isolation?: string;
       instruction?: string | null;
       concurrency?: number;
@@ -2810,6 +2822,15 @@ export function buildRest(
     if (b.permission !== undefined && !PERMISSIONS.includes(b.permission))
       bad(`permission 可选 ${PERMISSIONS.join("/")}`);
     if (
+      b.sandboxNetworkAccess !== undefined &&
+      typeof b.sandboxNetworkAccess !== "boolean"
+    ) {
+      bad("sandboxNetworkAccess 需要 true/false");
+    }
+    if (agent.backend !== "codex" && b.sandboxNetworkAccess === true) {
+      bad("sandboxNetworkAccess 当前只支持 Codex CLI");
+    }
+    if (
       b.isolation !== undefined &&
       b.isolation !== "none" &&
       b.isolation !== "worktree"
@@ -2843,6 +2864,9 @@ export function buildRest(
       ...(b.model !== undefined ? { model: b.model?.trim() || null } : {}),
       ...(b.permission !== undefined
         ? { permission: b.permission as import("@sm/agent").PermissionPolicy }
+        : {}),
+      ...(b.sandboxNetworkAccess !== undefined
+        ? { sandboxNetworkAccess: b.sandboxNetworkAccess }
         : {}),
       ...(b.isolation !== undefined
         ? { isolation: b.isolation as IsolationKind }

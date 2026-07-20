@@ -10,6 +10,7 @@ import {
   materializeRunAttachments,
   readSelfDeployActionRequest,
   resolveSelfDeployActionSandbox,
+  resolveRunSandboxNetworkAccess,
   resolveRunAdditionalWritableDirs,
   runAgentSetup,
   submitSelfDeployAction,
@@ -123,6 +124,10 @@ describe("self-deploy action outbox", () => {
     expect(resolveSelfDeployActionSandbox({ ...release, purpose: "review" }, "/tmp/outbox")).toBeNull();
     expect(resolveSelfDeployActionSandbox({ ...release, agentActionTrigger: { eventType: "issue_opened" } }, "/tmp/outbox")).toBeNull();
     expect(resolveSelfDeployActionSandbox(release, null)).toBeNull();
+    expect(resolveRunSandboxNetworkAccess({ ...release, sandboxNetworkAccess: true }, {
+      directory: "/private/tmp/harbor-actions-r_1",
+    })).toBe(false);
+    expect(resolveRunSandboxNetworkAccess({ ...runSpec(), sandboxNetworkAccess: true }, null)).toBe(true);
   });
 });
 

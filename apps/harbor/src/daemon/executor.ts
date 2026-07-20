@@ -161,6 +161,9 @@ export class Executor {
             : {}),
         ...(!actionSandbox && additionalWritableDirs.length > 0 ? { additionalWritableDirs } : {}),
         additionalWorkspaces: actionSandbox ? [] : spec.additionalRepositoryRoots,
+        // Self-deploy intent 仍走 daemon-mediated outbox；不能因为 Release Agent
+        // 平时获准联网，就让这次 coordination 绕过 action control plane。
+        sandboxNetworkAccess: resolveRunSandboxNetworkAccess(spec, actionSandbox),
         // Codex read-only sandbox 不允许写任何 tmp path。Self-deploy coordination
         // 只把 cwd 切到一次性空 outbox 并启 workspace-write；Repository 不再是
         // cwd/add-dir/writable root，仍不可修改，Run 的领域 permission 也不变。
@@ -259,6 +262,13 @@ export function resolveSelfDeployActionSandbox(
     return null;
   }
   return { directory: actionOutboxDir };
+}
+
+export function resolveRunSandboxNetworkAccess(
+  spec: RunSpec,
+  actionSandbox: { directory: string } | null,
+): boolean {
+  return actionSandbox === null && spec.sandboxNetworkAccess === true;
 }
 
 /**

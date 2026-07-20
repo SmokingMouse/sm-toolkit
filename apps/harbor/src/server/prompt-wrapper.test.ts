@@ -50,6 +50,7 @@ function fixtures(
     backend: "claude",
     model: "sonnet",
     permission: "auto-edit",
+    sandboxNetworkAccess: false,
     repositoryId: "repository_1",
     repositoryIds: ["repository_1"],
     isolation: "none",

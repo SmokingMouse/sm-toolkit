@@ -149,6 +149,8 @@ export interface HarborAgent {
   /** endpoints.yaml 名 / 裸 tier / 透传；null = 该 CLI 自己的默认模型 */
   model: string | null;
   permission: PermissionPolicy;
+  /** Codex workspace-write Run 可直接访问网络；不等于 full access。 */
+  sandboxNetworkAccess: boolean;
   /** 必选主 Repository；Issue / Chat 指派给 Agent 后继承它，不单独选择。 */
   repositoryId: string;
   /** Agent 可见的仓库集合；repositoryId 始终是本次默认执行仓库。 */
@@ -789,6 +791,8 @@ export interface RunSpec {
   /** 同一 Agent 额外可见的 Repository checkout。 */
   additionalRepositoryRoots?: string[];
   permission: PermissionPolicy;
+  /** Agent 配置在 dispatch 时冻结；旧 daemon/server 缺省视为 false。 */
+  sandboxNetworkAccess?: boolean;
   systemPrompt: string | null;
   /** 上一轮 claude_session_id，多轮续接 */
   resume: string | null;
