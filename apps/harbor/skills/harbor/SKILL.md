@@ -126,7 +126,7 @@ Approve only the reviewed head revision. Harbor re-syncs provider facts and enfo
 
 Only a `coordination` Run started by a Codebase `merge_request_merged` Automation may request Harbor self-deployment. Require `HARBOR_AGENT_TRIGGER_EVENT_TYPE=merge_request_merged` and a full 40–64 hex `HARBOR_AGENT_TRIGGER_REVISION`; never infer the revision from the checkout or payload text.
 
-When `HARBOR_AGENT_SELF_DEPLOY_REQUEST_PATH` is present, write exactly this JSON object to that path and finish the Run. Do not call loopback HTTP as well; the daemon validates the file and submits it before marking the Run successful:
+When `HARBOR_AGENT_SELF_DEPLOY_REQUEST_PATH` is present, write exactly this JSON object to that path and finish the Run. Harbor gives a Codex Release Run an isolated one-Run writable cwd containing only this outbox; the Repository remains outside its writable roots. Do not call loopback HTTP as well; the daemon validates the file and submits it before marking the Run successful:
 
 ```json
 {

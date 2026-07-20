@@ -150,13 +150,21 @@ export class Executor {
         Object.assign(actionEnvironment, agentActionTriggerEnvironment(spec.agentActionTrigger));
       }
       const interactive = spec.permission === "default";
+      const actionSandbox = resolveSelfDeployActionSandbox(spec, actionOutboxDir);
       const environmentSkillNames =
         spec.backend === "codex" ? detectEnvironmentSkillNames(effectiveDir) : [];
       for await (const ev of backend.run(prompt, {
-        ...(effectiveDir ? { workspace: effectiveDir, cwd: effectiveDir } : {}),
-        ...(additionalWritableDirs.length > 0 ? { additionalWritableDirs } : {}),
-        additionalWorkspaces: spec.additionalRepositoryRoots,
-        permission: spec.permission,
+        ...(actionSandbox
+          ? { workspace: actionSandbox.directory, cwd: actionSandbox.directory }
+          : effectiveDir
+            ? { workspace: effectiveDir, cwd: effectiveDir }
+            : {}),
+        ...(!actionSandbox && additionalWritableDirs.length > 0 ? { additionalWritableDirs } : {}),
+        additionalWorkspaces: actionSandbox ? [] : spec.additionalRepositoryRoots,
+        // Codex read-only sandbox 不允许写任何 tmp path。Self-deploy coordination
+        // 只把 cwd 切到一次性空 outbox 并启 workspace-write；Repository 不再是
+        // cwd/add-dir/writable root，仍不可修改，Run 的领域 permission 也不变。
+        permission: actionSandbox ? "auto-edit" : spec.permission,
         systemPrompt: spec.systemPrompt,
         // Agent 的能力边界只来自 Harbor 配置：scheduler 注入 instruction + 已绑定
         // Skill；Device 用户目录、checkout 或 Runtime bundled Skill 一律不继承。
@@ -235,6 +243,22 @@ export class Executor {
       ...(errMsg ? { error: errMsg } : {}),
     });
   }
+}
+
+export function resolveSelfDeployActionSandbox(
+  spec: RunSpec,
+  actionOutboxDir: string | null,
+): { directory: string } | null {
+  if (
+    !actionOutboxDir ||
+    spec.backend !== "codex" ||
+    spec.purpose !== "coordination" ||
+    !spec.agentActionToken ||
+    spec.agentActionTrigger?.eventType !== "merge_request_merged"
+  ) {
+    return null;
+  }
+  return { directory: actionOutboxDir };
 }
 
 /**

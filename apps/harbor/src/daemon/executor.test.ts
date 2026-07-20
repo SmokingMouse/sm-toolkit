@@ -9,6 +9,7 @@ import {
   agentActionTriggerEnvironment,
   materializeRunAttachments,
   readSelfDeployActionRequest,
+  resolveSelfDeployActionSandbox,
   resolveRunAdditionalWritableDirs,
   runAgentSetup,
   submitSelfDeployAction,
@@ -106,6 +107,22 @@ describe("self-deploy action outbox", () => {
       HARBOR_AGENT_TRIGGER_REVISION: "c".repeat(40),
     });
     expect(() => agentActionTriggerEnvironment({ eventId: "x\0y" })).toThrow("无效");
+  });
+
+  test("gives only a one-Run empty cwd to Codex merged coordination", () => {
+    const release = runSpec({
+      purpose: "coordination",
+      isolation: "none",
+      agentActionToken: "short-lived",
+      agentActionTrigger: { eventType: "merge_request_merged" },
+    });
+    expect(resolveSelfDeployActionSandbox(release, "/private/tmp/harbor-actions-r_1")).toEqual({
+      directory: "/private/tmp/harbor-actions-r_1",
+    });
+    expect(resolveSelfDeployActionSandbox({ ...release, backend: "claude" }, "/tmp/outbox")).toBeNull();
+    expect(resolveSelfDeployActionSandbox({ ...release, purpose: "review" }, "/tmp/outbox")).toBeNull();
+    expect(resolveSelfDeployActionSandbox({ ...release, agentActionTrigger: { eventType: "issue_opened" } }, "/tmp/outbox")).toBeNull();
+    expect(resolveSelfDeployActionSandbox(release, null)).toBeNull();
   });
 });
 
