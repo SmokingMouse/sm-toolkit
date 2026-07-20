@@ -131,6 +131,24 @@ export default function IssuesPage() {
   const [sort, setSort] = useState<"updated" | "oldest" | "title">("updated");
   const [dragOver, setDragOver] = useState<BoardStatus | null>(null);
 
+  // AI draft state lifted here so it survives modal close. The draft runs on
+  // the server, so the user can step away from the modal without losing it.
+  const [aiDraft, setAiDraft] = useState(false);
+  const [draftId, setDraftId] = useState<string | null>(null);
+  const [draftRunId, setDraftRunId] = useState<string | null>(null);
+  const [draftHydrated, setDraftHydrated] = useState(false);
+  const draftDetail = usePoll(
+    () => (draftId ? getConversation(draftId) : Promise.resolve(null)),
+    draftId ? 1_500 : 60_000,
+  );
+  const draftRun = draftDetail.data?.runs.at(-1) ?? null;
+  const clearDraft = () => {
+    setDraftId(null);
+    setDraftRunId(null);
+    setDraftHydrated(false);
+    setAiDraft(false);
+  };
+
   useEffect(() => {
     const saved = localStorage.getItem("harbor_issues_view");
     if (saved === "board" || saved === "list") setView(saved);
@@ -281,6 +299,13 @@ export default function IssuesPage() {
           {convs.error}
         </div>
       )}
+      {draftId && !creating && (
+        <DraftBanner
+          draftRun={draftRun}
+          onResume={() => setCreating(true)}
+          onDiscard={clearDraft}
+        />
+      )}
       <div className="surface-shadow mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-line bg-panel/85 p-2">
         <label className="relative min-w-[220px] flex-1 lg:max-w-sm">
           <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-dim">
@@ -425,9 +450,29 @@ export default function IssuesPage() {
         <NewIssueModal
           agents={agents.data ?? []}
           onlineDeviceIds={onlineDeviceIds}
-          onClose={() => setCreating(false)}
+          aiDraft={aiDraft}
+          draftId={draftId}
+          draftRunId={draftRunId}
+          draftHydrated={draftHydrated}
+          draftRun={draftRun}
+          draftDescription={draftDetail.data?.conversation.description ?? null}
+          onAiDraftChange={setAiDraft}
+          onDraftIdChange={setDraftId}
+          onDraftRunIdChange={setDraftRunId}
+          onDraftHydratedChange={setDraftHydrated}
+          onClose={() => {
+            setCreating(false);
+            // Keep the draft running in the background; force re-hydrate on reopen.
+            if (draftId) setDraftHydrated(false);
+            else setAiDraft(false);
+          }}
+          onDiscardDraft={() => {
+            clearDraft();
+            setCreating(false);
+          }}
           onCreated={(id) => {
             setCreating(false);
+            clearDraft();
             convs.reload();
             setOpenId(id);
           }}
@@ -560,15 +605,79 @@ function IssueList({
   );
 }
 
+function DraftBanner({
+  draftRun,
+  onResume,
+  onDiscard,
+}: {
+  draftRun: RunWithResult | null;
+  onResume: () => void;
+  onDiscard: () => void;
+}) {
+  const running = draftRun?.status === "queued" || draftRun?.status === "running";
+  const succeeded = draftRun?.status === "succeeded";
+  const failed = draftRun?.status === "failed" || draftRun?.status === "canceled";
+  const label = running
+    ? "AI draft 正在分诊中…"
+    : succeeded
+      ? "AI draft 已就绪"
+      : failed
+        ? "AI draft 分诊未完成"
+        : "AI draft 进行中";
+  const tone = succeeded
+    ? "bg-done"
+    : failed
+      ? "bg-canceled"
+      : "bg-doing";
+  return (
+    <div className="mb-3 flex items-center gap-3 rounded-xl border border-line bg-panel/85 px-4 py-3 shadow-sm">
+      <span
+        className={`h-2 w-2 shrink-0 rounded-full ${tone} ${running ? "animate-pulse" : ""}`}
+      />
+      <span className="text-sm font-medium text-ink/80">{label}</span>
+      <div className="ml-auto flex items-center gap-2">
+        <button className={btnGhost} onClick={onDiscard}>
+          放弃草稿
+        </button>
+        <button className={btnPrimary} onClick={onResume}>
+          {succeeded ? "查看草稿" : "继续查看"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function NewIssueModal({
   agents,
   onlineDeviceIds,
+  aiDraft,
+  draftId,
+  draftRunId,
+  draftHydrated,
+  draftRun,
+  draftDescription,
+  onAiDraftChange,
+  onDraftIdChange,
+  onDraftRunIdChange,
+  onDraftHydratedChange,
   onClose,
+  onDiscardDraft,
   onCreated,
 }: {
   agents: HarborAgent[];
   onlineDeviceIds: Set<string>;
+  aiDraft: boolean;
+  draftId: string | null;
+  draftRunId: string | null;
+  draftHydrated: boolean;
+  draftRun: RunWithResult | null;
+  draftDescription: string | null;
+  onAiDraftChange: (v: boolean) => void;
+  onDraftIdChange: (v: string | null) => void;
+  onDraftRunIdChange: (v: string | null) => void;
+  onDraftHydratedChange: (v: boolean) => void;
   onClose: () => void;
+  onDiscardDraft: () => void;
   onCreated: (id: string) => void;
 }) {
   const toast = useToast();
@@ -583,16 +692,7 @@ function NewIssueModal({
   const [stage, setStage] = useState<"backlog" | "todo">("todo");
   const [ownerMemberId, setOwnerMemberId] = useState("");
   const [labelIds, setLabelIds] = useState<string[]>([]);
-  const [aiDraft, setAiDraft] = useState(false);
-  const [draftId, setDraftId] = useState<string | null>(null);
-  const [draftRunId, setDraftRunId] = useState<string | null>(null);
-  const [draftHydrated, setDraftHydrated] = useState(false);
   const [busy, setBusy] = useState(false);
-  const draftDetail = usePoll(
-    () => (draftId ? getConversation(draftId) : Promise.resolve(null)),
-    draftId ? 1_500 : 60_000,
-  );
-  const draftRun = draftDetail.data?.runs.at(-1);
   const members = usePoll(listMembers, 15_000);
   const labels = usePoll(listLabels, 15_000);
 
@@ -606,7 +706,7 @@ function NewIssueModal({
     const parsed = parseIssueDraft(draftRun.resultText, description);
     setTitle(parsed.title);
     setDescription(parsed.description);
-    setDraftHydrated(true);
+    onDraftHydratedChange(true);
   }, [description, draftHydrated, draftRun?.resultText, draftRun?.status]);
 
   const submitRegular = async () => {
@@ -659,8 +759,8 @@ function NewIssueModal({
         agent,
         priority,
       });
-      setDraftId(created.conversation.id);
-      setDraftRunId(created.run.id);
+      onDraftIdChange(created.conversation.id);
+      onDraftRunIdChange(created.run.id);
       toast("Agent 已开始只读分诊", "success");
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), "error");
@@ -733,7 +833,7 @@ function NewIssueModal({
         {aiDraft && draftId && (
           <div className="max-h-[52vh] overflow-y-auto px-5 pt-5">
             <div className="mb-5 ml-auto max-w-[88%] rounded-2xl rounded-br-md bg-bg px-4 py-3 text-sm leading-6 text-ink/80">
-              {draftDetail.data?.conversation.description}
+              {draftDescription ?? ""}
             </div>
             <div className="mb-5 flex gap-3">
               <AgentAvatar
@@ -849,7 +949,7 @@ function NewIssueModal({
                 type="checkbox"
                 checked={aiDraft}
                 disabled={!!draftId}
-                onChange={(event) => setAiDraft(event.target.checked)}
+                onChange={(event) => onAiDraftChange(event.target.checked)}
               />
               <span
                 className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition ${aiDraft ? "left-[18px]" : "left-0.5"}`}
@@ -889,8 +989,13 @@ function NewIssueModal({
         )}
       </div>
       <ModalFooter>
+        {!!draftId && (
+          <button className={btnGhost} onClick={onDiscardDraft}>
+            放弃草稿
+          </button>
+        )}
         <button className={btnGhost} onClick={onClose}>
-          取消
+          {draftId ? "收起" : "取消"}
         </button>
         {!aiDraft && (
           <button
@@ -914,9 +1019,10 @@ function NewIssueModal({
           <button
             className={btnGhost}
             onClick={() => {
-              setDraftId(null);
-              setDraftRunId(null);
-              setAiDraft(false);
+              onDraftIdChange(null);
+              onDraftRunIdChange(null);
+              onDraftHydratedChange(false);
+              onAiDraftChange(false);
             }}
           >
             普通模式创建
