@@ -524,7 +524,7 @@ export class DeliveryService {
     if (provider) return provider;
     if (kind === "github") {
       throw new Error(
-        "GitHub Delivery provider 未配置：请在 harbor-server 设置 HARBOR_GITHUB_TOKEN（或 ~/.harbor.yaml github.token）；manual provider 仍可用",
+        "GitHub Delivery provider 未配置：请先连接对应 Repository 的 GitHub App installation；manual provider 仍可用",
       );
     }
     throw new Error(`delivery provider "${kind}" 尚未配置`);

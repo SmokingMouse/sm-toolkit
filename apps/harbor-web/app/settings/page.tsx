@@ -4,16 +4,21 @@ import { startRegistration } from "@simplewebauthn/browser";
 import { useEffect, useMemo, useState } from "react";
 import {
   beginPasskeyRegistration,
+  beginGitHubInstallation,
+  beginGitHubLink,
   createInvitation,
   createLabel,
   createLarkBinding,
   createPersonalAccessToken,
   currentActor,
+  disconnectGitHubInstallation,
   deleteLarkBinding,
   finishPasskeyRegistration,
   getActiveWorkspace,
   health,
+  getGitHubIntegration,
   listAgents,
+  listAuthIdentities,
   listInvitations,
   listLabels,
   listLarkBindings,
@@ -29,11 +34,14 @@ import {
   revokePersonalAccessToken,
   savePromptBlock,
   setActiveWorkspace,
+  syncGitHubInstallation,
   updateLarkBinding,
   updateMember,
   updateRepository,
   updateWorkspace,
   type CurrentActor,
+  type AuthIdentity,
+  type GitHubIntegrationView,
   type HarborAgent,
   type HarborWorkspace,
   type IssueLabel,
@@ -63,18 +71,22 @@ import {
 type Tab = "general" | "account" | "members" | "integrations" | "prompts";
 const TABS: { key: Tab; label: string; hint: string }[] = [
   { key: "general", label: "General", hint: "Workspace 基本信息" },
-  { key: "account", label: "Account", hint: "Passkeys 与 PAT" },
+  { key: "account", label: "Account", hint: "GitHub、Passkeys 与 PAT" },
   { key: "members", label: "Members", hint: "角色、状态与邀请" },
   {
     key: "integrations",
     label: "Integrations",
-    hint: "Codebase、Lark 与 Labels",
+    hint: "GitHub、Codebase、Lark 与 Labels",
   },
   { key: "prompts", label: "Prompts", hint: "Context + event pipeline" },
 ];
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>("general");
+  useEffect(() => {
+    const requested = new URLSearchParams(location.search).get("tab") as Tab | null;
+    if (requested && TABS.some((item) => item.key === requested)) setTab(requested);
+  }, []);
   return (
     <div className="page-enter mx-auto max-w-[1440px] p-7 max-sm:p-4">
       <PageHeader
@@ -272,6 +284,7 @@ function AccountPanel() {
   const [actor, setActor] = useState<CurrentActor | null>(null);
   const [passkeys, setPasskeys] = useState<PasskeyCredential[]>([]);
   const [tokens, setTokens] = useState<PersonalAccessToken[]>([]);
+  const [identities, setIdentities] = useState<AuthIdentity[]>([]);
   const [workspaces, setWorkspaces] = useState<HarborWorkspace[]>([]);
   const [passkeyLabel, setPasskeyLabel] = useState("");
   const [tokenLabel, setTokenLabel] = useState("CLI access");
@@ -280,17 +293,24 @@ function AccountPanel() {
   const [busy, setBusy] = useState(false);
 
   const reload = async () => {
-    const [me, keys, pats, spaces] = await Promise.all([
-      currentActor(), listPasskeys(), listPersonalAccessTokens(), listWorkspaces(),
+    const [me, keys, pats, spaces, linkedIdentities] = await Promise.all([
+      currentActor(), listPasskeys(), listPersonalAccessTokens(), listWorkspaces(), listAuthIdentities(),
     ]);
     setActor(me);
     setPasskeys(keys);
     setTokens(pats);
     setWorkspaces(spaces);
+    setIdentities(linkedIdentities);
     setTokenWorkspace((current) => current || getActiveWorkspace() || spaces[0]?.id || "");
   };
 
-  useEffect(() => { void reload().catch((error) => toast(error instanceof Error ? error.message : String(error), "error")); }, []);
+  useEffect(() => {
+    void reload().catch((error) => toast(error instanceof Error ? error.message : String(error), "error"));
+    const params = new URLSearchParams(location.search);
+    const githubError = params.get("github_error");
+    if (githubError) toast(githubError, "error");
+    else if (params.get("github") === "linked") toast("GitHub identity 已绑定", "success");
+  }, []);
 
   const addPasskey = async () => {
     setBusy(true);
@@ -325,6 +345,17 @@ function AccountPanel() {
     }
   };
 
+  const linkGitHub = async () => {
+    setBusy(true);
+    try {
+      const started = await beginGitHubLink();
+      location.assign(started.url);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="grid items-start gap-5 xl:grid-cols-[1fr_390px]">
       <section className="surface-shadow overflow-hidden rounded-2xl border border-line bg-panel">
@@ -351,6 +382,11 @@ function AccountPanel() {
         <section className="surface-shadow rounded-2xl border border-line bg-panel p-5">
           <SectionTitle eyebrow="Account identity" title={actor?.kind === "account" ? actor.account.displayName : "Account"} description="Recovery 时需要 Account ID；它不是 secret。" />
           <code className="mt-4 block break-all rounded-xl border border-line bg-bg px-3 py-2 text-[11px]">{actor?.kind === "account" ? actor.account.id : "—"}</code>
+          <div className="mt-3 rounded-xl border border-line bg-bg px-3 py-3">
+            <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-dim">GitHub identity</div>
+            <div className="mt-2 text-xs font-semibold">{identities.find((identity) => identity.provider === "github") ? `Linked · user ${identities.find((identity) => identity.provider === "github")!.subject}` : "Not linked"}</div>
+            <button className={`${btnGhost} mt-3 w-full`} disabled={busy} onClick={() => void linkGitHub()}>{identities.some((identity) => identity.provider === "github") ? "Verify GitHub again" : "Link GitHub"}</button>
+          </div>
         </section>
         <section className="surface-shadow rounded-2xl border border-line bg-panel p-5">
           <SectionTitle eyebrow="Personal access" title="PATs" description="由当前 Account 自己签发；raw token 只展示一次。" />
@@ -522,14 +558,16 @@ function IntegrationsPanel() {
   const [customBotConfigured, setCustomBotConfigured] = useState(false);
   const [events, setEvents] = useState<ScmEvent[]>([]);
   const [labels, setLabels] = useState<IssueLabel[]>([]);
+  const [github, setGitHub] = useState<GitHubIntegrationView | null>(null);
   const reload = async () => {
     try {
-      const [repos, roster, lark, scmEvents, issueLabels] = await Promise.all([
+      const [repos, roster, lark, scmEvents, issueLabels, githubState] = await Promise.all([
         listRepositories(),
         listAgents(),
         listLarkBindings(),
         listScmEvents(),
         listLabels(),
+        getGitHubIntegration(),
       ]);
       setRepositories(repos);
       setAgents(roster);
@@ -537,15 +575,21 @@ function IntegrationsPanel() {
       setCustomBotConfigured(lark.customBotConfigured);
       setEvents(scmEvents);
       setLabels(issueLabels);
+      setGitHub(githubState);
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), "error");
     }
   };
   useEffect(() => {
     void reload();
+    const params = new URLSearchParams(location.search);
+    const githubError = params.get("github_error");
+    if (githubError) toast(githubError, "error");
+    else if (params.get("github") === "connected") toast("GitHub App installation 已连接", "success");
   }, []);
   return (
     <div className="space-y-5">
+      <GitHubSection github={github} onChanged={reload} />
       <RepositoriesSection
         repositories={repositories}
         agents={agents}
@@ -560,6 +604,91 @@ function IntegrationsPanel() {
       />
       <LabelsSection labels={labels} onChanged={reload} />
     </div>
+  );
+}
+
+function GitHubSection({
+  github,
+  onChanged,
+}: {
+  github: GitHubIntegrationView | null;
+  onChanged: () => Promise<void>;
+}) {
+  const toast = useToast();
+  const [busy, setBusy] = useState("");
+  const install = async () => {
+    setBusy("install");
+    try {
+      const started = await beginGitHubInstallation();
+      location.assign(started.url);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+      setBusy("");
+    }
+  };
+  const sync = async (installationId: string) => {
+    setBusy(`sync:${installationId}`);
+    try {
+      const result = await syncGitHubInstallation(installationId);
+      await onChanged();
+      toast(`GitHub 已同步：${result.connected} mappings · ${result.aliases} aliases · ${result.created} created · ${result.removed} removed`, "success");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy("");
+    }
+  };
+  const disconnect = async (installationId: string) => {
+    setBusy(`disconnect:${installationId}`);
+    try {
+      await disconnectGitHubInstallation(installationId);
+      await onChanged();
+      toast("GitHub App connection 已断开；GitHub 侧 installation 未卸载", "success");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <section className="surface-shadow overflow-hidden rounded-2xl border border-line bg-panel">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-line p-5">
+        <SectionTitle
+          eyebrow="GitHub App"
+          title={github?.configured ? github.appSlug : "Not configured"}
+          description="Account identity 负责登录；Workspace installation 负责 Repository、PR、checks 与 merge。短期 installation token 只存在 server 内存。"
+        />
+        {github?.configured && <button className={btnPrimary} disabled={!!busy} onClick={() => void install()}>{busy === "install" ? "Redirecting…" : "Install / connect"}</button>}
+      </div>
+      {!github ? <div className="p-5 text-xs text-dim">Loading GitHub integration…</div> : !github.configured ? <div className="p-5"><Empty text="Server 尚未配置 GitHub App" /></div> : (
+        <div className="divide-y divide-line">
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs">
+            <span>Account identity</span>
+            <span className={github.identity ? "font-semibold text-accent" : "text-dim"}>{github.identity ? `linked · ${github.identity.subject}` : "not linked (installation flow will link it)"}</span>
+          </div>
+          {github.installations.map(({ installation, connection, repositories }) => (
+            <div key={installation.installationId} className="p-5">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-semibold">{installation.targetLogin}</div>
+                  <div className="mt-1 text-[10px] text-dim">{installation.targetType} · installation {installation.installationId} · {installation.repositorySelection} · {installation.status}/{connection.status}</div>
+                </div>
+                <div className="flex gap-2">
+                  <button className={btnGhost} disabled={!!busy || connection.status !== "active"} onClick={() => void sync(installation.installationId)}>{busy === `sync:${installation.installationId}` ? "Syncing…" : "Sync repositories"}</button>
+                  <button className={btnDanger} disabled={!!busy || connection.status !== "active"} onClick={() => void disconnect(installation.installationId)}>{busy === `disconnect:${installation.installationId}` ? "Disconnecting…" : "Disconnect"}</button>
+                </div>
+              </div>
+              <div className="mt-4 grid gap-2 md:grid-cols-2">
+                {repositories.map((repository) => <div key={`${repository.workspaceId}:${repository.githubRepositoryId}`} className="rounded-xl border border-line bg-bg px-3 py-2"><div className="text-xs font-semibold">{repository.fullName}</div><div className="mt-1 text-[9px] text-dim">{repository.private ? "private" : "public"} · {repository.defaultBranch} · {repository.status}</div></div>)}
+                {!repositories.length && <Empty text="No repositories connected" />}
+              </div>
+            </div>
+          ))}
+          {!github.installations.length && <div className="p-5"><Empty text="No GitHub App installation connected to this Workspace" /></div>}
+          <div className="bg-bg/50 px-5 py-3 text-[10px] leading-5 text-dim">GitHub 侧授权范围请在 <a className="font-semibold text-accent" href="https://github.com/settings/installations" target="_blank" rel="noreferrer">Installed GitHub Apps</a> 调整；变更会通过全局 App webhook 自动同步。</div>
+        </div>
+      )}
+    </section>
   );
 }
 

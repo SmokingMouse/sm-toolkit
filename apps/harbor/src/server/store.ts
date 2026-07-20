@@ -45,6 +45,9 @@ import type {
   HarborRepository,
   HarborSkill,
   HarborWorkspace,
+  GitHubInstallation,
+  GitHubRepositoryConnection,
+  GitHubWorkspaceInstallation,
   IsolationKind,
   IssuePriority,
   IssueLabel,
@@ -378,6 +381,54 @@ interface RepositoryMountRow {
   created_at: number;
 }
 
+interface GitHubInstallationRow {
+  installation_id: string;
+  app_id: string;
+  target_id: string;
+  target_type: string;
+  target_login: string;
+  repository_selection: string;
+  permissions: string;
+  status: string;
+  created_at: number;
+  updated_at: number;
+}
+
+interface GitHubWorkspaceInstallationRow {
+  workspace_id: string;
+  installation_id: string;
+  connected_by_account_id: string;
+  status: string;
+  created_at: number;
+  updated_at: number;
+}
+
+interface GitHubRepositoryConnectionRow {
+  workspace_id: string;
+  repository_id: string;
+  installation_id: string;
+  github_repository_id: string;
+  full_name: string;
+  default_branch: string;
+  private: number;
+  status: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface GitHubOAuthState {
+  id: string;
+  flow: "login" | "link" | "install" | "invite";
+  accountId: string | null;
+  workspaceId: string | null;
+  invitationId: string | null;
+  installationId: string | null;
+  returnTo: string;
+  expiresAt: number;
+  createdAt: number;
+  consumedAt: number | null;
+}
+
 function parseStringRecord(value: string): Record<string, string> {
   try {
     const parsed = JSON.parse(value) as unknown;
@@ -471,6 +522,66 @@ function toRepositoryMount(r: RepositoryMountRow): RepositoryMount {
     deviceId: r.device_id,
     path: r.path,
     createdAt: r.created_at,
+  };
+}
+
+function toGitHubInstallation(r: GitHubInstallationRow): GitHubInstallation {
+  return {
+    installationId: r.installation_id,
+    appId: r.app_id,
+    targetId: r.target_id,
+    targetType: r.target_type as GitHubInstallation["targetType"],
+    targetLogin: r.target_login,
+    repositorySelection: r.repository_selection as GitHubInstallation["repositorySelection"],
+    permissions: parseStringRecord(r.permissions),
+    status: r.status as GitHubInstallation["status"],
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+function toGitHubWorkspaceInstallation(r: GitHubWorkspaceInstallationRow): GitHubWorkspaceInstallation {
+  return {
+    workspaceId: r.workspace_id,
+    installationId: r.installation_id,
+    connectedByAccountId: r.connected_by_account_id,
+    status: r.status as GitHubWorkspaceInstallation["status"],
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+function toGitHubRepositoryConnection(r: GitHubRepositoryConnectionRow): GitHubRepositoryConnection {
+  return {
+    workspaceId: r.workspace_id,
+    repositoryId: r.repository_id,
+    installationId: r.installation_id,
+    githubRepositoryId: r.github_repository_id,
+    fullName: r.full_name,
+    defaultBranch: r.default_branch,
+    private: r.private === 1,
+    status: r.status as GitHubRepositoryConnection["status"],
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+function toGitHubOAuthState(r: {
+  id: string; flow: string; account_id: string | null; workspace_id: string | null;
+  invitation_id: string | null; installation_id: string | null; return_to: string;
+  expires_at: number; created_at: number; consumed_at: number | null;
+}): GitHubOAuthState {
+  return {
+    id: r.id,
+    flow: r.flow as GitHubOAuthState["flow"],
+    accountId: r.account_id,
+    workspaceId: r.workspace_id,
+    invitationId: r.invitation_id,
+    installationId: r.installation_id,
+    returnTo: r.return_to,
+    expiresAt: r.expires_at,
+    createdAt: r.created_at,
+    consumedAt: r.consumed_at,
   };
 }
 
@@ -957,6 +1068,9 @@ export class HarborStore {
     email?: string | null;
     verifiedAt?: number | null;
   }, now: number): AuthIdentity {
+    if (input.provider === "github" && !/^[1-9][0-9]*$/.test(input.subject)) {
+      throw new Error("GitHub AuthIdentity subject 必须是不可变的数字 user id");
+    }
     const id = newId("authIdentity");
     this.db.run(
       `INSERT INTO auth_identities
@@ -965,6 +1079,345 @@ export class HarborStore {
       [id, input.accountId, input.provider, input.subject, input.email?.trim() || null, input.verifiedAt ?? null, now],
     );
     return this.getAuthIdentity(input.provider, input.subject)!;
+  }
+
+  listAuthIdentities(accountId: string): AuthIdentity[] {
+    return this.db.query<{ provider: string; subject: string }, [string]>(
+      "SELECT provider, subject FROM auth_identities WHERE account_id = ? ORDER BY created_at, id",
+    ).all(accountId).map((row) => this.getAuthIdentity(row.provider, row.subject)!);
+  }
+
+  upsertAuthIdentity(input: {
+    accountId: string;
+    provider: string;
+    subject: string;
+    email?: string | null;
+    verifiedAt: number;
+  }, now: number): AuthIdentity {
+    const existing = this.getAuthIdentity(input.provider, input.subject);
+    if (existing && existing.accountId !== input.accountId) {
+      throw new Error(`${input.provider} identity 已绑定其他 Harbor Account`);
+    }
+    if (!existing) return this.createAuthIdentity(input, now);
+    this.db.run(
+      "UPDATE auth_identities SET email = ?, verified_at = ? WHERE id = ?",
+      [input.email?.trim() || null, input.verifiedAt, existing.id],
+    );
+    return this.getAuthIdentity(input.provider, input.subject)!;
+  }
+
+  createGitHubOAuthState(input: {
+    tokenHash: string;
+    flow: GitHubOAuthState["flow"];
+    accountId?: string | null;
+    workspaceId?: string | null;
+    invitationId?: string | null;
+    returnTo: string;
+    expiresAt: number;
+  }, now: number): string {
+    if (!input.returnTo.startsWith("/") || input.returnTo.startsWith("//")) {
+      throw new Error("GitHub OAuth returnTo 必须是同源绝对 path");
+    }
+    const id = newId("githubOAuthState");
+    this.db.run(
+      `INSERT INTO github_oauth_states
+       (id, token_hash, flow, account_id, workspace_id, invitation_id, return_to, expires_at, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+      [id, input.tokenHash, input.flow, input.accountId ?? null, input.workspaceId ?? null,
+       input.invitationId ?? null, input.returnTo, input.expiresAt, now],
+    );
+    return id;
+  }
+
+  attachGitHubInstallationToOAuthState(tokenHash: string, installationId: string, now: number): GitHubOAuthState | null {
+    if (!/^[1-9][0-9]*$/.test(installationId)) return null;
+    const changed = this.db.run(
+      `UPDATE github_oauth_states SET installation_id = ?
+       WHERE token_hash = ? AND flow = 'install' AND consumed_at IS NULL AND expires_at > ?
+         AND (installation_id IS NULL OR installation_id = ?)`,
+      [installationId, tokenHash, now, installationId],
+    ).changes;
+    if (changed !== 1) return null;
+    return this.githubOAuthState(tokenHash, now);
+  }
+
+  githubOAuthState(tokenHash: string, now: number): GitHubOAuthState | null {
+    const row = this.db.query<{
+      id: string; flow: string; account_id: string | null; workspace_id: string | null;
+      invitation_id: string | null; installation_id: string | null; return_to: string;
+      expires_at: number; created_at: number; consumed_at: number | null;
+    }, [string, number]>(
+      `SELECT id, flow, account_id, workspace_id, invitation_id, installation_id, return_to,
+              expires_at, created_at, consumed_at
+       FROM github_oauth_states
+       WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?`,
+    ).get(tokenHash, now);
+    return row ? toGitHubOAuthState(row) : null;
+  }
+
+  consumeGitHubOAuthState(tokenHash: string, now: number): GitHubOAuthState | null {
+    return this.db.transaction(() => {
+      const state = this.githubOAuthState(tokenHash, now);
+      if (!state) return null;
+      const changed = this.db.run(
+        "UPDATE github_oauth_states SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
+        [now, state.id],
+      ).changes;
+      return changed === 1 ? { ...state, consumedAt: now } : null;
+    })();
+  }
+
+  completeExternalInvitation(input: {
+    invitationId: string;
+    provider: string;
+    subject: string;
+    displayName: string;
+    verifiedEmails: string[];
+  }, now: number): { account: Account; membership: WorkspaceMember; personalWorkspace: HarborWorkspace } {
+    return this.db.transaction(() => {
+      const invitation = this.getWorkspaceInvitation(input.invitationId);
+      if (!invitation || invitation.status !== "pending" || invitation.expiresAt <= now) {
+        throw new Error("Invitation 不存在、已过期或已结束");
+      }
+      const emails = [...new Set(input.verifiedEmails.map((email) => email.trim().toLowerCase()).filter(Boolean))];
+      if (invitation.email && !emails.includes(invitation.email.trim().toLowerCase())) {
+        throw new Error("Invitation email 不属于 GitHub 已验证邮箱");
+      }
+      const existingIdentity = this.getAuthIdentity(input.provider, input.subject);
+      if (existingIdentity) {
+        const account = this.getAccount(existingIdentity.accountId);
+        if (!account || account.status !== "active") throw new Error("GitHub identity 对应 Account 不可用");
+        const membership = this.acceptWorkspaceInvitation(invitation.id, account.id, now, emails);
+        const personalWorkspace = this.listMembershipsForAccount(account.id)
+          .map((member) => this.getWorkspace(member.workspaceId))
+          .find((workspace) => workspace?.kind === "personal");
+        if (!personalWorkspace) throw new Error("GitHub identity 对应 Account 缺少 personal Workspace");
+        return { account, membership, personalWorkspace };
+      }
+      const primaryEmail = invitation.email?.trim() || emails[0] || null;
+      if (primaryEmail && this.hasActiveAccountWithEmail(primaryEmail)) {
+        throw new Error("该 GitHub 邮箱已有 Harbor Account；请先登录原 Account 再绑定 GitHub");
+      }
+      const account = this.createAccount({
+        displayName: input.displayName,
+        primaryEmail,
+        status: "active",
+      }, now);
+      this.createAuthIdentity({
+        accountId: account.id,
+        provider: input.provider,
+        subject: input.subject,
+        email: primaryEmail,
+        verifiedAt: now,
+      }, now);
+      const personalWorkspace = this.createWorkspace({
+        name: `${account.displayName}'s Harbor`,
+        slug: `personal-${account.id.replace(/[^a-z0-9]/gi, "").slice(-12).toLowerCase()}`,
+        description: "Personal Workspace",
+        ownerAccountId: account.id,
+        kind: "personal",
+      }, now);
+      const membership = this.acceptWorkspaceInvitation(invitation.id, account.id, now);
+      return { account, membership, personalWorkspace };
+    })();
+  }
+
+  upsertGitHubInstallation(input: Omit<GitHubInstallation, "createdAt" | "updatedAt" | "status"> & {
+    status?: GitHubInstallation["status"];
+  }, now: number): GitHubInstallation {
+    for (const [label, value] of [["installationId", input.installationId], ["appId", input.appId], ["targetId", input.targetId]]) {
+      if (!/^[1-9][0-9]*$/.test(value)) throw new Error(`GitHub ${label} 必须是正整数 id`);
+    }
+    this.db.run(
+      `INSERT INTO github_installations
+       (installation_id, app_id, target_id, target_type, target_login, repository_selection,
+        permissions, status, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(installation_id) DO UPDATE SET
+         app_id = excluded.app_id,
+         target_id = excluded.target_id,
+         target_type = excluded.target_type,
+         target_login = excluded.target_login,
+         repository_selection = excluded.repository_selection,
+         permissions = excluded.permissions,
+         status = excluded.status,
+         updated_at = excluded.updated_at`,
+      [input.installationId, input.appId, input.targetId, input.targetType, input.targetLogin,
+       input.repositorySelection, JSON.stringify(input.permissions), input.status ?? "active", now, now],
+    );
+    return this.getGitHubInstallation(input.installationId)!;
+  }
+
+  getGitHubInstallation(installationId: string): GitHubInstallation | null {
+    const row = this.db.query<GitHubInstallationRow, [string]>(
+      "SELECT * FROM github_installations WHERE installation_id = ?",
+    ).get(installationId);
+    return row ? toGitHubInstallation(row) : null;
+  }
+
+  setGitHubInstallationStatus(installationId: string, status: GitHubInstallation["status"], now: number): boolean {
+    return this.db.transaction(() => {
+      const changed = this.db.run(
+        "UPDATE github_installations SET status = ?, updated_at = ? WHERE installation_id = ?",
+        [status, now, installationId],
+      ).changes;
+      if (status === "deleted") {
+        this.db.run(
+          "UPDATE github_workspace_installations SET status = 'disconnected', updated_at = ? WHERE installation_id = ?",
+          [now, installationId],
+        );
+        this.db.run(
+          "UPDATE github_repository_connections SET status = 'removed', updated_at = ? WHERE installation_id = ?",
+          [now, installationId],
+        );
+      }
+      return changed === 1;
+    })();
+  }
+
+  connectGitHubInstallation(input: {
+    workspaceId: string;
+    installationId: string;
+    connectedByAccountId: string;
+  }, now: number): GitHubWorkspaceInstallation {
+    if (!this.membershipForAccount(input.connectedByAccountId, input.workspaceId)) {
+      throw new Error("GitHub installation 连接需要 active Workspace Membership");
+    }
+    const installation = this.getGitHubInstallation(input.installationId);
+    if (!installation || installation.status === "deleted") throw new Error("GitHub installation 不存在或已删除");
+    this.db.run(
+      `INSERT INTO github_workspace_installations
+       (workspace_id, installation_id, connected_by_account_id, status, created_at, updated_at)
+       VALUES (?,?,?,'active',?,?)
+       ON CONFLICT(workspace_id, installation_id) DO UPDATE SET
+         connected_by_account_id = excluded.connected_by_account_id,
+         status = 'active',
+         updated_at = excluded.updated_at`,
+      [input.workspaceId, input.installationId, input.connectedByAccountId, now, now],
+    );
+    return this.getGitHubWorkspaceInstallation(input.workspaceId, input.installationId)!;
+  }
+
+  getGitHubWorkspaceInstallation(workspaceId: string, installationId: string): GitHubWorkspaceInstallation | null {
+    const row = this.db.query<GitHubWorkspaceInstallationRow, [string, string]>(
+      "SELECT * FROM github_workspace_installations WHERE workspace_id = ? AND installation_id = ?",
+    ).get(workspaceId, installationId);
+    return row ? toGitHubWorkspaceInstallation(row) : null;
+  }
+
+  listGitHubWorkspaceInstallations(workspaceId: string): GitHubWorkspaceInstallation[] {
+    return this.db.query<GitHubWorkspaceInstallationRow, [string]>(
+      "SELECT * FROM github_workspace_installations WHERE workspace_id = ? ORDER BY created_at, installation_id",
+    ).all(workspaceId).map(toGitHubWorkspaceInstallation);
+  }
+
+  listGitHubWorkspacesForInstallation(installationId: string): GitHubWorkspaceInstallation[] {
+    return this.db.query<GitHubWorkspaceInstallationRow, [string]>(
+      "SELECT * FROM github_workspace_installations WHERE installation_id = ? ORDER BY workspace_id",
+    ).all(installationId).map(toGitHubWorkspaceInstallation);
+  }
+
+  disconnectGitHubInstallation(workspaceId: string, installationId: string, now: number): boolean {
+    return this.db.transaction(() => {
+      const changed = this.db.run(
+        `UPDATE github_workspace_installations SET status = 'disconnected', updated_at = ?
+         WHERE workspace_id = ? AND installation_id = ? AND status = 'active'`,
+        [now, workspaceId, installationId],
+      ).changes;
+      if (changed === 1) {
+        this.db.run(
+          `UPDATE github_repository_connections SET status = 'removed', updated_at = ?
+           WHERE workspace_id = ? AND installation_id = ?`,
+          [now, workspaceId, installationId],
+        );
+      }
+      return changed === 1;
+    })();
+  }
+
+  upsertGitHubRepositoryConnection(input: Omit<GitHubRepositoryConnection, "createdAt" | "updatedAt" | "status">, now: number): GitHubRepositoryConnection {
+    if (!/^[1-9][0-9]*$/.test(input.githubRepositoryId)) throw new Error("GitHub repository id 必须是正整数");
+    const repository = this.getRepository(input.repositoryId);
+    if (!repository || repository.workspaceId !== input.workspaceId) throw new Error("GitHub Repository connection 跨 Workspace");
+    const binding = this.getGitHubWorkspaceInstallation(input.workspaceId, input.installationId);
+    if (!binding || binding.status !== "active") throw new Error("GitHub Workspace installation 未连接");
+    this.db.run(
+      `INSERT INTO github_repository_connections
+       (workspace_id, repository_id, installation_id, github_repository_id, full_name,
+        default_branch, private, status, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,'active',?,?)
+       ON CONFLICT(repository_id) DO UPDATE SET
+         workspace_id = excluded.workspace_id,
+         installation_id = excluded.installation_id,
+         github_repository_id = excluded.github_repository_id,
+         full_name = excluded.full_name,
+         default_branch = excluded.default_branch,
+         private = excluded.private,
+         status = 'active',
+         updated_at = excluded.updated_at`,
+      [input.workspaceId, input.repositoryId, input.installationId, input.githubRepositoryId,
+       input.fullName.toLowerCase(), input.defaultBranch, input.private ? 1 : 0, now, now],
+    );
+    return this.githubRepositoryConnectionByRepository(input.repositoryId)!;
+  }
+
+  githubRepositoryConnectionByRepository(repositoryId: string): GitHubRepositoryConnection | null {
+    const row = this.db.query<GitHubRepositoryConnectionRow, [string]>(
+      "SELECT * FROM github_repository_connections WHERE repository_id = ?",
+    ).get(repositoryId);
+    return row ? toGitHubRepositoryConnection(row) : null;
+  }
+
+  listGitHubRepositoryAliases(workspaceId: string, githubRepositoryId: string): GitHubRepositoryConnection[] {
+    return this.db.query<GitHubRepositoryConnectionRow, [string, string]>(
+      `SELECT * FROM github_repository_connections
+       WHERE workspace_id = ? AND github_repository_id = ? ORDER BY repository_id`,
+    ).all(workspaceId, githubRepositoryId).map(toGitHubRepositoryConnection);
+  }
+
+  githubRepositoryConnectionForRepository(repositoryId: string): GitHubRepositoryConnection | null {
+    const row = this.db.query<GitHubRepositoryConnectionRow, [string]>(
+      `SELECT c.* FROM github_repository_connections c
+       JOIN github_workspace_installations w
+         ON w.workspace_id = c.workspace_id AND w.installation_id = c.installation_id
+       JOIN github_installations i ON i.installation_id = c.installation_id
+       WHERE c.repository_id = ? AND c.status = 'active' AND w.status = 'active' AND i.status = 'active'`,
+    ).get(repositoryId);
+    return row ? toGitHubRepositoryConnection(row) : null;
+  }
+
+  listGitHubRepositoryConnections(workspaceId: string, installationId?: string): GitHubRepositoryConnection[] {
+    const rows = installationId
+      ? this.db.query<GitHubRepositoryConnectionRow, [string, string]>(
+          "SELECT * FROM github_repository_connections WHERE workspace_id = ? AND installation_id = ? ORDER BY full_name",
+        ).all(workspaceId, installationId)
+      : this.db.query<GitHubRepositoryConnectionRow, [string]>(
+          "SELECT * FROM github_repository_connections WHERE workspace_id = ? ORDER BY full_name",
+        ).all(workspaceId);
+    return rows.map(toGitHubRepositoryConnection);
+  }
+
+  githubConnectionsForWebhook(installationId: string, githubRepositoryId: string): GitHubRepositoryConnection[] {
+    return this.db.query<GitHubRepositoryConnectionRow, [string, string]>(
+      `SELECT c.* FROM github_repository_connections c
+       JOIN github_workspace_installations w
+         ON w.workspace_id = c.workspace_id AND w.installation_id = c.installation_id
+       JOIN github_installations i ON i.installation_id = c.installation_id
+       WHERE c.installation_id = ? AND c.github_repository_id = ?
+         AND c.status = 'active' AND w.status = 'active' AND i.status = 'active'
+       ORDER BY c.workspace_id`,
+    ).all(installationId, githubRepositoryId).map(toGitHubRepositoryConnection);
+  }
+
+  markMissingGitHubRepositoriesRemoved(workspaceId: string, installationId: string, activeRepositoryIds: string[], now: number): number {
+    const ids = [...new Set(activeRepositoryIds)];
+    const sql = ids.length
+      ? `UPDATE github_repository_connections SET status = 'removed', updated_at = ?
+         WHERE workspace_id = ? AND installation_id = ?
+           AND github_repository_id NOT IN (${ids.map(() => "?").join(",")})`
+      : `UPDATE github_repository_connections SET status = 'removed', updated_at = ?
+         WHERE workspace_id = ? AND installation_id = ?`;
+    return this.db.run(sql, [now, workspaceId, installationId, ...ids]).changes;
   }
 
   defaultWorkspace(): HarborWorkspace {
@@ -1514,7 +1967,7 @@ export class HarborStore {
     })();
   }
 
-  acceptWorkspaceInvitation(id: string, accountId: string, now: number): WorkspaceMember {
+  acceptWorkspaceInvitation(id: string, accountId: string, now: number, verifiedEmails: string[] = []): WorkspaceMember {
     return this.db.transaction(() => {
       const invitation = this.getWorkspaceInvitation(id);
       if (!invitation || invitation.status !== "pending" || invitation.expiresAt <= now) {
@@ -1522,7 +1975,11 @@ export class HarborStore {
       }
       const account = this.getAccount(accountId);
       if (!account || account.status !== "active") throw new Error("Account 不存在或不可用");
-      if (invitation.email && invitation.email.trim().toLowerCase() !== account.primaryEmail?.trim().toLowerCase()) {
+      const acceptedEmails = new Set([
+        account.primaryEmail?.trim().toLowerCase() ?? "",
+        ...verifiedEmails.map((email) => email.trim().toLowerCase()),
+      ].filter(Boolean));
+      if (invitation.email && !acceptedEmails.has(invitation.email.trim().toLowerCase())) {
         throw new Error("Invitation email 与当前 Account 不匹配");
       }
       if (this.membershipForAccount(accountId, invitation.workspaceId)) {

@@ -69,6 +69,7 @@ import {
   validatePromptTemplate,
 } from "./prompt-wrapper.js";
 import type { DeploymentTargetConfig } from "../config.js";
+import type { GitHubIntegrationService } from "./github-integration.js";
 
 const PERMISSIONS = ["readonly", "auto-edit", "full", "default"];
 const MAX_SKILL_INSTRUCTION = 128 * 1024;
@@ -127,29 +128,15 @@ function safeGitHubSignatureEqual(rawBody: string, signature: string, secret: st
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-function githubRepositoryName(remoteUrl: string | null | undefined): string | null {
-  if (!remoteUrl) return null;
-  let path: string;
-  const scp = remoteUrl.match(/^(?:[^@]+@)?github\.com:([^?#]+)$/i);
-  if (scp) {
-    path = scp[1]!;
-  } else {
-    try {
-      const url = new URL(remoteUrl);
-      if (url.hostname.toLowerCase() !== "github.com") return null;
-      path = url.pathname;
-    } catch {
-      return null;
-    }
-  }
-  const normalized = path.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
-  return /^[^/]+\/[^/]+$/.test(normalized) ? normalized.toLowerCase() : null;
-}
-
 function objectField(value: unknown, key: string): unknown {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)[key]
     : undefined;
+}
+
+function githubNumericId(value: unknown): string | null {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return String(value);
+  return typeof value === "string" && /^[1-9][0-9]*$/.test(value) ? value : null;
 }
 
 function stringField(value: unknown, key: string): string | null {
@@ -320,6 +307,7 @@ export function buildRest(
   }),
   selfDeployTarget: DeploymentTargetConfig | null = null,
   githubWebhookSecret = "",
+  githubIntegration: GitHubIntegrationService | null = null,
 ): Hono {
   const app = new Hono();
   type ApiActor =
@@ -336,6 +324,7 @@ export function buildRest(
   const challengeCookie = "harbor_auth_challenge";
   const sessionCookie = "harbor_session";
   const csrfCookie = "harbor_csrf";
+  const githubStateCookie = "harbor_github_state";
   const cookieBase = {
     secure: auth.config.secureCookie,
     sameSite: "Lax" as const,
@@ -349,6 +338,16 @@ export function buildRest(
   const clearSessionCookies = (c: Context) => {
     deleteCookie(c, sessionCookie, cookieBase);
     deleteCookie(c, csrfCookie, cookieBase);
+  };
+  const setGitHubStateCookie = (c: Context, state: string) => {
+    setCookie(c, githubStateCookie, state, { ...cookieBase, httpOnly: true, maxAge: 600 });
+  };
+  const clearGitHubStateCookie = (c: Context) => deleteCookie(c, githubStateCookie, cookieBase);
+  const githubFailurePath = (returnTo: string | null | undefined, message: string): string => {
+    const fallback = returnTo?.startsWith("/settings") ? returnTo : "/login";
+    const url = new URL(fallback, auth.config.origin);
+    url.searchParams.set("github_error", message.slice(0, 300));
+    return `${url.pathname}${url.search}`;
   };
   const bearer = (c: Context): string => {
     const value = c.req.header("Authorization") ?? "";
@@ -625,8 +624,8 @@ export function buildRest(
     }
   });
 
-  /** Mew Codebase Trigger 的 GitHub adapter：验签后直接归一化为 Repository event。 */
-  app.post("/hooks/scm/github/:repositoryId", async (c) => {
+  /** GitHub App 全局 webhook：installation + repository id 定位显式 Workspace connection。 */
+  app.post("/hooks/github/app", async (c) => {
     if (!githubWebhookSecret) return c.json({ error: "not found" }, 404);
     const declaredLength = Number(c.req.header("content-length") ?? "0");
     if (Number.isFinite(declaredLength) && declaredLength > 512 * 1024) {
@@ -656,17 +655,59 @@ export function buildRest(
     } catch {
       return c.json({ error: "webhook body 必须是 JSON object" }, 400);
     }
-    const repository = store.getRepository(c.req.param("repositoryId"));
-    if (!repository || repository.archivedAt) {
-      return c.json({ error: "Repository 不存在或已归档" }, 404);
-    }
-    const configuredName = githubRepositoryName(repository.remoteUrl);
-    const deliveredName = stringField(payload.repository, "full_name")?.toLowerCase() ?? null;
-    if (!configuredName || !deliveredName || configuredName !== deliveredName) {
-      return c.json({ error: "GitHub payload Repository 与 Harbor 配置不匹配" }, 400);
-    }
     if (githubEvent === "ping") {
-      return c.json({ status: "pong", repositoryId: repository.id });
+      return c.json({ status: "pong" });
+    }
+    const installationId = githubNumericId(objectField(payload.installation, "id"));
+    if (!installationId) {
+      return c.json({ error: "GitHub App webhook 缺少 installation.id" }, 400);
+    }
+    const installation = store.getGitHubInstallation(installationId);
+    if (!installation) {
+      return c.json({ status: "ignored", reason: "installation_not_connected" });
+    }
+    const deliveredAppId = githubNumericId(objectField(payload.installation, "app_id"));
+    if (deliveredAppId && deliveredAppId !== installation.appId) {
+      return c.json({ error: "GitHub webhook installation 不属于当前 Harbor App" }, 400);
+    }
+    const action = typeof payload.action === "string" ? payload.action : "";
+    if (githubEvent === "installation") {
+      const status = action === "deleted"
+        ? "deleted"
+        : action === "suspend"
+          ? "suspended"
+          : action === "unsuspend"
+            ? "active"
+            : null;
+      if (!status) return c.json({ status: "ignored", event: githubEvent, action });
+      store.setGitHubInstallationStatus(installationId, status, Date.now());
+      if (status !== "active") githubIntegration?.client.clearInstallationToken(installationId);
+      return c.json({ status: "processed", event: githubEvent, action });
+    }
+    if (githubEvent === "installation_repositories" || githubEvent === "repository") {
+      if (!githubIntegration) return c.json({ error: "GitHub App integration 未配置" }, 503);
+      try {
+        const results = await Promise.all(
+          store.listGitHubWorkspacesForInstallation(installationId)
+            .filter((connection) => connection.status === "active")
+            .map((connection) => githubIntegration.syncInstallation(connection.workspaceId, installationId)),
+        );
+        return c.json({ status: "processed", event: githubEvent, results });
+      } catch (error) {
+        return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
+      }
+    }
+    const githubRepositoryId = githubNumericId(objectField(payload.repository, "id"));
+    const deliveredName = stringField(payload.repository, "full_name")?.toLowerCase() ?? null;
+    if (!githubRepositoryId || !deliveredName) {
+      return c.json({ error: "GitHub App webhook 缺少 repository.id/full_name" }, 400);
+    }
+    const connections = store.githubConnectionsForWebhook(installationId, githubRepositoryId);
+    if (connections.length === 0) {
+      return c.json({ status: "ignored", reason: "repository_not_connected" });
+    }
+    if (connections.some((connection) => connection.fullName !== deliveredName)) {
+      return c.json({ error: "GitHub payload Repository 与 Harbor connection 不匹配" }, 400);
     }
     let normalized;
     try {
@@ -685,15 +726,15 @@ export function buildRest(
       c.header("Retry-After", "5");
       return c.json({ error: "deployment maintenance state 不可判定" }, 503);
     }
-    const results = automations.receiveCodebase({
-      workspaceId: repository.workspaceId,
-      repositoryId: repository.id,
+    const results = connections.flatMap((connection) => automations.receiveCodebase({
+      workspaceId: connection.workspaceId,
+      repositoryId: connection.repositoryId,
       eventType: normalized.eventType,
       eventId: `github:${deliveryId}`,
       payload,
       revision: normalized.revision,
       occurredAt: normalized.occurredAt,
-    });
+    }));
     return c.json({ status: results.some((result) => result.status === "started") ? "accepted" : "processed", results },
       results.some((result) => result.status === "started") ? 202 : 200);
   });
@@ -1156,6 +1197,71 @@ export function buildRest(
   // challenge cookie HttpOnly + DB 单次消费；Passkey RP/origin 只来自 HARBOR_PUBLIC_URL。
   app.get("/api/auth/bootstrap/status", (c) => c.json(auth.bootstrapState()));
 
+  app.get("/api/auth/github/status", (c) => c.json(githubIntegration
+    ? { configured: true, appSlug: githubIntegration.client.config.slug }
+    : { configured: false }));
+
+  app.post("/api/auth/github/login", async (c) => {
+    if (!githubIntegration) return c.json({ error: "GitHub App 登录未配置" }, 503);
+    try {
+      const body = await c.req.json().catch(() => ({})) as { invitationToken?: string };
+      const started = githubIntegration.beginLogin(body.invitationToken);
+      setGitHubStateCookie(c, started.state);
+      return c.json({ url: started.url });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  app.get("/api/auth/github/setup", (c) => {
+    if (!githubIntegration) return c.json({ error: "GitHub App installation 未配置" }, 503);
+    const state = c.req.query("state") ?? "";
+    const installationId = c.req.query("installation_id") ?? "";
+    const action = c.req.query("setup_action") ?? "";
+    if (!safeSecretEqual(state, getCookie(c, githubStateCookie) ?? "")) {
+      clearGitHubStateCookie(c);
+      return c.redirect(githubFailurePath("/settings?tab=integrations", "GitHub setup state cookie 不匹配"));
+    }
+    if (!/^[1-9][0-9]*$/.test(installationId) || !["install", "update"].includes(action)) {
+      clearGitHubStateCookie(c);
+      return c.redirect(githubFailurePath("/settings?tab=integrations", "GitHub setup 回调参数不正确"));
+    }
+    try {
+      return c.redirect(githubIntegration.continueInstallation(state, installationId));
+    } catch (error) {
+      clearGitHubStateCookie(c);
+      return c.redirect(githubFailurePath("/settings?tab=integrations", error instanceof Error ? error.message : String(error)));
+    }
+  });
+
+  app.get("/api/auth/github/callback", async (c) => {
+    if (!githubIntegration) return c.json({ error: "GitHub App OAuth 未配置" }, 503);
+    const state = c.req.query("state") ?? "";
+    const stored = /^[A-Za-z0-9_-]{16,512}$/.test(state)
+      ? store.githubOAuthState(createHash("sha256").update(state).digest("hex"), Date.now())
+      : null;
+    if (!safeSecretEqual(state, getCookie(c, githubStateCookie) ?? "")) {
+      clearGitHubStateCookie(c);
+      return c.redirect(githubFailurePath(stored?.returnTo, "GitHub OAuth state cookie 不匹配"));
+    }
+    const githubError = c.req.query("error");
+    const code = c.req.query("code") ?? "";
+    if (githubError || !code) {
+      clearGitHubStateCookie(c);
+      return c.redirect(githubFailurePath(stored?.returnTo, githubError ? `GitHub OAuth 已取消：${githubError}` : "GitHub OAuth code 缺失"));
+    }
+    try {
+      const completed = await githubIntegration.complete(state, code);
+      if (completed.personalWorkspace) ensureBuiltinHarborSkill(store, completed.personalWorkspace.id, Date.now());
+      setSessionCookies(c, completed.session);
+      clearGitHubStateCookie(c);
+      return c.redirect(completed.returnTo);
+    } catch (error) {
+      clearGitHubStateCookie(c);
+      return c.redirect(githubFailurePath(stored?.returnTo, error instanceof Error ? error.message : String(error)));
+    }
+  });
+
   app.post("/api/auth/bootstrap/options", async (c) => {
     requireBootstrapToken(c);
     try {
@@ -1446,6 +1552,25 @@ export function buildRest(
     return c.json({ ok: true });
   });
 
+  app.get("/api/accounts/me/identities", (c) => {
+    const actor = requestActor(c);
+    if (actor.kind !== "account") bad("system token 没有 Account identity");
+    return c.json(store.listAuthIdentities(actor.account.id));
+  });
+
+  app.post("/api/accounts/me/github/link", (c) => {
+    if (!githubIntegration) return c.json({ error: "GitHub App 登录未配置" }, 503);
+    const actor = requestActor(c);
+    if (actor.kind !== "account" || actor.credential.kind !== "session") bad("只有登录 Session 可以绑定 GitHub identity");
+    try {
+      const started = githubIntegration.beginLink(actor.account.id);
+      setGitHubStateCookie(c, started.state);
+      return c.json({ url: started.url });
+    } catch (error) {
+      bad(error instanceof Error ? error.message : String(error));
+    }
+  });
+
   app.get("/api/accounts/me/passkeys", (c) => {
     const actor = requestActor(c);
     if (actor.kind !== "account") bad("system token 没有 Account Passkey");
@@ -1553,6 +1678,55 @@ export function buildRest(
     if (actor.kind !== "account" || actor.credential.kind !== "session") bad("当前不是 browser Session");
     auth.logout(actor.credential.sessionId);
     clearSessionCookies(c);
+    return c.json({ ok: true });
+  });
+
+  app.get("/api/integrations/github", (c) => {
+    const actor = requestActor(c);
+    if (actor.kind !== "account") bad("system token 没有 GitHub Account integration");
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "member");
+    return c.json(githubIntegration
+      ? githubIntegration.view(actor.account.id, workspace.id)
+      : { configured: false });
+  });
+
+  app.post("/api/integrations/github/install", (c) => {
+    if (!githubIntegration) return c.json({ error: "GitHub App installation 未配置" }, 503);
+    const actor = requestActor(c);
+    if (actor.kind !== "account" || actor.credential.kind !== "session") bad("只有登录 Session 可以连接 GitHub App");
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    try {
+      const started = githubIntegration.beginInstall(actor.account.id, workspace.id);
+      setGitHubStateCookie(c, started.state);
+      return c.json({ url: started.url });
+    } catch (error) {
+      bad(error instanceof Error ? error.message : String(error));
+    }
+  });
+
+  app.post("/api/integrations/github/installations/:installationId/sync", async (c) => {
+    if (!githubIntegration) return c.json({ error: "GitHub App installation 未配置" }, 503);
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const installationId = c.req.param("installationId");
+    if (!/^[1-9][0-9]*$/.test(installationId)) bad("GitHub installation id 格式不正确");
+    try {
+      return c.json(await githubIntegration.syncInstallation(workspace.id, installationId));
+    } catch (error) {
+      bad(error instanceof Error ? error.message : String(error));
+    }
+  });
+
+  app.delete("/api/integrations/github/installations/:installationId", (c) => {
+    if (!githubIntegration) return c.json({ error: "GitHub App installation 未配置" }, 503);
+    const workspace = currentWorkspace(c);
+    requireRole(c, workspace.id, "admin");
+    const installationId = c.req.param("installationId");
+    if (!githubIntegration.disconnect(workspace.id, installationId)) {
+      throw new HTTPException(404, { message: "GitHub installation connection 不存在或已断开" });
+    }
     return c.json({ ok: true });
   });
 
@@ -2322,7 +2496,7 @@ export function buildRest(
       );
     } else if (b.source === "github") {
       if (!b.url?.trim()) bad("GitHub import 缺少 url");
-      bundle = await skillImports.fromGitHub(b.url, b.ref);
+      bundle = await skillImports.fromGitHub(b.url, b.ref, workspace.id);
     } else if (b.zipBase64) {
       bundle = await skillImports.fromZip(b.zipBase64);
     } else {
@@ -2386,6 +2560,7 @@ export function buildRest(
       originUrl: skill.originUrl,
       sourcePath: skill.sourcePath,
       sourceRef: skill.sourceRef,
+      workspaceId: workspace.id,
     });
     const metadata = importedSkillMetadata(bundle.files, skill.name);
     store.updateSkill(

@@ -13,8 +13,13 @@
  *     admin_user_id: ou_xxx             # 唯一有权指挥 bot 的人（send-gate ACL）
  *     bot_name: Harbor
  *     allowed_chats: []                 # automation 播报白名单群，默认空 = 不播报
- *   github:                            # server-only GitHub integration；token 与 webhook secret 独立启用
- *     token: github_pat_xxx
+ *   github:                            # server-only GitHub App；不接受 PAT/user token 配置
+ *     app:
+ *       app_id: "123456"
+ *       client_id: Iv1.xxxxxxxxxxxxxxxx
+ *       client_secret: <oauth client secret>
+ *       slug: harbor-automation
+ *       private_key_path: /Users/me/.harbor/github-app.pem
  *     webhook_secret: <random secret>
  *   # feishu.custom_bots 可为特定 Workspace 配置独立 Bot。
  *   self_deploy_target:               # Harbor-only sidecar target；敏感字段不进 DB/REST
@@ -73,7 +78,13 @@ interface HarborFileConfig {
     webhook_secret?: string;
   };
   github?: {
-    token?: string;
+    app?: {
+      app_id?: string | number;
+      client_id?: string;
+      client_secret?: string;
+      slug?: string;
+      private_key_path?: string;
+    };
     webhook_secret?: string;
   };
   self_deploy_target?: unknown;
@@ -192,18 +203,73 @@ export function feishuConfig(): FeishuConfig | null {
   };
 }
 
-export interface GitHubConfig {
-  token: string;
+export interface GitHubAppConfig {
+  appId: string;
+  clientId: string;
+  clientSecret: string;
+  slug: string;
+  privateKey: string;
+  privateKeyPath: string;
+  webhookSecret: string;
 }
 
-/** GitHub Delivery 凭证只从 server 配置读取；不全时返回 null，让 manual provider 独立启动。 */
-export function githubConfig(): GitHubConfig | null {
-  const configured = process.env.HARBOR_GITHUB_TOKEN ?? fileConfig().github?.token;
-  const githubToken = configured?.trim();
-  return githubToken ? { token: githubToken } : null;
+interface GitHubAppEnvironment {
+  HARBOR_GITHUB_APP_ID?: string;
+  HARBOR_GITHUB_APP_CLIENT_ID?: string;
+  HARBOR_GITHUB_APP_CLIENT_SECRET?: string;
+  HARBOR_GITHUB_APP_SLUG?: string;
+  HARBOR_GITHUB_APP_PRIVATE_KEY_PATH?: string;
+  HARBOR_GITHUB_WEBHOOK_SECRET?: string;
 }
 
-/** GitHub webhook 使用独立 secret；不复用高权限 HARBOR_TOKEN 或 GitHub API token。 */
+/** GitHub App private key 是 server credential：只接受当前 uid 拥有的 canonical 0600 普通文件。 */
+export function readGitHubAppPrivateKey(path: string, expectedUid = process.getuid?.()): string {
+  if (!isAbsolute(path) || resolve(path) !== path || dirname(path) === path) {
+    throw new Error("github.app.private_key_path 必须是非根目录下的 canonical 绝对路径");
+  }
+  const metadata = lstatSync(path);
+  assertPrivateConfigMetadata(metadata, expectedUid, "GitHub App private key");
+  if (realpathSync(path) !== path) throw new Error("GitHub App private key 路径不能包含 symlink component");
+  const value = readFileSync(path, "utf8").trim();
+  if (!/^-----BEGIN (?:RSA )?PRIVATE KEY-----[\s\S]+-----END (?:RSA )?PRIVATE KEY-----$/.test(value)) {
+    throw new Error("GitHub App private key 不是 PEM private key");
+  }
+  return `${value}\n`;
+}
+
+/** 纯 parser 供测试/部署预检注入；任一 App 字段出现时必须完整配置，拒绝半启用。 */
+export function parseGitHubAppConfig(
+  value: HarborFileConfig["github"] | undefined,
+  environment: GitHubAppEnvironment = { ...process.env } as GitHubAppEnvironment,
+  readPrivateKey: (path: string) => string = readGitHubAppPrivateKey,
+): GitHubAppConfig | null {
+  const app = value?.app ?? {};
+  const rawAppId = environment.HARBOR_GITHUB_APP_ID ?? app.app_id;
+  const raw = {
+    appId: rawAppId === undefined ? "" : String(rawAppId).trim(),
+    clientId: (environment.HARBOR_GITHUB_APP_CLIENT_ID ?? app.client_id ?? "").trim(),
+    clientSecret: (environment.HARBOR_GITHUB_APP_CLIENT_SECRET ?? app.client_secret ?? "").trim(),
+    slug: (environment.HARBOR_GITHUB_APP_SLUG ?? app.slug ?? "").trim().toLowerCase(),
+    privateKeyPath: (environment.HARBOR_GITHUB_APP_PRIVATE_KEY_PATH ?? app.private_key_path ?? "").trim(),
+    webhookSecret: (environment.HARBOR_GITHUB_WEBHOOK_SECRET ?? value?.webhook_secret ?? "").trim(),
+  };
+  if (Object.values(raw).every((entry) => !entry)) return null;
+  const missing = Object.entries(raw).filter(([, entry]) => !entry).map(([key]) => key);
+  if (missing.length) throw new Error(`GitHub App 配置不完整：缺少 ${missing.join(", ")}`);
+  if (!/^[1-9][0-9]*$/.test(raw.appId)) throw new Error("github.app.app_id 必须是正整数 GitHub App id");
+  if (!/^[A-Za-z0-9_.-]{3,128}$/.test(raw.clientId)) throw new Error("github.app.client_id 格式不正确");
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/.test(raw.slug)) throw new Error("github.app.slug 格式不正确");
+  if (raw.clientSecret.length < 16) throw new Error("github.app.client_secret 长度不足");
+  if (raw.webhookSecret.length < 16) throw new Error("github.webhook_secret 长度不足");
+  return { ...raw, privateKey: readPrivateKey(raw.privateKeyPath) };
+}
+
+/** GitHub Delivery/OAuth 只支持 GitHub App；未配置时 manual/codebase provider 独立启动。 */
+export function githubAppConfig(): GitHubAppConfig | null {
+  return parseGitHubAppConfig(fileConfig().github);
+}
+
+/** GitHub App webhook 使用独立 secret；不复用高权限 HARBOR_TOKEN。 */
 export function githubWebhookSecret(): string {
   return (
     process.env.HARBOR_GITHUB_WEBHOOK_SECRET ??

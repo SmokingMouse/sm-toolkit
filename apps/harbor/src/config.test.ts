@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { assertPrivateConfigMetadata, githubWebhookSecret, parsePublicAuthConfig, parseSelfDeployTarget } from "./config.js";
+import { assertPrivateConfigMetadata, githubWebhookSecret, parseGitHubAppConfig, parsePublicAuthConfig, parseSelfDeployTarget } from "./config.js";
 
 const SECRETS = { HEALTH_TOKEN: "TOPSECRET", OTHER_HEALTH_TOKEN: "OTHERSECRET" };
 
@@ -32,6 +32,44 @@ test("GitHub webhook secret is independent from the API token", () => {
     if (previousToken === undefined) delete process.env.HARBOR_GITHUB_TOKEN;
     else process.env.HARBOR_GITHUB_TOKEN = previousToken;
   }
+});
+
+test("GitHub App config is all-or-nothing and reads private key through a file boundary", () => {
+  const key = "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n";
+  const configured = parseGitHubAppConfig({
+    app: {
+      app_id: "12345",
+      client_id: "Iv1.fixture",
+      client_secret: "client-secret-fixture",
+      slug: "harbor-automation",
+      private_key_path: "/secure/github-app.pem",
+    },
+    webhook_secret: "webhook-secret-fixture",
+  }, {}, (path) => {
+    expect(path).toBe("/secure/github-app.pem");
+    return key;
+  });
+  expect(configured).toEqual({
+    appId: "12345",
+    clientId: "Iv1.fixture",
+    clientSecret: "client-secret-fixture",
+    slug: "harbor-automation",
+    privateKey: key,
+    privateKeyPath: "/secure/github-app.pem",
+    webhookSecret: "webhook-secret-fixture",
+  });
+  expect(parseGitHubAppConfig(undefined, {})).toBeNull();
+  expect(() => parseGitHubAppConfig({ app: { app_id: "123" } }, {})).toThrow("配置不完整");
+  expect(() => parseGitHubAppConfig({
+    app: {
+      app_id: "not-an-id",
+      client_id: "Iv1.fixture",
+      client_secret: "client-secret-fixture",
+      slug: "harbor-automation",
+      private_key_path: "/secure/github-app.pem",
+    },
+    webhook_secret: "webhook-secret-fixture",
+  }, {}, () => key)).toThrow("app_id");
 });
 
 function configured(overrides: Record<string, unknown> = {}) {

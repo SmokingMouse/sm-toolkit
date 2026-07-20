@@ -26,10 +26,17 @@ export interface ImportedSkillMetadata {
   dependencies: SkillDependency[];
 }
 
+export type GitHubImportCredentialResolver = (input: {
+  workspaceId: string;
+  owner: string;
+  repository: string;
+}) => string | null | Promise<string | null>;
+
 export class SkillImportService {
   constructor(
     private readonly codebase: CodebaseCommandRunner = new BitsCodebaseRunner(),
     private readonly fetcher: typeof fetch = fetch,
+    private readonly githubCredential: GitHubImportCredentialResolver | null = null,
   ) {}
 
   async fromCodebase(
@@ -101,6 +108,7 @@ export class SkillImportService {
   async fromGitHub(
     url: string,
     refOverride?: string,
+    workspaceId?: string,
   ): Promise<ImportedSkillBundle> {
     const parsed = new URL(url);
     if (parsed.protocol !== "https:" || parsed.hostname !== "github.com")
@@ -117,9 +125,12 @@ export class SkillImportService {
       Accept: "application/vnd.github+json",
       "User-Agent": "Harbor",
     };
-    if (process.env.HARBOR_GITHUB_TOKEN)
+    const credential = this.githubCredential && workspaceId
+      ? await this.githubCredential({ workspaceId, owner: owner!, repository: repository! })
+      : null;
+    if (credential)
       (headers as Record<string, string>).Authorization =
-        `Bearer ${process.env.HARBOR_GITHUB_TOKEN}`;
+        `Bearer ${credential}`;
     while (queue.length && files.length < MAX_FILES) {
       const path = queue.shift()!;
       const api = `https://api.github.com/repos/${encodeURIComponent(owner!)}/${encodeURIComponent(repository!)}/contents/${path === "." ? "" : path}?ref=${encodeURIComponent(ref)}`;
@@ -142,7 +153,11 @@ export class SkillImportService {
           entry.type === "file" &&
           typeof entry.download_url === "string"
         ) {
-          const content = await this.fetcher(entry.download_url);
+          const downloadUrl = new URL(entry.download_url);
+          if (downloadUrl.protocol !== "https:" || !["raw.githubusercontent.com", "api.github.com"].includes(downloadUrl.hostname)) {
+            throw new Error(`GitHub file ${entry.path} download_url origin 不可信`);
+          }
+          const content = await this.fetcher(downloadUrl, { headers });
           if (!content.ok)
             throw new Error(
               `GitHub file ${entry.path} 下载失败（${content.status}）`,
@@ -192,9 +207,10 @@ export class SkillImportService {
     originUrl: string;
     sourcePath: string | null;
     sourceRef: string | null;
+    workspaceId?: string;
   }): Promise<ImportedSkillBundle> {
     if (input.source === "github")
-      return this.fromGitHub(input.originUrl, input.sourceRef ?? undefined);
+      return this.fromGitHub(input.originUrl, input.sourceRef ?? undefined, input.workspaceId);
     if (!input.originUrl.startsWith("codebase://"))
       throw new Error("Codebase Skill originUrl 无效");
     const repository = input.originUrl

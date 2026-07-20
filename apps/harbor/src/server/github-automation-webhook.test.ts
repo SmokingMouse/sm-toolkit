@@ -25,6 +25,29 @@ function harness() {
     name: "harbor",
     remoteUrl: "git@github.com:SmokingMouse/sm-toolkit.git",
   }, 2);
+  store.upsertGitHubInstallation({
+    installationId: "77",
+    appId: "12345",
+    targetId: "42",
+    targetType: "User",
+    targetLogin: "SmokingMouse",
+    repositorySelection: "selected",
+    permissions: { contents: "write", pull_requests: "write" },
+  }, 2);
+  store.connectGitHubInstallation({
+    workspaceId: repository.workspaceId,
+    installationId: "77",
+    connectedByAccountId: "acc_bootstrap",
+  }, 2);
+  store.upsertGitHubRepositoryConnection({
+    workspaceId: repository.workspaceId,
+    repositoryId: repository.id,
+    installationId: "77",
+    githubRepositoryId: "99",
+    fullName: "SmokingMouse/sm-toolkit",
+    defaultBranch: "main",
+    private: false,
+  }, 2);
   store.setRepositoryMount(repository.id, device.id, "/repo", 3);
   const agent = store.createAgent({
     name: "release-builder",
@@ -70,7 +93,8 @@ function harness() {
   );
   const payload = {
     action: "closed",
-    repository: { full_name: "SmokingMouse/sm-toolkit" },
+    installation: { id: 77, app_id: 12345 },
+    repository: { id: 99, full_name: "SmokingMouse/sm-toolkit" },
     pull_request: {
       merged: true,
       merge_commit_sha: REVISION,
@@ -81,7 +105,7 @@ function harness() {
   const send = (body: unknown, overrides: Record<string, string> = {}) => {
     const raw = JSON.stringify(body);
     const signature = `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}`;
-    return app.request(`/hooks/scm/github/${repository.id}`, {
+    return app.request("/hooks/github/app", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -134,7 +158,7 @@ describe("GitHub repository event adapter", () => {
     const mismatch = harness();
     const wrongRepository = await mismatch.send({
       ...mismatch.payload,
-      repository: { full_name: "other/project" },
+      repository: { id: 99, full_name: "other/project" },
     });
     expect(wrongRepository.status).toBe(400);
 

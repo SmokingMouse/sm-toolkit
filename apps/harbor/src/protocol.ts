@@ -451,6 +451,44 @@ export interface AuthIdentity {
   createdAt: number;
 }
 
+/** GitHub App 的一次 account/organization installation；不包含短期 token 或私钥。 */
+export interface GitHubInstallation {
+  installationId: string;
+  appId: string;
+  targetId: string;
+  targetType: "User" | "Organization";
+  targetLogin: string;
+  repositorySelection: "all" | "selected";
+  permissions: Record<string, string>;
+  status: "active" | "suspended" | "deleted";
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Workspace 对 GitHub App installation 的显式连接。 */
+export interface GitHubWorkspaceInstallation {
+  workspaceId: string;
+  installationId: string;
+  connectedByAccountId: string;
+  status: "active" | "disconnected";
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** GitHub Repository 与 Harbor Repository 的稳定映射；GitHub 数字 id 是外部主键。 */
+export interface GitHubRepositoryConnection {
+  workspaceId: string;
+  repositoryId: string;
+  installationId: string;
+  githubRepositoryId: string;
+  fullName: string;
+  defaultBranch: string;
+  private: boolean;
+  status: "active" | "removed";
+  createdAt: number;
+  updatedAt: number;
+}
+
 /** Web/API 的安全 Passkey projection；credential id 与 public key 不离开 server。 */
 export interface PasskeyCredential {
   id: string;

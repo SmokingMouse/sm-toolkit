@@ -66,7 +66,7 @@ test("REST fails GitHub configuration loudly while manual Delivery remains usabl
   });
   expect(github.status).toBe(400);
   expect((await github.json()) as { error: string }).toEqual({
-    error: expect.stringContaining("HARBOR_GITHUB_TOKEN"),
+    error: expect.stringContaining("GitHub App installation"),
   });
 
   const manualIssue = h.issue("Manual fallback", 20);

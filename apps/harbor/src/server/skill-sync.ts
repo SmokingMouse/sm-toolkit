@@ -38,6 +38,7 @@ export class SkillSyncService {
             originUrl: skill.originUrl!,
             sourcePath: skill.sourcePath,
             sourceRef: skill.sourceRef,
+            workspaceId: skill.workspaceId,
           });
           const metadata = importedSkillMetadata(bundle.files, skill.name);
           if (skill.bundleHash !== bundleHash(bundle.files)) {
