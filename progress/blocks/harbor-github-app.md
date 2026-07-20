@@ -20,8 +20,10 @@
 - 2026-07-21：完成 GitHub App JWT、OAuth identity、installation ownership 复核、内存 installation token、Repository connection/sync、全局 App webhook、Delivery/Skill import credential provider，以及 Login/Account/Integrations Web 入口。旧 `HARBOR_GITHUB_TOKEN`/`github.token` 运行路径已移除。
 - 2026-07-21：对 Mac mini schema v28 online backup 运行真实 dry-run：`migratable=true`，1 Account、2 Workspaces、2 GitHub remote Repository、0 旧 GitHub identity/Delivery、0 blocker。唯一 warning 是 `smokingmouse/sm-toolkit` 有 2 个 Harbor Repository alias；核对 mounts/Agents/self-deploy target 后确认这是开发与 release 的有意分视图，因此 v29 改为一份 GitHub repository id 映射全部 alias，不合并/归档历史 Repository。
 - 2026-07-21：验证完成：`bun run build` 通过（含 Next production export），全量 `bun test` 449 pass / 0 fail，`git diff --check` 通过；旧 schema lineage 断言已推进到 v29。
+- 2026-07-21：PR #3 合并为 `e72e75e`；真实 merge webhook 首投因 Harbor 10s 响应超时未触发，使用同一 GitHub delivery id、GitHub API 的真实 PR 数据与主机内 webhook secret 做签名 replay 后，Release Agent 正常创建 generation 6 sidecar job。
+- 2026-07-21：generation 6 在切换前的 launchd stop proof 遇到 label/PID 短暂过渡态并 fail-closed；首次管理员 recovery 因手工注入 raw health token 超时，改用 worker-entry 原格式 `Bearer <token>` 后验证旧 `6566418` baseline、释放 gate，DB 保持 v28。根因是 `bootout` 后只有一次即时 proof，修复为在任何 DB/plist/symlink 变更前有界重试 exact unload + 全部 observed PID death，超时仍 fail-closed。
 
 ## Next
 
-- PR、合并，并由既有 Harbor sidecar 部署。
+- 合并 launchd stop-proof 竞态修复，并由既有 Harbor sidecar 重新部署 `e72e75e` 之后的 exact merge revision。
 - 在 GitHub 创建/安装 App，安全落配置并完成真实登录、Repository sync、Delivery/Automation 验收。
