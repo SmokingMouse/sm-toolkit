@@ -59,6 +59,10 @@ test("GitHub App config is all-or-nothing and reads private key through a file b
     webhookSecret: "webhook-secret-fixture",
   });
   expect(parseGitHubAppConfig(undefined, {})).toBeNull();
+  expect(parseGitHubAppConfig({ webhook_secret: "legacy-webhook-secret" }, {})).toBeNull();
+  expect(parseGitHubAppConfig(undefined, {
+    HARBOR_GITHUB_WEBHOOK_SECRET: "legacy-webhook-secret",
+  })).toBeNull();
   expect(() => parseGitHubAppConfig({ app: { app_id: "123" } }, {})).toThrow("配置不完整");
   expect(() => parseGitHubAppConfig({
     app: {
