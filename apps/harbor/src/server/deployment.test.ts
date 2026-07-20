@@ -76,6 +76,15 @@ function targetClaim(target: ReturnType<typeof harness>["target"]) {
   return [{ id: target.id, fingerprint: target.fingerprint, manifestHash: target.manifestHash }];
 }
 
+function succeedSourceRun(h: ReturnType<typeof harness>, now = 8) {
+  h.store.markRunRunning(h.run.id, now - 1);
+  h.store.finishRun(h.run.id, "succeeded", {
+    claudeSessionId: null,
+    cost: null,
+    error: null,
+  }, now);
+}
+
 function fenceOf(job: DeploymentJob): DeploymentFence {
   if (!job.leaseToken || !job.fenceEpoch || !job.fenceNonce) throw new Error("claim missing fence");
   return { leaseToken: job.leaseToken, fenceEpoch: job.fenceEpoch, fenceNonce: job.fenceNonce };
@@ -137,6 +146,7 @@ describe("Harbor self deployment queue", () => {
   test("reclaims an expired lease and fences every callback from the old worker", () => {
     const h = harness();
     enqueue(h);
+    succeedSourceRun(h);
     const first = h.store.claimDeploymentJob(targetClaim(h.target), 10, 10)!;
     const reclaimed = h.store.claimDeploymentJob(targetClaim(h.target), 21, 10)!;
 
@@ -154,6 +164,7 @@ describe("Harbor self deployment queue", () => {
   test("requires exact healthy proof, keeps the gate through restart, then releases it", () => {
     const h = harness();
     enqueue(h);
+    succeedSourceRun(h);
     const claimed = h.store.claimDeploymentJob(targetClaim(h.target), 10, 100)!;
     const fence = fenceOf(claimed);
     const gate = h.store.activateDeploymentMaintenance(claimed.id, fence, baselineInput(claimed), 11);
@@ -200,6 +211,34 @@ describe("Harbor self deployment queue", () => {
       rollbackComplete: true,
     }));
     expect(h.store.claimDeploymentJob(targetClaim(h.target), 11, 100)).toBeNull();
+  });
+
+  test("waits for the Release Agent Run and abandons requests from failed source Runs", () => {
+    const h = harness();
+    const queued = enqueue(h).job;
+    h.store.markRunRunning(h.run.id, 7);
+    expect(h.store.claimDeploymentJob(targetClaim(h.target), 8, 100)).toBeNull();
+    h.store.finishRun(h.run.id, "succeeded", {
+      claudeSessionId: null, cost: null, error: null,
+    }, 9);
+    expect(h.store.claimDeploymentJob(targetClaim(h.target), 10, 100)).toEqual(expect.objectContaining({
+      id: queued.id,
+      status: "running",
+    }));
+
+    const failed = harness();
+    const abandoned = enqueue(failed).job;
+    failed.store.markRunRunning(failed.run.id, 7);
+    failed.store.finishRun(failed.run.id, "failed", {
+      claudeSessionId: null, cost: null, error: "agent failed",
+    }, 8);
+    expect(failed.store.claimDeploymentJob(targetClaim(failed.target), 9, 100)).toBeNull();
+    expect(failed.store.getDeploymentJob(abandoned.id)).toEqual(expect.objectContaining({
+      status: "failed",
+      failureKind: "deployment_failed",
+      checkpoint: "source_run_failed",
+      rollbackComplete: true,
+    }));
   });
 
   test("serializes host cutovers even when separate Runs request the same target", () => {

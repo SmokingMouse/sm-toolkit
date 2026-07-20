@@ -3232,10 +3232,25 @@ export class HarborStore {
   claimDeploymentJob(targets: { id: string; fingerprint: string; manifestHash: string }[], now: number, leaseMs: number): DeploymentJob | null {
     if (targets.length === 0) return null;
     return this.db.transaction(() => {
+      // Release Agent 必须先成功结束，sidecar 才能停止承载该 Run 的 daemon。
+      // source Run 失败/取消则在任何 host mutation 前把请求原子终止，避免 queued job 永久占位。
+      this.db.run(
+        `UPDATE self_deploy_jobs
+         SET status = 'failed', failure_kind = 'deployment_failed', rollback_complete = 1,
+             checkpoint = 'source_run_failed', error = 'source Release Agent Run did not succeed',
+             finished_at = ?, updated_at = ?
+         WHERE status = 'queued' AND EXISTS (
+           SELECT 1 FROM runs source
+           WHERE source.id = self_deploy_jobs.source_run_id AND source.status IN ('failed','canceled')
+         )`,
+        [now, now],
+      );
       const targetPredicate = targets.map(() => "(j.target_id = ? AND j.target_fingerprint = ? AND j.target_manifest_hash = ?)").join(" OR ");
       const row = this.db
         .query<DeploymentJobRow, (string | number)[]>(
-          `SELECT j.* FROM self_deploy_jobs j WHERE (${targetPredicate})
+          `SELECT j.* FROM self_deploy_jobs j
+           JOIN runs source ON source.id = j.source_run_id
+           WHERE (${targetPredicate}) AND source.status = 'succeeded'
              AND (j.status = 'queued' OR (j.status = 'running' AND j.lease_expires_at IS NOT NULL AND j.lease_expires_at <= ?))
            ORDER BY j.created_at, j.generation LIMIT 1`,
         )
@@ -3250,7 +3265,9 @@ export class HarborStore {
          SET status = 'running', attempt = attempt + 1, lease_token = ?, lease_expires_at = ?,
              fence_epoch = ?, fence_nonce = ?,
              started_at = COALESCE(started_at, ?), updated_at = ?
-         WHERE id = ? AND (status = 'queued' OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?))`,
+         WHERE id = ? AND EXISTS (
+           SELECT 1 FROM runs source WHERE source.id = self_deploy_jobs.source_run_id AND source.status = 'succeeded'
+         ) AND (status = 'queued' OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?))`,
         [leaseToken, now + leaseMs, fenceEpoch, fenceNonce, now, now, row.id, now],
       );
       if (updated.changes !== 1) return null;
