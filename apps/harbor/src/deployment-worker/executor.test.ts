@@ -680,6 +680,39 @@ test("bootout-adjacent PID transitions are part of both deploy and rollback stop
   }
 });
 
+test("stop proof waits for launchd and observed PIDs to leave their bounded transition state", async () => {
+  let inspections = 0;
+  const launchd: LaunchdControl = {
+    inspect: async () => {
+      inspections++;
+      if (inspections <= 2) {
+        return { loaded: true, label: services[0]!.label, state: "exited", pid: 20 };
+      }
+      return { loaded: false, label: null, state: "unloaded", pid: null };
+    },
+    bootout: async () => {},
+    bootstrap: async () => {},
+    isPidAlive: async (pid) => pid === 20 && inspections <= 2,
+  };
+  const h = harness();
+  const clock = new FakeClock();
+  const executor = new LocalLaunchdDeploymentExecutor({
+    fs: h.fs, process: h.process, launchd, sqlite: h.sqlite, health: h.health, clock,
+    maintenance: h.sentinel, validator: { validate: async () => {} },
+  });
+  await expect((executor as unknown as {
+    stopAndProve(
+      services: DeploymentServiceConfig[], prior: Map<string, number | null>, logger: { record(value: string): void },
+      hooks: Pick<DeploymentExecutionHooks, "assertFence">, prefix: string,
+    ): Promise<void>;
+  }).stopAndProve(
+    [services[0]!], new Map([["gui/1/com.test.server", 10]]), { record: () => {} },
+    { assertFence: async () => {} }, "deploy",
+  )).resolves.toBeUndefined();
+  expect(inspections).toBe(3);
+  expect(clock.value).toBe(100);
+});
+
 test("strict plist semantics reject comments, entity duplicates, nested Label and wrong value types", () => {
   const plist = (body: string) => `<?xml version="1.0"?><plist version="1.0"><dict>${body}</dict></plist>`;
   const standard = `<?xml version="1.0" encoding="UTF-8"?>

@@ -13,6 +13,8 @@ import { assertNoCredentialMaterial, assertSafeArgv, redactStructured, safeArgvA
 import { exactPlistRootLabel } from "./plist.js";
 
 const RELEASE_MANIFEST = ".harbor-deployment.json";
+const SERVICE_STOP_PROOF_TIMEOUT_MS = 10_000;
+const SERVICE_STOP_PROOF_INTERVAL_MS = 100;
 
 export interface DeploymentReleaseManifest {
   version: 1;
@@ -634,7 +636,7 @@ export class LocalLaunchdDeploymentExecutor {
     hooks: Pick<DeploymentExecutionHooks, "assertFence">,
     prefix: string,
   ): Promise<void> {
-    let ambiguous: string | null = null;
+    let bootoutFailure: string | null = null;
     const proofPids = new Map<string, Set<number>>();
     for (const service of services) {
       const initial = priorPids.get(serviceKey(service));
@@ -652,24 +654,40 @@ export class LocalLaunchdDeploymentExecutor {
           try {
             await this.deps.launchd.bootout(service.domain, service.label);
           } catch (error) {
-            ambiguous ??= `${serviceKey(service)} bootout failed: ${message(error)}`;
+            bootoutFailure ??= `${serviceKey(service)} bootout failed: ${message(error)}`;
           }
         }
         await hooks.assertFence(`after-${prefix}-bootout-${service.id}`);
       });
     }
-    for (const service of services) {
-      await this.deps.maintenance.withLock(async () => {
-        await hooks.assertFence(`before-${prefix}-stop-proof-${service.id}`);
-        const state = await this.deps.launchd.inspect(service.domain, service.label);
-        if (state.loaded || state.pid !== null || state.label !== null) ambiguous ??= `${serviceKey(service)} 仍 loaded/有 PID/label`;
-        if (state.pid) proofPids.get(serviceKey(service))!.add(state.pid);
-        for (const pid of proofPids.get(serviceKey(service))!) {
-          if (await this.deps.launchd.isPidAlive(pid)) ambiguous ??= `${serviceKey(service)} observed PID ${pid} 仍存活`;
-        }
-        await hooks.assertFence(`after-${prefix}-stop-proof-${service.id}`);
-      });
+    const proofDeadline = this.deps.clock.now() + SERVICE_STOP_PROOF_TIMEOUT_MS;
+    let proofFailure: string | null = null;
+    while (true) {
+      proofFailure = null;
+      for (const service of services) {
+        await this.deps.maintenance.withLock(async () => {
+          await hooks.assertFence(`before-${prefix}-stop-proof-${service.id}`);
+          const state = await this.deps.launchd.inspect(service.domain, service.label);
+          this.assertExactLabel(service, state);
+          if (state.pid) proofPids.get(serviceKey(service))!.add(state.pid);
+          if (state.loaded || state.pid !== null || state.label !== null) {
+            proofFailure ??= `${serviceKey(service)} 仍 loaded/有 PID/label`;
+          }
+          for (const pid of proofPids.get(serviceKey(service))!) {
+            if (await this.deps.launchd.isPidAlive(pid)) {
+              proofFailure ??= `${serviceKey(service)} observed PID ${pid} 仍存活`;
+            }
+          }
+          await hooks.assertFence(`after-${prefix}-stop-proof-${service.id}`);
+        });
+      }
+      if (!proofFailure || this.deps.clock.now() >= proofDeadline) break;
+      await this.deps.clock.sleep(Math.min(
+        SERVICE_STOP_PROOF_INTERVAL_MS,
+        Math.max(1, proofDeadline - this.deps.clock.now()),
+      ));
     }
+    const ambiguous = bootoutFailure ?? proofFailure;
     if (ambiguous) throw new StopProofFailure(`无法证明所有 exact launchd services 已停止：${ambiguous}`);
     logger.record(`proved ${services.length} exact launchd services unloaded and old PIDs dead`);
   }
