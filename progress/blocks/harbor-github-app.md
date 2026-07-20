@@ -23,8 +23,12 @@
 - 2026-07-21：PR #3 合并为 `e72e75e`；真实 merge webhook 首投因 Harbor 10s 响应超时未触发，使用同一 GitHub delivery id、GitHub API 的真实 PR 数据与主机内 webhook secret 做签名 replay 后，Release Agent 正常创建 generation 6 sidecar job。
 - 2026-07-21：generation 6 在切换前的 launchd stop proof 遇到 label/PID 短暂过渡态并 fail-closed；首次管理员 recovery 因手工注入 raw health token 超时，改用 worker-entry 原格式 `Bearer <token>` 后验证旧 `6566418` baseline、释放 gate，DB 保持 v28。根因是 `bootout` 后只有一次即时 proof，修复为在任何 DB/plist/symlink 变更前有界重试 exact unload + 全部 observed PID death，超时仍 fail-closed。
 - 2026-07-21：PR #4 合并为 `6970525`，真实 GitHub webhook 202 并由 Agent 创建 generation 7；新 server 启动时发现 production 仅有旧独立 `github.webhook_secret`，GitHub App all-or-nothing parser 将其误判为半配置并退出，sidecar 验证 PID 失败后自动完整回滚，DB 仍为 v28、旧 baseline 健康。rolling config 修复为仅 App 字段出现时才激活完整校验，standalone legacy webhook secret 在新 GitHub App runtime 中保持 disabled。
+- 2026-07-21：PR #5 合并为 `208b88c`，真实 merge webhook 触发 generation 8 sidecar 成功部署；生产 server + daemon 均运行 exact `208b88cde7ddf77c72e80accb9bad36d66e1e628`，schema v29、health healthy、maintenance=false、DB integrity=ok，daemon credential 未改。
+- 2026-07-21：用 GitHub App manifest flow 创建 private App `harbor-smokingmouse-home`；修正 manifest 中不受支持的 `email_addresses` default permission，并为 `issues` / `issue_comment` 事件补齐 `issues: write`。App config 与 private key 原子写入 Mac mini，均为当前用户 `0600`；Harbor `/api/auth/github/status` 已 configured。
+- 2026-07-21：真实 Account OAuth identity 已按 GitHub numeric subject 绑定 `acc_bootstrap`；installation 已 active 连接 `ws_personal`，installation token 成功列仓并生成 64 条 active Repository connection / 63 个 distinct GitHub repository，其中 `smokingmouse/sm-toolkit` 正确映射普通开发与 self-hosting 两个 alias。user access token 与 installation token 均未落 SQLite。
+- 2026-07-21：App 创建/安装时的首个 `ping` 与 `installation.created` 撞上配置重启窗口而为 502；server healthy 后通过 GitHub App redelivery API 重放，两条均真实返回 200。当前 installation 选择 `all` repositories；多人加入前需由 owner 决定是否收窄为 selected repositories，避免 `ws_personal` 暴露无关仓库。
 
 ## Next
 
-- 合并 GitHub App rolling-config 修复，并由既有 Harbor sidecar 部署新的 exact merge revision。
-- 在 GitHub 创建/安装 App，安全落配置并完成真实登录、Repository sync、Delivery/Automation 验收。
+- 多人协作前把 GitHub installation 从 `all` 收窄到所需 repositories，或新建边界独立的团队 Workspace；成员只走 Harbor Invitation + 自己的 GitHub identity，不重复安装同一 target 的 App。
+- 需要把成员自己的机器作为 Device 时进入 P6.2 Device ownership/enrollment；这与 Account/Workspace GitHub onboarding 分开，当前 daemon credential 仍保持 legacy compatibility。
