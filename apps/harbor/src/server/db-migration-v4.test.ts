@@ -25,6 +25,20 @@ test("deployment worker refuses an old schema without creating or migrating it",
   }
 });
 
+test("deployment worker waits for a bounded concurrent WAL writer", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "harbor-worker-busy-timeout-")));
+  const path = join(dir, "harbor.db");
+  try {
+    openDb(path).close();
+    chmodSync(path, 0o600);
+    const worker = openDeploymentDb(path);
+    expect(worker.query<{ timeout: number }, []>("PRAGMA busy_timeout").get()?.timeout).toBe(5_000);
+    worker.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("legacy database migrates through latest schema without losing conversations, runs, or prompts", () => {
   const dir = mkdtempSync(join(tmpdir(), "harbor-v4-"));
   const path = join(dir, "legacy.db");

@@ -2369,6 +2369,9 @@ function installMaintenanceLinearization(db: Database): void {
 export function openDeploymentDb(path: string): Database {
   assertPrivateDeploymentDatabase(path);
   const db = new Database(path, { create: false, readwrite: true });
+  // server/daemon 会在 release build 期间继续写 Run/heartbeat。sidecar 的短事务
+  // 应等待这个正常 WAL writer，而不是一次瞬时 SQLITE_BUSY 就丢弃 5 分钟 lease。
+  db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA foreign_keys = ON;");
   const row = db.query<{ user_version: number }, []>("PRAGMA user_version").get();
