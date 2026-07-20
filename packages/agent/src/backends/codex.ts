@@ -53,6 +53,7 @@ export class CodexBackend implements Backend {
       model: opts.model,
       resume: opts.resume ?? null,
       additionalWritableDirs: opts.additionalWritableDirs ?? [],
+      sandboxNetworkAccess: opts.sandboxNetworkAccess === true,
       imagePaths: (opts.attachments ?? []).map((a) => a.path),
       prompt: finalPrompt,
       additionalDirs: opts.additionalWorkspaces ?? [],
@@ -139,6 +140,7 @@ export function buildCodexArgs(o: {
   model?: string;
   resume: string | null;
   additionalWritableDirs: string[];
+  sandboxNetworkAccess: boolean;
   imagePaths: string[];
   prompt: string;
   additionalDirs?: string[];
@@ -158,6 +160,12 @@ export function buildCodexArgs(o: {
   // default/readonly 都不能仅凭调用方传参扩大额外可写范围；Executor 另有领域闸，这里再做参数层防御。
   const writableDirs =
     o.policy === "auto-edit" || o.policy === "full" ? [...new Set(o.additionalWritableDirs)] : [];
+  // 只对 workspace-write 生效。显式写 false，避免 Runtime 默认值或旧 thread
+  // 配置漂移；readonly 不通过切换 workspace-write 来换网络，full 已绕过 sandbox。
+  const workspaceNetwork =
+    o.policy === "auto-edit" || o.policy === "default"
+      ? ["-c", `sandbox_workspace_write.network_access=${o.sandboxNetworkAccess ? "true" : "false"}`]
+      : [];
 
   if (o.resume) {
     // codex 0.144.2 实测：resume parser 不接受 --sandbox/--add-dir，但接受 -c。
@@ -170,6 +178,7 @@ export function buildCodexArgs(o: {
           : [
               "-c",
               'sandbox_mode="workspace-write"',
+              ...workspaceNetwork,
               ...(writableDirs.length > 0
                 ? ["-c", `sandbox_workspace_write.writable_roots=${JSON.stringify(writableDirs)}`]
                 : []),
@@ -184,7 +193,7 @@ export function buildCodexArgs(o: {
         : ["--sandbox", "workspace-write"]; // auto-edit(以及兼容 default,codex 无独立 default 档)
   const additionalWritableDirs = writableDirs.flatMap((dir) => ["--add-dir", dir]);
   const ephemeral = o.ephemeral ? ["--ephemeral"] : [];
-  return ["exec", ...common, ...ephemeral, ...sandbox, ...additionalWritableDirs, ...imageArgs, o.prompt];
+  return ["exec", ...common, ...ephemeral, ...sandbox, ...workspaceNetwork, ...additionalWritableDirs, ...imageArgs, o.prompt];
 }
 
 /**

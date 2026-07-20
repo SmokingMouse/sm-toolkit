@@ -28,6 +28,11 @@ export interface RunOptions {
   additionalWritableDirs?: string[];
   /** 同一 Agent 可见的额外 Repository checkout；主 cwd 仍由 workspace 决定。 */
   additionalWorkspaces?: string[];
+  /**
+   * Codex workspace-write sandbox 是否允许直接网络访问。缺省 false；readonly
+   * 没有对应的安全组合，full 本来就绕过 sandbox，因此这两档忽略该字段。
+   */
+  sandboxNetworkAccess?: boolean;
   /** 进程工作目录 —— 决定 CLI session transcript 落盘路径,与 workspace 正交。
    * 纯对话需要稳定落盘目录(供 fork resume 校验 + 清理路径一致)却不要文件工具,
    * 故 cwd 独立于 workspace。缺省回退 workspace,再回退继承父进程。 */

@@ -338,7 +338,7 @@ function AgentDetail({
           </div>
         )}
 
-        <div className="mb-7 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line text-xs lg:grid-cols-5">
+        <div className="mb-7 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line text-xs lg:grid-cols-6">
           <AgentFact
             label="Runtime"
             value={agent.backend === "claude" ? "Claude Code" : "Codex CLI"}
@@ -350,6 +350,16 @@ function AgentDetail({
             mono
           />
           <AgentFact label="Permission" value={agent.permission} />
+          <AgentFact
+            label="Sandbox network"
+            value={
+              agent.backend === "codex"
+                ? agent.sandboxNetworkAccess
+                  ? "Direct"
+                  : "Blocked"
+                : "N/A"
+            }
+          />
           <AgentFact label="Isolation" value={agent.isolation} />
         </div>
 
@@ -465,6 +475,9 @@ function AgentConfigEditor({
   const [description, setDescription] = useState(agent.description ?? "");
   const [model, setModel] = useState(agent.model ?? "");
   const [permission, setPermission] = useState(agent.permission);
+  const [sandboxNetworkAccess, setSandboxNetworkAccess] = useState(
+    agent.sandboxNetworkAccess,
+  );
   const [isolation, setIsolation] = useState(agent.isolation);
   const [instruction, setInstruction] = useState(agent.instruction ?? "");
   const [concurrency, setConcurrency] = useState(agent.concurrency);
@@ -528,6 +541,7 @@ function AgentConfigEditor({
         description: description.trim() || null,
         model: model.trim() || null,
         permission,
+        sandboxNetworkAccess,
         isolation,
         instruction: instruction.trim() || null,
         concurrency,
@@ -700,6 +714,28 @@ function AgentConfigEditor({
             <option value="worktree">Git worktree</option>
           </select>
         </Field>
+        {agent.backend === "codex" && (
+          <div className="md:col-span-2">
+            <Field label="Network access">
+              <label className="flex items-start gap-3 rounded-xl border border-line bg-white/65 p-3 text-xs">
+                <input
+                  type="checkbox"
+                  checked={sandboxNetworkAccess}
+                  onChange={(event) =>
+                    setSandboxNetworkAccess(event.target.checked)
+                  }
+                />
+                <span>
+                  <b>Allow direct network in workspace-write Runs</b>
+                  <span className="mt-1 block leading-5 text-dim">
+                    允许访问 GitHub、包仓库和外部 API；read-only Review 仍离线，
+                    Harbor self-deploy 仍走 daemon sidecar。
+                  </span>
+                </span>
+              </label>
+            </Field>
+          </div>
+        )}
         <div className="md:col-span-2">
           <Field label="Visible repositories">
             <div className="grid gap-2 sm:grid-cols-2">
@@ -1133,6 +1169,7 @@ function NewAgentPanel({
   const [defaultBranch, setDefaultBranch] = useState("main");
   const [checkoutPath, setCheckoutPath] = useState("");
   const [permission, setPermission] = useState<string>("auto-edit");
+  const [sandboxNetworkAccess, setSandboxNetworkAccess] = useState(false);
   const [isolation, setIsolation] = useState("none");
   const [instruction, setInstruction] = useState("");
   const [concurrency, setConcurrency] = useState(1);
@@ -1205,6 +1242,8 @@ function NewAgentPanel({
     );
     if (!available.includes("claude") && permission === "default")
       setPermission("auto-edit");
+    const nextBackend = available.includes("claude") ? "claude" : available[0];
+    if (nextBackend !== "codex") setSandboxNetworkAccess(false);
     if (
       repository !== "__new__" &&
       !repositories
@@ -1237,6 +1276,7 @@ function NewAgentPanel({
     );
     if (value === "codex" && permission === "default")
       setPermission("auto-edit");
+    if (value !== "codex") setSandboxNetworkAccess(false);
   };
 
   const submit = async (event?: React.FormEvent) => {
@@ -1263,6 +1303,7 @@ function NewAgentPanel({
         repository: repositoryId,
         repositories: additionalRepositoryIds,
         permission,
+        sandboxNetworkAccess,
         isolation,
         instruction: instruction.trim() || undefined,
         concurrency,
@@ -1559,6 +1600,26 @@ function NewAgentPanel({
               </ChoiceButton>
             </div>
           </Field>
+          {backend === "codex" && (
+            <Field label="Network access">
+              <label className="flex items-start gap-3 rounded-xl border border-line bg-white/65 p-3 text-xs">
+                <input
+                  type="checkbox"
+                  checked={sandboxNetworkAccess}
+                  onChange={(event) =>
+                    setSandboxNetworkAccess(event.target.checked)
+                  }
+                />
+                <span>
+                  <b>Allow direct network in workspace-write Runs</b>
+                  <span className="mt-1 block leading-5 text-dim">
+                    用于 GitHub、依赖下载和外部 API。默认关闭；read-only
+                    Review 与 self-deploy 不受此开关放宽。
+                  </span>
+                </span>
+              </label>
+            </Field>
+          )}
         </AgentFormSection>
 
         <AgentFormSection title="Skills">

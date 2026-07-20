@@ -11,6 +11,7 @@ function args(
     ephemeral: false,
     resume: null,
     additionalWritableDirs: [],
+    sandboxNetworkAccess: false,
     imagePaths: [],
     prompt: "ship it",
     ...options,
@@ -53,6 +54,8 @@ describe("Codex argument construction", () => {
       "--skip-git-repo-check",
       "--sandbox",
       "workspace-write",
+      "-c",
+      "sandbox_workspace_write.network_access=false",
       "--add-dir",
       "/repo/.git",
       "--add-dir",
@@ -68,6 +71,21 @@ describe("Codex argument construction", () => {
     expect(readonly).not.toContain("/repo/.git");
   });
 
+  test("enables direct network only for workspace-write initial and resumed exec", () => {
+    const initial = args("auto-edit", { sandboxNetworkAccess: true });
+    const resumed = args("auto-edit", {
+      resume: "thread-1",
+      sandboxNetworkAccess: true,
+    });
+    const readonly = args("readonly", { sandboxNetworkAccess: true });
+    const full = args("full", { sandboxNetworkAccess: true });
+
+    expect(initial).toContain("sandbox_workspace_write.network_access=true");
+    expect(resumed).toContain("sandbox_workspace_write.network_access=true");
+    expect(readonly.join(" ")).not.toContain("network_access");
+    expect(full.join(" ")).not.toContain("network_access");
+  });
+
   test("default permission cannot add writable dirs for initial or resumed exec", () => {
     const initial = args("default", { additionalWritableDirs: ["/repo/.git"] });
     const resumed = args("default", { resume: "thread-1", additionalWritableDirs: ["/repo/.git"] });
@@ -75,6 +93,7 @@ describe("Codex argument construction", () => {
     expect(initial).not.toContain("--add-dir");
     expect(initial).not.toContain("/repo/.git");
     expect(resumed).toContain('sandbox_mode="workspace-write"');
+    expect(resumed).toContain("sandbox_workspace_write.network_access=false");
     expect(resumed.join(" ")).not.toContain("writable_roots");
     expect(resumed).not.toContain("/repo/.git");
   });

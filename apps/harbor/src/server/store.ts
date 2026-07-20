@@ -101,6 +101,7 @@ interface AgentRow {
   backend: string;
   model: string | null;
   permission: string;
+  sandbox_network_access?: number;
   repository_id: string;
   isolation: string;
   instruction: string | null;
@@ -483,6 +484,7 @@ function toAgent(r: AgentRow): HarborAgent {
     backend: r.backend as BackendKind,
     model: r.model,
     permission: r.permission as PermissionPolicy,
+    sandboxNetworkAccess: r.sandbox_network_access === 1,
     repositoryId: r.repository_id,
     repositoryIds: [],
     isolation: r.isolation as IsolationKind,
@@ -849,12 +851,17 @@ function parseJsonArray<T>(value: string): T[] {
 export class HarborStore {
   private domainEventListener: ((event: DomainEvent) => void) | null = null;
   private readonly hasDeviceSummaryColumn: boolean;
+  private readonly hasAgentSandboxNetworkAccessColumn: boolean;
 
   constructor(private db: Database) {
     this.hasDeviceSummaryColumn = db
       .query<{ name: string }, []>("PRAGMA table_info(devices)")
       .all()
       .some((column) => column.name === "capabilities_summary");
+    this.hasAgentSandboxNetworkAccessColumn = db
+      .query<{ name: string }, []>("PRAGMA table_info(agents)")
+      .all()
+      .some((column) => column.name === "sandbox_network_access");
   }
 
   setDomainEventListener(listener: ((event: DomainEvent) => void) | null): void {
@@ -1860,6 +1867,7 @@ export class HarborStore {
     backend: BackendKind;
     model?: string | null;
     permission?: PermissionPolicy;
+    sandboxNetworkAccess?: boolean;
     repositoryId?: string;
     /** @deprecated REST/CLI compatibility; converted to Repository + mount immediately. */
     workdir?: string;
@@ -1882,13 +1890,14 @@ export class HarborStore {
     if (!repositoryId) throw new Error(`Agent "${a.name}" 必须绑定 Repository`);
     const repositoryIds = [...new Set([repositoryId, ...(a.repositoryIds ?? [])])];
     this.db.transaction(() => {
-      this.db.run(
-        `INSERT INTO agents
-         (id, workspace_id, name, description, device_id, backend, model, permission, repository_id,
-          isolation, instruction, concurrency, visibility, environment, setup_script, reuse_device_cli,
-          created_by_member_id, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [
+      const columns = [
+        "id", "workspace_id", "name", "description", "device_id", "backend", "model", "permission",
+        "repository_id", "isolation",
+        ...(this.hasAgentSandboxNetworkAccessColumn ? ["sandbox_network_access"] : []),
+        "instruction", "concurrency", "visibility", "environment", "setup_script", "reuse_device_cli",
+        "created_by_member_id", "created_at",
+      ];
+      const values = [
           id,
           workspaceId,
           a.name,
@@ -1899,6 +1908,7 @@ export class HarborStore {
           a.permission ?? "auto-edit",
           repositoryId,
           a.isolation ?? "none",
+          ...(this.hasAgentSandboxNetworkAccessColumn ? [a.sandboxNetworkAccess === true ? 1 : 0] : []),
           a.instruction ?? null,
           a.concurrency ?? 1,
           a.visibility ?? "workspace",
@@ -1907,7 +1917,13 @@ export class HarborStore {
           a.reuseDeviceCli === false ? 0 : 1,
           a.createdByMemberId ?? null,
           now,
-        ],
+        ];
+      if (!this.hasAgentSandboxNetworkAccessColumn && a.sandboxNetworkAccess === true) {
+        throw new Error("旧 schema 不支持 Agent sandbox network access");
+      }
+      this.db.run(
+        `INSERT INTO agents (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(",")})`,
+        values,
       );
       const insert = this.db.prepare(
         "INSERT INTO agent_repositories (agent_id, repository_id, position, is_primary, created_at) VALUES (?,?,?,?,?)",
@@ -1974,6 +1990,7 @@ export class HarborStore {
       description?: string | null;
       model?: string | null;
       permission?: PermissionPolicy;
+      sandboxNetworkAccess?: boolean;
       isolation?: IsolationKind;
       instruction?: string | null;
       concurrency?: number;
@@ -1990,6 +2007,12 @@ export class HarborStore {
     if (patch.description !== undefined) add("description", patch.description);
     if (patch.model !== undefined) add("model", patch.model);
     if (patch.permission !== undefined) add("permission", patch.permission);
+    if (patch.sandboxNetworkAccess !== undefined) {
+      if (!this.hasAgentSandboxNetworkAccessColumn) {
+        throw new Error("旧 schema 不支持 Agent sandbox network access");
+      }
+      add("sandbox_network_access", patch.sandboxNetworkAccess ? 1 : 0);
+    }
     if (patch.isolation !== undefined) add("isolation", patch.isolation);
     if (patch.instruction !== undefined) add("instruction", patch.instruction);
     if (patch.concurrency !== undefined) add("concurrency", patch.concurrency);

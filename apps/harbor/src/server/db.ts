@@ -2133,6 +2133,11 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE deliveries_v27 RENAME TO deliveries;
   CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
   `,
+  // v28 —— Codex workspace-write direct network 是 Agent 显式 capability；旧 Agent 默认关闭。
+  `
+  ALTER TABLE agents ADD COLUMN sandbox_network_access INTEGER NOT NULL DEFAULT 0
+    CHECK (sandbox_network_access IN (0,1));
+  `,
 ];
 
 function backfillDeviceCapabilitySummaries(db: Database): void {
@@ -2352,6 +2357,11 @@ export function openV25MigrationFixtureDb(path = ":memory:"): Database {
 /** 只给 v27 legacy deployment archive/cleanup regression fixture 使用。 */
 export function openV26MigrationFixtureDb(path = ":memory:"): Database {
   return openDbAtVersion(path, 26);
+}
+
+/** 只给 v28 Agent sandbox network capability migration regression fixture 使用。 */
+export function openV27MigrationFixtureDb(path = ":memory:"): Database {
+  return openDbAtVersion(path, 27);
 }
 
 function installMaintenanceLinearization(db: Database): void {

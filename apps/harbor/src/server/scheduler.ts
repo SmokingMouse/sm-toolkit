@@ -418,6 +418,7 @@ export class RunCoordinator {
         permission: ["triage", "review", "verification", "coordination"].includes(run.purpose)
           ? "readonly"
           : agent.permission,
+        sandboxNetworkAccess: agent.sandboxNetworkAccess,
         systemPrompt: withAgentActionGuidance(
           composeAgentSystemPrompt(agent.instruction, this.store.listSkillsForAgent(agent.id)),
         ),
