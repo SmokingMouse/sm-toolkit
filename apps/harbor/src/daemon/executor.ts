@@ -14,7 +14,7 @@
 import { ClaudeBackend, CodexBackend, EventType, type AgentEvent, type Backend, type Cost } from "@sm/agent";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { assertAgentEnvironmentSafe } from "../agent-environment.js";
@@ -30,6 +30,12 @@ import {
 const FLUSH_MS = 200;
 const FLUSH_COUNT = 20;
 const EVENT_FIELD_MAX = 8 * 1024;
+const ACTION_REQUEST_MAX = 4 * 1024;
+
+export interface SelfDeployActionRequest {
+  revision: string;
+  idempotencyKey: string;
+}
 
 type ApprovalResolver = (r: { behavior: "allow" | "deny"; updatedInput?: unknown; message?: string }) => void;
 
@@ -102,6 +108,7 @@ export class Executor {
     let cost: Cost | null = null;
     let errMsg: string | null = null;
     let attachmentDir: string | null = null;
+    let actionOutboxDir: string | null = null;
     let reviewCheckoutPath: string | null = null;
     try {
       const agentEnvironment = spec.envOverrides ?? {};
@@ -138,6 +145,9 @@ export class Executor {
         actionEnvironment.HARBOR_AGENT_DISPATCH_URL = `${actionBaseUrl}/dispatch`;
         actionEnvironment.HARBOR_AGENT_SELF_DEPLOY_URL = `${actionBaseUrl}/self-deployments`;
         actionEnvironment.HARBOR_AGENT_ACTION_TOKEN = spec.agentActionToken;
+        actionOutboxDir = mkdtempSync(join(tmpdir(), `harbor-actions-${runId.replace(/[^A-Za-z0-9_-]/g, "_")}-`));
+        actionEnvironment.HARBOR_AGENT_SELF_DEPLOY_REQUEST_PATH = join(actionOutboxDir, "self-deploy.json");
+        Object.assign(actionEnvironment, agentActionTriggerEnvironment(spec.agentActionTrigger));
       }
       const interactive = spec.permission === "default";
       const environmentSkillNames =
@@ -191,6 +201,17 @@ export class Executor {
         if (ev.type === EventType.Result) cost = (ev.data.cost as Cost) ?? null;
         if (ev.type === EventType.Error) errMsg = String(ev.data.message ?? "unknown backend error");
       }
+      if (!errMsg && actionOutboxDir && spec.agentActionToken) {
+        const request = readSelfDeployActionRequest(join(actionOutboxDir, "self-deploy.json"));
+        if (request) {
+          const actionBaseUrl = this.agentActionUrl.replace(/\/issues$/, "");
+          await submitSelfDeployAction(
+            `${actionBaseUrl}/self-deployments`,
+            spec.agentActionToken,
+            request,
+          );
+        }
+      }
     } catch (e) {
       // spawn 失败（claude 不在 PATH）、worktree 创建失败、流中断等
       errMsg = e instanceof Error ? e.message : String(e);
@@ -198,6 +219,7 @@ export class Executor {
       clearInterval(timer);
       flush();
       if (attachmentDir) rmSync(attachmentDir, { recursive: true, force: true });
+      if (actionOutboxDir) rmSync(actionOutboxDir, { recursive: true, force: true });
       if (reviewCheckoutPath && spec.repositoryRoot) {
         const cleanup = removeReviewCheckout(spec.repositoryRoot, reviewCheckoutPath);
         if (!cleanup.ok) errMsg = [errMsg, cleanup.message].filter(Boolean).join("; ");
@@ -213,6 +235,89 @@ export class Executor {
       ...(errMsg ? { error: errMsg } : {}),
     });
   }
+}
+
+/**
+ * Codex 的 read-only/workspace-write sandbox 默认不能访问 loopback。Release Agent
+ * 因此把非敏感 intent 写进 Run 专属临时 outbox，由 daemon 在 sandbox 外携带短期
+ * token 提交；server 仍重新验证 source Run、Repository、event 与 exact revision。
+ */
+export function readSelfDeployActionRequest(path: string): SelfDeployActionRequest | null {
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("self-deploy action outbox 必须是普通文件");
+  if (stat.size > ACTION_REQUEST_MAX) throw new Error("self-deploy action outbox 超过 4KB");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw new Error("self-deploy action outbox 不是合法 JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("self-deploy action outbox 必须是 JSON object");
+  }
+  const body = parsed as Record<string, unknown>;
+  const keys = Object.keys(body).sort();
+  if (keys.join(",") !== "idempotencyKey,revision") {
+    throw new Error("self-deploy action outbox 只允许 revision 与 idempotencyKey");
+  }
+  const revision = typeof body.revision === "string" ? body.revision.trim().toLowerCase() : "";
+  const idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "";
+  if (!/^[a-f0-9]{40,64}$/.test(revision)) throw new Error("self-deploy action revision 无效");
+  if (!idempotencyKey || idempotencyKey.length > 128) {
+    throw new Error("self-deploy action idempotencyKey 需要 1–128 字符");
+  }
+  return { revision, idempotencyKey };
+}
+
+export function agentActionTriggerEnvironment(
+  trigger: RunSpec["agentActionTrigger"],
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  const assign = (key: string, value: string | undefined, max: number) => {
+    if (value === undefined) return;
+    if (value.length > max || value.includes("\0")) throw new Error(`Agent action trigger ${key} 无效`);
+    result[key] = value;
+  };
+  assign("HARBOR_AGENT_TRIGGER_EVENT_TYPE", trigger?.eventType, 128);
+  assign("HARBOR_AGENT_TRIGGER_EVENT_ID", trigger?.eventId, 256);
+  assign("HARBOR_AGENT_TRIGGER_REPOSITORY_ID", trigger?.repositoryId, 128);
+  assign("HARBOR_AGENT_TRIGGER_REVISION", trigger?.revision, 128);
+  return result;
+}
+
+export async function submitSelfDeployAction(
+  url: string,
+  token: string,
+  request: SelfDeployActionRequest,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ jobId: string; reused: boolean }> {
+  const response = await fetchImpl(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error(`Harbor self-deploy action rejected (HTTP ${response.status})`);
+  let parsed: unknown;
+  try {
+    parsed = await response.json();
+  } catch {
+    throw new Error("Harbor self-deploy action returned invalid JSON");
+  }
+  const body = parsed as { job?: { id?: unknown }; reused?: unknown };
+  if (!body?.job || typeof body.job.id !== "string" || !body.job.id) {
+    throw new Error("Harbor self-deploy action response 缺少 job id");
+  }
+  return { jobId: body.job.id, reused: body.reused === true };
 }
 
 /**

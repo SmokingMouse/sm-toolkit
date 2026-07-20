@@ -806,6 +806,16 @@ export interface RunSpec {
   attachments?: RunAttachment[];
   /** 仅允许当前 Run 创建 follow-up Issue 的短期凭证，不进入 Agent 配置或 prompt。 */
   agentActionToken?: string;
+  /**
+   * Agent action 所需的非敏感触发事实。daemon 只把这些已由 server 持久化的字段
+   * 暴露为 env；最终 action endpoint 仍以 DB 中的 Run context 重新校验。
+   */
+  agentActionTrigger?: {
+    eventType?: string;
+    eventId?: string;
+    repositoryId?: string;
+    revision?: string;
+  };
 }
 
 export interface RunAttachment {

@@ -442,6 +442,20 @@ export class RunCoordinator {
           : null,
         attachments: this.store.listRunAttachments(run.id),
         agentActionToken: actionToken,
+        agentActionTrigger: {
+          ...(typeof run.triggerContext.eventType === "string"
+            ? { eventType: run.triggerContext.eventType }
+            : {}),
+          ...(typeof run.triggerContext.eventId === "string"
+            ? { eventId: run.triggerContext.eventId }
+            : {}),
+          ...(typeof run.triggerContext.repositoryId === "string"
+            ? { repositoryId: run.triggerContext.repositoryId }
+            : {}),
+          ...(typeof run.triggerContext.revision === "string"
+            ? { revision: run.triggerContext.revision }
+            : {}),
+        },
       };
       const sent = this.transport.send(deviceId, { type: "run_start", runId: run.id, spec });
       if (!sent) {

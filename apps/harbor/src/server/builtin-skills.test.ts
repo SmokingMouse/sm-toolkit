@@ -79,6 +79,7 @@ describe("built-in Harbor Skill", () => {
     expect(skill?.instruction).toContain("HARBOR_AGENT_ISSUE_URL");
     expect(skill?.instruction).toContain("HARBOR_AGENT_DELIVERY_URL");
     expect(skill?.instruction).toContain("HARBOR_AGENT_REVIEW_URL");
+    expect(skill?.instruction).toContain("HARBOR_AGENT_SELF_DEPLOY_REQUEST_PATH");
     expect(skill?.instruction).toContain("Never mutate the current Issue status");
     expect(store.getAgent(agent.id)?.skillIds).toEqual([skill!.id]);
 

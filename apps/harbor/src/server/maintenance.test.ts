@@ -71,6 +71,11 @@ async function activeMaintenanceHarness() {
     promptEvent: "event.automation.webhook",
     triggerContext: { eventType: "merge_request_merged", repositoryId: repository.id, revision: REVISION },
   }, 7);
+  store.finishRun(run.id, "succeeded", {
+    claudeSessionId: null,
+    cost: null,
+    error: null,
+  }, 8);
   store.enqueueDeploymentJob(
     run.id, "merge-event-1", repository.id, configured.id, REVISION,
     configured.fingerprint, configured.manifestHash, 10,

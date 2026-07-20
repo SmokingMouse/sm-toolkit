@@ -41,6 +41,8 @@ Harbor exposes capability URLs and a short-lived token through the Run environme
 - `HARBOR_AGENT_CONTEXT_URL` reads a safe snapshot of the current Run source, Delivery, candidate Agents, and lineage.
 - `HARBOR_AGENT_DISPATCH_URL` creates an explicitly targeted child Run on the current source.
 - `HARBOR_AGENT_SELF_DEPLOY_URL` lets the Harbor Release Agent enqueue the trusted merged revision for the Harbor-only self-deployer.
+- `HARBOR_AGENT_SELF_DEPLOY_REQUEST_PATH` is the preferred Run-scoped self-deploy outbox. It works when the Runtime sandbox cannot access Harbor over loopback; the daemon submits it outside the sandbox with the short-lived Run token.
+- `HARBOR_AGENT_TRIGGER_EVENT_TYPE`, `HARBOR_AGENT_TRIGGER_EVENT_ID`, `HARBOR_AGENT_TRIGGER_REPOSITORY_ID`, and `HARBOR_AGENT_TRIGGER_REVISION` expose the non-sensitive trigger facts already frozen on the Run.
 - `HARBOR_AGENT_ACTION_TOKEN` authenticates those actions.
 
 Send `Authorization: Bearer $HARBOR_AGENT_ACTION_TOKEN` and JSON content. Never print, log, persist, echo, or include the token in output. Never copy these credentials into repository files, commands whose tracing is enabled, or Issue text.
@@ -122,7 +124,9 @@ Approve only the reviewed head revision. Harbor re-syncs provider facts and enfo
 
 ### Deploy Harbor after a trusted merge
 
-Only a `coordination` Run started by a Codebase `merge_request_merged` Automation may POST to `HARBOR_AGENT_SELF_DEPLOY_URL`:
+Only a `coordination` Run started by a Codebase `merge_request_merged` Automation may request Harbor self-deployment. Require `HARBOR_AGENT_TRIGGER_EVENT_TYPE=merge_request_merged` and a full 40–64 hex `HARBOR_AGENT_TRIGGER_REVISION`; never infer the revision from the checkout or payload text.
+
+When `HARBOR_AGENT_SELF_DEPLOY_REQUEST_PATH` is present, write exactly this JSON object to that path and finish the Run. Do not call loopback HTTP as well; the daemon validates the file and submits it before marking the Run successful:
 
 ```json
 {
@@ -131,7 +135,7 @@ Only a `coordination` Run started by a Codebase `merge_request_merged` Automatio
 }
 ```
 
-Do not infer the revision from the local checkout or MR head. Use only the trusted merged commit in Run trigger context. Harbor selects its single host target and freezes paths, commands, service definitions, health policy, backup, and rollback; the Agent cannot override them. Other repositories must deploy through their own project Skill/CLI and must not call this Harbor-only action.
+Use `HARBOR_AGENT_TRIGGER_REVISION` as `revision` and `deploy-$HARBOR_AGENT_TRIGGER_EVENT_ID` as the idempotency key. If the outbox path is absent, a network-capable Runtime may POST the same object to `HARBOR_AGENT_SELF_DEPLOY_URL` with the bearer token. Harbor selects its single host target and freezes paths, commands, service definitions, health policy, backup, and rollback; the Agent cannot override them. Other repositories must deploy through their own project Skill/CLI and must not call this Harbor-only action.
 
 ## Composition patterns
 
@@ -165,6 +169,7 @@ In the final answer, state the outcome, verification performed, Delivery/Issue a
 ## Known failure modes
 
 - Missing `HARBOR_AGENT_*` variables: the Run has no action capability; stop at a clear completion report.
+- Loopback unavailable inside a Runtime sandbox: use the Run-scoped self-deploy outbox when present; do not weaken the Agent permission sandbox.
 - `manual` Delivery merge: approval can succeed while merge remains human-owned.
 - CI pending or failed: Harbor defers merge even if review is approved.
 - Head changed after review: the old approval is not authority for the new revision; re-review it.
