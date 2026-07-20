@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-将部署编排从 Delivery control plane 移交给 Release Agent，并把现有 durable worker 收窄为 Harbor 专属 self-deploy sidecar。
+v26 已在生产完成 Delivery 解耦与 Harbor 专属 self-deployer 首跳；当前收尾 v27 GitHub Repository event adapter、legacy deployment audit archive/schema cleanup 与生产 Automation/Webhook。
 
 ## Contract
 
@@ -25,7 +25,9 @@
 
 - 2026-07-20：用户确认 Agent-driven self-deploy 边界；创建 `codex/harbor-agent-self-deploy` 隔离 worktree。
 - 2026-07-20：v26 bridge 实现完成：Delivery/UI/REST 解耦，新增 Run-scoped exact-revision action、独立 `self_deploy_*` queue、v2→v3 sentinel bridge 与 `com.smokingmouse.harbor.self-deployer` service；root/Web typecheck、Harbor 188-test suite（修正 latest-schema fixture 后）通过。
+- 2026-07-20：v26 `368debf` 已推送并由生产 legacy worker exact 部署；schema v26、server/daemon health 与新 `com.smokingmouse.harbor.self-deployer` one-shot service 已验证，旧 deploy-worker 不再加载。
+- 2026-07-20：v27 实现完成：Mew Codebase Trigger 可绑定任意 Agent-visible Repository，新增 GitHub HMAC webhook adapter 与 exact merged revision；legacy Delivery deployment snapshot/job 审计迁入 immutable archive，旧字段/表/config fallback 删除，self-deploy gate/fence 保留。Migration fixtures、Harbor 193 tests / 1006 assertions、root typecheck、全 workspace production build 与 diff check 通过；生产 YAML 已安全双写 `self_deploy_target` + 独立 GitHub webhook secret，旧 key 待 v27 验收后删除。
 
 ## Next
 
-- 提交/推送 v26，使用生产 legacy worker 完成首跳；安装新 self-deployer 与 Release Agent/Codebase Automation；再提交/部署 v27 archive + destructive cleanup，最后删除 legacy YAML key并完成生产验收。
+- 提交/推送 v27；对生产 DB copy 跑 migration dry-run，再创建 Release Automation 并由 Agent 触发 exact self-deploy；验收 schema/archive/health 后删除旧 YAML key、创建 GitHub webhook并完成端到端事件验证。

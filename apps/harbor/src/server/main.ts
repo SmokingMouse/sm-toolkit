@@ -26,6 +26,7 @@ import {
   databasePath,
   feishuBotProfiles,
   githubConfig,
+  githubWebhookSecret,
   harborSelfDeployTarget,
   publicAuthConfig,
   token,
@@ -56,7 +57,7 @@ const selfDeployTarget = harborSelfDeployTarget({ resolveSecrets: false });
 const auth = new AuthService(store, publicAuthConfig());
 const bus = new RunBus();
 const hasDatabaseMaintenance = () =>
-  store.listLegacyDeploymentMaintenance().length > 0 || store.listDeploymentMaintenance().length > 0;
+  store.listDeploymentMaintenance().length > 0;
 const hub = new DeviceHub(store, authToken, hasDatabaseMaintenance);
 const gc = githubConfig();
 const maintenance = new DeploymentMaintenanceGuard(store, new HostMaintenanceSentinel());
@@ -272,6 +273,7 @@ const app = buildRest(
   maintenance,
   auth,
   selfDeployTarget,
+  githubWebhookSecret(),
 );
 
 // Delivery facts already live in SQLite; startup and live updates deterministically finalize Issues.

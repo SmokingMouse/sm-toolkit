@@ -71,7 +71,7 @@ export function renderDeploymentWorkerLaunchAgent(input: {
 }
 
 export function setupDeploymentWorkerService(): DeploymentWorkerServiceStatus {
-  if (process.env.HARBOR_SELF_DEPLOY_TARGET_JSON || process.env.HARBOR_DEPLOYMENT_TARGETS_JSON) {
+  if (process.env.HARBOR_SELF_DEPLOY_TARGET_JSON) {
     throw new Error("LaunchAgent 不会把当前 shell env 安全持久化；请把 self_deploy_target 写入权限 0600 的 ~/.harbor.yaml 后再 setup");
   }
   const serviceHome = process.env.HARBOR_SERVICE_HOME ?? process.env.HOME ?? homedir();

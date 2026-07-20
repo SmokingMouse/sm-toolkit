@@ -32,7 +32,7 @@ function setup(online = false, isolation: "none" | "worktree" = "none") {
   return { store, agent, device, coordinator, sent, service: new AutomationService(store, coordinator) };
 }
 
-function addCodebaseRepository(
+function addAutomationRepository(
   store: HarborStore,
   agentId: string,
   deviceId: string,
@@ -41,11 +41,10 @@ function addCodebaseRepository(
   const agent = store.getAgent(agentId)!;
   const repository = store.createRepository({
     workspaceId: agent.workspaceId,
-    name: "codebase-app",
-    scmProvider: "codebase",
-    scmRepository: "team/codebase-app",
+    name: "github-app",
+    remoteUrl: "https://github.com/acme/github-app.git",
   }, now);
-  store.setRepositoryMount(repository.id, deviceId, "/codebase-app", now);
+  store.setRepositoryMount(repository.id, deviceId, "/github-app", now);
   store.setAgentRepositories(agentId, [agent.repositoryId, repository.id], agent.repositoryId, now);
   return repository;
 }
@@ -106,7 +105,7 @@ describe("Mew Automation runtime", () => {
 
   test("Codebase Trigger binds one Repository/event and deduplicates delivery IDs", () => {
     const { store, agent, device, service } = setup();
-    const repository = addCodebaseRepository(store, agent.id, device.id);
+    const repository = addAutomationRepository(store, agent.id, device.id);
     const automation = store.createAutomation({
       name: "review-new-mr",
       agentId: agent.id,
@@ -138,7 +137,7 @@ describe("Mew Automation runtime", () => {
     if (first[0]?.status !== "started") throw new Error("expected Codebase Automation to start");
     expect(first[0].run).toEqual(expect.objectContaining({
       repositoryId: repository.id,
-      executionRoot: "/codebase-app",
+      executionRoot: "/github-app",
       promptEvent: "event.automation.webhook",
       purpose: "coordination",
       triggerContext: expect.objectContaining({
@@ -176,7 +175,7 @@ describe("Mew Automation runtime", () => {
 
   test("REST exposes only Output and a single Schedule/Codebase Trigger", async () => {
     const { store, agent, device, coordinator, service } = setup();
-    const repository = addCodebaseRepository(store, agent.id, device.id);
+    const repository = addAutomationRepository(store, agent.id, device.id);
     const hub = { onlineIds: () => new Set<string>(), isOnline: () => false } as unknown as DeviceHub;
     const app = buildRest(
       store,

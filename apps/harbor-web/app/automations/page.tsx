@@ -276,7 +276,6 @@ function AutomationEditor({
   const codebaseRepositories = useMemo(
     () => repositories.filter((repository) =>
       !repository.archivedAt &&
-      repository.scmProvider === "codebase" &&
       !!selectedAgent?.repositoryIds.includes(repository.id)),
     [repositories, selectedAgent],
   );
@@ -298,7 +297,7 @@ function AutomationEditor({
       return;
     }
     if (triggerType === "codebase" && !repositoryId) {
-      toast("当前 Agent 没有可用的 Codebase Repository", "error");
+      toast("当前 Agent 没有可用的 Repository", "error");
       return;
     }
     if (triggerType === "schedule" && !cron.trim()) {

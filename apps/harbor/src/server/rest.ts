@@ -7,7 +7,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { join, resolve } from "node:path";
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
@@ -120,6 +120,97 @@ function safeSecretEqual(actual: string, expected: string): boolean {
   return timingSafeEqual(left, right);
 }
 
+function safeGitHubSignatureEqual(rawBody: string, signature: string, secret: string): boolean {
+  if (!secret || !/^sha256=[a-f0-9]{64}$/i.test(signature)) return false;
+  const actual = Buffer.from(signature.slice("sha256=".length), "hex");
+  const expected = createHmac("sha256", secret).update(rawBody).digest();
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function githubRepositoryName(remoteUrl: string | null | undefined): string | null {
+  if (!remoteUrl) return null;
+  let path: string;
+  const scp = remoteUrl.match(/^(?:[^@]+@)?github\.com:([^?#]+)$/i);
+  if (scp) {
+    path = scp[1]!;
+  } else {
+    try {
+      const url = new URL(remoteUrl);
+      if (url.hostname.toLowerCase() !== "github.com") return null;
+      path = url.pathname;
+    } catch {
+      return null;
+    }
+  }
+  const normalized = path.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
+  return /^[^/]+\/[^/]+$/.test(normalized) ? normalized.toLowerCase() : null;
+}
+
+function objectField(value: unknown, key: string): unknown {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)[key]
+    : undefined;
+}
+
+function stringField(value: unknown, key: string): string | null {
+  const candidate = objectField(value, key);
+  return typeof candidate === "string" && candidate.trim() ? candidate.trim() : null;
+}
+
+function githubAutomationEvent(
+  githubEvent: string,
+  payload: Record<string, unknown>,
+): { eventType: CodebaseAutomationEvent; revision: string | null; occurredAt?: number } | null {
+  const action = typeof payload.action === "string" ? payload.action : "";
+  if (githubEvent === "pull_request") {
+    const pullRequest = payload.pull_request;
+    if (!pullRequest || typeof pullRequest !== "object" || Array.isArray(pullRequest)) return null;
+    const merged = objectField(pullRequest, "merged") === true;
+    if (action === "closed" && !merged) return null;
+    const eventType: CodebaseAutomationEvent = action === "closed" && merged
+      ? "merge_request_merged"
+      : action === "opened" || action === "reopened"
+        ? "merge_request_opened"
+        : "merge_request_updated";
+    const revision = eventType === "merge_request_merged"
+      ? stringField(pullRequest, "merge_commit_sha")
+      : stringField(objectField(pullRequest, "head"), "sha");
+    if (eventType === "merge_request_merged" && (!revision || !/^[a-f0-9]{40,64}$/i.test(revision))) {
+      throw new Error("GitHub merged pull request 缺少可信 merge_commit_sha");
+    }
+    const occurred = stringField(pullRequest, eventType === "merge_request_merged" ? "merged_at" : "updated_at");
+    const occurredAt = occurred ? Date.parse(occurred) : Number.NaN;
+    return {
+      eventType,
+      revision: revision?.toLowerCase() ?? null,
+      ...(Number.isFinite(occurredAt) ? { occurredAt } : {}),
+    };
+  }
+  if (githubEvent === "issues") {
+    if (action === "closed" || action === "deleted") return null;
+    const issue = payload.issue;
+    if (!issue || typeof issue !== "object" || Array.isArray(issue)) return null;
+    const occurred = stringField(issue, action === "opened" ? "created_at" : "updated_at");
+    const occurredAt = occurred ? Date.parse(occurred) : Number.NaN;
+    return {
+      eventType: action === "opened" || action === "reopened" ? "issue_opened" : "issue_updated",
+      revision: null,
+      ...(Number.isFinite(occurredAt) ? { occurredAt } : {}),
+    };
+  }
+  if (githubEvent === "issue_comment" && action === "created") {
+    const comment = payload.comment;
+    const occurred = stringField(comment, "created_at");
+    const occurredAt = occurred ? Date.parse(occurred) : Number.NaN;
+    return {
+      eventType: "issue_commented",
+      revision: null,
+      ...(Number.isFinite(occurredAt) ? { occurredAt } : {}),
+    };
+  }
+  return null;
+}
+
 function parseAgentEnvironment(value: unknown): Record<string, string> {
   if (value === undefined) return {};
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -228,6 +319,7 @@ export function buildRest(
     secureCookie: false,
   }),
   selfDeployTarget: DeploymentTargetConfig | null = null,
+  githubWebhookSecret = "",
 ): Hono {
   const app = new Hono();
   type ApiActor =
@@ -531,6 +623,79 @@ export function buildRest(
       if (/不存在|未启用/.test(message)) return c.json({ error: message }, 404);
       return c.json({ error: message }, 400);
     }
+  });
+
+  /** Mew Codebase Trigger 的 GitHub adapter：验签后直接归一化为 Repository event。 */
+  app.post("/hooks/scm/github/:repositoryId", async (c) => {
+    if (!githubWebhookSecret) return c.json({ error: "not found" }, 404);
+    const declaredLength = Number(c.req.header("content-length") ?? "0");
+    if (Number.isFinite(declaredLength) && declaredLength > 512 * 1024) {
+      return c.json({ error: "webhook payload 超过 512KB" }, 413);
+    }
+    const rawBody = await c.req.text();
+    if (Buffer.byteLength(rawBody, "utf8") > 512 * 1024) {
+      return c.json({ error: "webhook payload 超过 512KB" }, 413);
+    }
+    if (!safeGitHubSignatureEqual(
+      rawBody,
+      c.req.header("x-hub-signature-256") ?? "",
+      githubWebhookSecret,
+    )) {
+      return c.json({ error: "GitHub webhook signature 不正确" }, 401);
+    }
+    const githubEvent = (c.req.header("x-github-event") ?? "").trim().toLowerCase();
+    const deliveryId = (c.req.header("x-github-delivery") ?? "").trim();
+    if (!githubEvent || !/^[A-Za-z0-9._:-]{1,256}$/.test(deliveryId)) {
+      return c.json({ error: "GitHub event/delivery header 缺失或格式不正确" }, 400);
+    }
+    let payload: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(rawBody) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+      payload = parsed as Record<string, unknown>;
+    } catch {
+      return c.json({ error: "webhook body 必须是 JSON object" }, 400);
+    }
+    const repository = store.getRepository(c.req.param("repositoryId"));
+    if (!repository || repository.archivedAt) {
+      return c.json({ error: "Repository 不存在或已归档" }, 404);
+    }
+    const configuredName = githubRepositoryName(repository.remoteUrl);
+    const deliveredName = stringField(payload.repository, "full_name")?.toLowerCase() ?? null;
+    if (!configuredName || !deliveredName || configuredName !== deliveredName) {
+      return c.json({ error: "GitHub payload Repository 与 Harbor 配置不匹配" }, 400);
+    }
+    if (githubEvent === "ping") {
+      return c.json({ status: "pong", repositoryId: repository.id });
+    }
+    let normalized;
+    try {
+      normalized = githubAutomationEvent(githubEvent, payload);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+    if (!normalized) return c.json({ status: "ignored", event: githubEvent });
+    try {
+      const snapshot = await maintenance.current();
+      if (snapshot.active) {
+        c.header("Retry-After", "5");
+        return c.json({ error: "Harbor 正处于 deployment maintenance" }, 503);
+      }
+    } catch {
+      c.header("Retry-After", "5");
+      return c.json({ error: "deployment maintenance state 不可判定" }, 503);
+    }
+    const results = automations.receiveCodebase({
+      workspaceId: repository.workspaceId,
+      repositoryId: repository.id,
+      eventType: normalized.eventType,
+      eventId: `github:${deliveryId}`,
+      payload,
+      revision: normalized.revision,
+      occurredAt: normalized.occurredAt,
+    });
+    return c.json({ status: results.some((result) => result.status === "started") ? "accepted" : "processed", results },
+      results.some((result) => result.status === "started") ? 202 : 200);
   });
 
   const runActionContext = (c: Context) => {
@@ -3413,8 +3578,8 @@ export function buildRest(
           : "";
       if (!repositoryKey) bad("Codebase trigger 缺少 Repository");
       const repository = scopedRepository(workspaceId, repositoryKey);
-      if (!repository || repository.archivedAt || repository.scmProvider !== "codebase") {
-        bad(`Repository "${repositoryKey}" 不存在、已归档或未启用 Codebase`);
+      if (!repository || repository.archivedAt) {
+        bad(`Repository "${repositoryKey}" 不存在或已归档`);
       }
       if (!agent.repositoryIds.includes(repository.id)) {
         bad(`Agent "${agent.name}" 未绑定 Repository "${repository.name}"`);

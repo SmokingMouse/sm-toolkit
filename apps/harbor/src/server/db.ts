@@ -32,6 +32,7 @@ const APPLICATION_MUTATION_TABLES = [
   "workspace_prompt_blocks",
   "deliveries",
   "delivery_events",
+  "delivery_deployment_archive_v27",
   "automation_triggers",
   "automation_trigger_deliveries",
   "automation_legacy_archive_v25",
@@ -61,10 +62,16 @@ const APPLICATION_MUTATION_TABLES = [
   "workspace_invitations",
 ] as const;
 
-function maintenanceLinearizationSql(tables: readonly string[], includeSelfDeploy = false): string {
-  const activeGate = includeSelfDeploy
-    ? "EXISTS (SELECT 1 FROM deployment_maintenance WHERE lock_id = 1) OR EXISTS (SELECT 1 FROM self_deploy_maintenance WHERE lock_id = 1)"
-    : "EXISTS (SELECT 1 FROM deployment_maintenance WHERE lock_id = 1)";
+function maintenanceLinearizationSql(
+  tables: readonly string[],
+  gates: { legacy: boolean; selfDeploy: boolean },
+): string {
+  const predicates = [
+    ...(gates.legacy ? ["EXISTS (SELECT 1 FROM deployment_maintenance WHERE lock_id = 1)"] : []),
+    ...(gates.selfDeploy ? ["EXISTS (SELECT 1 FROM self_deploy_maintenance WHERE lock_id = 1)"] : []),
+  ];
+  if (predicates.length === 0) throw new Error("maintenance linearization 缺少 durable gate table");
+  const activeGate = predicates.join(" OR ");
   return tables.flatMap((table) => (["INSERT", "UPDATE", "DELETE"] as const).map((operation) => `
     CREATE TRIGGER IF NOT EXISTS maintenance_block_${operation.toLowerCase()}_${table}
     BEFORE ${operation} ON ${table}
@@ -2017,6 +2024,115 @@ export const MIGRATIONS: string[] = [
     updated_at INTEGER NOT NULL
   );
   `,
+  // v27 —— destructive cleanup：旧 Delivery deployment audit 只读归档，运行时仅保留 self-deploy queue。
+  `
+  CREATE TABLE delivery_deployment_archive_v27 (
+    delivery_id TEXT PRIMARY KEY,
+    snapshot TEXT NOT NULL,
+    jobs TEXT NOT NULL,
+    archived_at INTEGER NOT NULL
+  );
+
+  INSERT INTO delivery_deployment_archive_v27 (delivery_id, snapshot, jobs, archived_at)
+    SELECT d.id,
+      json_object(
+        'deploymentStatus', d.deployment_status,
+        'targetId', d.deployment_target_id,
+        'deploymentRevision', d.deployment_revision,
+        'generation', d.deployment_generation,
+        'activeJobId', d.active_deployment_job_id,
+        'error', d.deployment_error,
+        'deployedAt', d.deployed_at
+      ),
+      COALESCE((
+        SELECT json_group_array(json_object(
+          'id', ordered.id,
+          'generation', ordered.generation,
+          'targetId', ordered.target_id,
+          'revision', ordered.revision,
+          'targetFingerprint', ordered.target_fingerprint,
+          'targetManifestHash', ordered.target_manifest_hash,
+          'status', ordered.status,
+          'attempt', ordered.attempt,
+          'fenceEpoch', ordered.fence_epoch,
+          'leaseExpiresAt', ordered.lease_expires_at,
+          'checkpoint', ordered.checkpoint,
+          'log', ordered.log,
+          'error', ordered.error,
+          'failureKind', ordered.failure_kind,
+          'rollbackComplete', ordered.rollback_complete,
+          'rollbackAttempt', ordered.rollback_attempt,
+          'baselineRevision', ordered.baseline_revision,
+          'baselineFingerprint', ordered.baseline_fingerprint,
+          'baselineManifestHash', ordered.baseline_manifest_hash,
+          'baselineHealthFingerprint', ordered.baseline_health_fingerprint,
+          'databaseBackupCreated', ordered.database_backup_created,
+          'newServicePids', CASE WHEN json_valid(ordered.new_service_pids)
+            THEN json(ordered.new_service_pids) ELSE json_object('invalidLegacyValue', ordered.new_service_pids) END,
+          'createdAt', ordered.created_at,
+          'startedAt', ordered.started_at,
+          'finishedAt', ordered.finished_at,
+          'updatedAt', ordered.updated_at
+        ))
+        FROM (SELECT * FROM deployment_jobs job WHERE job.delivery_id = d.id ORDER BY job.generation, job.id) ordered
+      ), '[]'),
+      CAST(strftime('%s','now') AS INTEGER) * 1000
+    FROM deliveries d
+    WHERE d.deployment_status != 'not_required'
+       OR d.deployment_target_id IS NOT NULL
+       OR d.deployment_revision IS NOT NULL
+       OR d.deployment_generation != 0
+       OR d.active_deployment_job_id IS NOT NULL
+       OR d.deployment_error IS NOT NULL
+       OR d.deployed_at IS NOT NULL
+       OR EXISTS (SELECT 1 FROM deployment_jobs job WHERE job.delivery_id = d.id);
+
+  CREATE TRIGGER immutable_delivery_deployment_archive_v27_insert
+    BEFORE INSERT ON delivery_deployment_archive_v27
+    BEGIN SELECT RAISE(ABORT, 'immutable deployment archive'); END;
+  CREATE TRIGGER immutable_delivery_deployment_archive_v27_update
+    BEFORE UPDATE ON delivery_deployment_archive_v27
+    BEGIN SELECT RAISE(ABORT, 'immutable deployment archive'); END;
+  CREATE TRIGGER immutable_delivery_deployment_archive_v27_delete
+    BEFORE DELETE ON delivery_deployment_archive_v27
+    BEGIN SELECT RAISE(ABORT, 'immutable deployment archive'); END;
+
+  DROP TABLE deployment_maintenance;
+  DROP TABLE deployment_jobs;
+  DROP TABLE deployment_host_fence;
+
+  CREATE TABLE deliveries_v27 (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id),
+    provider TEXT NOT NULL,
+    change_url TEXT,
+    external_id TEXT,
+    head_branch TEXT,
+    base_branch TEXT,
+    latest_head_sha TEXT,
+    approved_head_sha TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending' CHECK (review_status IN ('pending','approved')),
+    check_status TEXT NOT NULL DEFAULT 'unknown' CHECK (check_status IN ('unknown','pending','passed','failed')),
+    merge_status TEXT NOT NULL DEFAULT 'open' CHECK (merge_status IN ('open','closed','merged')),
+    merged_revision TEXT,
+    review_approved_at INTEGER,
+    merged_at INTEGER,
+    revision INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  INSERT INTO deliveries_v27
+    (id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+     latest_head_sha, approved_head_sha, review_status, check_status, merge_status,
+     merged_revision, review_approved_at, merged_at, revision, created_at, updated_at)
+    SELECT id, conversation_id, provider, change_url, external_id, head_branch, base_branch,
+           latest_head_sha, approved_head_sha, review_status, check_status, merge_status,
+           merged_revision, review_approved_at, merged_at, revision, created_at, updated_at
+    FROM deliveries;
+  DROP TABLE deliveries;
+  ALTER TABLE deliveries_v27 RENAME TO deliveries;
+  CREATE INDEX idx_deliveries_conversation ON deliveries(conversation_id);
+  `,
 ];
 
 function backfillDeviceCapabilitySummaries(db: Database): void {
@@ -2126,6 +2242,18 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
         throw new Error("deployment convergence migration 拒绝多个 legacy maintenance gates；请先离线恢复到唯一 baseline");
       }
     }
+    if (version === 26) {
+      const activeGate = db.query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM deployment_maintenance",
+      ).get()?.count ?? 0;
+      const activeJobs = db.query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM deployment_jobs WHERE status IN ('queued','running','recovering','needs_recovery')",
+      ).get()?.count ?? 0;
+      if (activeGate > 0 || activeJobs > 0) {
+        db.close();
+        throw new Error(`schema v27 cleanup 拒绝 active legacy deployment（gate=${activeGate}, jobs=${activeJobs}）；请先完成或恢复旧 job`);
+      }
+    }
     const sql = MIGRATIONS[version]!;
     const identityReport = version === 22 ? inspectIdentityNormalization(db) : null;
     if (identityReport && !identityReport.migratable) {
@@ -2148,7 +2276,8 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
       version === 18 ||
       version === 19 ||
       version === 21 ||
-      version === 24;
+      version === 24 ||
+      version === 26;
     if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = OFF;");
     try {
       db.transaction(() => {
@@ -2163,6 +2292,7 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
           "automation_trigger_deliveries",
         ]);
         if (version === 25) dropMaintenanceLinearization(db, APPLICATION_MUTATION_TABLES);
+        if (version === 26) dropMaintenanceLinearization(db, APPLICATION_MUTATION_TABLES);
         if (sql.trim()) db.exec(sql);
         if (version === 22) {
           applyIdentityNormalization(db, identityReport!);
@@ -2174,6 +2304,7 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
         }
         if (version === 20) installMaintenanceLinearization(db);
         if (version === 25) installMaintenanceLinearization(db);
+        if (version === 26) installMaintenanceLinearization(db);
         db.exec(`PRAGMA user_version = ${version + 1}`);
       })();
     } finally {
@@ -2218,11 +2349,19 @@ export function openV25MigrationFixtureDb(path = ":memory:"): Database {
   return openDbAtVersion(path, 25);
 }
 
+/** 只给 v27 legacy deployment archive/cleanup regression fixture 使用。 */
+export function openV26MigrationFixtureDb(path = ":memory:"): Database {
+  return openDbAtVersion(path, 26);
+}
+
 function installMaintenanceLinearization(db: Database): void {
   const present = new Set(db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
   db.exec(maintenanceLinearizationSql(
     APPLICATION_MUTATION_TABLES.filter((table) => present.has(table)),
-    present.has("self_deploy_maintenance"),
+    {
+      legacy: present.has("deployment_maintenance"),
+      selfDeploy: present.has("self_deploy_maintenance"),
+    },
   ));
 }
 

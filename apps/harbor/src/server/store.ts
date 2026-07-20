@@ -169,16 +169,9 @@ interface DeliveryRow {
   review_status: string;
   check_status: string;
   merge_status: string;
-  deployment_status: string;
-  deployment_target_id: string | null;
   merged_revision: string | null;
-  deployment_revision: string | null;
-  deployment_generation: number;
-  active_deployment_job_id: string | null;
-  deployment_error: string | null;
   review_approved_at: number | null;
   merged_at: number | null;
-  deployed_at: number | null;
   revision: number;
   created_at: number;
   updated_at: number;
@@ -240,10 +233,6 @@ interface DeploymentMaintenanceRow {
   created_at: number;
   updated_at: number;
 }
-
-type LegacyDeploymentMaintenanceRow = Omit<DeploymentMaintenanceRow, "source_run_id"> & {
-  delivery_id: string;
-};
 
 interface DeliveryEventRow {
   delivery_id: string;
@@ -2964,8 +2953,8 @@ export class HarborStore {
     this.db.run(
       `INSERT INTO deliveries
        (id, conversation_id, provider, change_url, external_id, head_branch, base_branch, latest_head_sha, check_status,
-        deployment_status, deployment_target_id, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?, ?,?,?,?)`,
+        created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?, ?,?)`,
       [
         id,
         input.conversationId,
@@ -2976,8 +2965,6 @@ export class HarborStore {
         input.baseBranch ?? null,
         input.latestHeadSha?.toLowerCase() ?? null,
         input.checkStatus ?? "unknown",
-        "not_required",
-        null,
         now,
         now,
       ],
@@ -3361,16 +3348,6 @@ export class HarborStore {
     return this.db.query<DeploymentMaintenanceRow, []>("SELECT * FROM self_deploy_maintenance WHERE lock_id = 1").all().map(toDeploymentMaintenance);
   }
 
-  /** v26 bridge：部署 v26 的旧 worker 仍使用 legacy gate；新 server 必须继续 exact-health fail-closed。 */
-  listLegacyDeploymentMaintenance(): DeploymentMaintenanceGate[] {
-    return this.db.query<LegacyDeploymentMaintenanceRow, []>(
-      "SELECT * FROM deployment_maintenance WHERE lock_id = 1",
-    ).all().map((row) => toDeploymentMaintenance({
-      ...row,
-      source_run_id: `legacy:${row.delivery_id}`,
-    }));
-  }
-
   assertDeploymentFence(id: string, fence: DeploymentFence): boolean {
     return !!this.db.query<{ id: string }, [string, string, number, string]>(
       `SELECT id FROM self_deploy_jobs WHERE id = ? AND status IN ('running','recovering')
@@ -3584,7 +3561,6 @@ export class HarborStore {
       const row = this.db.query<DeploymentJobRow, [string]>("SELECT * FROM self_deploy_jobs WHERE id = ?").get(id);
       if (!row || row.target_id !== targetId || row.target_fingerprint !== targetFingerprint
         || row.target_manifest_hash !== targetManifestHash) throw new Error("recovery job/target identity 不匹配");
-      if (row.failure_kind === "legacy_ack_required") throw new Error("legacy deployment 必须先由管理员 ack/bootstrap，不能执行普通 recovery");
       if (row.rollback_attempt === null || !row.baseline_revision || !row.baseline_fingerprint
         || !row.baseline_manifest_hash || !row.baseline_health_fingerprint) {
         throw new Error("recovery job 缺少原始 rollback anchor，不能自动恢复");

@@ -316,8 +316,7 @@ export type DeploymentFailureKind =
   | "config_drift"
   | "bootstrap_required"
   | "deployment_failed"
-  | "rollback_incomplete"
-  | "legacy_ack_required";
+  | "rollback_incomplete";
 
 /**
  * DB 与 host 0600 sentinel 共用的非敏感 maintenance identity。

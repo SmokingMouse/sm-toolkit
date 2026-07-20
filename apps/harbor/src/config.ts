@@ -13,8 +13,9 @@
  *     admin_user_id: ou_xxx             # 唯一有权指挥 bot 的人（send-gate ACL）
  *     bot_name: Harbor
  *     allowed_chats: []                 # automation 播报白名单群，默认空 = 不播报
- *   github:                            # server-only SCM Delivery provider；缺省 = 仅 manual 可用
+ *   github:                            # server-only GitHub integration；token 与 webhook secret 独立启用
  *     token: github_pat_xxx
+ *     webhook_secret: <random secret>
  *   # feishu.custom_bots 可为特定 Workspace 配置独立 Bot。
  *   self_deploy_target:               # Harbor-only sidecar target；敏感字段不进 DB/REST
  *       id: local-harbor
@@ -73,8 +74,8 @@ interface HarborFileConfig {
   };
   github?: {
     token?: string;
+    webhook_secret?: string;
   };
-  deployment_targets?: unknown;
   self_deploy_target?: unknown;
 }
 
@@ -202,6 +203,15 @@ export function githubConfig(): GitHubConfig | null {
   return githubToken ? { token: githubToken } : null;
 }
 
+/** GitHub webhook 使用独立 secret；不复用高权限 HARBOR_TOKEN 或 GitHub API token。 */
+export function githubWebhookSecret(): string {
+  return (
+    process.env.HARBOR_GITHUB_WEBHOOK_SECRET ??
+    fileConfig().github?.webhook_secret ??
+    ""
+  ).trim();
+}
+
 export interface FeishuBotProfile {
   mode: "global" | "custom";
   workspaceKey: string | null;
@@ -293,23 +303,20 @@ export interface LocalLaunchdDeploymentTargetConfig {
 
 export type DeploymentTargetConfig = LocalLaunchdDeploymentTargetConfig;
 
-/** 纯 parser 供测试注入；不会读取真实 HOME。 */
-export function parseDeploymentTargets(
+/** Harbor-only target 纯 parser，供测试注入；不会读取真实 HOME。 */
+export function parseSelfDeployTarget(
   value: unknown,
   secretEnvironment: Record<string, string | undefined> = {},
   options: { resolveSecrets?: boolean; maintenancePath?: string } = {},
-): DeploymentTargetConfig[] {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) throw new Error("deployment_targets 必须是数组");
-  const seen = new Set<string>();
-  const parsed = value.map((item, index) => {
-    const raw = record(item, `deployment_targets[${index}]`);
-    const id = requiredString(raw.id, `deployment_targets[${index}].id`);
+): DeploymentTargetConfig | null {
+  if (value === undefined || value === null) return null;
+  if (Array.isArray(value)) throw new Error("self_deploy_target 必须是单个 object");
+  const parsed = [value].map((item) => {
+    const raw = record(item, "self_deploy_target");
+    const id = requiredString(raw.id, "self_deploy_target.id");
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)) {
       throw new Error(`deployment target id "${id}" 只能使用小写字母、数字、._-，且最长 64 字符`);
     }
-    if (seen.has(id)) throw new Error(`deployment target id "${id}" 重复`);
-    seen.add(id);
     if (raw.provider !== "local-launchd") {
       throw new Error(`deployment target "${id}" provider 只支持 local-launchd`);
     }
@@ -479,35 +486,12 @@ export function parseDeploymentTargets(
       manifestHash: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"),
     };
   });
-  assertDeploymentTargetsDisjoint(parsed);
-  if (options.maintenancePath) assertMaintenancePathDisjoint(parsed, options.maintenancePath);
-  return parsed;
+  const target = parsed[0]!;
+  if (options.maintenancePath) assertMaintenancePathDisjoint(target, options.maintenancePath);
+  return target;
 }
 
-/** env JSON 优先；缺省读取 yaml。server 必须 resolveSecrets=false，secret value 只存在 worker 内存。 */
-export function deploymentTargets(options: { resolveSecrets?: boolean } = {}): DeploymentTargetConfig[] {
-  const configured = process.env.HARBOR_DEPLOYMENT_TARGETS_JSON;
-  if (configured !== undefined) {
-    try {
-      return parseDeploymentTargets(JSON.parse(configured), process.env, {
-        resolveSecrets: options.resolveSecrets,
-        maintenancePath: deploymentMaintenancePath(),
-      });
-    } catch (error) {
-      if (error instanceof SyntaxError) throw new Error("HARBOR_DEPLOYMENT_TARGETS_JSON 不是合法 JSON");
-      throw error;
-    }
-  }
-  return parseDeploymentTargets(fileConfig().deployment_targets, process.env, {
-    resolveSecrets: options.resolveSecrets,
-    maintenancePath: deploymentMaintenancePath(),
-  });
-}
-
-/**
- * Harbor-only self-deploy target。新配置是单对象；deployment_targets 仅作 v26 首跳兼容，
- * 因为部署 v26 的旧 worker 仍需读取旧 key。
- */
+/** env JSON 优先；server 必须 resolveSecrets=false，secret value 只存在 self-deployer 内存。 */
 export function harborSelfDeployTarget(options: { resolveSecrets?: boolean } = {}): DeploymentTargetConfig | null {
   const envTarget = process.env.HARBOR_SELF_DEPLOY_TARGET_JSON;
   let raw = fileConfig().self_deploy_target;
@@ -515,57 +499,21 @@ export function harborSelfDeployTarget(options: { resolveSecrets?: boolean } = {
     try { raw = JSON.parse(envTarget); }
     catch { throw new Error("HARBOR_SELF_DEPLOY_TARGET_JSON 不是合法 JSON"); }
   }
-  const targets = raw === undefined
-    ? deploymentTargets(options)
-    : parseDeploymentTargets([raw], process.env, {
-        resolveSecrets: options.resolveSecrets,
-        maintenancePath: deploymentMaintenancePath(),
-      });
-  if (targets.length > 1) throw new Error("Harbor self-deployer 只允许一个 Harbor-owned target");
-  return targets[0] ?? null;
+  return parseSelfDeployTarget(raw, process.env, {
+    resolveSecrets: options.resolveSecrets,
+    maintenancePath: deploymentMaintenancePath(),
+  });
 }
 
-function assertMaintenancePathDisjoint(targets: DeploymentTargetConfig[], maintenancePath: string): void {
+function assertMaintenancePathDisjoint(target: DeploymentTargetConfig, maintenancePath: string): void {
   if (!isAbsolute(maintenancePath) || resolve(maintenancePath) !== maintenancePath) {
     throw new Error("deployment maintenance path 必须是 canonical 绝对路径");
   }
-  for (const target of targets) {
-    const paths = [target.repositoryPath, target.releasesPath, target.currentSymlinkPath, target.sqlitePath, target.statePath,
-      ...target.services.flatMap((service) => [service.plistPath, service.templatePath])];
-    if (paths.some((path) => pathsConflict(path, maintenancePath))) {
-      throw new Error(`deployment target "${target.id}" host path 与稳定 maintenance sentinel 冲突或互相包含`);
-    }
+  const paths = [target.repositoryPath, target.releasesPath, target.currentSymlinkPath, target.sqlitePath, target.statePath,
+    ...target.services.flatMap((service) => [service.plistPath, service.templatePath])];
+  if (paths.some((path) => pathsConflict(path, maintenancePath))) {
+    throw new Error(`deployment target "${target.id}" host path 与稳定 maintenance sentinel 冲突或互相包含`);
   }
-}
-
-function assertDeploymentTargetsDisjoint(targets: DeploymentTargetConfig[]): void {
-  for (let leftIndex = 0; leftIndex < targets.length; leftIndex++) {
-    for (let rightIndex = leftIndex + 1; rightIndex < targets.length; rightIndex++) {
-      const left = targets[leftIndex]!;
-      const right = targets[rightIndex]!;
-      const leftPaths = [left.repositoryPath, left.releasesPath, left.currentSymlinkPath, left.sqlitePath, left.statePath,
-        ...left.services.flatMap((service) => [service.plistPath, service.templatePath])];
-      const rightPaths = [right.repositoryPath, right.releasesPath, right.currentSymlinkPath, right.sqlitePath, right.statePath,
-        ...right.services.flatMap((service) => [service.plistPath, service.templatePath])];
-      if (leftPaths.some((a) => rightPaths.some((b) => pathsConflict(a, b)))) {
-        throw new Error(`deployment targets "${left.id}"/"${right.id}" 的 host paths 冲突或互相包含`);
-      }
-      if (left.services.some((a) => right.services.some((b) => launchdIdentitiesConflict(a, b)))) {
-        throw new Error(`deployment targets "${left.id}"/"${right.id}" 的 launchd label 冲突或互相包含`);
-      }
-      if (urlsConflict(left.health.url, right.health.url)) {
-        throw new Error(`deployment targets "${left.id}"/"${right.id}" 的 health endpoint 冲突`);
-      }
-    }
-  }
-}
-
-function launchdIdentitiesConflict(
-  left: Pick<DeploymentServiceConfig, "domain" | "label">,
-  right: Pick<DeploymentServiceConfig, "domain" | "label">,
-): boolean {
-  if (left.domain !== right.domain) return false;
-  return left.label === right.label || left.label.startsWith(`${right.label}.`) || right.label.startsWith(`${left.label}.`);
 }
 
 function pathsConflict(left: string, right: string): boolean {
@@ -574,16 +522,6 @@ function pathsConflict(left: string, right: string): boolean {
   const rightRelative = relative(right, left);
   return (!!leftRelative && !leftRelative.startsWith("..") && !isAbsolute(leftRelative))
     || (!!rightRelative && !rightRelative.startsWith("..") && !isAbsolute(rightRelative));
-}
-
-function urlsConflict(left: string, right: string): boolean {
-  const a = new URL(left);
-  const b = new URL(right);
-  if (a.origin !== b.origin) return false;
-  const normalize = (value: string) => value.replace(/\/+$/, "") || "/";
-  const aPath = normalize(a.pathname);
-  const bPath = normalize(b.pathname);
-  return aPath === bPath || aPath.startsWith(`${bPath}/`) || bPath.startsWith(`${aPath}/`);
 }
 
 function credentialLike(value: string): boolean {
@@ -601,7 +539,7 @@ export function validateDeploymentWorkerConfigFile(
   if (!isAbsolute(path) || resolve(path) !== path) throw new Error(`deploy worker 配置 ${path} 必须是 canonical 绝对路径`);
   // env可以提供target，但只要YAML存在，database/sentinel等其余worker配置仍可能
   // 从该文件读取，因此每次进程启动都必须复验；只有文件确实不存在且target完全来自env才跳过。
-  if (!existsSync(path) && process.env.HARBOR_DEPLOYMENT_TARGETS_JSON !== undefined) return;
+  if (!existsSync(path) && process.env.HARBOR_SELF_DEPLOY_TARGET_JSON !== undefined) return;
   let metadata: Stats;
   try {
     metadata = lstatSync(path);
