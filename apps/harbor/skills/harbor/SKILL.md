@@ -37,6 +37,8 @@ Harbor exposes capability URLs and a short-lived token through the Run environme
 
 - `HARBOR_AGENT_ISSUE_URL` routes durable follow-up work.
 - `HARBOR_AGENT_DELIVERY_URL` registers or opens the implementation Delivery.
+- `HARBOR_AGENT_GIT_PUSH_REQUEST_PATH` is the preferred GitHub push outbox. The daemon obtains the current Run principal's short-lived credential and pushes outside the Agent process.
+- `HARBOR_AGENT_DELIVERY_REQUEST_PATH` defers GitHub PR creation until that controlled push succeeds.
 - `HARBOR_AGENT_REVIEW_URL` submits an independent review decision.
 - `HARBOR_AGENT_CONTEXT_URL` reads a safe snapshot of the current Run source, Delivery, candidate Agents, and lineage.
 - `HARBOR_AGENT_DISPATCH_URL` creates an explicitly targeted child Run on the current source.
@@ -92,12 +94,11 @@ Use `dispatch: true` only when the chosen Agent can start immediately with enoug
 
 ### Register a Delivery
 
-After implementation is tested and committed, POST to `HARBOR_AGENT_DELIVERY_URL`:
+For a GitHub implementation, never run `git push` directly and never request, inspect, or persist a GitHub token. After implementation is tested and committed, write exactly `{"push":true}` to `HARBOR_AGENT_GIT_PUSH_REQUEST_PATH`, then write this object to `HARBOR_AGENT_DELIVERY_REQUEST_PATH` and finish the Run:
 
 ```json
 {
-  "provider": "github|codebase|manual",
-  "changeUrl": "optional existing PR/MR URL",
+  "provider": "github",
   "headBranch": "harbor/<current Issue ID>",
   "baseBranch": "main",
   "title": "Change title",
@@ -105,7 +106,11 @@ After implementation is tested and committed, POST to `HARBOR_AGENT_DELIVERY_URL
 }
 ```
 
-The implementation branch must be `harbor/<current Issue ID>`. Test, commit, and push when the provider requires it before registering the Delivery. This action cannot approve or merge its own change.
+The daemon first pushes `HEAD` to the server-derived fixed Issue branch using a credential chosen from the frozen Run principal, then submits the Delivery action. Neither token enters the Agent environment, argv, git config, prompt, or output. Do not both write the Delivery outbox and POST the same Delivery directly.
+
+For Codebase/manual providers, POST to `HARBOR_AGENT_DELIVERY_URL` with the existing provider-specific fields; their repository authentication remains project-native.
+
+The implementation branch must be `harbor/<current Issue ID>`. Test and commit before requesting the controlled push/Delivery. This action cannot approve or merge its own change.
 
 ### Submit a review
 

@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import type { SkillDependency, SkillSource } from "../protocol.js";
+import type { RunPrincipal, SkillDependency, SkillSource } from "../protocol.js";
 import { BitsCodebaseRunner, type CodebaseCommandRunner } from "./codebase.js";
 
 const MAX_FILES = 64;
@@ -30,6 +30,7 @@ export type GitHubImportCredentialResolver = (input: {
   workspaceId: string;
   owner: string;
   repository: string;
+  principal: RunPrincipal;
 }) => string | null | Promise<string | null>;
 
 export class SkillImportService {
@@ -109,6 +110,7 @@ export class SkillImportService {
     url: string,
     refOverride?: string,
     workspaceId?: string,
+    principal?: RunPrincipal,
   ): Promise<ImportedSkillBundle> {
     const parsed = new URL(url);
     if (parsed.protocol !== "https:" || parsed.hostname !== "github.com")
@@ -125,8 +127,8 @@ export class SkillImportService {
       Accept: "application/vnd.github+json",
       "User-Agent": "Harbor",
     };
-    const credential = this.githubCredential && workspaceId
-      ? await this.githubCredential({ workspaceId, owner: owner!, repository: repository! })
+    const credential = this.githubCredential && workspaceId && principal
+      ? await this.githubCredential({ workspaceId, owner: owner!, repository: repository!, principal })
       : null;
     if (credential)
       (headers as Record<string, string>).Authorization =
@@ -208,9 +210,10 @@ export class SkillImportService {
     sourcePath: string | null;
     sourceRef: string | null;
     workspaceId?: string;
+    principal?: RunPrincipal;
   }): Promise<ImportedSkillBundle> {
     if (input.source === "github")
-      return this.fromGitHub(input.originUrl, input.sourceRef ?? undefined, input.workspaceId);
+      return this.fromGitHub(input.originUrl, input.sourceRef ?? undefined, input.workspaceId, input.principal);
     if (!input.originUrl.startsWith("codebase://"))
       throw new Error("Codebase Skill originUrl 无效");
     const repository = input.originUrl

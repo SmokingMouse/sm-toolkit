@@ -332,6 +332,16 @@ export class FeishuEntry implements ApprovalSink {
           reviewer,
           prompt,
           "review",
+          undefined,
+          undefined,
+          {
+            principal: {
+              type: "external",
+              id: `feishu:${msg.senderId}`,
+              membershipId: null,
+              initiator: { provider: "feishu", subject: msg.senderId },
+            },
+          },
         );
         const ackId = await this.respond(
           msg,
@@ -428,7 +438,15 @@ export class FeishuEntry implements ApprovalSink {
       purpose,
       event,
       msg.id,
-      { attachments },
+      {
+        attachments,
+        principal: {
+          type: "external",
+          id: `feishu:${msg.senderId}`,
+          membershipId: null,
+          initiator: { provider: "feishu", subject: msg.senderId },
+        },
+      },
     );
     const ackId = await this.respond(
       msg,

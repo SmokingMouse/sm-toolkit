@@ -67,6 +67,11 @@ describe("GitHubIntegrationService", () => {
       expect(h.integration.continueInstallation(state, "77")).toContain("login/oauth/authorize");
       const completed = await h.integration.complete(state, "oauth-code");
       expect(completed.identity).toEqual(expect.objectContaining({ provider: "github", subject: "42", accountId: "acc_bootstrap" }));
+      expect(h.store.getGitHubAccountAuthorization("acc_bootstrap")).toEqual(expect.objectContaining({
+        githubUserId: "42",
+        status: "active",
+      }));
+      expect(await h.integration.userAccessToken("acc_bootstrap")).toBe("ghu_transient_secret");
       expect(completed.installation).toEqual(expect.objectContaining({ installationId: "77", targetLogin: "SmokingMouse" }));
       expect(completed.sync).toEqual(expect.objectContaining({ connected: 1, reused: 1, created: 0 }));
       expect(h.store.githubRepositoryConnectionForRepository(h.repository.id)).toEqual(expect.objectContaining({
@@ -135,6 +140,21 @@ describe("GitHubIntegrationService", () => {
       expect(h.store.githubRepositoryConnectionForRepository(releaseRepository.id)?.githubRepositoryId).toBe("99");
       expect(h.store.githubConnectionsForWebhook("77", "99").map((connection) => connection.repositoryId).sort())
         .toEqual([h.repository.id, releaseRepository.id].sort());
+    } finally {
+      h.db.close();
+    }
+  });
+
+  test("revokes executable authorization without deleting the login identity", async () => {
+    const h = harness();
+    try {
+      const started = h.integration.beginLink("acc_bootstrap");
+      const state = new URL(started.url).searchParams.get("state")!;
+      await h.integration.complete(state, "oauth-code");
+      expect(h.integration.revokeUserAuthorization("acc_bootstrap")).toBe(true);
+      expect(h.store.getGitHubAccountAuthorization("acc_bootstrap")?.status).toBe("revoked");
+      expect(h.store.getAuthIdentity("github", "42")?.accountId).toBe("acc_bootstrap");
+      await expect(h.integration.userAccessToken("acc_bootstrap")).rejects.toThrow("重新授权");
     } finally {
       h.db.close();
     }

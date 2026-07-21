@@ -32,6 +32,16 @@ export interface GitHubRepositorySnapshot {
   htmlUrl: string;
 }
 
+/** OAuth user-to-server credential bundle；只允许进入 server credential store / 内存。 */
+export interface GitHubUserTokenBundle {
+  accessToken: string;
+  tokenType: string;
+  scopes: string[];
+  accessExpiresAt: number | null;
+  refreshToken: string | null;
+  refreshExpiresAt: number | null;
+}
+
 interface GitHubAppClientOptions {
   fetch?: typeof fetch;
   apiBaseUrl?: string;
@@ -72,6 +82,13 @@ function stringRecord(value: unknown): Record<string, string> {
 
 function base64url(value: string): string {
   return Buffer.from(value, "utf8").toString("base64url");
+}
+
+function optionalPositiveSeconds(value: unknown, label: string): number | null {
+  if (value === undefined || value === null) return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`GitHub ${label} 无效`);
+  return parsed;
 }
 
 /** GitHub App 机器身份与短期凭证 client；user/installation token 只存进程内存。 */
@@ -121,7 +138,7 @@ export class GitHubAppClient {
     return `${unsigned}.${signature}`;
   }
 
-  async exchangeUserCode(code: string): Promise<string> {
+  async exchangeUserCode(code: string): Promise<GitHubUserTokenBundle> {
     if (!code.trim() || code.length > 512) throw new Error("GitHub OAuth code 缺失或格式不正确");
     const url = new URL("login/oauth/access_token", this.webBaseUrl);
     let response: Response;
@@ -136,15 +153,46 @@ export class GitHubAppClient {
         }),
       });
     } catch (error) {
-      throw new Error(`GitHub OAuth token exchange 网络失败：${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`GitHub OAuth token exchange 网络失败：${this.redact(
+        error instanceof Error ? error.message : String(error),
+        code.trim(),
+      )}`);
     }
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-    const token = typeof body.access_token === "string" ? body.access_token.trim() : "";
-    if (!response.ok || !token) {
+    if (!response.ok) {
       const reason = typeof body.error === "string" ? body.error : `HTTP ${response.status}`;
       throw new Error(`GitHub OAuth token exchange 失败：${reason}`);
     }
-    return token;
+    return this.parseUserToken(body);
+  }
+
+  async refreshUserToken(refreshToken: string): Promise<GitHubUserTokenBundle> {
+    if (!refreshToken.trim()) throw new Error("GitHub OAuth refresh token 缺失");
+    const url = new URL("login/oauth/access_token", this.webBaseUrl);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: this.config.clientId,
+          client_secret: this.config.clientSecret,
+          grant_type: "refresh_token",
+          refresh_token: refreshToken.trim(),
+        }),
+      });
+    } catch (error) {
+      throw new Error(`GitHub OAuth token refresh 网络失败：${this.redact(
+        error instanceof Error ? error.message : String(error),
+        refreshToken,
+      )}`);
+    }
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (!response.ok) {
+      const reason = typeof body.error === "string" ? body.error : `HTTP ${response.status}`;
+      throw new Error(`GitHub OAuth token refresh 失败：${reason}`);
+    }
+    return this.parseUserToken(body, refreshToken);
   }
 
   async user(token: string): Promise<GitHubUserProfile> {
@@ -240,6 +288,30 @@ export class GitHubAppClient {
 
   clearInstallationToken(installationId: string): void {
     this.installationTokens.delete(installationId);
+  }
+
+  private parseUserToken(body: Record<string, unknown>, previousRefreshToken: string | null = null): GitHubUserTokenBundle {
+    const accessToken = typeof body.access_token === "string" ? body.access_token.trim() : "";
+    if (!accessToken) throw new Error("GitHub OAuth token 响应缺少 access_token");
+    const expiresIn = optionalPositiveSeconds(body.expires_in, "access token expires_in");
+    const refreshExpiresIn = optionalPositiveSeconds(body.refresh_token_expires_in, "refresh token expires_in");
+    const responseRefresh = typeof body.refresh_token === "string" && body.refresh_token.trim()
+      ? body.refresh_token.trim()
+      : null;
+    const refreshToken = responseRefresh ?? previousRefreshToken;
+    const scope = typeof body.scope === "string" ? body.scope : "";
+    return {
+      accessToken,
+      tokenType: typeof body.token_type === "string" && body.token_type.trim()
+        ? body.token_type.trim().toLowerCase()
+        : "bearer",
+      scopes: [...new Set(scope.split(/[ ,]+/).map((entry) => entry.trim()).filter(Boolean))].sort(),
+      accessExpiresAt: expiresIn === null ? null : this.now() + expiresIn * 1_000,
+      refreshToken,
+      refreshExpiresAt: refreshToken && refreshExpiresIn !== null
+        ? this.now() + refreshExpiresIn * 1_000
+        : null,
+    };
   }
 
   private parseInstallation(value: unknown): GitHubInstallationSnapshot {

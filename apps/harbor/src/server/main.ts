@@ -44,6 +44,9 @@ import { ensureBuiltinSkills } from "./builtin-skills.js";
 import { AuthService } from "./auth.js";
 import { GitHubAppClient } from "./github-app.js";
 import { GitHubIntegrationService } from "./github-integration.js";
+import { FileGitHubUserCredentialStore } from "./github-user-credentials.js";
+import { GitHubCredentialBroker } from "./github-credential-broker.js";
+import { dirname, resolve } from "node:path";
 
 const authToken = token();
 const port = Number(process.env.HARBOR_PORT ?? DEFAULT_PORT);
@@ -63,7 +66,16 @@ const hub = new DeviceHub(store, authToken, hasDatabaseMaintenance);
 const gc = githubAppConfig();
 const githubAppClient = gc ? new GitHubAppClient(gc) : null;
 const githubIntegration = githubAppClient
-  ? new GitHubIntegrationService(store, auth, githubAppClient)
+  ? new GitHubIntegrationService(
+      store,
+      auth,
+      githubAppClient,
+      Date.now,
+      new FileGitHubUserCredentialStore(resolve(dirname(dbPath), "credentials/github")),
+    )
+  : null;
+const githubCredentials = githubAppClient && githubIntegration
+  ? new GitHubCredentialBroker(store, githubIntegration, githubAppClient)
   : null;
 const maintenance = new DeploymentMaintenanceGuard(store, new HostMaintenanceSentinel());
 let maintenanceActive = (await maintenance.current()).active;
@@ -73,11 +85,10 @@ const deliveries = new DeliveryService(
   store,
   [
     new CodebaseDeliveryProvider(store),
-    ...(githubAppClient
-      ? [new GitHubDeliveryProvider((repository) => {
-          const connection = store.githubRepositoryConnectionForRepository(repository.id);
-          if (!connection) throw new Error(`Repository "${repository.name}" 尚未连接 GitHub App installation`);
-          return new GitHubRestClient((forceRefresh) => githubAppClient.installationToken(connection.installationId, forceRefresh));
+    ...(githubCredentials
+      ? [new GitHubDeliveryProvider((repository, principal) => {
+          return new GitHubRestClient((forceRefresh) =>
+            githubCredentials.tokenForRepository(repository, principal, forceRefresh));
         })]
       : []),
   ],
@@ -93,12 +104,16 @@ const automations = new AutomationService(store, coordinator, writesBlocked);
 const scm = new ScmService(store, coordinator, deliveries);
 scm.setAutomationListener((input) => automations.receiveCodebase(input).length > 0);
 const codebase = codebaseConfig();
-const skillImports = new SkillImportService(undefined, undefined, githubAppClient
-  ? async ({ workspaceId, owner, repository }) => {
+const skillImports = new SkillImportService(undefined, undefined, githubCredentials
+  ? async ({ workspaceId, owner, repository, principal }) => {
       const fullName = `${owner}/${repository}`.toLowerCase();
       const connection = store.listGitHubRepositoryConnections(workspaceId)
         .find((candidate) => candidate.status === "active" && candidate.fullName === fullName);
-      return connection ? githubAppClient.installationToken(connection.installationId) : null;
+      if (!connection) return null;
+      const harborRepository = store.getRepository(connection.repositoryId);
+      return harborRepository
+        ? githubCredentials.tokenForRepository(harborRepository, principal)
+        : null;
     }
   : null);
 const skillSync = new SkillSyncService(store, skillImports);
@@ -291,6 +306,7 @@ const app = buildRest(
   selfDeployTarget,
   gc?.webhookSecret ?? "",
   githubIntegration,
+  githubCredentials,
 );
 
 // Delivery facts already live in SQLite; startup and live updates deterministically finalize Issues.

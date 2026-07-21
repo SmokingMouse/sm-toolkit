@@ -129,7 +129,7 @@ test("v25 preserves representable Mew Automations and archives legacy product co
     const migrated = openDb(path);
     try {
       expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(LATEST_SCHEMA_VERSION);
-      expect(LATEST_SCHEMA_VERSION).toBe(29);
+      expect(LATEST_SCHEMA_VERSION).toBe(30);
 
       const automations = new HarborStore(migrated).listAutomations("ws_personal");
       expect(automations).toEqual([
@@ -178,6 +178,7 @@ test("v25 preserves representable Mew Automations and archives legacy product co
         "last_fired_at",
         "created_at",
         "updated_at",
+        "service_principal_id",
       ]);
       expect(migrated.query<unknown, []>("PRAGMA foreign_key_check").all()).toEqual([]);
     } finally {

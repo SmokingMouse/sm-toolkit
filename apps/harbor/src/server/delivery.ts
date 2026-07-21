@@ -12,6 +12,7 @@ import type {
   DeliveryProviderKind,
   HarborRepository,
   Run,
+  RunPrincipal,
 } from "../protocol.js";
 import type { HarborStore } from "./store.js";
 
@@ -30,6 +31,7 @@ export interface DeliveryProviderResult {
 export interface DeliveryProviderContext {
   conversation: Conversation;
   repository: HarborRepository | null;
+  principal?: RunPrincipal | null;
 }
 
 export interface DeliveryChangeInput {
@@ -173,7 +175,7 @@ export class DeliveryService {
       baseBranch: repository.defaultBranch,
     };
     if (!preparedInput.changeUrl?.trim() && provider.createChange) {
-      preparedInput = await provider.createChange(this.context(conv), preparedInput);
+      preparedInput = await provider.createChange(this.context(conv, run.principal), preparedInput);
     }
     return this.createPrepared(conv, { ...preparedInput, provider: providerKind }, "agent", now);
   }
@@ -331,6 +333,7 @@ export class DeliveryService {
     _conv: Conversation,
     now = Date.now(),
     allowedRunId?: string,
+    principal: RunPrincipal | null = null,
   ): Promise<Delivery> {
     return this.runExternalAction(delivery.id, async () => {
       const current = this.requireDelivery(delivery.id);
@@ -338,7 +341,7 @@ export class DeliveryService {
       this.assertReviewIdle(conv, allowedRunId);
       const provider = this.provider(current);
       if (!provider.sync) throw new Error(`delivery provider "${current.provider}" 不支持外部同步`);
-      const result = await provider.sync(current, this.context(conv));
+      const result = await provider.sync(current, this.context(conv, principal));
 
       const metadata = changedMetadata(current, result.metadata);
       const headChanged = current.latestHeadSha !== null && result.metadata.latestHeadSha !== current.latestHeadSha;
@@ -432,6 +435,7 @@ export class DeliveryService {
     input: DeliveryProviderAction,
     now = Date.now(),
     allowedRunId?: string,
+    principal: RunPrincipal | null = null,
   ): Promise<Delivery> {
     return this.runExternalAction(delivery.id, async () => {
       const current = this.requireDelivery(delivery.id);
@@ -448,7 +452,7 @@ export class DeliveryService {
           throw new Error("人工验收对应的 GitHub head SHA 已过期；请 Sync 后重新验收");
         }
       }
-      const result = await this.provider(current).merge(current, input, this.context(conv));
+      const result = await this.provider(current).merge(current, input, this.context(conv, principal));
       const committed = this.store.compareAndSetDelivery(
         current.id,
         current.revision,
@@ -469,11 +473,11 @@ export class DeliveryService {
     });
   }
 
-  async refresh(delivery: Delivery, now = Date.now()): Promise<Delivery> {
+  async refresh(delivery: Delivery, now = Date.now(), principal: RunPrincipal | null = null): Promise<Delivery> {
     const provider = this.provider(delivery);
     if (!provider.refresh) throw new Error(`delivery provider "${delivery.provider}" 不支持主动刷新`);
     const conv = this.requireConversation(delivery);
-    const snapshot = await provider.refresh(delivery, this.context(conv));
+    const snapshot = await provider.refresh(delivery, this.context(conv, principal));
     return this.applyProviderSnapshot(delivery, snapshot, now);
   }
 
@@ -530,10 +534,11 @@ export class DeliveryService {
     throw new Error(`delivery provider "${kind}" 尚未配置`);
   }
 
-  private context(conv: Conversation): DeliveryProviderContext {
+  private context(conv: Conversation, principal: RunPrincipal | null = null): DeliveryProviderContext {
     return {
       conversation: conv,
       repository: conv.repositoryId ? this.store.getRepository(conv.repositoryId) : null,
+      principal,
     };
   }
 

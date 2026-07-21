@@ -47,7 +47,22 @@ describe("GitHubAppClient", () => {
       calls.push(`${init?.method ?? "GET"} ${url.pathname}${url.search}`);
       if (url.pathname === "/login/oauth/access_token") {
         expect(String(init?.body)).toContain("client-secret-fixture");
-        return Response.json({ access_token: "ghu_user_secret" });
+        if (String(init?.body).includes('"grant_type":"refresh_token"')) {
+          return Response.json({
+            access_token: "ghu_refreshed_secret",
+            expires_in: 28_800,
+            refresh_token: "ghr_rotated_secret",
+            refresh_token_expires_in: 15_811_200,
+            token_type: "bearer",
+          });
+        }
+        return Response.json({
+          access_token: "ghu_user_secret",
+          expires_in: 28_800,
+          refresh_token: "ghr_refresh_secret",
+          refresh_token_expires_in: 15_811_200,
+          token_type: "bearer",
+        });
       }
       if (url.pathname === "/user") return Response.json({ id: 42, login: "octo", name: "Octo", email: null, avatar_url: "https://example.test/avatar" });
       if (url.pathname === "/user/installations") return Response.json({ installations: [{
@@ -67,11 +82,19 @@ describe("GitHubAppClient", () => {
     }) as typeof fetch;
     const client = new GitHubAppClient(config(), { fetch: fetchMock, now: () => NOW });
     const userToken = await client.exchangeUserCode("oauth-code");
-    expect(userToken).toBe("ghu_user_secret");
-    expect(await client.user(userToken)).toEqual(expect.objectContaining({ id: "42", login: "octo" }));
-    expect(await client.userInstallations(userToken)).toEqual([expect.objectContaining({ installationId: "77", appId: "12345" })]);
+    expect(userToken).toEqual(expect.objectContaining({
+      accessToken: "ghu_user_secret",
+      accessExpiresAt: NOW + 28_800_000,
+      refreshToken: "ghr_refresh_secret",
+    }));
+    expect(await client.user(userToken.accessToken)).toEqual(expect.objectContaining({ id: "42", login: "octo" }));
+    expect(await client.userInstallations(userToken.accessToken)).toEqual([expect.objectContaining({ installationId: "77", appId: "12345" })]);
     expect(await client.installationRepositories("77")).toEqual([expect.objectContaining({ repositoryId: "99", fullName: "octo/repo" })]);
     expect(await client.installationToken("77")).toBe("ghs_installation_secret");
+    expect(await client.refreshUserToken(userToken.refreshToken!)).toEqual(expect.objectContaining({
+      accessToken: "ghu_refreshed_secret",
+      refreshToken: "ghr_rotated_secret",
+    }));
     expect(calls.filter((call) => call.startsWith("POST /app/installations/77/access_tokens"))).toHaveLength(1);
   });
 

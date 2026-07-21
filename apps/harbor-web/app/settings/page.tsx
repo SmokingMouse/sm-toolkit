@@ -31,6 +31,7 @@ import {
   promptBlockSettings,
   resetPromptBlock,
   revokeInvitation,
+  revokeGitHubAuthorization,
   revokePersonalAccessToken,
   savePromptBlock,
   setActiveWorkspace,
@@ -285,6 +286,7 @@ function AccountPanel() {
   const [passkeys, setPasskeys] = useState<PasskeyCredential[]>([]);
   const [tokens, setTokens] = useState<PersonalAccessToken[]>([]);
   const [identities, setIdentities] = useState<AuthIdentity[]>([]);
+  const [github, setGitHub] = useState<GitHubIntegrationView | null>(null);
   const [workspaces, setWorkspaces] = useState<HarborWorkspace[]>([]);
   const [passkeyLabel, setPasskeyLabel] = useState("");
   const [tokenLabel, setTokenLabel] = useState("CLI access");
@@ -293,14 +295,15 @@ function AccountPanel() {
   const [busy, setBusy] = useState(false);
 
   const reload = async () => {
-    const [me, keys, pats, spaces, linkedIdentities] = await Promise.all([
-      currentActor(), listPasskeys(), listPersonalAccessTokens(), listWorkspaces(), listAuthIdentities(),
+    const [me, keys, pats, spaces, linkedIdentities, githubState] = await Promise.all([
+      currentActor(), listPasskeys(), listPersonalAccessTokens(), listWorkspaces(), listAuthIdentities(), getGitHubIntegration(),
     ]);
     setActor(me);
     setPasskeys(keys);
     setTokens(pats);
     setWorkspaces(spaces);
     setIdentities(linkedIdentities);
+    setGitHub(githubState);
     setTokenWorkspace((current) => current || getActiveWorkspace() || spaces[0]?.id || "");
   };
 
@@ -309,7 +312,7 @@ function AccountPanel() {
     const params = new URLSearchParams(location.search);
     const githubError = params.get("github_error");
     if (githubError) toast(githubError, "error");
-    else if (params.get("github") === "linked") toast("GitHub identity 已绑定", "success");
+    else if (params.get("github") === "linked") toast("GitHub identity 与 user authorization 已更新", "success");
   }, []);
 
   const addPasskey = async () => {
@@ -356,6 +359,19 @@ function AccountPanel() {
     }
   };
 
+  const revokeGitHub = async () => {
+    setBusy(true);
+    try {
+      await revokeGitHubAuthorization();
+      await reload();
+      toast("GitHub user authorization 已撤销；identity 仍保留用于登录映射", "success");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="grid items-start gap-5 xl:grid-cols-[1fr_390px]">
       <section className="surface-shadow overflow-hidden rounded-2xl border border-line bg-panel">
@@ -385,7 +401,9 @@ function AccountPanel() {
           <div className="mt-3 rounded-xl border border-line bg-bg px-3 py-3">
             <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-dim">GitHub identity</div>
             <div className="mt-2 text-xs font-semibold">{identities.find((identity) => identity.provider === "github") ? `Linked · user ${identities.find((identity) => identity.provider === "github")!.subject}` : "Not linked"}</div>
-            <button className={`${btnGhost} mt-3 w-full`} disabled={busy} onClick={() => void linkGitHub()}>{identities.some((identity) => identity.provider === "github") ? "Verify GitHub again" : "Link GitHub"}</button>
+            <div className="mt-1 text-[10px] text-dim">User authorization · {github?.configured ? github.authorization?.status ?? "not authorized" : "server not configured"}</div>
+            <button className={`${btnGhost} mt-3 w-full`} disabled={busy} onClick={() => void linkGitHub()}>{github?.configured && github.authorization?.status === "active" ? "Reauthorize GitHub" : identities.some((identity) => identity.provider === "github") ? "Authorize GitHub" : "Link + authorize GitHub"}</button>
+            {github?.configured && github.authorization && github.authorization.status !== "revoked" && <button className={`${btnDanger} mt-2 w-full`} disabled={busy} onClick={() => void revokeGitHub()}>Revoke user authorization</button>}
           </div>
         </section>
         <section className="surface-shadow rounded-2xl border border-line bg-panel p-5">
@@ -656,7 +674,7 @@ function GitHubSection({
         <SectionTitle
           eyebrow="GitHub App"
           title={github?.configured ? github.appSlug : "Not configured"}
-          description="Account identity 负责登录；Workspace installation 负责 Repository、PR、checks 与 merge。短期 installation token 只存在 server 内存。"
+          description="Account authorization 代表人工 Run；installation 只代表 Automation/service。Workspace Repository mapping 仅是项目上下文与 allowlist。"
         />
         {github?.configured && <button className={btnPrimary} disabled={!!busy} onClick={() => void install()}>{busy === "install" ? "Redirecting…" : "Install / connect"}</button>}
       </div>
@@ -665,6 +683,10 @@ function GitHubSection({
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs">
             <span>Account identity</span>
             <span className={github.identity ? "font-semibold text-accent" : "text-dim"}>{github.identity ? `linked · ${github.identity.subject}` : "not linked (installation flow will link it)"}</span>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-xs">
+            <span>User authorization</span>
+            <span className={github.authorization?.status === "active" ? "font-semibold text-accent" : "text-dim"}>{github.authorization?.status ?? "not authorized"}</span>
           </div>
           {github.installations.map(({ installation, connection, repositories }) => (
             <div key={installation.installationId} className="p-5">

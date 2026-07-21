@@ -45,6 +45,7 @@ import type {
   HarborRepository,
   HarborSkill,
   HarborWorkspace,
+  GitHubAccountAuthorization,
   GitHubInstallation,
   GitHubRepositoryConnection,
   GitHubWorkspaceInstallation,
@@ -61,6 +62,7 @@ import type {
   RunAttachment,
   RunEventRow,
   RunPurpose,
+  RunPrincipal,
   RunSourceType,
   RunStatus,
   ReviewCheckout,
@@ -267,6 +269,10 @@ interface RunRow {
   root_run_id: string;
   dispatch_depth: number;
   dispatch_key: string | null;
+  principal_type?: string;
+  principal_id?: string | null;
+  principal_membership_id?: string | null;
+  initiator_snapshot?: string;
   review_delivery_id: string | null;
   review_revision: string | null;
   review_ref: string | null;
@@ -319,6 +325,7 @@ interface AutomationRow {
   workspace_id: string;
   name: string;
   agent_id: string;
+  service_principal_id: string;
   prompt: string;
   output_mode: string;
   enabled: number;
@@ -413,6 +420,20 @@ interface GitHubRepositoryConnectionRow {
   private: number;
   status: string;
   created_at: number;
+  updated_at: number;
+}
+
+interface GitHubAccountAuthorizationRow {
+  account_id: string;
+  github_user_id: string;
+  credential_ref: string;
+  status: string;
+  scopes: string;
+  access_expires_at: number | null;
+  refresh_expires_at: number | null;
+  authorized_at: number;
+  refreshed_at: number | null;
+  revoked_at: number | null;
   updated_at: number;
 }
 
@@ -562,6 +583,29 @@ function toGitHubRepositoryConnection(r: GitHubRepositoryConnectionRow): GitHubR
     private: r.private === 1,
     status: r.status as GitHubRepositoryConnection["status"],
     createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+function toGitHubAccountAuthorization(r: GitHubAccountAuthorizationRow): GitHubAccountAuthorization {
+  let scopes: string[] = [];
+  try {
+    const value = JSON.parse(r.scopes) as unknown;
+    if (Array.isArray(value)) scopes = value.filter((entry): entry is string => typeof entry === "string");
+  } catch {
+    scopes = [];
+  }
+  return {
+    accountId: r.account_id,
+    githubUserId: r.github_user_id,
+    credentialRef: r.credential_ref,
+    status: r.status as GitHubAccountAuthorization["status"],
+    scopes,
+    accessExpiresAt: r.access_expires_at,
+    refreshExpiresAt: r.refresh_expires_at,
+    authorizedAt: r.authorized_at,
+    refreshedAt: r.refreshed_at,
+    revokedAt: r.revoked_at,
     updatedAt: r.updated_at,
   };
 }
@@ -851,6 +895,17 @@ function toRun(r: RunRow): Run {
     rootRunId: r.root_run_id,
     dispatchDepth: r.dispatch_depth,
     dispatchKey: r.dispatch_key,
+    principal: r.principal_type ? {
+      type: r.principal_type as RunPrincipal["type"],
+      id: r.principal_id ?? null,
+      membershipId: r.principal_membership_id ?? null,
+      initiator: parseJsonRecord(r.initiator_snapshot ?? "{}"),
+    } as RunPrincipal : {
+      type: "system",
+      id: null,
+      membershipId: null,
+      initiator: { kind: "legacy_or_internal" },
+    },
     reviewCheckout: r.review_delivery_id && r.review_revision && r.review_ref && r.review_remote_url
       ? {
           deliveryId: r.review_delivery_id,
@@ -927,6 +982,7 @@ function toAutomation(r: AutomationRow, trigger: AutomationTrigger): Automation 
     workspaceId: r.workspace_id,
     name: r.name,
     agentId: r.agent_id,
+    servicePrincipalId: r.service_principal_id,
     prompt: r.prompt,
     output: r.output_mode as AutomationOutput,
     enabled: r.enabled === 1,
@@ -1104,6 +1160,89 @@ export class HarborStore {
       [input.email?.trim() || null, input.verifiedAt, existing.id],
     );
     return this.getAuthIdentity(input.provider, input.subject)!;
+  }
+
+  getGitHubAccountAuthorization(accountId: string): GitHubAccountAuthorization | null {
+    const row = this.db.query<GitHubAccountAuthorizationRow, [string]>(
+      "SELECT * FROM github_account_authorizations WHERE account_id = ?",
+    ).get(accountId);
+    return row ? toGitHubAccountAuthorization(row) : null;
+  }
+
+  upsertGitHubAccountAuthorization(input: {
+    accountId: string;
+    githubUserId: string;
+    credentialRef: string;
+    scopes: string[];
+    accessExpiresAt: number | null;
+    refreshExpiresAt: number | null;
+  }, now: number): GitHubAccountAuthorization {
+    const identity = this.getAuthIdentity("github", input.githubUserId);
+    if (!identity || identity.accountId !== input.accountId) {
+      throw new Error("GitHub authorization 必须对应同一 Account 的 AuthIdentity");
+    }
+    if (!/^github-user-[a-zA-Z0-9_-]+$/.test(input.credentialRef)) {
+      throw new Error("GitHub credentialRef 格式不正确");
+    }
+    const scopes = [...new Set(input.scopes.map((scope) => scope.trim()).filter(Boolean))].sort();
+    this.db.run(
+      `INSERT INTO github_account_authorizations
+       (account_id, github_user_id, credential_ref, status, scopes, access_expires_at,
+        refresh_expires_at, authorized_at, refreshed_at, revoked_at, updated_at)
+       VALUES (?,?,?,'active',?,?,?,?,NULL,NULL,?)
+       ON CONFLICT(account_id) DO UPDATE SET
+         github_user_id = excluded.github_user_id,
+         credential_ref = excluded.credential_ref,
+         status = 'active',
+         scopes = excluded.scopes,
+         access_expires_at = excluded.access_expires_at,
+         refresh_expires_at = excluded.refresh_expires_at,
+         authorized_at = excluded.authorized_at,
+         refreshed_at = NULL,
+         revoked_at = NULL,
+         updated_at = excluded.updated_at`,
+      [input.accountId, input.githubUserId, input.credentialRef, JSON.stringify(scopes),
+       input.accessExpiresAt, input.refreshExpiresAt, now, now],
+    );
+    return this.getGitHubAccountAuthorization(input.accountId)!;
+  }
+
+  refreshGitHubAccountAuthorization(input: {
+    accountId: string;
+    scopes: string[];
+    accessExpiresAt: number | null;
+    refreshExpiresAt: number | null;
+  }, now: number): GitHubAccountAuthorization {
+    const changed = this.db.run(
+      `UPDATE github_account_authorizations
+       SET status = 'active', scopes = ?, access_expires_at = ?, refresh_expires_at = ?,
+           refreshed_at = ?, revoked_at = NULL, updated_at = ?
+       WHERE account_id = ?`,
+      [JSON.stringify([...new Set(input.scopes)].sort()), input.accessExpiresAt,
+       input.refreshExpiresAt, now, now, input.accountId],
+    ).changes;
+    if (changed !== 1) throw new Error("GitHub Account authorization 不存在");
+    return this.getGitHubAccountAuthorization(input.accountId)!;
+  }
+
+  requireGitHubReauthorization(accountId: string, now: number): boolean {
+    return this.db.run(
+      `UPDATE github_account_authorizations
+       SET status = 'reauthorization_required', revoked_at = NULL, updated_at = ?
+       WHERE account_id = ? AND status != 'revoked'`,
+      [now, accountId],
+    ).changes === 1;
+  }
+
+  revokeGitHubAccountAuthorization(accountId: string, now: number): GitHubAccountAuthorization | null {
+    const current = this.getGitHubAccountAuthorization(accountId);
+    if (!current) return null;
+    this.db.run(
+      `UPDATE github_account_authorizations
+       SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE account_id = ?`,
+      [now, now, accountId],
+    );
+    return this.getGitHubAccountAuthorization(accountId);
   }
 
   createGitHubOAuthState(input: {
@@ -4249,6 +4388,7 @@ export class HarborStore {
       rootRunId?: string;
       dispatchDepth?: number;
       dispatchKey?: string | null;
+      principal?: RunPrincipal;
       reviewCheckout?: ReviewCheckout | null;
       attachments?: RunAttachment[];
     },
@@ -4274,41 +4414,90 @@ export class HarborStore {
       throw new Error("派生 Run 必须与 parent Run 保持相同 Workspace 和 source");
     }
     if (parent && rootRunId !== parent.rootRunId) throw new Error("派生 Run rootRunId 与 parent 不一致");
-    this.db.run(
-      `INSERT INTO runs
+    if (parent && r.principal && JSON.stringify(parent.principal) !== JSON.stringify(r.principal)) {
+      throw new Error("派生 Run 必须继承 parent Run 的 principal");
+    }
+    const principal: RunPrincipal = parent?.principal ?? r.principal ?? {
+      type: "system",
+      id: null,
+      membershipId: null,
+      initiator: { kind: "legacy_or_internal" },
+    };
+    if (principal.type === "account") {
+      const membership = this.membershipForAccount(principal.id, workspaceId);
+      if (!membership || membership.id !== principal.membershipId || membership.status !== "active") {
+        throw new Error("Run Account principal 缺少当前 Workspace 的 active Membership");
+      }
+    } else if (principal.type === "service") {
+      const service = this.db.query<{ workspace_id: string; status: string }, [string]>(
+        "SELECT workspace_id, status FROM service_principals WHERE id = ?",
+      ).get(principal.id);
+      if (!service || service.workspace_id !== workspaceId || service.status !== "active") {
+        throw new Error("Run ServicePrincipal 不属于当前 Workspace 或不可用");
+      }
+    } else if (principal.type === "external" && !principal.id.trim()) {
+      throw new Error("Run external principal id 不能为空");
+    }
+    const legacyValues = [
+      id,
+      workspaceId,
+      sourceType,
+      sourceId,
+      r.conversationId ?? null,
+      r.agentId,
+      r.deviceId,
+      r.repositoryId ?? null,
+      r.repositoryMountId ?? null,
+      r.executionRoot ?? null,
+      r.prompt,
+      r.purpose ?? "implementation",
+      r.promptEvent,
+      r.triggerRef ?? null,
+      JSON.stringify(r.triggerContext ?? {}),
+      r.concurrencyKey ?? null,
+      r.parentRunId ?? null,
+      rootRunId,
+      dispatchDepth,
+      r.dispatchKey ?? null,
+    ];
+    const reviewValues = [
+      r.reviewCheckout?.deliveryId ?? null,
+      r.reviewCheckout?.revision.toLowerCase() ?? null,
+      r.reviewCheckout?.ref ?? null,
+      r.reviewCheckout?.remoteUrl ?? null,
+      now,
+    ];
+    const schemaVersion = this.db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
+    if (schemaVersion >= 30) {
+      this.db.run(
+        `INSERT INTO runs
        (id, workspace_id, source_type, source_id, conversation_id, agent_id, device_id, repository_id,
         repository_mount_id, execution_root, prompt, purpose, prompt_event, trigger_ref, trigger_context,
         concurrency_key, parent_run_id, root_run_id, dispatch_depth, dispatch_key,
+        principal_type, principal_id, principal_membership_id, initiator_snapshot,
         review_delivery_id, review_revision, review_ref, review_remote_url, status, queued_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?)`,
-      [
-        id,
-        workspaceId,
-        sourceType,
-        sourceId,
-        r.conversationId ?? null,
-        r.agentId,
-        r.deviceId,
-        r.repositoryId ?? null,
-        r.repositoryMountId ?? null,
-        r.executionRoot ?? null,
-        r.prompt,
-        r.purpose ?? "implementation",
-        r.promptEvent,
-        r.triggerRef ?? null,
-        JSON.stringify(r.triggerContext ?? {}),
-        r.concurrencyKey ?? null,
-        r.parentRunId ?? null,
-        rootRunId,
-        dispatchDepth,
-        r.dispatchKey ?? null,
-        r.reviewCheckout?.deliveryId ?? null,
-        r.reviewCheckout?.revision.toLowerCase() ?? null,
-        r.reviewCheckout?.ref ?? null,
-        r.reviewCheckout?.remoteUrl ?? null,
-        now,
-      ],
-    );
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?)`,
+        [
+          ...legacyValues,
+        principal.type,
+        principal.id,
+        principal.membershipId,
+        JSON.stringify(principal.initiator),
+          ...reviewValues,
+        ],
+      );
+    } else {
+      // Migration fixtures intentionally exercise historical schemas with the current Store helpers.
+      this.db.run(
+        `INSERT INTO runs
+         (id, workspace_id, source_type, source_id, conversation_id, agent_id, device_id, repository_id,
+          repository_mount_id, execution_root, prompt, purpose, prompt_event, trigger_ref, trigger_context,
+          concurrency_key, parent_run_id, root_run_id, dispatch_depth, dispatch_key,
+          review_delivery_id, review_revision, review_ref, review_remote_url, status, queued_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?)`,
+        [...legacyValues, ...reviewValues],
+      );
+    }
     const insertAttachment = this.db.prepare(
       `INSERT INTO run_attachments (run_id, position, name, mime, data_base64) VALUES (?,?,?,?,?)`,
     );
@@ -4725,20 +4914,30 @@ export class HarborStore {
     now: number,
   ): Automation {
     const id = newId("automation");
+    const servicePrincipalId = `sp_automation_${id}`;
+    const workspaceId = a.workspaceId ?? DEFAULT_WORKSPACE_ID;
     this.db.transaction(() => {
       this.db.run(
+        `INSERT INTO service_principals
+         (id, workspace_id, owner_type, owner_id, status, created_at, updated_at)
+         VALUES (?,?,'automation',?,'active',?,?)`,
+        [servicePrincipalId, workspaceId, id, now, now],
+      );
+      this.db.run(
         `INSERT INTO automations
-         (id, workspace_id, name, agent_id, prompt, output_mode, enabled, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,1,?,?)`,
+         (id, workspace_id, name, agent_id, prompt, output_mode, enabled, created_at, updated_at,
+          service_principal_id)
+         VALUES (?,?,?,?,?,?,1,?,?,?)`,
         [
           id,
-          a.workspaceId ?? DEFAULT_WORKSPACE_ID,
+          workspaceId,
           a.name,
           a.agentId,
           a.prompt,
           a.output ?? "run",
           now,
           now,
+          servicePrincipalId,
         ],
       );
       this.insertAutomationTrigger(id, a.trigger, now);
@@ -4780,6 +4979,13 @@ export class HarborStore {
       if (!trigger) throw new Error(`automation "${row.id}" 缺少唯一 Trigger`);
       return toAutomation(row, trigger);
     });
+  }
+
+  isActiveServicePrincipal(id: string, workspaceId: string): boolean {
+    return !!this.db.query<{ found: number }, [string, string]>(
+      `SELECT 1 AS found FROM service_principals
+       WHERE id = ? AND workspace_id = ? AND status = 'active'`,
+    ).get(id, workspaceId);
   }
 
   setAutomationEnabled(id: string, enabled: boolean): void {
@@ -4843,8 +5049,10 @@ export class HarborStore {
 
   deleteAutomation(id: string): void {
     this.db.transaction(() => {
+      const automation = this.getAutomation(id);
       this.db.run("DELETE FROM automation_log WHERE automation_id = ?", [id]);
       this.db.run("DELETE FROM automations WHERE id = ?", [id]);
+      if (automation) this.db.run("DELETE FROM service_principals WHERE id = ?", [automation.servicePrincipalId]);
     })();
   }
 
