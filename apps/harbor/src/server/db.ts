@@ -2272,6 +2272,27 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX idx_github_account_authorizations_user
     ON github_account_authorizations(github_user_id, status);
   `,
+  // v31 —— repair v30 Automation principal backfill under the self-deploy maintenance gate.
+  `
+  INSERT OR IGNORE INTO service_principals
+    (id, workspace_id, owner_type, owner_id, status, created_at, updated_at)
+    SELECT 'sp_automation_' || id, workspace_id, 'automation', id, 'active', created_at, updated_at
+    FROM automations;
+
+  UPDATE automations
+    SET service_principal_id = 'sp_automation_' || id
+    WHERE service_principal_id IS NULL;
+
+  CREATE TRIGGER automations_require_service_principal_insert
+    BEFORE INSERT ON automations
+    WHEN NEW.service_principal_id IS NULL
+    BEGIN SELECT RAISE(ABORT, 'automation service principal required'); END;
+
+  CREATE TRIGGER automations_require_service_principal_update
+    BEFORE UPDATE ON automations
+    WHEN NEW.service_principal_id IS NULL
+    BEGIN SELECT RAISE(ABORT, 'automation service principal required'); END;
+  `,
 ];
 
 function backfillDeviceCapabilitySummaries(db: Database): void {
@@ -2450,6 +2471,10 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
         ]);
         if (version === 25) dropMaintenanceLinearization(db, APPLICATION_MUTATION_TABLES);
         if (version === 26) dropMaintenanceLinearization(db, APPLICATION_MUTATION_TABLES);
+        // v30/v31 backfill an existing application table while self-deployer intentionally
+        // holds the durable write gate. Remove only this table's triggers inside the same
+        // migration transaction, then reinstall before commit.
+        if (version === 29 || version === 30) dropMaintenanceLinearization(db, ["automations"]);
         if (sql.trim()) db.exec(sql);
         if (version === 22) {
           applyIdentityNormalization(db, identityReport!);
@@ -2462,6 +2487,7 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
         if (version === 20) installMaintenanceLinearization(db);
         if (version === 25) installMaintenanceLinearization(db);
         if (version === 26) installMaintenanceLinearization(db);
+        if (version === 29 || version === 30) installMaintenanceLinearization(db);
         db.exec(`PRAGMA user_version = ${version + 1}`);
       })();
     } finally {
@@ -2524,6 +2550,11 @@ export function openV28MigrationFixtureDb(path = ":memory:"): Database {
 /** 只给 v30 per-Account GitHub authorization migration regression fixture 使用。 */
 export function openV29MigrationFixtureDb(path = ":memory:"): Database {
   return openDbAtVersion(path, 29);
+}
+
+/** 只给 v31 Automation ServicePrincipal repair regression fixture 使用。 */
+export function openV30MigrationFixtureDb(path = ":memory:"): Database {
+  return openDbAtVersion(path, 30);
 }
 
 function installMaintenanceLinearization(db: Database): void {

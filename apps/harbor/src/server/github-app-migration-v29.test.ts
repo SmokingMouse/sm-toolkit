@@ -71,7 +71,7 @@ describe("schema v29 GitHub App migration", () => {
 
     const migrated = openDb(path);
     try {
-      expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(30);
+      expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(31);
       expect(migrated.query<{ id: string }, [string]>("SELECT id FROM repositories WHERE id = ?").get(repository.id)).toEqual({ id: repository.id });
       for (const table of [
         "github_oauth_states",

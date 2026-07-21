@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openDb, openV29MigrationFixtureDb } from "./db.js";
+import { openDb, openV29MigrationFixtureDb, openV30MigrationFixtureDb } from "./db.js";
 import { inspectGitHubPrincipalMigration } from "./github-principal-migration.js";
 import { HarborStore } from "./store.js";
 
@@ -48,7 +48,7 @@ describe("schema v30 GitHub principal migration", () => {
     const db = openDb(":memory:");
     try {
       expect(inspectGitHubPrincipalMigration(db)).toEqual(expect.objectContaining({
-        sourceSchemaVersion: 30,
+        sourceSchemaVersion: 31,
         expectedSourceSchemaVersion: 29,
         migratable: false,
         issues: [expect.objectContaining({ code: "UNSUPPORTED_SCHEMA_VERSION" })],
@@ -107,7 +107,7 @@ describe("schema v30 GitHub principal migration", () => {
 
     const migrated = openDb(path);
     try {
-      expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(30);
+      expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(31);
       expect(migrated.query<{ count: number }, []>(
         "SELECT COUNT(*) AS count FROM github_account_authorizations",
       ).get()!.count).toBe(0);
@@ -121,6 +121,65 @@ describe("schema v30 GitHub principal migration", () => {
         "SELECT owner_id, status FROM service_principals WHERE id = 'sp_automation_auto_fixture'",
       ).get()).toEqual({ owner_id: "auto_fixture", status: "active" });
       expect(migrated.query<Record<string, unknown>, []>("PRAGMA foreign_key_check").all()).toEqual([]);
+    } finally {
+      migrated.close();
+    }
+  });
+
+  test("v31 repairs the production-shaped v30 null backfill and makes it non-nullable by trigger", () => {
+    const path = fixturePath();
+    const v30 = openV30MigrationFixtureDb(path);
+    const store = new HarborStore(v30);
+    const device = store.upsertDevice("worker", "hash", { clis: { codex: "1" }, endpoints: [] }, 1);
+    const agent = store.createAgent({ name: "agent", deviceId: device.id, backend: "codex", workdir: "/repo" }, 2);
+    const automation = store.createAutomation({
+      name: "repair",
+      agentId: agent.id,
+      prompt: "run",
+      trigger: { type: "schedule", cron: "0 9 * * *", timezone: "Asia/Shanghai" },
+    }, 3);
+    v30.run("UPDATE automations SET service_principal_id = NULL WHERE id = ?", [automation.id]);
+    v30.close();
+
+    const migrated = openDb(path);
+    try {
+      expect(migrated.query<{ service_principal_id: string }, [string]>(
+        "SELECT service_principal_id FROM automations WHERE id = ?",
+      ).get(automation.id)).toEqual({ service_principal_id: automation.servicePrincipalId });
+      expect(() => migrated.run(
+        "UPDATE automations SET service_principal_id = NULL WHERE id = ?",
+        [automation.id],
+      )).toThrow("automation service principal required");
+    } finally {
+      migrated.close();
+    }
+  });
+
+  test("v29 migration temporarily removes the durable maintenance trigger before backfill", () => {
+    const path = fixturePath();
+    const v29 = openV29MigrationFixtureDb(path);
+    const store = new HarborStore(v29);
+    const device = store.upsertDevice("worker", "hash", { clis: { codex: "1" }, endpoints: [] }, 1);
+    const agent = store.createAgent({ name: "agent", deviceId: device.id, backend: "codex", workdir: "/repo" }, 2);
+    v29.run(
+      `INSERT INTO automations
+       (id, workspace_id, name, agent_id, prompt, output_mode, enabled, created_at, updated_at)
+       VALUES ('auto_gated', ?, 'gated', ?, 'run', 'run', 1, 3, 3)`,
+      [agent.workspaceId, agent.id],
+    );
+    v29.exec(`
+      DROP TRIGGER maintenance_block_update_automations;
+      CREATE TRIGGER maintenance_block_update_automations
+      BEFORE UPDATE ON automations
+      BEGIN SELECT RAISE(ABORT, 'deployment maintenance'); END;
+    `);
+    v29.close();
+
+    const migrated = openDb(path);
+    try {
+      expect(migrated.query<{ service_principal_id: string }, []>(
+        "SELECT service_principal_id FROM automations WHERE id = 'auto_gated'",
+      ).get()).toEqual({ service_principal_id: "sp_automation_auto_gated" });
     } finally {
       migrated.close();
     }
