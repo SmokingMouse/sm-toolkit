@@ -119,8 +119,8 @@ export interface HarborRepository {
   name: string;
   remoteUrl: string | null;
   defaultBranch: string;
-  /** local 只有 checkout；codebase 同时接收 Issue/MR/CI 事件并可执行交付动作。 */
-  scmProvider: "local" | "codebase";
+  /** local 只有 checkout；github/codebase 同时承载可验证的外部 SCM 事实与交付动作。 */
+  scmProvider: "local" | "github" | "codebase";
   /** Codebase 项目标识（项目名、路径或服务端可解析的 repository id）。 */
   scmRepository: string | null;
   /** 外部 Issue/评论进入时使用的默认 Agent；null = 只同步不派活。 */

@@ -15,6 +15,7 @@ Use Harbor as the source of truth for workflow state. A Run performs one bounded
 - **Conversation** is an Issue or Chat. An Issue carries durable workflow state; a Chat is conversational context.
 - **Run** is one bounded execution attempt. `coordination` is a neutral purpose for inspection/routing; it does not imply a built-in Orchestrator role.
 - **Delivery** records the external change, review, CI, and merge facts. A merged, approved change with passing checks completes Delivery.
+- **Repository SCM provider** is explicit: `github` uses the active GitHub App mapping and controlled push outbox, `codebase` registers an existing MR, and `local` has no managed external Delivery. Never reinterpret `local` as GitHub or switch providers to work around a rejected action.
 - **Automation** consumes durable Harbor events, webhooks, or schedules and starts a user-selected Agent. It does not choose Agents or own workflow state.
 
 Harbor exposes mechanisms, not a mandatory team topology. Do not assume an Orchestrator exists, infer a Reviewer Pool, or ask the control plane to choose “the best Agent.” A user may wire direct Automations, a custom routing Agent, manual dispatch, or any combination. Every dispatch still names the target Agent explicitly.
@@ -94,7 +95,9 @@ Use `dispatch: true` only when the chosen Agent can start immediately with enoug
 
 ### Register a Delivery
 
-For a GitHub implementation, never run `git push` directly and never request, inspect, or persist a GitHub token. After implementation is tested and committed, write exactly `{"push":true}` to `HARBOR_AGENT_GIT_PUSH_REQUEST_PATH`, then write this object to `HARBOR_AGENT_DELIVERY_REQUEST_PATH` and finish the Run:
+Read `repository.scmProvider` from the Run context when the prompt does not already establish it. Do not mutate Repository configuration from an implementation Run.
+
+For a `github` implementation, never run `git push` directly and never request, inspect, or persist a GitHub token. After implementation is tested and committed, write exactly `{"push":true}` to `HARBOR_AGENT_GIT_PUSH_REQUEST_PATH`, then write this object to `HARBOR_AGENT_DELIVERY_REQUEST_PATH` and finish the Run:
 
 ```json
 {
@@ -108,7 +111,7 @@ For a GitHub implementation, never run `git push` directly and never request, in
 
 The daemon first pushes `HEAD` to the server-derived fixed Issue branch using a credential chosen from the frozen Run principal, then submits the Delivery action. Neither token enters the Agent environment, argv, git config, prompt, or output. Do not both write the Delivery outbox and POST the same Delivery directly.
 
-For Codebase/manual providers, POST to `HARBOR_AGENT_DELIVERY_URL` with the existing provider-specific fields; their repository authentication remains project-native.
+For a `codebase` Repository, POST to `HARBOR_AGENT_DELIVERY_URL` with the existing MR number and provider-specific fields; its repository authentication remains project-native. A `local` Repository cannot create an external Delivery until an administrator connects GitHub or configures Codebase. Never change `local` to `codebase`, invent an MR number, or use `manual` to bypass that boundary.
 
 The implementation branch must be `harbor/<current Issue ID>`. Test and commit before requesting the controlled push/Delivery. This action cannot approve or merge its own change.
 

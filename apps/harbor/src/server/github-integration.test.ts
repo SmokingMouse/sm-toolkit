@@ -79,12 +79,15 @@ describe("GitHubIntegrationService", () => {
         githubRepositoryId: "99",
         fullName: "smokingmouse/sm-toolkit",
       }));
+      expect(h.store.getRepository(h.repository.id)?.scmProvider).toBe("github");
       expect(h.store.listRepositories(h.workspace.id)).toHaveLength(1);
       const serialized = Buffer.from(h.db.serialize()).toString("utf8");
       expect(serialized).not.toContain("ghu_transient_secret");
       expect(serialized).not.toContain("ghs_transient_secret");
       expect(serialized).not.toContain("client-secret-fixture");
       expect(serialized).not.toContain("BEGIN PRIVATE KEY");
+      expect(h.integration.disconnect(h.workspace.id, "77")).toBe(true);
+      expect(h.store.getRepository(h.repository.id)?.scmProvider).toBe("local");
     } finally {
       h.db.close();
     }

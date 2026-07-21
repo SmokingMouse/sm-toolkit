@@ -819,6 +819,9 @@ export function buildRest(
     if (!conversation || conversation.kind !== "issue" || conversation.repositoryId !== repository?.id) {
       return c.json({ error: "Run 的 Issue/Repository 绑定无效" }, 409);
     }
+    if (repository.scmProvider !== "github") {
+      return c.json({ error: `Repository SCM provider 不是 GitHub（当前 ${repository.scmProvider}）` }, 409);
+    }
     const connection = store.githubRepositoryConnectionForRepository(repository.id);
     if (!connection || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(connection.fullName)) {
       return c.json({ error: "Repository 没有可信 GitHub connection" }, 409);
@@ -900,6 +903,7 @@ export function buildRest(
         name: repository.name,
         defaultBranch: repository.defaultBranch,
         scmProvider: repository.scmProvider,
+        githubConnection: store.githubRepositoryConnectionForRepository(repository.id),
       } : null,
       agents,
       sourceRuns,
@@ -2098,6 +2102,7 @@ export function buildRest(
     if (!repository) return null;
     return {
       ...repository,
+      githubConnection: store.githubRepositoryConnectionForRepository(id),
       mounts: store.listRepositoryMounts(id).map((mount) => ({
         ...mount,
         deviceName:
@@ -2122,7 +2127,7 @@ export function buildRest(
       name?: string;
       remoteUrl?: string;
       defaultBranch?: string;
-      scmProvider?: "local" | "codebase";
+      scmProvider?: "local" | "github" | "codebase";
       scmRepository?: string;
       scmAgent?: string;
       scmAutoDispatch?: boolean;
@@ -2134,10 +2139,13 @@ export function buildRest(
     if (
       b.scmProvider !== undefined &&
       b.scmProvider !== "local" &&
+      b.scmProvider !== "github" &&
       b.scmProvider !== "codebase"
     ) {
-      bad("scmProvider 可选 local/codebase");
+      bad("scmProvider 可选 local/github/codebase");
     }
+    if (b.scmProvider === "github")
+      bad("GitHub Repository 由 Integrations 的 GitHub App connection 创建或映射");
     if (b.scmProvider === "codebase" && !b.scmRepository?.trim())
       bad("Codebase Repository 缺少 scmRepository path");
     const scmAgent = b.scmAgent
@@ -2191,7 +2199,7 @@ export function buildRest(
       name?: string;
       remoteUrl?: string | null;
       defaultBranch?: string;
-      scmProvider?: "local" | "codebase";
+      scmProvider?: "local" | "github" | "codebase";
       scmRepository?: string | null;
       scmAgent?: string | null;
       scmAutoDispatch?: boolean;
@@ -2200,11 +2208,17 @@ export function buildRest(
     if (
       b.scmProvider !== undefined &&
       b.scmProvider !== "local" &&
+      b.scmProvider !== "github" &&
       b.scmProvider !== "codebase"
     ) {
-      bad("scmProvider 可选 local/codebase");
+      bad("scmProvider 可选 local/github/codebase");
     }
     const targetProvider = b.scmProvider ?? repository.scmProvider;
+    const githubConnection = store.githubRepositoryConnectionForRepository(repository.id);
+    if (targetProvider === "github" && !githubConnection)
+      bad("GitHub Repository 需要 active GitHub App connection；请先在 Integrations 连接并同步");
+    if (targetProvider !== "github" && githubConnection)
+      bad("Repository 仍有 active GitHub connection；请先在 Integrations 调整 installation repository 范围");
     const targetScmRepository =
       b.scmRepository === undefined
         ? repository.scmRepository
@@ -2234,13 +2248,13 @@ export function buildRest(
           ? { defaultBranch: b.defaultBranch.trim() }
           : {}),
         ...(b.scmProvider !== undefined ? { scmProvider: b.scmProvider } : {}),
-        ...(b.scmRepository !== undefined || b.scmProvider === "local"
+        ...(b.scmRepository !== undefined || (b.scmProvider !== undefined && b.scmProvider !== "codebase")
           ? {
               scmRepository:
                 targetProvider === "codebase" ? targetScmRepository : null,
             }
           : {}),
-        ...(b.scmAgent !== undefined || b.scmProvider === "local"
+        ...(b.scmAgent !== undefined || (b.scmProvider !== undefined && b.scmProvider !== "codebase")
           ? {
               scmAgentId:
                 targetProvider === "codebase"
@@ -2248,7 +2262,7 @@ export function buildRest(
                   : null,
             }
           : {}),
-        ...(b.scmAutoDispatch !== undefined || b.scmProvider === "local"
+        ...(b.scmAutoDispatch !== undefined || (b.scmProvider !== undefined && b.scmProvider !== "codebase")
           ? {
               scmAutoDispatch:
                 targetProvider === "codebase" ? targetAutoDispatch : false,

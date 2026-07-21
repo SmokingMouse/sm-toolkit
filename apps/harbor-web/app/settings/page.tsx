@@ -809,13 +809,21 @@ function RepositoryIntegration({
           className={`${inputCls} w-28 py-2 text-xs`}
           value={provider}
           onChange={(event) =>
-            setProvider(event.target.value as "local" | "codebase")
+            setProvider(event.target.value as "local" | "github" | "codebase")
           }
         >
-          <option value="local">Local</option>
-          <option value="codebase">Codebase</option>
+          <option value="local" disabled={!!repository.githubConnection}>Local</option>
+          <option value="github" disabled={!repository.githubConnection}>GitHub</option>
+          <option value="codebase" disabled={!!repository.githubConnection}>Codebase</option>
         </select>
       </div>
+      {provider === "github" && (
+        <div className="mt-4 rounded-xl border border-line bg-bg px-3 py-2 text-[10px] leading-5 text-dim">
+          {repository.githubConnection
+            ? `GitHub App mapping · ${repository.githubConnection.fullName} · ${repository.githubConnection.status}`
+            : "请先在 Integrations 连接 GitHub App 并同步该 Repository。"}
+        </div>
+      )}
       {provider === "codebase" && (
         <div className="mt-4">
           <Field label="Codebase repository path">

@@ -1792,7 +1792,9 @@ function IssueDrawer({
           defaultProvider={
             detail.data?.repository?.scmProvider === "codebase"
               ? "codebase"
-              : "manual"
+              : detail.data?.repository?.scmProvider === "github"
+                ? "github"
+                : "manual"
           }
           onClose={() => setDeliverySetup(false)}
           onSubmit={setupDelivery}
@@ -2176,7 +2178,7 @@ function DeliverySetupModal({
   onSubmit,
 }: {
   busy: boolean;
-  defaultProvider: "manual" | "codebase";
+  defaultProvider: "manual" | "github" | "codebase";
   onClose: () => void;
   onSubmit: (input: {
     provider: DeliveryProviderKind;

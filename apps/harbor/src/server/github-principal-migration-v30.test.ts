@@ -48,7 +48,7 @@ describe("schema v30 GitHub principal migration", () => {
     const db = openDb(":memory:");
     try {
       expect(inspectGitHubPrincipalMigration(db)).toEqual(expect.objectContaining({
-        sourceSchemaVersion: 31,
+        sourceSchemaVersion: 32,
         expectedSourceSchemaVersion: 29,
         migratable: false,
         issues: [expect.objectContaining({ code: "UNSUPPORTED_SCHEMA_VERSION" })],
@@ -107,7 +107,7 @@ describe("schema v30 GitHub principal migration", () => {
 
     const migrated = openDb(path);
     try {
-      expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(31);
+      expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(32);
       expect(migrated.query<{ count: number }, []>(
         "SELECT COUNT(*) AS count FROM github_account_authorizations",
       ).get()!.count).toBe(0);

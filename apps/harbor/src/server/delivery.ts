@@ -167,7 +167,15 @@ export class DeliveryService {
     if (input.baseBranch?.trim() && input.baseBranch.trim() !== repository.defaultBranch) {
       throw new Error(`baseBranch 必须是 Repository default branch ${repository.defaultBranch}`);
     }
-    const providerKind = input.provider ?? (repository.scmProvider === "codebase" ? "codebase" : "github");
+    const providerKind = input.provider ?? repository.scmProvider;
+    if (providerKind !== repository.scmProvider) {
+      throw new Error(
+        `Delivery provider ${providerKind} 与 Repository SCM provider ${repository.scmProvider} 不一致`,
+      );
+    }
+    if (providerKind === "local") {
+      throw new Error("Local Repository 不能由 Agent 创建外部 Delivery；请先连接 GitHub 或配置 Codebase");
+    }
     const provider = this.configuredProvider(providerKind);
     let preparedInput: DeliveryChangeInput = {
       ...input,

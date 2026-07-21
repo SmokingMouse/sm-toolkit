@@ -89,6 +89,18 @@ test("validates credential-free git/Delivery outboxes and authenticates daemon c
       authorization: "Bearer daemon-secret",
       body: { runActionToken: "run-action-secret", forceRefresh: false },
     });
+    await expect(requestGitPushCredential(
+      "https://harbor.example.test/hooks/daemon-actions/git/push-credential",
+      "daemon-secret",
+      "run-action-secret",
+      false,
+      (async () => Response.json(
+        { error: "Repository 未配置 GitHub Provider\n请先完成映射" },
+        { status: 409 },
+      )) as unknown as typeof fetch,
+    )).rejects.toThrow(
+      "Harbor git push credential request rejected (HTTP 409): Repository 未配置 GitHub Provider 请先完成映射",
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

@@ -133,8 +133,8 @@ test("v27 archives complete legacy deployment audit, drops legacy runtime schema
 
     const migrated = openDb(path);
     try {
-      expect(LATEST_SCHEMA_VERSION).toBe(31);
-      expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(31);
+      expect(LATEST_SCHEMA_VERSION).toBe(32);
+      expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(32);
       const tableNames = new Set(migrated.query<{ name: string }, []>(
         "SELECT name FROM sqlite_master WHERE type = 'table'",
       ).all().map((row) => row.name));

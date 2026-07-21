@@ -38,6 +38,8 @@ test("GitHub broker treats Repository mapping as allowlist and chooses credentia
       defaultBranch: "main",
       private: true,
     }, 2);
+    const githubRepository = store.getRepository(repository.id)!;
+    expect(githubRepository.scmProvider).toBe("github");
     const device = store.upsertDevice("worker", "hash", { clis: { codex: "1" }, endpoints: [] }, 2);
     const agent = store.createAgent({ name: "agent", deviceId: device.id, backend: "codex", workdir: "/repo" }, 2);
     const automation = store.createAutomation({
@@ -62,19 +64,19 @@ test("GitHub broker treats Repository mapping as allowlist and chooses credentia
     const broker = new GitHubCredentialBroker(store, integration, client);
     const membership = store.membershipForAccount("acc_bootstrap", workspace.id)!;
 
-    expect(await broker.tokenForRepository(repository, {
+    expect(await broker.tokenForRepository(githubRepository, {
       type: "account",
       id: "acc_bootstrap",
       membershipId: membership.id,
       initiator: {},
     })).toBe("ghu_user");
-    expect(await broker.tokenForRepository(repository, {
+    expect(await broker.tokenForRepository(githubRepository, {
       type: "service",
       id: automation.servicePrincipalId,
       membershipId: null,
       initiator: {},
     }, true)).toBe("ghs_service");
-    await expect(broker.tokenForRepository(repository, {
+    await expect(broker.tokenForRepository(githubRepository, {
       type: "system",
       id: null,
       membershipId: null,

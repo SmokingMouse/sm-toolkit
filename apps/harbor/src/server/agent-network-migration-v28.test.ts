@@ -41,8 +41,8 @@ test("v28 adds fail-closed Agent sandbox network capability without changing exi
 
     const migrated = openDb(path);
     try {
-      expect(LATEST_SCHEMA_VERSION).toBe(31);
-      expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(31);
+      expect(LATEST_SCHEMA_VERSION).toBe(32);
+      expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(32);
       const store = new HarborStore(migrated);
       expect(store.getAgent(legacyAgent.id)?.sandboxNetworkAccess).toBe(false);
       store.updateAgentConfig(legacyAgent.id, { sandboxNetworkAccess: true });

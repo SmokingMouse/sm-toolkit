@@ -150,6 +150,29 @@ test("implementation and review action tokens can open, approve, and policy-merg
     remoteUrl: "https://github.com/acme/app.git",
     defaultBranch: "main",
   }, 2);
+  store.upsertGitHubInstallation({
+    installationId: "77",
+    appId: "123",
+    targetId: "42",
+    targetType: "User",
+    targetLogin: "acme",
+    repositorySelection: "selected",
+    permissions: { contents: "write", pull_requests: "write" },
+  }, 2);
+  store.connectGitHubInstallation({
+    workspaceId: "ws_personal",
+    installationId: "77",
+    connectedByAccountId: "acc_bootstrap",
+  }, 2);
+  store.upsertGitHubRepositoryConnection({
+    workspaceId: "ws_personal",
+    repositoryId: repository.id,
+    installationId: "77",
+    githubRepositoryId: "99",
+    fullName: "acme/app",
+    defaultBranch: "main",
+    private: false,
+  }, 2);
   const mount = store.setRepositoryMount(repository.id, device.id, "/repo", 3);
   const developer = store.createAgent({
     name: "developer",
@@ -249,6 +272,30 @@ test("implementation and review action tokens can open, approve, and policy-merg
     Date.now() + 60_000,
     10,
   );
+  const context = await app.request("/hooks/agent-actions/context", {
+    headers: { Authorization: `Bearer ${implementationToken}` },
+  });
+  expect(context.status).toBe(200);
+  expect(await context.json()).toEqual(expect.objectContaining({
+    repository: expect.objectContaining({
+      scmProvider: "github",
+      githubConnection: expect.objectContaining({ fullName: "acme/app", status: "active" }),
+    }),
+  }));
+  const bypass = await app.request("/hooks/agent-actions/deliveries", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${implementationToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      provider: "manual",
+      changeUrl: "https://github.com/acme/app/pull/7",
+      headBranch: `harbor/${issue.id}`,
+      baseBranch: "main",
+    }),
+  });
+  expect(bypass.status).toBe(400);
+  expect(await bypass.json()).toEqual(expect.objectContaining({
+    error: "Delivery provider manual 与 Repository SCM provider github 不一致",
+  }));
   const opened = await app.request("/hooks/agent-actions/deliveries", {
     method: "POST",
     headers: { Authorization: `Bearer ${implementationToken}`, "Content-Type": "application/json" },
