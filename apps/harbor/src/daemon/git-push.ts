@@ -45,6 +45,10 @@ export function prepareGitPushTransport(cwd: string, directory: string): { gitDi
   writeFileSync(join(gitDir, "objects/info/alternates"), `${objectDir}\n`, { mode: 0o600 });
   const sourceRef = "refs/heads/harbor-source";
   writeFileSync(join(gitDir, sourceRef), `${head}\n`, { mode: 0o600 });
+  // Git uses HEAD as part of repository discovery even when push names an explicit source ref.
+  // Without it the directory merely resembles a bare repository and `git --git-dir=... push`
+  // fails before authentication with "not a git repository".
+  writeFileSync(join(gitDir, "HEAD"), `ref: ${sourceRef}\n`, { mode: 0o600 });
   return { gitDir, sourceRef };
 }
 
