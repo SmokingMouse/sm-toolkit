@@ -30,8 +30,10 @@
 - 2026-07-21：代码核对确认 v29 只持久化 AuthIdentity/installation/Repository connection；OAuth user token 在 callback 后丢弃，Run 无 principal，GitHub Delivery 与 Skill import 固定使用 installation token。
 - 2026-07-21：实现 schema v30、credential vault、OAuth refresh/revoke、Run principal propagation、GitHub broker、daemon-controlled push 与 UI。历史 Run 回填 system；既有 GitHub identity 不伪造 authorization，部署后需一次 reauthorization。
 - 2026-07-21：验证通过：`bun test src` 225 tests / 1162 assertions；`harbor` build、`harbor-web` typecheck、`git diff --check` 全绿。daemon credential 未改，仅继续作为 daemon→server dual-auth 的既有 machine credential。
+- 2026-07-21：PR #7 merge 后 Agent + sidecar 自动部署 `e29c282` attempt 1 healthy，生产 schema v30、integrity/FK/gate 均正常；验收发现 2 条既有 Automation 的 ServicePrincipal 行已建、但 FK 列为 NULL。根因是 self-deploy cutover 持有 v21 SQLite maintenance trigger，v30 首次 backfill 没像旧 backfill migration 那样在同一 transaction 临时移除并重装 trigger。
+- 2026-07-21：追加 v31 repair：v29→v30 与 v30→v31 都在 migration transaction 内临时移除 Automation maintenance trigger，v31 幂等补建/回填 ServicePrincipal 并用 insert/update trigger 禁止 NULL。新增生产形状 v30 repair 与 active-gate regression；全量验证 227 tests / 1165 assertions、双 typecheck/build 全绿。
 
 ## Release next
 
-- 推送 PR；在 Mac mini 对生产 v29 DB 跑 `harbor db github-principal-report`，确认 active Run/自部署闸，再合并并由现有 self-deployer sidecar 完成 exact-revision cutover。
-- 部署后核对 schema v30、credential directory 权限、server/daemon revision 与健康状态；当前用户重新走一次 GitHub OAuth 生成可执行 user authorization。
+- 推送 v31 repair PR 并由现有 Agent/self-deployer 完成第二次 exact-revision cutover。
+- 部署后核对 schema v31、Automation FK 非空 + trigger、credential directory 权限、server/daemon revision 与健康状态；当前用户重新走一次 GitHub OAuth 生成可执行 user authorization。
