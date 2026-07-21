@@ -32,6 +32,7 @@
 - 2026-07-21：验证通过：`bun test src` 225 tests / 1162 assertions；`harbor` build、`harbor-web` typecheck、`git diff --check` 全绿。daemon credential 未改，仅继续作为 daemon→server dual-auth 的既有 machine credential。
 - 2026-07-21：PR #7 merge 后 Agent + sidecar 自动部署 `e29c282` attempt 1 healthy，生产 schema v30、integrity/FK/gate 均正常；验收发现 2 条既有 Automation 的 ServicePrincipal 行已建、但 FK 列为 NULL。根因是 self-deploy cutover 持有 v21 SQLite maintenance trigger，v30 首次 backfill 没像旧 backfill migration 那样在同一 transaction 临时移除并重装 trigger。
 - 2026-07-21：追加 v31 repair：v29→v30 与 v30→v31 都在 migration transaction 内临时移除 Automation maintenance trigger，v31 幂等补建/回填 ServicePrincipal 并用 insert/update trigger 禁止 NULL。新增生产形状 v30 repair 与 active-gate regression；全量验证 227 tests / 1165 assertions、双 typecheck/build 全绿。
+- 2026-07-21：PR #8 merge event 在 v30 按 fail-closed 被拒并去重。保留 `0600` SQLite backup 后，事务性把生产 2 条 Automation 指向 v30 已创建且 workspace/owner/status 全匹配的确定性 ServicePrincipal；FK 检查通过。本 docs-only merge 用于产生新的可信 GitHub merged event，仍由 Agent + sidecar 执行 v31 cutover，不手工替代部署 worker。
 
 ## Release next
 
