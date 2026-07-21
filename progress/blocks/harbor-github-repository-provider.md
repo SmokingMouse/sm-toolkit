@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-把 GitHub App connection 提升为一等 `Repository.scmProvider = github`，让 UI、Run context、credential broker 与 Delivery 都使用同一个可信状态；不改 daemon credential。
+GitHub Repository provider 与受控 push transport 均已部署到控制面和 Feature Builder 的 MacBook Device；剩余验收仅是用户从已登录 Account Session 再 Continue 原 Issue，确认真实 PR/Delivery 闭环。daemon credential 未改。
 
 ## Domain decisions
 
@@ -20,8 +20,10 @@
 - 2026-07-21：验证完成：全量 `bun test` 475 pass / 0 fail，root typecheck、全 workspace production build、`git diff --check` 通过。
 - 2026-07-21：用户以 Account principal 重试后，Repository/GitHub connection 与 credential broker 已通过，但 Run `r_47hshysn17` 在 daemon push 阶段失败：临时 bare transport 缺少 Git repository discovery 必需的 `HEAD`，因此 `git --git-dir=... push` 在认证前报 `not a git repository`；Issue 安全退回 Ready，未创建虚假 Delivery/PR。
 - 2026-07-21：修复 transport 写入指向固定 source ref 的 `HEAD`；回归测试不再只检查目录文件，而是让 Git 识别该 bare repository、实际 push 到本地 bare remote 并核对目标 branch SHA。全量 `bun test` 475 pass / 0 fail。
+- 2026-07-21：PR #12 merge 为 feature revision `df81c878e9214f37faad6a610e2aea0fb0f17cc3`。GitHub App merged delivery 首投 502，以同一 delivery `3832481130917920768` 走 App redelivery API 返回 202；Release Run `r_2i9etjonqh` 成功，sidecar Job `depjob_26h4mulgof` generation 14 attempt 1 到 `healthy`。控制面 `/api/health` exact revision、schema v32、integrity/FK/gate、server/daemon revision 全部通过。
+- 2026-07-21：执行 Feature Builder 的 MacBook daemon 建立独立 immutable release 并切到同一 feature revision。首次启动验收发现 release prep 命令 cwd 错在开发 worktree，导致 release 缺 `node_modules`；立即停掉 crash loop，在 release 目录重新 frozen install + 跑真实 push regression 后重启。PID 连续稳定、Device `online=true` 且重新 hello，旧 plist/release 可回滚；daemon credential 未改。
 
 ## Next
 
 - PR #10 已 merge 为 `5dd4fee98c0921d0d30a76b739e777be41ac5ffd`；GitHub event → Release Run `r_3aqwcnqraz` → sidecar Job `depjob_2alfeix0cj` generation 12 attempt 1 exact cutover 已完成。生产 schema v32、integrity/FK/gate、两条 active alias、REST projection、server/daemon revision 与 health 全部通过。
-- 先将 transport 修复合并并同时 rollout Mac mini 控制面与实际执行 Feature Builder 的 MacBook Device daemon；随后原 Issue `c_1d0ymfs03b` 由用户从已登录 Session 再 Continue 一次，完成 Account principal controlled push + GitHub PR/Delivery acceptance。这一步不能由 system token 替代，否则会破坏 principal 设计。
+- 原 Issue `c_1d0ymfs03b` 由用户从已登录 Session 再 Continue 一次，完成 Account principal controlled push + GitHub PR/Delivery acceptance。这一步不能由 system token 替代，否则会破坏 principal 设计。
