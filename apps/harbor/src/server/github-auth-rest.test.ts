@@ -151,5 +151,23 @@ describe("GitHub OAuth REST boundary", () => {
       installationId: "77",
       githubRepositoryId: "99",
     }));
+    const repositories = await h.app.request("/api/repositories", { headers: commonHeaders });
+    expect(repositories.status).toBe(200);
+    expect(await repositories.json()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: h.repository.id,
+        scmProvider: "github",
+        githubConnection: expect.objectContaining({ fullName: "smokingmouse/sm-toolkit", status: "active" }),
+      }),
+    ]));
+    const conflicting = await h.app.request(`/api/repositories/${h.repository.id}`, {
+      method: "PATCH",
+      headers: commonHeaders,
+      body: JSON.stringify({ scmProvider: "codebase", scmRepository: "acme/app" }),
+    });
+    expect(conflicting.status).toBe(400);
+    expect(await conflicting.json()).toEqual(expect.objectContaining({
+      error: expect.stringContaining("active GitHub connection"),
+    }));
   });
 });

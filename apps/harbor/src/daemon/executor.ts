@@ -440,7 +440,12 @@ export async function requestGitPushCredential(
   });
   const parsed = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok) {
-    throw new Error(`Harbor git push credential request rejected (HTTP ${response.status})`);
+    const detail = typeof parsed.error === "string"
+      ? parsed.error.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 500)
+      : "";
+    throw new Error(
+      `Harbor git push credential request rejected (HTTP ${response.status})${detail ? `: ${detail}` : ""}`,
+    );
   }
   if (typeof parsed.token !== "string" || typeof parsed.remoteUrl !== "string" || typeof parsed.refspec !== "string") {
     throw new Error("Harbor git push credential response 无效");

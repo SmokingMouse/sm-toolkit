@@ -150,6 +150,7 @@ export type SkillWithAgents = HarborSkill & {
 };
 export type RepositoryWithMounts = HarborRepository & {
   mounts: (RepositoryMount & { deviceName: string })[];
+  githubConnection: GitHubRepositoryConnection | null;
 };
 export interface ConversationDetail {
   conversation: Conversation;
@@ -330,7 +331,7 @@ export const createRepository = (body: {
   defaultBranch?: string;
   device?: string;
   path?: string;
-  scmProvider?: "local" | "codebase";
+  scmProvider?: "local" | "github" | "codebase";
   scmRepository?: string;
   scmAgent?: string;
   scmAutoDispatch?: boolean;

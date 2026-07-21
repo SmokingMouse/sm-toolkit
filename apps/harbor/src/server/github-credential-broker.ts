@@ -19,6 +19,9 @@ export class GitHubCredentialBroker {
     principal: RunPrincipal,
     forceRefresh = false,
   ): Promise<string> {
+    if (repository.scmProvider !== "github") {
+      throw new Error(`Repository "${repository.name}" SCM provider 不是 GitHub`);
+    }
     const connection = this.store.githubRepositoryConnectionForRepository(repository.id);
     if (!connection || connection.workspaceId !== repository.workspaceId) {
       throw new Error(`Repository "${repository.name}" 尚未连接可用的 GitHub App installation`);

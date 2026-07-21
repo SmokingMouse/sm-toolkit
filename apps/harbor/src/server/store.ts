@@ -1400,7 +1400,7 @@ export class HarborStore {
         "UPDATE github_installations SET status = ?, updated_at = ? WHERE installation_id = ?",
         [status, now, installationId],
       ).changes;
-      if (status === "deleted") {
+      if (status !== "active") {
         this.db.run(
           "UPDATE github_workspace_installations SET status = 'disconnected', updated_at = ? WHERE installation_id = ?",
           [now, installationId],
@@ -1423,7 +1423,7 @@ export class HarborStore {
       throw new Error("GitHub installation 连接需要 active Workspace Membership");
     }
     const installation = this.getGitHubInstallation(input.installationId);
-    if (!installation || installation.status === "deleted") throw new Error("GitHub installation 不存在或已删除");
+    if (!installation || installation.status !== "active") throw new Error("GitHub installation 不存在或不可用");
     this.db.run(
       `INSERT INTO github_workspace_installations
        (workspace_id, installation_id, connected_by_account_id, status, created_at, updated_at)

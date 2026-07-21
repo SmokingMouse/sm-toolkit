@@ -2293,6 +2293,127 @@ export const MIGRATIONS: string[] = [
     WHEN NEW.service_principal_id IS NULL
     BEGIN SELECT RAISE(ABORT, 'automation service principal required'); END;
   `,
+  // v32 —— GitHub is a first-class Repository SCM provider, maintained by connection lifecycle.
+  `
+  CREATE TABLE repositories_v32 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    name TEXT NOT NULL,
+    remote_url TEXT,
+    default_branch TEXT NOT NULL DEFAULT 'main',
+    created_at INTEGER NOT NULL,
+    archived_at INTEGER,
+    scm_provider TEXT NOT NULL DEFAULT 'local'
+      CHECK (scm_provider IN ('local','github','codebase')),
+    scm_repository TEXT,
+    scm_agent_id TEXT REFERENCES agents(id),
+    scm_auto_dispatch INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (workspace_id, name)
+  );
+  WITH repository_sources AS (
+    SELECT r.*, EXISTS (
+      SELECT 1
+      FROM github_repository_connections c
+      JOIN github_workspace_installations w
+        ON w.workspace_id = c.workspace_id AND w.installation_id = c.installation_id
+      JOIN github_installations i ON i.installation_id = c.installation_id
+      WHERE c.repository_id = r.id AND c.status = 'active'
+        AND w.status = 'active' AND i.status = 'active'
+    ) AS github_active
+    FROM repositories r
+  )
+  INSERT INTO repositories_v32
+    (id, workspace_id, name, remote_url, default_branch, created_at, archived_at,
+     scm_provider, scm_repository, scm_agent_id, scm_auto_dispatch)
+    SELECT id, workspace_id, name, remote_url, default_branch, created_at, archived_at,
+           CASE WHEN github_active THEN 'github' ELSE scm_provider END,
+           CASE WHEN NOT github_active AND scm_provider = 'codebase' THEN scm_repository ELSE NULL END,
+           CASE WHEN NOT github_active AND scm_provider = 'codebase' THEN scm_agent_id ELSE NULL END,
+           CASE WHEN NOT github_active AND scm_provider = 'codebase' THEN scm_auto_dispatch ELSE 0 END
+    FROM repository_sources;
+  DROP TABLE repositories;
+  ALTER TABLE repositories_v32 RENAME TO repositories;
+  CREATE INDEX idx_repositories_workspace ON repositories(workspace_id, archived_at, name);
+  CREATE UNIQUE INDEX idx_repositories_scm
+    ON repositories(scm_provider, scm_repository)
+    WHERE scm_provider = 'codebase' AND scm_repository IS NOT NULL;
+
+  CREATE TRIGGER repositories_github_requires_active_connection_insert
+    BEFORE INSERT ON repositories
+    WHEN NEW.scm_provider = 'github' AND NOT EXISTS (
+      SELECT 1 FROM github_repository_connections c
+      JOIN github_workspace_installations w
+        ON w.workspace_id = c.workspace_id AND w.installation_id = c.installation_id
+      JOIN github_installations i ON i.installation_id = c.installation_id
+      WHERE c.repository_id = NEW.id AND c.status = 'active'
+        AND w.status = 'active' AND i.status = 'active'
+    )
+    BEGIN SELECT RAISE(ABORT, 'github repository connection required'); END;
+  CREATE TRIGGER repositories_github_requires_active_connection_update
+    BEFORE UPDATE OF scm_provider ON repositories
+    WHEN NEW.scm_provider = 'github' AND NOT EXISTS (
+      SELECT 1 FROM github_repository_connections c
+      JOIN github_workspace_installations w
+        ON w.workspace_id = c.workspace_id AND w.installation_id = c.installation_id
+      JOIN github_installations i ON i.installation_id = c.installation_id
+      WHERE c.repository_id = NEW.id AND c.status = 'active'
+        AND w.status = 'active' AND i.status = 'active'
+    )
+    BEGIN SELECT RAISE(ABORT, 'github repository connection required'); END;
+  CREATE TRIGGER repositories_active_github_connection_blocks_provider_change
+    BEFORE UPDATE OF scm_provider ON repositories
+    WHEN OLD.scm_provider = 'github' AND NEW.scm_provider <> 'github' AND EXISTS (
+      SELECT 1 FROM github_repository_connections c
+      JOIN github_workspace_installations w
+        ON w.workspace_id = c.workspace_id AND w.installation_id = c.installation_id
+      JOIN github_installations i ON i.installation_id = c.installation_id
+      WHERE c.repository_id = OLD.id AND c.status = 'active'
+        AND w.status = 'active' AND i.status = 'active'
+    )
+    BEGIN SELECT RAISE(ABORT, 'active github connection blocks provider change'); END;
+  CREATE TRIGGER github_connection_rejects_codebase_repository_insert
+    BEFORE INSERT ON github_repository_connections
+    WHEN NEW.status = 'active' AND EXISTS (
+      SELECT 1 FROM repositories r WHERE r.id = NEW.repository_id AND r.scm_provider = 'codebase'
+    )
+    BEGIN SELECT RAISE(ABORT, 'codebase repository cannot attach github connection'); END;
+  CREATE TRIGGER github_connection_rejects_codebase_repository_update
+    BEFORE UPDATE ON github_repository_connections
+    WHEN NEW.status = 'active' AND EXISTS (
+      SELECT 1 FROM repositories r WHERE r.id = NEW.repository_id AND r.scm_provider = 'codebase'
+    )
+    BEGIN SELECT RAISE(ABORT, 'codebase repository cannot attach github connection'); END;
+  CREATE TRIGGER github_connection_sets_repository_provider_insert
+    AFTER INSERT ON github_repository_connections
+    WHEN NEW.status = 'active'
+    BEGIN
+      UPDATE repositories
+        SET scm_provider = 'github', scm_repository = NULL, scm_agent_id = NULL, scm_auto_dispatch = 0
+        WHERE id = NEW.repository_id;
+    END;
+  CREATE TRIGGER github_connection_sets_repository_provider_update
+    AFTER UPDATE ON github_repository_connections
+    WHEN NEW.status = 'active'
+    BEGIN
+      UPDATE repositories
+        SET scm_provider = 'github', scm_repository = NULL, scm_agent_id = NULL, scm_auto_dispatch = 0
+        WHERE id = NEW.repository_id;
+    END;
+  CREATE TRIGGER github_connection_removal_clears_repository_provider_update
+    AFTER UPDATE OF status ON github_repository_connections
+    WHEN OLD.status = 'active' AND NEW.status = 'removed'
+    BEGIN
+      UPDATE repositories SET scm_provider = 'local'
+        WHERE id = NEW.repository_id AND scm_provider = 'github';
+    END;
+  CREATE TRIGGER github_connection_removal_clears_repository_provider_delete
+    AFTER DELETE ON github_repository_connections
+    WHEN OLD.status = 'active'
+    BEGIN
+      UPDATE repositories SET scm_provider = 'local'
+        WHERE id = OLD.repository_id AND scm_provider = 'github';
+    END;
+  `,
 ];
 
 function backfillDeviceCapabilitySummaries(db: Database): void {
@@ -2455,7 +2576,8 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
       version === 19 ||
       version === 21 ||
       version === 24 ||
-      version === 26;
+      version === 26 ||
+      version === 31;
     if (rebuildsReferencedTables) db.exec("PRAGMA foreign_keys = OFF;");
     try {
       db.transaction(() => {
@@ -2475,6 +2597,7 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
         // holds the durable write gate. Remove only this table's triggers inside the same
         // migration transaction, then reinstall before commit.
         if (version === 29 || version === 30) dropMaintenanceLinearization(db, ["automations"]);
+        if (version === 31) dropMaintenanceLinearization(db, ["repositories"]);
         if (sql.trim()) db.exec(sql);
         if (version === 22) {
           applyIdentityNormalization(db, identityReport!);
@@ -2488,6 +2611,7 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
         if (version === 25) installMaintenanceLinearization(db);
         if (version === 26) installMaintenanceLinearization(db);
         if (version === 29 || version === 30) installMaintenanceLinearization(db);
+        if (version === 31) installMaintenanceLinearization(db);
         db.exec(`PRAGMA user_version = ${version + 1}`);
       })();
     } finally {
@@ -2555,6 +2679,11 @@ export function openV29MigrationFixtureDb(path = ":memory:"): Database {
 /** 只给 v31 Automation ServicePrincipal repair regression fixture 使用。 */
 export function openV30MigrationFixtureDb(path = ":memory:"): Database {
   return openDbAtVersion(path, 30);
+}
+
+/** 只给 v32 GitHub Repository provider migration regression fixture 使用。 */
+export function openV31MigrationFixtureDb(path = ":memory:"): Database {
+  return openDbAtVersion(path, 31);
 }
 
 function installMaintenanceLinearization(db: Database): void {

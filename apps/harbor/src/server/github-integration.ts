@@ -289,10 +289,16 @@ export class GitHubIntegrationService {
       const selected = new Map<string, HarborRepository>();
       for (const existing of existingAliases) {
         const repository = this.store.getRepository(existing.repositoryId);
-        if (repository && !repository.archivedAt) selected.set(repository.id, repository);
+        if (repository && !repository.archivedAt && repository.scmProvider !== "codebase") {
+          selected.set(repository.id, repository);
+        }
       }
       for (const candidate of this.store.listRepositories(workspaceId)) {
-        if (candidate.archivedAt || canonicalRemote(candidate) !== github.fullName.toLowerCase()) continue;
+        if (
+          candidate.archivedAt ||
+          candidate.scmProvider === "codebase" ||
+          canonicalRemote(candidate) !== github.fullName.toLowerCase()
+        ) continue;
         const current = this.store.githubRepositoryConnectionByRepository(candidate.id);
         if (current && current.githubRepositoryId !== github.repositoryId) continue;
         if (!selected.has(candidate.id)) reused++;
