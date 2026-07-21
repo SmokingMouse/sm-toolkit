@@ -21,5 +21,5 @@
 
 ## Next
 
-- 提交并推送 PR，由 Harbor Agent + self-deployer 执行 exact-revision cutover。
-- 部署后核对 schema v32、两条 active sm-toolkit alias provider、server/daemon revision、health/FK/maintenance gate；再从原 Issue 触发一次 implementation Run 验证受控 push + GitHub PR/Delivery。
+- PR #10 已 merge 为 `5dd4fee98c0921d0d30a76b739e777be41ac5ffd`；GitHub event → Release Run `r_3aqwcnqraz` → sidecar Job `depjob_2alfeix0cj` generation 12 attempt 1 exact cutover 已完成。生产 schema v32、integrity/FK/gate、两条 active alias、REST projection、server/daemon revision 与 health 全部通过。
+- 原 Issue `c_1d0ymfs03b` 由用户从已登录 Session 再 Continue 一次，完成 Account principal controlled push + GitHub PR/Delivery acceptance；这一步不能由 system token 替代，否则会破坏 principal 设计。
