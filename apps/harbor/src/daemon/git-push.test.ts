@@ -31,6 +31,31 @@ test("authenticated push uses a clean bare transport instead of Agent-writable h
 
   const transport = prepareGitPushTransport(repository, root);
   const head = execFileSync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  expect(execFileSync("git", [
+    `--git-dir=${transport.gitDir}`,
+    "rev-parse",
+    "--is-bare-repository",
+  ], { encoding: "utf8" }).trim()).toBe("true");
+  expect(execFileSync("git", [
+    `--git-dir=${transport.gitDir}`,
+    "symbolic-ref",
+    "HEAD",
+  ], { encoding: "utf8" }).trim()).toBe(transport.sourceRef);
+  const remote = join(root, "remote.git");
+  execFileSync("git", ["init", "--bare", remote]);
+  execFileSync("git", [
+    `--git-dir=${transport.gitDir}`,
+    "push",
+    "--porcelain",
+    "--no-verify",
+    remote,
+    `${transport.sourceRef}:refs/heads/harbor/test`,
+  ]);
+  expect(execFileSync("git", [
+    `--git-dir=${remote}`,
+    "rev-parse",
+    "refs/heads/harbor/test",
+  ], { encoding: "utf8" }).trim()).toBe(head);
   expect(readFileSync(join(transport.gitDir, transport.sourceRef), "utf8").trim()).toBe(head);
   expect(readFileSync(join(transport.gitDir, "config"), "utf8")).not.toContain("attacker.invalid");
   expect(readFileSync(join(transport.gitDir, "objects/info/alternates"), "utf8")).toContain("/.git/objects");

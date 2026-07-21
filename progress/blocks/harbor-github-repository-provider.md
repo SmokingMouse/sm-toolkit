@@ -18,8 +18,10 @@
 - 2026-07-21：v32 fixture 覆盖冲突 backfill、active connection 防改、disconnect/reconnect/removal；相关 REST/integration/broker/Agent tests 已覆盖。
 - 2026-07-21：生产 v31 online backup 只在本地副本迁移：schema v32、`integrity_check=ok`、0 FK failure；2 个 active `smokingmouse/sm-toolkit` alias 均变为 `github`，62 个 removed/unmapped Repository 保持 `local`。
 - 2026-07-21：验证完成：全量 `bun test` 475 pass / 0 fail，root typecheck、全 workspace production build、`git diff --check` 通过。
+- 2026-07-21：用户以 Account principal 重试后，Repository/GitHub connection 与 credential broker 已通过，但 Run `r_47hshysn17` 在 daemon push 阶段失败：临时 bare transport 缺少 Git repository discovery 必需的 `HEAD`，因此 `git --git-dir=... push` 在认证前报 `not a git repository`；Issue 安全退回 Ready，未创建虚假 Delivery/PR。
+- 2026-07-21：修复 transport 写入指向固定 source ref 的 `HEAD`；回归测试不再只检查目录文件，而是让 Git 识别该 bare repository、实际 push 到本地 bare remote 并核对目标 branch SHA。全量 `bun test` 475 pass / 0 fail。
 
 ## Next
 
 - PR #10 已 merge 为 `5dd4fee98c0921d0d30a76b739e777be41ac5ffd`；GitHub event → Release Run `r_3aqwcnqraz` → sidecar Job `depjob_2alfeix0cj` generation 12 attempt 1 exact cutover 已完成。生产 schema v32、integrity/FK/gate、两条 active alias、REST projection、server/daemon revision 与 health 全部通过。
-- 原 Issue `c_1d0ymfs03b` 由用户从已登录 Session 再 Continue 一次，完成 Account principal controlled push + GitHub PR/Delivery acceptance；这一步不能由 system token 替代，否则会破坏 principal 设计。
+- 先将 transport 修复合并并同时 rollout Mac mini 控制面与实际执行 Feature Builder 的 MacBook Device daemon；随后原 Issue `c_1d0ymfs03b` 由用户从已登录 Session 再 Continue 一次，完成 Account principal controlled push + GitHub PR/Delivery acceptance。这一步不能由 system token 替代，否则会破坏 principal 设计。
