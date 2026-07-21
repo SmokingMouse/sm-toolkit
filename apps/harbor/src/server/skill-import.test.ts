@@ -99,7 +99,7 @@ describe("Skill bundle imports", () => {
     expect(store.getSkill(skill.id)?.bundleHash).not.toBe(oldHash);
   });
 
-  test("GitHub import resolves a Workspace installation token and never reads a static PAT", async () => {
+  test("GitHub import resolves the request principal credential and never reads a static PAT", async () => {
     const authorizations: string[] = [];
     const fetchMock = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
       const url = new URL(String(input));
@@ -116,11 +116,22 @@ describe("Skill bundle imports", () => {
     const resolverCalls: unknown[] = [];
     const service = new SkillImportService(undefined, fetchMock, (input) => {
       resolverCalls.push(input);
-      return "installation-token-only";
+      return "principal-token-only";
     });
-    const bundle = await service.fromGitHub("https://github.com/acme/repo/tree/main/skills/review", undefined, "ws_team");
+    const principal = {
+      type: "account" as const,
+      id: "acc_owner",
+      membershipId: "member_owner",
+      initiator: { kind: "test" },
+    };
+    const bundle = await service.fromGitHub(
+      "https://github.com/acme/repo/tree/main/skills/review",
+      undefined,
+      "ws_team",
+      principal,
+    );
     expect(bundle.files).toEqual([expect.objectContaining({ path: "SKILL.md" })]);
-    expect(resolverCalls).toEqual([{ workspaceId: "ws_team", owner: "acme", repository: "repo" }]);
-    expect(authorizations).toEqual(["Bearer installation-token-only", "Bearer installation-token-only"]);
+    expect(resolverCalls).toEqual([{ workspaceId: "ws_team", owner: "acme", repository: "repo", principal }]);
+    expect(authorizations).toEqual(["Bearer principal-token-only", "Bearer principal-token-only"]);
   });
 });

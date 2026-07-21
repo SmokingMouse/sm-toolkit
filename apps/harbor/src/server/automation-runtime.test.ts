@@ -70,6 +70,12 @@ describe("Mew Automation runtime", () => {
       promptEvent: "event.automation.manual",
       triggerRef: automation.id,
       concurrencyKey: `automation:${automation.id}`,
+      principal: {
+        type: "service",
+        id: automation.servicePrincipalId,
+        membershipId: null,
+        initiator: { kind: "automation", automationId: automation.id },
+      },
     }));
     expect(store.listConversations({ workspaceId: "ws_personal" })).toHaveLength(0);
     expect(renderRunPrompt(store, { run, conversation: null, agent })).toContain("Manual Automation Run");

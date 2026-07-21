@@ -26,6 +26,7 @@ import type {
   HarborSkill,
   HarborWorkspace,
   GitHubInstallation,
+  GitHubAccountAuthorization,
   GitHubRepositoryConnection,
   GitHubWorkspaceInstallation,
   IssueLabel,
@@ -75,6 +76,7 @@ export type {
   HarborSkill,
   HarborWorkspace,
   GitHubInstallation,
+  GitHubAccountAuthorization,
   GitHubRepositoryConnection,
   GitHubWorkspaceInstallation,
   IssueLabel,
@@ -603,6 +605,8 @@ export const revokePersonalAccessToken = (id: string) =>
 
 export const listAuthIdentities = () => req<AuthIdentity[]>("GET", "/api/accounts/me/identities");
 export const beginGitHubLink = () => req<{ url: string }>("POST", "/api/accounts/me/github/link", {});
+export const revokeGitHubAuthorization = () =>
+  req<{ ok: boolean }>("DELETE", "/api/accounts/me/github/authorization");
 
 export const listPasskeys = () => req<PasskeyCredential[]>("GET", "/api/accounts/me/passkeys");
 export const beginPasskeyRegistration = () =>
@@ -618,6 +622,7 @@ export type GitHubIntegrationView =
       configured: true;
       appSlug: string;
       identity: AuthIdentity | null;
+      authorization: Omit<GitHubAccountAuthorization, "credentialRef"> | null;
       installations: {
         installation: GitHubInstallation;
         connection: GitHubWorkspaceInstallation;

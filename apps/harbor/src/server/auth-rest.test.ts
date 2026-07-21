@@ -159,6 +159,37 @@ test("REST bootstrap/login uses HttpOnly session, CSRF origin gate, PAT self-ser
     "X-Harbor-CSRF": sessionCookies.get("harbor_csrf")!,
     "Content-Type": "application/json",
   };
+  const runDevice = store.upsertDevice("runner", "hash", { clis: { codex: "1" }, endpoints: [] }, 20);
+  const runRepository = store.createRepository({ workspaceId: "ws_personal", name: "principal-fixture" }, 21);
+  store.setRepositoryMount(runRepository.id, runDevice.id, "/principal-fixture", 22);
+  const runAgent = store.createAgent({
+    name: "principal-agent",
+    deviceId: runDevice.id,
+    backend: "codex",
+    repositoryId: runRepository.id,
+  }, 23);
+  const runConversation = store.createConversation({
+    workspaceId: "ws_personal",
+    kind: "issue",
+    title: "Principal fixture",
+    description: "Run as the logged-in caller",
+    agentId: runAgent.id,
+    repositoryId: runRepository.id,
+  }, 24);
+  const runResponse = await app.request(`/api/conversations/${runConversation.id}/runs`, {
+    method: "POST",
+    headers: writeHeaders,
+    body: JSON.stringify({ prompt: "Implement it" }),
+  });
+  expect(runResponse.status).toBe(201);
+  const accountRun = store.listRunsByConversation(runConversation.id)[0]!;
+  expect(accountRun.principal).toEqual({
+    type: "account",
+    id: "acc_bootstrap",
+    membershipId: store.membershipForAccount("acc_bootstrap", "ws_personal")!.id,
+    initiator: expect.objectContaining({ kind: "api", credential: "session" }),
+  });
+
   const createdWorkspaceResponse = await app.request("/api/workspaces", {
     method: "POST", headers: writeHeaders, body: JSON.stringify({ name: "Team", slug: "team" }),
   });

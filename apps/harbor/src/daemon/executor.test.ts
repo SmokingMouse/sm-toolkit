@@ -8,7 +8,10 @@ import {
   coalesceStreamingEvent,
   agentActionTriggerEnvironment,
   materializeRunAttachments,
+  readDeliveryActionRequest,
+  readGitPushActionRequest,
   readSelfDeployActionRequest,
+  requestGitPushCredential,
   resolveSelfDeployActionSandbox,
   resolveRunSandboxNetworkAccess,
   resolveRunAdditionalWritableDirs,
@@ -46,6 +49,49 @@ test("rejects Agent environment overrides that can change Runtime identity or Sk
   expect(() => assertAgentEnvironmentSafe({ codex_home: "/tmp/other" })).toThrow("codex_home");
   expect(() => assertAgentEnvironmentSafe({ PATH: "/tmp/bin" })).toThrow("PATH");
   expect(() => assertAgentEnvironmentSafe({ API_TOKEN: "allowed" })).not.toThrow();
+});
+
+test("validates credential-free git/Delivery outboxes and authenticates daemon credential handoff", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harbor-git-action-"));
+  try {
+    const pushPath = join(directory, "git-push.json");
+    const deliveryPath = join(directory, "delivery.json");
+    writeFileSync(pushPath, '{"push":true}');
+    writeFileSync(deliveryPath, JSON.stringify({
+      provider: "github",
+      headBranch: "harbor/issue_1",
+      baseBranch: "main",
+      title: "Ship it",
+      body: "verified",
+    }));
+    expect(readGitPushActionRequest(pushPath)).toBe(true);
+    expect(readDeliveryActionRequest(deliveryPath)).toEqual(expect.objectContaining({ title: "Ship it" }));
+    let observed = {} as { authorization?: string; body?: Record<string, unknown> };
+    const credential = await requestGitPushCredential(
+      "https://harbor.example.test/hooks/daemon-actions/git/push-credential",
+      "daemon-secret",
+      "run-action-secret",
+      false,
+      (async (_input, init) => {
+        observed = {
+          authorization: new Headers(init?.headers).get("Authorization") ?? undefined,
+          body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+        };
+        return Response.json({
+          token: "ghu_memory_only",
+          remoteUrl: "https://github.com/acme/repo.git",
+          refspec: "HEAD:refs/heads/harbor/issue_1",
+        });
+      }) as typeof fetch,
+    );
+    expect(credential).toEqual(expect.objectContaining({ token: "ghu_memory_only" }));
+    expect(observed).toEqual({
+      authorization: "Bearer daemon-secret",
+      body: { runActionToken: "run-action-secret", forceRefresh: false },
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 describe("self-deploy action outbox", () => {

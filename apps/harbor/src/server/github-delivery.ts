@@ -3,6 +3,7 @@ import type {
   DeliveryCheckStatus,
   DeliveryMergeStatus,
   HarborRepository,
+  RunPrincipal,
 } from "../protocol.js";
 import type {
   DeliveryChangeInput,
@@ -380,7 +381,7 @@ export class GitHubRestClient {
   }
 }
 
-export type GitHubRestClientResolver = (repository: HarborRepository) => GitHubRestClient;
+export type GitHubRestClientResolver = (repository: HarborRepository, principal: RunPrincipal) => GitHubRestClient;
 
 export class GitHubDeliveryProvider implements DeliveryProvider {
   readonly kind = "github" as const;
@@ -388,10 +389,10 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
 
   constructor(private readonly clientOrResolver: GitHubRestClient | GitHubRestClientResolver) {}
 
-  private client(repository: HarborRepository): GitHubRestClient {
-    return typeof this.clientOrResolver === "function"
-      ? this.clientOrResolver(repository)
-      : this.clientOrResolver;
+  private client(repository: HarborRepository, principal: RunPrincipal | null): GitHubRestClient {
+    if (typeof this.clientOrResolver !== "function") return this.clientOrResolver;
+    if (!principal) throw new Error("GitHub action 缺少已冻结的 Run/request principal");
+    return this.clientOrResolver(repository, principal);
   }
 
   async createChange(
@@ -407,7 +408,7 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
     if (!title) throw new Error("GitHub PR 创建需要 title");
     if (!head) throw new Error("GitHub PR 创建需要 headBranch");
     const repository = parseGitHubRepository(context.repository.remoteUrl);
-    const pull = await this.client(context.repository).createPullRequest(repository, {
+    const pull = await this.client(context.repository, context.principal ?? null).createPullRequest(repository, {
       title,
       body: input.body?.trim() ?? "",
       head,
@@ -447,7 +448,7 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
   async sync(delivery: Delivery, context: DeliveryProviderContext): Promise<DeliveryProviderSyncResult> {
     const ref = resolveGitHubPullRequest(delivery.changeUrl, context.repository);
     if (!context.repository) throw new Error("GitHub Delivery 需要 Issue 关联 Repository");
-    const client = this.client(context.repository);
+    const client = this.client(context.repository, context.principal ?? null);
     const pull = await client.getPullRequest(ref);
     if (
       pull.number !== ref.number ||
@@ -497,7 +498,7 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
     if (!delivery.latestHeadSha) throw new Error(`GitHub PR #${ref.number} 尚未同步 head SHA`);
     // merge 只能重验已获人工 approval 的同一 SHA，不能自动升级到 GitHub 上的新 head。
     if (!context.repository) throw new Error("GitHub Delivery 需要 Issue 关联 Repository");
-    const client = this.client(context.repository);
+    const client = this.client(context.repository, context.principal ?? null);
     const pull = await client.getPullRequest(ref);
     if (!pull.head?.sha || !pull.base?.ref) {
       throw new Error(`GitHub PR #${ref.number} 当前不可合并；请 Sync 后检查 PR 状态`);

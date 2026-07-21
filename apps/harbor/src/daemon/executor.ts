@@ -26,6 +26,7 @@ import {
   removeReviewCheckout,
   resolveWorktreeGitCommonDir,
 } from "./worktree.js";
+import { pushGitHead, type GitPushCredential } from "./git-push.js";
 
 const FLUSH_MS = 200;
 const FLUSH_COUNT = 20;
@@ -35,6 +36,14 @@ const ACTION_REQUEST_MAX = 4 * 1024;
 export interface SelfDeployActionRequest {
   revision: string;
   idempotencyKey: string;
+}
+
+export interface DeliveryActionRequest {
+  provider: "github";
+  headBranch: string;
+  baseBranch: string;
+  title: string;
+  body: string;
 }
 
 type ApprovalResolver = (r: { behavior: "allow" | "deny"; updatedInput?: unknown; message?: string }) => void;
@@ -47,6 +56,7 @@ export class Executor {
   constructor(
     private send: (msg: DaemonMsg) => void,
     private agentActionUrl = process.env.HARBOR_AGENT_ACTION_URL ?? "",
+    private daemonToken = "",
   ) {}
 
   runningIds(): string[] {
@@ -110,11 +120,14 @@ export class Executor {
     let attachmentDir: string | null = null;
     let actionOutboxDir: string | null = null;
     let reviewCheckoutPath: string | null = null;
+    let effectiveDir: string | null = null;
     try {
       const agentEnvironment = spec.envOverrides ?? {};
       // 老 DB / 旧 server 也不能绕过新 API 校验：daemon 在真正 spawn 前再次 fail-closed。
       assertAgentEnvironmentSafe(agentEnvironment);
-      const { executionRoot: effectiveDir, shouldReportWorktreeReady } = prepareRunExecution(spec, runId);
+      const preparedExecution = prepareRunExecution(spec, runId);
+      effectiveDir = preparedExecution.executionRoot;
+      const { shouldReportWorktreeReady } = preparedExecution;
       reviewCheckoutPath = spec.reviewCheckout ? effectiveDir : null;
       if (shouldReportWorktreeReady && effectiveDir && spec.conversationId) {
         this.send({ type: "worktree_ready", runId, conversationId: spec.conversationId, path: effectiveDir });
@@ -122,8 +135,6 @@ export class Executor {
       if (reviewCheckoutPath) {
         this.send({ type: "run_execution_ready", runId, path: reviewCheckoutPath });
       }
-      const additionalWritableDirs = resolveRunAdditionalWritableDirs(spec, effectiveDir);
-
       if (spec.setupScript?.trim()) {
         if (!effectiveDir) throw new Error("Agent setup 需要 Repository mount");
         await runAgentSetup(effectiveDir, spec.setupScript, spec.setupKey, agentEnvironment, signal);
@@ -146,9 +157,28 @@ export class Executor {
         actionEnvironment.HARBOR_AGENT_SELF_DEPLOY_URL = `${actionBaseUrl}/self-deployments`;
         actionEnvironment.HARBOR_AGENT_ACTION_TOKEN = spec.agentActionToken;
         actionOutboxDir = mkdtempSync(join(tmpdir(), `harbor-actions-${runId.replace(/[^A-Za-z0-9_-]/g, "_")}-`));
+        const emptyGhConfig = join(actionOutboxDir, "gh-config");
+        mkdirSync(emptyGhConfig, { mode: 0o700 });
+        // Agent 不能继承 host 登录态绕过 principal broker；本地 commit 的非凭证 git config 仍保留。
+        actionEnvironment.GH_CONFIG_DIR = emptyGhConfig;
+        actionEnvironment.GH_TOKEN = "";
+        actionEnvironment.GITHUB_TOKEN = "";
+        actionEnvironment.GIT_TERMINAL_PROMPT = "0";
+        actionEnvironment.GIT_CONFIG_COUNT = "1";
+        actionEnvironment.GIT_CONFIG_KEY_0 = "credential.helper";
+        actionEnvironment.GIT_CONFIG_VALUE_0 = "";
+        actionEnvironment.SSH_AUTH_SOCK = "";
         actionEnvironment.HARBOR_AGENT_SELF_DEPLOY_REQUEST_PATH = join(actionOutboxDir, "self-deploy.json");
+        actionEnvironment.HARBOR_AGENT_GIT_PUSH_REQUEST_PATH = join(actionOutboxDir, "git-push.json");
+        actionEnvironment.HARBOR_AGENT_DELIVERY_REQUEST_PATH = join(actionOutboxDir, "delivery.json");
         Object.assign(actionEnvironment, agentActionTriggerEnvironment(spec.agentActionTrigger));
       }
+      const additionalWritableDirs = [
+        ...resolveRunAdditionalWritableDirs(spec, effectiveDir),
+        ...(actionOutboxDir && spec.backend === "codex" && spec.purpose === "implementation"
+          ? [actionOutboxDir]
+          : []),
+      ];
       const interactive = spec.permission === "default";
       const actionSandbox = resolveSelfDeployActionSandbox(spec, actionOutboxDir);
       const environmentSkillNames =
@@ -211,6 +241,41 @@ export class Executor {
         if (ev.sessionId) sessionId = ev.sessionId;
         if (ev.type === EventType.Result) cost = (ev.data.cost as Cost) ?? null;
         if (ev.type === EventType.Error) errMsg = String(ev.data.message ?? "unknown backend error");
+      }
+      if (!errMsg && actionOutboxDir && spec.agentActionToken && effectiveDir) {
+        const gitPushRequested = readGitPushActionRequest(join(actionOutboxDir, "git-push.json"));
+        const delivery = readDeliveryActionRequest(join(actionOutboxDir, "delivery.json"));
+        if (delivery && !gitPushRequested) {
+          throw new Error("GitHub Delivery action 必须同时请求受控 git push");
+        }
+        if (gitPushRequested) {
+          if (!this.daemonToken) throw new Error("daemon credential 未配置，不能安全获取 git push credential");
+          const credentialUrl = this.agentActionUrl.replace(
+            /\/hooks\/agent-actions\/issues$/,
+            "/hooks/daemon-actions/git/push-credential",
+          );
+          let credential = await requestGitPushCredential(
+            credentialUrl,
+            this.daemonToken,
+            spec.agentActionToken,
+            false,
+          );
+          let pushed = await pushGitHead(effectiveDir, credential);
+          if (!pushed.ok && pushed.authenticationFailed) {
+            credential = await requestGitPushCredential(
+              credentialUrl,
+              this.daemonToken,
+              spec.agentActionToken,
+              true,
+            );
+            pushed = await pushGitHead(effectiveDir, credential);
+          }
+          if (!pushed.ok) throw new Error(pushed.message);
+        }
+        if (delivery) {
+          const actionBaseUrl = this.agentActionUrl.replace(/\/issues$/, "");
+          await submitDeliveryAction(`${actionBaseUrl}/deliveries`, spec.agentActionToken, delivery);
+        }
       }
       if (!errMsg && actionOutboxDir && spec.agentActionToken) {
         const request = readSelfDeployActionRequest(join(actionOutboxDir, "self-deploy.json"));
@@ -307,6 +372,95 @@ export function readSelfDeployActionRequest(path: string): SelfDeployActionReque
     throw new Error("self-deploy action idempotencyKey 需要 1–128 字符");
   }
   return { revision, idempotencyKey };
+}
+
+export function readGitPushActionRequest(path: string): boolean {
+  const body = readActionRequestObject(path, "git push");
+  if (body === null) return false;
+  if (Object.keys(body).join(",") !== "push" || body.push !== true) {
+    throw new Error("git push action outbox 只允许 {\"push\":true}");
+  }
+  return true;
+}
+
+export function readDeliveryActionRequest(path: string): DeliveryActionRequest | null {
+  const body = readActionRequestObject(path, "delivery");
+  if (body === null) return null;
+  const allowed = ["baseBranch", "body", "headBranch", "provider", "title"];
+  if (Object.keys(body).sort().join(",") !== allowed.join(",")) {
+    throw new Error(`delivery action outbox 只允许 ${allowed.join(", ")}`);
+  }
+  const provider = body.provider;
+  const headBranch = typeof body.headBranch === "string" ? body.headBranch.trim() : "";
+  const baseBranch = typeof body.baseBranch === "string" ? body.baseBranch.trim() : "";
+  const title = typeof body.title === "string" ? body.title.trim() : "";
+  const deliveryBody = typeof body.body === "string" ? body.body : "";
+  if (provider !== "github") throw new Error("delivery action outbox 当前只支持 github provider");
+  if (!/^harbor\/[A-Za-z0-9._-]+$/.test(headBranch)) throw new Error("delivery action headBranch 无效");
+  if (!/^[A-Za-z0-9._/-]+$/.test(baseBranch) || baseBranch.includes("..")) throw new Error("delivery action baseBranch 无效");
+  if (!title || title.length > 256) throw new Error("delivery action title 需要 1–256 字符");
+  if (deliveryBody.length > 64 * 1024) throw new Error("delivery action body 不能超过 64KB");
+  return { provider, headBranch, baseBranch, title, body: deliveryBody };
+}
+
+function readActionRequestObject(path: string, label: string): Record<string, unknown> | null {
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} action outbox 必须是普通文件`);
+  if (stat.size > 128 * 1024) throw new Error(`${label} action outbox 过大`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw new Error(`${label} action outbox 不是合法 JSON`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${label} action outbox 必须是 JSON object`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+export async function requestGitPushCredential(
+  url: string,
+  daemonToken: string,
+  runActionToken: string,
+  forceRefresh: boolean,
+  fetchImpl: typeof fetch = fetch,
+): Promise<GitPushCredential> {
+  const response = await fetchImpl(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${daemonToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runActionToken, forceRefresh }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const parsed = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok) {
+    throw new Error(`Harbor git push credential request rejected (HTTP ${response.status})`);
+  }
+  if (typeof parsed.token !== "string" || typeof parsed.remoteUrl !== "string" || typeof parsed.refspec !== "string") {
+    throw new Error("Harbor git push credential response 无效");
+  }
+  return { token: parsed.token, remoteUrl: parsed.remoteUrl, refspec: parsed.refspec };
+}
+
+export async function submitDeliveryAction(
+  url: string,
+  token: string,
+  request: DeliveryActionRequest,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const response = await fetchImpl(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`Harbor delivery action rejected (HTTP ${response.status})`);
 }
 
 export function agentActionTriggerEnvironment(

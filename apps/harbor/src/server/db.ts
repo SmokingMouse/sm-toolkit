@@ -9,6 +9,7 @@ import { chmodSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { applyIdentityNormalization, inspectIdentityNormalization } from "./identity-normalization.js";
 import { inspectGitHubAppMigration } from "./github-app-migration.js";
+import { inspectGitHubPrincipalMigration } from "./github-principal-migration.js";
 import { summarizeDeviceCapabilities } from "../device-summary.js";
 import type { DeviceCapabilities } from "../protocol.js";
 
@@ -65,6 +66,8 @@ const APPLICATION_MUTATION_TABLES = [
   "github_installations",
   "github_workspace_installations",
   "github_repository_connections",
+  "github_account_authorizations",
+  "service_principals",
 ] as const;
 
 function maintenanceLinearizationSql(
@@ -2216,6 +2219,59 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX idx_github_repository_connections_workspace_repo
     ON github_repository_connections(workspace_id, github_repository_id, status);
   `,
+  // v30 —— RunPrincipal + per-Account GitHub authorization；Workspace mapping 不再充当 credential source。
+  `
+  CREATE TABLE service_principals (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    owner_type TEXT NOT NULL CHECK (owner_type IN ('automation')),
+    owner_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(owner_type, owner_id)
+  );
+
+  INSERT INTO service_principals
+    (id, workspace_id, owner_type, owner_id, status, created_at, updated_at)
+    SELECT 'sp_automation_' || id, workspace_id, 'automation', id, 'active', created_at, updated_at
+    FROM automations;
+
+  ALTER TABLE automations ADD COLUMN service_principal_id TEXT REFERENCES service_principals(id);
+  UPDATE automations SET service_principal_id = 'sp_automation_' || id;
+  CREATE UNIQUE INDEX idx_automations_service_principal
+    ON automations(service_principal_id);
+
+  ALTER TABLE runs ADD COLUMN principal_type TEXT NOT NULL DEFAULT 'system'
+    CHECK (principal_type IN ('account','service','system','external'));
+  ALTER TABLE runs ADD COLUMN principal_id TEXT;
+  ALTER TABLE runs ADD COLUMN principal_membership_id TEXT;
+  ALTER TABLE runs ADD COLUMN initiator_snapshot TEXT NOT NULL DEFAULT '{}';
+  CREATE INDEX idx_runs_principal ON runs(principal_type, principal_id, queued_at);
+
+  CREATE TABLE github_account_authorizations (
+    account_id TEXT PRIMARY KEY REFERENCES accounts(id),
+    github_user_id TEXT NOT NULL CHECK (
+      github_user_id <> '' AND github_user_id NOT GLOB '*[^0-9]*' AND github_user_id NOT GLOB '0*'
+    ),
+    credential_ref TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('active','reauthorization_required','revoked')),
+    scopes TEXT NOT NULL DEFAULT '[]',
+    access_expires_at INTEGER,
+    refresh_expires_at INTEGER,
+    authorized_at INTEGER NOT NULL,
+    refreshed_at INTEGER,
+    revoked_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    CHECK (
+      (status = 'active' AND revoked_at IS NULL) OR
+      (status = 'reauthorization_required' AND revoked_at IS NULL) OR
+      (status = 'revoked' AND revoked_at IS NOT NULL)
+    )
+  );
+  CREATE INDEX idx_github_account_authorizations_user
+    ON github_account_authorizations(github_user_id, status);
+  `,
 ];
 
 function backfillDeviceCapabilitySummaries(db: Database): void {
@@ -2356,6 +2412,15 @@ function openDbAtVersion(path: string, targetVersion: number): Database {
       db.close();
       throw new Error(`schema v29 GitHub App preflight 失败：${blockers}`);
     }
+    const githubPrincipalReport = version === 29 ? inspectGitHubPrincipalMigration(db) : null;
+    if (githubPrincipalReport && !githubPrincipalReport.migratable) {
+      const blockers = githubPrincipalReport.issues
+        .filter((entry) => entry.severity === "error")
+        .map((entry) => `${entry.code}[${entry.refs.join(",")}]`)
+        .join("; ");
+      db.close();
+      throw new Error(`schema v30 GitHub principal preflight 失败：${blockers}`);
+    }
     const rebuildsReferencedTables =
       version === 8 ||
       version === 9 ||
@@ -2454,6 +2519,11 @@ export function openV27MigrationFixtureDb(path = ":memory:"): Database {
 /** 只给 v29 GitHub App integration migration regression fixture 使用。 */
 export function openV28MigrationFixtureDb(path = ":memory:"): Database {
   return openDbAtVersion(path, 28);
+}
+
+/** 只给 v30 per-Account GitHub authorization migration regression fixture 使用。 */
+export function openV29MigrationFixtureDb(path = ":memory:"): Database {
+  return openDbAtVersion(path, 29);
 }
 
 function installMaintenanceLinearization(db: Database): void {

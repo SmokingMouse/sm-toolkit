@@ -263,6 +263,12 @@ export class AutomationService {
           {
             triggerContext,
             concurrencyKey: `automation:${automation.id}`,
+            principal: {
+              type: "service",
+              id: automation.servicePrincipalId,
+              membershipId: null,
+              initiator: { kind: "automation", automationId: automation.id },
+            },
           },
         )
       : this.coordinator.enqueueAutomationRun(

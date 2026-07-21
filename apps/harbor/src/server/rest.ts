@@ -29,6 +29,7 @@ import type {
   Origin,
   PromptBlockKey,
   Run,
+  RunPrincipal,
   RunPurpose,
   RunStreamFrame,
   Account,
@@ -70,6 +71,7 @@ import {
 } from "./prompt-wrapper.js";
 import type { DeploymentTargetConfig } from "../config.js";
 import type { GitHubIntegrationService } from "./github-integration.js";
+import type { GitHubCredentialBroker } from "./github-credential-broker.js";
 
 const PERMISSIONS = ["readonly", "auto-edit", "full", "default"];
 const MAX_SKILL_INSTRUCTION = 128 * 1024;
@@ -308,6 +310,7 @@ export function buildRest(
   selfDeployTarget: DeploymentTargetConfig | null = null,
   githubWebhookSecret = "",
   githubIntegration: GitHubIntegrationService | null = null,
+  githubCredentials: GitHubCredentialBroker | null = null,
 ): Hono {
   const app = new Hono();
   type ApiActor =
@@ -398,6 +401,39 @@ export function buildRest(
   const currentMembership = (c: Context, workspaceId: string): WorkspaceMember | null => {
     const actor = requestActor(c);
     return actor.kind === "account" ? store.membershipForAccount(actor.account.id, workspaceId) : null;
+  };
+
+  const requestPrincipal = (c: Context, workspaceId: string): RunPrincipal => {
+    const actor = requestActor(c);
+    if (actor.kind === "system") {
+      return { type: "system", id: null, membershipId: null, initiator: { kind: "system_token" } };
+    }
+    const membership = store.membershipForAccount(actor.account.id, workspaceId);
+    if (!membership || membership.status !== "active") {
+      throw new HTTPException(403, { message: "Account 没有当前 Workspace 的 active Membership" });
+    }
+    return {
+      type: "account",
+      id: actor.account.id,
+      membershipId: membership.id,
+      initiator: {
+        kind: "api",
+        credential: actor.credential.kind,
+        accountId: actor.account.id,
+        membershipId: membership.id,
+      },
+    };
+  };
+
+  const enqueueForRequest = (
+    c: Context,
+    ...args: Parameters<RunCoordinator["enqueueRun"]>
+  ): Run => {
+    const [conv, agent, prompt, purpose, promptEvent, triggerRef, options = {}] = args;
+    return enqueue(conv, agent, prompt, purpose, promptEvent, triggerRef, {
+      ...options,
+      principal: requestPrincipal(c, conv.workspaceId),
+    });
   };
 
   const requireRole = (
@@ -739,11 +775,7 @@ export function buildRest(
       results.some((result) => result.status === "started") ? 202 : 200);
   });
 
-  const runActionContext = (c: Context) => {
-    const authorization = c.req.header("authorization") ?? "";
-    const raw = authorization.startsWith("Bearer ")
-      ? authorization.slice(7)
-      : "";
+  const runForRawActionToken = (raw: string): Run => {
     if (!raw || raw.length > 512) {
       throw new HTTPException(401, { message: "run action token 不正确" });
     }
@@ -754,6 +786,15 @@ export function buildRest(
     if (!run || run.status !== "running") {
       throw new HTTPException(401, { message: "run action token 已失效" });
     }
+    return run;
+  };
+
+  const runActionContext = (c: Context) => {
+    const authorization = c.req.header("authorization") ?? "";
+    const raw = authorization.startsWith("Bearer ")
+      ? authorization.slice(7)
+      : "";
+    const run = runForRawActionToken(raw);
     const agent = store.getAgent(run.agentId);
     if (!agent || agent.workspaceId !== run.workspaceId) {
       throw new HTTPException(409, { message: "run agent 不存在" });
@@ -763,6 +804,37 @@ export function buildRest(
       : null;
     return { run, agent, conversation };
   };
+
+  /** daemon-only credential handoff；GitHub token 从不返回给 Agent action credential。 */
+  app.post("/hooks/daemon-actions/git/push-credential", async (c) => {
+    requireBootstrapToken(c);
+    if (!githubCredentials) return c.json({ error: "GitHub credential broker 未配置" }, 503);
+    const body = await c.req.json() as { runActionToken?: string; forceRefresh?: boolean };
+    const run = runForRawActionToken(body.runActionToken ?? "");
+    if (run.purpose !== "implementation" || !run.conversationId || !run.repositoryId) {
+      return c.json({ error: "只有 Repository Issue 的 implementation Run 可以请求 git push credential" }, 403);
+    }
+    const conversation = store.getConversation(run.conversationId);
+    const repository = store.getRepository(run.repositoryId);
+    if (!conversation || conversation.kind !== "issue" || conversation.repositoryId !== repository?.id) {
+      return c.json({ error: "Run 的 Issue/Repository 绑定无效" }, 409);
+    }
+    const connection = store.githubRepositoryConnectionForRepository(repository.id);
+    if (!connection || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(connection.fullName)) {
+      return c.json({ error: "Repository 没有可信 GitHub connection" }, 409);
+    }
+    try {
+      const token = await githubCredentials.tokenForRepository(repository, run.principal, body.forceRefresh === true);
+      c.header("Cache-Control", "no-store");
+      return c.json({
+        token,
+        remoteUrl: `https://github.com/${connection.fullName}.git`,
+        refspec: `HEAD:refs/heads/harbor/${conversation.id}`,
+      });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 403);
+    }
+  });
 
   /** Run-scoped 只读快照：给用户自定义的 routing Agent 足够信息，但不泄露凭证/环境/指令。 */
   app.get("/hooks/agent-actions/context", (c) => {
@@ -1033,7 +1105,9 @@ export function buildRest(
     }
     if (body.dispatch === true && assignee) {
       const prompt = body.prompt?.trim() || description || title;
-      const dispatched = coordinator.enqueueRun(issue, assignee, prompt, "implementation");
+      const dispatched = coordinator.enqueueRun(issue, assignee, prompt, "implementation", undefined, run.id, {
+        principal: run.principal,
+      });
       return c.json({ issue: store.getConversation(issue.id), run: dispatched }, 201);
     }
     return c.json(issue, 201);
@@ -1129,6 +1203,7 @@ export function buildRest(
           {
             allowQueuedBehindConversation: true,
             concurrencyKey: `conversation:${conversation.id}`,
+            principal: run.principal,
           },
         );
         return c.json({ decision: "request_changes", run: next }, 201);
@@ -1141,9 +1216,9 @@ export function buildRest(
     if (!delivery) return c.json({ error: "当前 Issue 尚未注册 PR/MR Delivery" }, 400);
     try {
       if (delivery.provider === "github") {
-        delivery = await deliveries.sync(delivery, conversation, now, run.id);
+        delivery = await deliveries.sync(delivery, conversation, now, run.id, run.principal);
       } else if (delivery.provider === "codebase") {
-        delivery = await deliveries.refresh(delivery, now);
+        delivery = await deliveries.refresh(delivery, now, run.principal);
       }
       if (
         run.reviewCheckout &&
@@ -1167,6 +1242,7 @@ export function buildRest(
             { confirmed: delivery.provider === "codebase" },
             now,
             run.id,
+            run.principal,
           );
         }
       }
@@ -1569,6 +1645,18 @@ export function buildRest(
     } catch (error) {
       bad(error instanceof Error ? error.message : String(error));
     }
+  });
+
+  app.delete("/api/accounts/me/github/authorization", (c) => {
+    if (!githubIntegration) return c.json({ error: "GitHub App 登录未配置" }, 503);
+    const actor = requestActor(c);
+    if (actor.kind !== "account" || actor.credential.kind !== "session") {
+      bad("只有登录 Session 可以撤销 GitHub authorization");
+    }
+    if (!githubIntegration.revokeUserAuthorization(actor.account.id)) {
+      throw new HTTPException(404, { message: "GitHub authorization 不存在" });
+    }
+    return c.json({ ok: true });
   });
 
   app.get("/api/accounts/me/passkeys", (c) => {
@@ -2496,7 +2584,12 @@ export function buildRest(
       );
     } else if (b.source === "github") {
       if (!b.url?.trim()) bad("GitHub import 缺少 url");
-      bundle = await skillImports.fromGitHub(b.url, b.ref, workspace.id);
+      bundle = await skillImports.fromGitHub(
+        b.url,
+        b.ref,
+        workspace.id,
+        requestPrincipal(c, workspace.id),
+      );
     } else if (b.zipBase64) {
       bundle = await skillImports.fromZip(b.zipBase64);
     } else {
@@ -2561,6 +2654,7 @@ export function buildRest(
       sourcePath: skill.sourcePath,
       sourceRef: skill.sourceRef,
       workspaceId: workspace.id,
+      principal: requestPrincipal(c, workspace.id),
     });
     const metadata = importedSkillMetadata(bundle.files, skill.name);
     store.updateSkill(
@@ -3251,7 +3345,8 @@ export function buildRest(
       },
       Date.now(),
     );
-    const run = enqueue(
+    const run = enqueueForRequest(
+      c,
       conv,
       agent,
       `${ISSUE_TRIAGE_PROMPT}${b.request.trim()}`,
@@ -3460,7 +3555,7 @@ export function buildRest(
     if (!agent) bad("Issue 尚未指派 Agent，请先选择 Assignee");
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
     appendRequestMessage(c, conv.id, b.prompt.trim());
-    const run = enqueue(conv, agent, b.prompt.trim(), purpose);
+    const run = enqueueForRequest(c, conv, agent, b.prompt.trim(), purpose);
     return c.json(run, 201);
   });
 
@@ -3477,7 +3572,7 @@ export function buildRest(
     const prompt = b.prompt?.trim() || conv.description?.trim();
     if (!prompt) bad("Issue 缺少任务描述，无法派发");
     appendRequestMessage(c, conv.id, prompt);
-    return c.json(enqueue(conv, agent, prompt, "implementation"), 201);
+    return c.json(enqueueForRequest(c, conv, agent, prompt, "implementation"), 201);
   });
 
   app.post("/api/conversations/:id/request-changes", async (c) => {
@@ -3493,7 +3588,7 @@ export function buildRest(
     if (agent.archivedAt) bad(`agent "${agent.name}" 已归档`);
     appendRequestMessage(c, conv.id, b.feedback.trim());
     return c.json(
-      enqueue(conv, agent, b.feedback.trim(), "implementation"),
+      enqueueForRequest(c, conv, agent, b.feedback.trim(), "implementation"),
       201,
     );
   });
@@ -3511,7 +3606,7 @@ export function buildRest(
       b.prompt?.trim() ||
       "请独立审查本 Issue 的实现结果、代码改动和测试证据，指出阻塞问题与改进建议；不要直接宣告 Issue 完成。";
     appendRequestMessage(c, conv.id, prompt);
-    return c.json(enqueue(conv, agent, prompt, "review"), 201);
+    return c.json(enqueueForRequest(c, conv, agent, prompt, "review"), 201);
   });
 
   app.post("/api/conversations/:id/messages", async (c) => {
@@ -3538,7 +3633,7 @@ export function buildRest(
         : conv.kind === "chat"
           ? ("event.chat.message_created" as const)
           : ("event.issue.message_created" as const);
-    const run = enqueue(conv, agent, body, purpose, promptEvent, message.id);
+    const run = enqueueForRequest(c, conv, agent, body, purpose, promptEvent, message.id);
     return c.json({ message, run }, 201);
   });
 
@@ -3597,7 +3692,7 @@ export function buildRest(
       "mergedRevision",
     ]);
     const fresh = await deliveryAction(() =>
-      deliveries.merge(delivery, conv, b),
+      deliveries.merge(delivery, conv, b, Date.now(), undefined, requestPrincipal(c, conv.workspaceId)),
     );
     finalizeDelivery(fresh);
     return c.json(store.getDelivery(fresh.id));
@@ -3608,14 +3703,26 @@ export function buildRest(
       currentWorkspace(c).id,
       c.req.param("id"),
     );
-    const fresh = await deliveryAction(() => deliveries.refresh(delivery));
+    const conversation = store.getConversation(delivery.conversationId);
+    if (!conversation) throw new HTTPException(404, { message: "Delivery Issue 不存在" });
+    const fresh = await deliveryAction(() => deliveries.refresh(
+      delivery,
+      Date.now(),
+      requestPrincipal(c, conversation.workspaceId),
+    ));
     finalizeDelivery(fresh);
     return c.json(store.getDelivery(fresh.id));
   });
 
   app.post("/api/deliveries/:id/sync", async (c) => {
     const { delivery, conversation: conv } = assertDeliveryWorkspace(currentWorkspace(c).id, c.req.param("id"));
-    const fresh = await deliveryAction(() => deliveries.sync(delivery, conv));
+    const fresh = await deliveryAction(() => deliveries.sync(
+      delivery,
+      conv,
+      Date.now(),
+      undefined,
+      requestPrincipal(c, conv.workspaceId),
+    ));
     finalizeDelivery(fresh);
     return c.json(store.getDelivery(fresh.id));
   });

@@ -268,7 +268,15 @@ export class ScmService {
       purpose,
       event.commentBody ? "event.issue.mentioned" : "event.issue.assigned",
       eventId,
-      { triggerContext: { scm: { provider: "codebase", eventId, externalId: event.externalId } } },
+      {
+        triggerContext: { scm: { provider: "codebase", eventId, externalId: event.externalId } },
+        principal: {
+          type: "external",
+          id: `codebase:${event.authorId ?? "unknown"}`,
+          membershipId: null,
+          initiator: { provider: "codebase", subject: event.authorId, eventId },
+        },
+      },
     );
   }
 

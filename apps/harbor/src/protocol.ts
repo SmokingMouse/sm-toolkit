@@ -451,6 +451,21 @@ export interface AuthIdentity {
   createdAt: number;
 }
 
+/** Account 对 GitHub App 的可执行授权；token 本体只存在 server-owned credential store。 */
+export interface GitHubAccountAuthorization {
+  accountId: string;
+  githubUserId: string;
+  credentialRef: string;
+  status: "active" | "reauthorization_required" | "revoked";
+  scopes: string[];
+  accessExpiresAt: number | null;
+  refreshExpiresAt: number | null;
+  authorizedAt: number;
+  refreshedAt: number | null;
+  revokedAt: number | null;
+  updatedAt: number;
+}
+
 /** GitHub App 的一次 account/organization installation；不包含短期 token 或私钥。 */
 export interface GitHubInstallation {
   installationId: string;
@@ -656,6 +671,8 @@ export interface Run {
   dispatchDepth: number;
   /** 同一 root Run 下的用户幂等键；null 表示普通入口创建。 */
   dispatchKey: string | null;
+  /** 入队时冻结的执行主体；共享 Agent 不继承 Agent 创建者的身份。 */
+  principal: RunPrincipal;
   /** Review/verification 锁定的可信 Delivery revision；无可信 revision 时均为 null。 */
   reviewCheckout: ReviewCheckout | null;
   status: RunStatus;
@@ -666,6 +683,32 @@ export interface Run {
   startedAt: number | null;
   finishedAt: number | null;
 }
+
+export type RunPrincipal =
+  | {
+      type: "account";
+      id: string;
+      membershipId: string;
+      initiator: Record<string, unknown>;
+    }
+  | {
+      type: "service";
+      id: string;
+      membershipId: null;
+      initiator: Record<string, unknown>;
+    }
+  | {
+      type: "system";
+      id: null;
+      membershipId: null;
+      initiator: Record<string, unknown>;
+    }
+  | {
+      type: "external";
+      id: string;
+      membershipId: null;
+      initiator: Record<string, unknown>;
+    };
 
 export interface RunEventRow {
   runId: string;
@@ -754,6 +797,8 @@ export interface Automation {
   workspaceId: string;
   name: string;
   agentId: string;
+  /** Automation 自己的机器身份；只使用 installation 权限，不冒充创建者。 */
+  servicePrincipalId: string;
   prompt: string;
   /** 用户只选择结果落点；Run purpose 由 Harbor 根据 output 推导。 */
   output: AutomationOutput;

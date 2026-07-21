@@ -18,6 +18,7 @@ import type {
   Run,
   RunAttachment,
   RunPurpose,
+  RunPrincipal,
   RunSpec,
   ReviewCheckout,
   ServerMsg,
@@ -70,6 +71,7 @@ export class RunCoordinator {
       rootRunId?: string;
       dispatchDepth?: number;
       dispatchKey?: string | null;
+      principal?: RunPrincipal;
     } = {},
   ): Run {
     if (conv.workspaceId !== agent.workspaceId) {
@@ -190,6 +192,7 @@ export class RunCoordinator {
         rootRunId: options.rootRunId,
         dispatchDepth: options.dispatchDepth,
         dispatchKey: options.dispatchKey,
+        principal: options.principal,
         reviewCheckout,
         attachments: options.attachments,
       },
@@ -324,6 +327,12 @@ export class RunCoordinator {
       triggerRef: automation.id,
       triggerContext,
       concurrencyKey: `automation:${automation.id}`,
+      principal: {
+        type: "service",
+        id: automation.servicePrincipalId,
+        membershipId: null,
+        initiator: { kind: "automation", automationId: automation.id },
+      },
     }, Date.now());
     this.pump(agent.deviceId);
     return this.store.getRun(run.id)!;
