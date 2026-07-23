@@ -124,7 +124,7 @@ export function buildRest(
         deviceId: device.id,
         backend,
         model: b.model ?? null,
-        permission: permission as import("@sm/agent").PermissionPolicy,
+        permission: permission as import("@smokingmouse/agent").PermissionPolicy,
         workdir: b.workdir,
         isolation,
         instruction: b.instruction ?? null,

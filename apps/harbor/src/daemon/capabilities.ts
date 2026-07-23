@@ -1,11 +1,11 @@
 /**
  * 设备能力探测：已装 CLI 版本 + 本机 endpoints.yaml 可用模型清单。
  * server 建 agent 时用这份清单校验 model（harbor.md §8「endpoints.yaml 各机不一致」对策）。
- * endpoints 同时上报裸模型名和 "provider:model" 限定 id 两种形式，与 @sm/llm 解析规则对齐。
+ * endpoints 同时上报裸模型名和 "provider:model" 限定 id 两种形式，与 @smokingmouse/llm 解析规则对齐。
  */
 
 import { spawnSync } from "node:child_process";
-import { loadEndpoints, listEndpoints } from "@sm/llm";
+import { loadEndpoints, listEndpoints } from "@smokingmouse/llm";
 import type { DeviceCapabilities } from "../protocol.js";
 
 function cliVersion(cmd: string): string | null {

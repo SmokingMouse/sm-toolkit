@@ -14,9 +14,9 @@
     "build": "tsc --build"
   },
   "dependencies": {
-    "@sm/agent": "workspace:*",
+    "@smokingmouse/agent": "workspace:*",
     "@sm/channel-feishu": "workspace:*",
-    "@sm/llm": "workspace:*",
+    "@smokingmouse/llm": "workspace:*",
     "croner": "^10.0.1",
     "hono": "^4.7.0",
     "yaml": "^2.9.0"

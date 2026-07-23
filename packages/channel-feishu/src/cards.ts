@@ -1,4 +1,4 @@
-import type { Content, ModelGroup, ContentAction, CommandInfo } from '@sm/agent'
+import type { Content, ModelGroup, ContentAction, CommandInfo } from '@smokingmouse/agent'
 
 const MAX_TEXT_LENGTH = 4000
 

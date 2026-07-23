@@ -7,7 +7,7 @@
  * ws 层只做传输解析，不含业务。
  */
 
-import type { Cost } from "@sm/agent";
+import type { Cost } from "@smokingmouse/agent";
 import type { Conversation, HarborAgent, Run, RunSpec, ServerMsg } from "../protocol.js";
 import type { HarborStore } from "./store.js";
 import type { RunBus } from "./bus.js";
@@ -107,7 +107,7 @@ export class RunCoordinator {
   }
 
   /** daemon 批量事件：幂等落库 + 实时广播 */
-  onRunEvents(events: { runId: string; seq: number; event: import("@sm/agent").AgentEvent }[]): void {
+  onRunEvents(events: { runId: string; seq: number; event: import("@smokingmouse/agent").AgentEvent }[]): void {
     if (events.length === 0) return;
     this.store.insertRunEvents(events, Date.now());
     for (const e of events) this.bus.emitEvent(e.runId, e.seq, e.event);

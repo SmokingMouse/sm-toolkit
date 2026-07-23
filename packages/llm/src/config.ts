@@ -9,20 +9,46 @@ import type {
   ProviderInfo,
 } from './types.js'
 
-const DEFAULT_CONFIG_PATH = resolve(
-  process.env.HOME ?? '~',
-  '.claude/global/endpoints.yaml',
-)
+// endpoints.yaml 搜索顺序（先命中先用）：
+//   1. loadEndpoints(path) 显式参数
+//   2. $SM_ENDPOINTS_PATH
+//   3. $XDG_CONFIG_HOME/sm/endpoints.yaml（默认 ~/.config/sm/endpoints.yaml）—— 规范位置
+//   4. ~/.claude/global/endpoints.yaml —— legacy 位置，兼容既有部署
+// 模板见包内 endpoints.example.yaml。API key 永远走环境变量，yaml 里只写变量名。
+function defaultConfigPath(): string {
+  if (process.env.SM_ENDPOINTS_PATH) return process.env.SM_ENDPOINTS_PATH
+  const home = process.env.HOME ?? '~'
+  const xdg = process.env.XDG_CONFIG_HOME ?? resolve(home, '.config')
+  const candidates = [
+    resolve(xdg, 'sm/endpoints.yaml'),
+    resolve(home, '.claude/global/endpoints.yaml'), // legacy
+  ]
+  // 都不存在时返回规范位置，让 "not found" 报错指向该建文件的地方。
+  return candidates.find((c) => existsSync(c)) ?? candidates[0]!
+}
 
 let _cached: ConfigFile | null = null
 let _cachedPath: string | null = null
 
+/** 当前生效的 endpoints.yaml 路径（可能不存在——调用方自行判断建文件）。 */
+export function resolveConfigPath(): string {
+  return defaultConfigPath()
+}
+
+/** 外部编辑了 endpoints.yaml / env_file 之后调用，下次 loadEndpoints 重读磁盘。 */
+export function clearEndpointsCache(): void {
+  _cached = null
+  _cachedPath = null
+}
+
 export function loadEndpoints(path?: string): ConfigFile {
-  const p = path ?? DEFAULT_CONFIG_PATH
+  const p = path ?? defaultConfigPath()
   if (_cached && _cachedPath === p) return _cached
 
   if (!existsSync(p)) {
-    throw new Error(`endpoints.yaml not found: ${p}`)
+    throw new Error(
+      `endpoints.yaml not found: ${p} (set $SM_ENDPOINTS_PATH or create ~/.config/sm/endpoints.yaml; template: endpoints.example.yaml in @smokingmouse/llm)`,
+    )
   }
   const raw = readFileSync(p, 'utf-8')
   const parsed = parseYaml(raw) as ConfigFile

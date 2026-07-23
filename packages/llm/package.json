@@ -1,8 +1,14 @@
 {
-  "name": "@sm/llm",
-  "version": "0.2.0",
+  "name": "@smokingmouse/llm",
+  "version": "0.3.0",
   "type": "module",
-  "description": "配置驱动的 LLM 直连 API 客户端 —— 读 ~/.claude/global/endpoints.yaml，OpenAI/Anthropic 兼容 provider + retry。",
+  "description": "配置驱动的 LLM 直连 API 客户端 —— 读 endpoints.yaml（$SM_ENDPOINTS_PATH / ~/.config/sm/endpoints.yaml），OpenAI/Anthropic 兼容 provider + retry。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SmokingMouse/sm-toolkit.git",
+    "directory": "packages/llm"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -12,7 +18,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "endpoints.example.yaml"
   ],
   "scripts": {
     "prepare": "tsc --build",

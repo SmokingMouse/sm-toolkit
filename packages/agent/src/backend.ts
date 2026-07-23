@@ -57,7 +57,7 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** 逐 token 流(claude --include-partial-messages)。默认 true */
   partialMessages?: boolean;
-  /** 采样温度。仅裸 API backend(@sm/llm 的 LLMClient)消费;claude/codex 惰性忽略。 */
+  /** 采样温度。仅裸 API backend(@smokingmouse/llm 的 LLMClient)消费;claude/codex 惰性忽略。 */
   temperature?: number;
   /** 要求 JSON 输出(OpenAI response_format)。仅裸 API backend 消费;claude/codex 惰性忽略。 */
   jsonMode?: boolean;

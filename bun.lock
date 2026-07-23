@@ -5,7 +5,7 @@
     "": {
       "name": "sm-sdk",
       "dependencies": {
-        "@sm/llm": "workspace:*",
+        "@smokingmouse/llm": "workspace:*",
         "yaml": "^2.9.0",
       },
       "devDependencies": {
@@ -20,7 +20,7 @@
         "llm": "src/main.ts",
       },
       "dependencies": {
-        "@sm/llm": "workspace:*",
+        "@smokingmouse/llm": "workspace:*",
       },
     },
     "apps/harbor": {
@@ -32,9 +32,9 @@
         "harbor": "src/cli/main.ts",
       },
       "dependencies": {
-        "@sm/agent": "workspace:*",
         "@sm/channel-feishu": "workspace:*",
-        "@sm/llm": "workspace:*",
+        "@smokingmouse/agent": "workspace:*",
+        "@smokingmouse/llm": "workspace:*",
         "croner": "^10.0.1",
         "hono": "^4.7.0",
         "yaml": "^2.9.0",
@@ -58,10 +58,10 @@
       },
     },
     "packages/agent": {
-      "name": "@sm/agent",
-      "version": "0.2.0",
+      "name": "@smokingmouse/agent",
+      "version": "0.3.0",
       "dependencies": {
-        "@sm/llm": "file:../llm",
+        "@smokingmouse/llm": "^0.3.0",
       },
       "devDependencies": {
         "@types/node": "^25.9.2",
@@ -80,7 +80,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@larksuiteoapi/node-sdk": "^1.68.0",
-        "@sm/agent": "workspace:*",
+        "@smokingmouse/agent": "workspace:*",
       },
     },
     "packages/guardrails": {
@@ -91,8 +91,8 @@
       },
     },
     "packages/llm": {
-      "name": "@sm/llm",
-      "version": "0.2.0",
+      "name": "@smokingmouse/llm",
+      "version": "0.3.0",
       "dependencies": {
         "yaml": "^2.7.1",
       },
@@ -213,8 +213,6 @@
 
     "@protobufjs/utf8": ["@protobufjs/utf8@1.1.1", "https://registry.npmmirror.com/@protobufjs/utf8/-/utf8-1.1.1.tgz", {}, "sha512-oOAWABowe8EAbMyWKM0tYDKi8Yaox52D+HWZhAIJqQXbqe0xI/GV7FhLWqlEKreMkfDjshR5FKgi3mnle0h6Eg=="],
 
-    "@sm/agent": ["@sm/agent@workspace:packages/agent"],
-
     "@sm/audit": ["@sm/audit@workspace:packages/audit"],
 
     "@sm/channel-feishu": ["@sm/channel-feishu@workspace:packages/channel-feishu"],
@@ -223,11 +221,13 @@
 
     "@sm/guardrails": ["@sm/guardrails@workspace:packages/guardrails"],
 
-    "@sm/llm": ["@sm/llm@workspace:packages/llm"],
-
     "@sm/sandbox": ["@sm/sandbox@workspace:packages/sandbox"],
 
     "@sm/store": ["@sm/store@workspace:packages/store"],
+
+    "@smokingmouse/agent": ["@smokingmouse/agent@workspace:packages/agent"],
+
+    "@smokingmouse/llm": ["@smokingmouse/llm@workspace:packages/llm"],
 
     "@swc/helpers": ["@swc/helpers@0.5.15", "https://registry.npmmirror.com/@swc/helpers/-/helpers-0.5.15.tgz", { "dependencies": { "tslib": "^2.8.0" } }, "sha512-JQ5TuMi45Owi4/BIMAJBoSQoOJu12oOk/gADqlcUL9JEdHB8vyjUSsxqeNXnmXHjYKMi2WcYtezGEEhqUI/E2g=="],
 

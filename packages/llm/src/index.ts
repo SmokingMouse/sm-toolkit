@@ -5,6 +5,8 @@ export {
   listEndpoints,
   listProviders,
   getApiKey,
+  resolveConfigPath,
+  clearEndpointsCache,
 } from './config.js'
 export type { Protocol } from './config.js'
 export { withRetry, categorizeHttpError } from './retry.js'

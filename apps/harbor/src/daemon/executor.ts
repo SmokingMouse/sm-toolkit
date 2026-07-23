@@ -1,5 +1,5 @@
 /**
- * run 执行器：run_start → @sm/agent Backend 流式执行 → run_event 批量回传（200ms/20 条）
+ * run 执行器：run_start → @smokingmouse/agent Backend 流式执行 → run_event 批量回传（200ms/20 条）
  * → run_done（含 cost/claude_session_id）。send 由 main 注入（断线时进 outbox 补发）。
  *
  * P2 新增：
@@ -11,7 +11,7 @@
  *     result/cost 不受影响）。
  */
 
-import { ClaudeBackend, CodexBackend, EventType, type AgentEvent, type Backend, type Cost } from "@sm/agent";
+import { ClaudeBackend, CodexBackend, EventType, type AgentEvent, type Backend, type Cost } from "@smokingmouse/agent";
 import type { DaemonMsg, RunSpec } from "../protocol.js";
 import { ensureWorktree } from "./worktree.js";
 

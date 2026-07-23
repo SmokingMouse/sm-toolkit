@@ -11,7 +11,7 @@
     "typecheck": "tsc --build"
   },
   "dependencies": {
-    "@sm/llm": "workspace:*",
+    "@smokingmouse/llm": "workspace:*",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

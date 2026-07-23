@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 import { readFileSync, readSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
-import { LLMClient } from '@sm/llm'
-import type { Message } from '@sm/llm'
+import { LLMClient } from '@smokingmouse/llm'
+import type { Message } from '@smokingmouse/llm'
 
 const client = new LLMClient()
 

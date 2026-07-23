@@ -4,7 +4,7 @@
  */
 
 import type { Run, RunStreamFrame } from "../protocol.js";
-import type { Cost } from "@sm/agent";
+import type { Cost } from "@smokingmouse/agent";
 
 export const c = {
   reset: "\x1b[0m",

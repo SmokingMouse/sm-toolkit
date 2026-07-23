@@ -14,7 +14,7 @@
  *   DM：anchor=chatId（滚动会话，agent 前缀=开新会话、裸文本=续最新）。
  */
 
-import type { Channel, Content, IncomingAction, IncomingMessage } from "@sm/agent";
+import type { Channel, Content, IncomingAction, IncomingMessage } from "@smokingmouse/agent";
 import type { Approval, Conversation, HarborAgent, Run } from "../protocol.js";
 import type { FeishuConfig } from "../config.js";
 import type { HarborStore } from "./store.js";

@@ -1,7 +1,7 @@
 /**
  * Claude Code CLI 后端 —— spawn `claude` + 把 stream-json 归一成统一 Event。
  * 事件映射基于 agent-gateway 的实测(claude 2.1.167)原样移植,新增能力:模型解析
- * 原生接入 endpoints.yaml(@sm/llm),让 `--model` 可以是第三方 Anthropic 兼容端点
+ * 原生接入 endpoints.yaml(@smokingmouse/llm),让 `--model` 可以是第三方 Anthropic 兼容端点
  * 的模型名 —— 这是本包吸收 agent-gateway 之外新增的唯一能力,其余 spawn/解析逻辑
  * 保持原样,不顺手"优化",降低移植过程中引入行为漂移的风险。
  */
@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import { EventType, type AgentEvent, type Cost } from "../events.js";
 import type { Backend, RunOptions, PermissionPolicy } from "../backend.js";
 import { streamLines, type StdinChannel } from "./stream-lines.js";
-import { loadEndpoints, resolveEndpoint, getApiKey } from "@sm/llm";
+import { loadEndpoints, resolveEndpoint, getApiKey } from "@smokingmouse/llm";
 
 // claude CLI 自己认识的裸 tier 别名 —— 这些不查 endpoints.yaml,直通给 CLI 自己
 // 的别名表解析(它们不在 endpoints.yaml 的 model 列表里,查了也找不到)。

@@ -11,8 +11,8 @@ import {
 import { join, resolve, dirname } from 'node:path'
 import * as readline from 'node:readline'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
-import { loadEndpoints, listProviders } from '@sm/llm'
-import type { ConfigFile } from '@sm/llm'
+import { loadEndpoints, listProviders } from '@smokingmouse/llm'
+import type { ConfigFile } from '@smokingmouse/llm'
 
 const ROOT = resolve(import.meta.dir, '..')
 const HOME = process.env.HOME ?? '~'
@@ -158,11 +158,11 @@ function registerPackages(): void {
     const pkgPath = join(dir, 'package.json')
     if (!existsSync(pkgPath)) continue
     const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
-    if (typeof pkg.name === 'string' && pkg.name.startsWith('@sm/')) {
+    if (typeof pkg.name === 'string' && /^@(sm|smokingmouse)\//.test(pkg.name)) {
       linkPackage(dir, pkg.name)
     }
   }
-  console.log(`\n  ${c.dim('其他项目里跑 `bun link @sm/<包名>` 即可引用。')}`)
+  console.log(`\n  ${c.dim('其他项目里跑 `bun link @smokingmouse/<包名>（或 @sm/<内部包名>）` 即可引用。')}`)
 }
 
 function registerCli(): void {

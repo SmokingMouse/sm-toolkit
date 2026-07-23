@@ -4,7 +4,7 @@
  */
 
 import type { Database } from "bun:sqlite";
-import type { AgentEvent, Cost } from "@sm/agent";
+import type { AgentEvent, Cost } from "@smokingmouse/agent";
 import type {
   Approval,
   ApprovalStatus,
@@ -25,7 +25,7 @@ import type {
   RunStatus,
   UsageRow,
 } from "../protocol.js";
-import type { PermissionPolicy } from "@sm/agent";
+import type { PermissionPolicy } from "@smokingmouse/agent";
 import { newId } from "../ids.js";
 
 // ── 行类型（SQLite 返回形状） ───────────────────────────

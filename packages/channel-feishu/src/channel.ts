@@ -10,7 +10,7 @@ import type {
   IncomingMessage,
   IncomingAction,
   Content,
-} from '@sm/agent'
+} from '@smokingmouse/agent'
 import type { FeishuChannelConfig } from './types.js'
 import { renderContent } from './cards.js'
 

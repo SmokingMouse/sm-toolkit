@@ -4,7 +4,7 @@
  */
 
 import type { Approval, ApprovalStatus, Run, RunStreamFrame } from "../protocol.js";
-import type { AgentEvent } from "@sm/agent";
+import type { AgentEvent } from "@smokingmouse/agent";
 
 type Subscriber = (frame: RunStreamFrame) => void;
 

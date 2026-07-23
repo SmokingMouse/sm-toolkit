@@ -1,8 +1,14 @@
 {
-  "name": "@sm/agent",
-  "version": "0.2.0",
+  "name": "@smokingmouse/agent",
+  "version": "0.3.0",
   "type": "module",
-  "description": "Claude Code / Codex CLI 编排引擎 —— 统一 Backend 抽象(吸收自 agent-gateway),原生接入 @sm/llm 的 endpoints.yaml 做模型/端点解析。",
+  "description": "Claude Code / Codex CLI 编排引擎 —— 统一 Backend 抽象(吸收自 agent-gateway),原生接入 @smokingmouse/llm 的 endpoints.yaml 做模型/端点解析。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SmokingMouse/sm-toolkit.git",
+    "directory": "packages/agent"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -19,7 +25,7 @@
     "build": "tsc --build"
   },
   "dependencies": {
-    "@sm/llm": "file:../llm"
+    "@smokingmouse/llm": "^0.3.0"
   },
   "devDependencies": {
     "typescript": "^6.0.3",

@@ -2,12 +2,12 @@
  * Harbor 协议 —— server / daemon / CLI 三端共享的领域类型 + WS 消息类型。
  * 单一真相源：领域定义对齐 progress/harbor.md §2（glossary），改这里必须三端同步审视。
  *
- * 命名注意：Harbor 的 Agent 与 Claude Code 的 subagent、@sm/agent 包名语义不同，
+ * 命名注意：Harbor 的 Agent 与 Claude Code 的 subagent、@smokingmouse/agent 包名语义不同，
  * 统一用 HarborAgent 规避碰撞；claude_session_id 全称，不简写 session。
  * id 一律 string（19 位整数 JSON 精度坑，见 harbor.md §8）。
  */
 
-import type { AgentEvent, Cost, PermissionPolicy } from "@sm/agent";
+import type { AgentEvent, Cost, PermissionPolicy } from "@smokingmouse/agent";
 
 // ── 领域类型 ────────────────────────────────────────────
 
