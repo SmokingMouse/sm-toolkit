@@ -2,6 +2,9 @@
 
 ## Current Focus
 
+**npm 发包准备（2026-07-23，已 commit `5157a79`，待 npm login 后 publish）**：trellis 部署去摩擦驱动。① 改名 `@sm/llm`→`@smokingmouse/llm`、`@sm/agent`→`@smokingmouse/agent`（npm org `sm` 被占），全仓 import 同步（harbor/cli/channel-feishu/install 脚本），版本 0.3.0；agent 对 llm 依赖 `file:../llm`→`^0.3.0`（仓内仍 workspace 解析，发布后对消费者合法）。② endpoints.yaml 路径解耦：`$SM_ENDPOINTS_PATH` → `~/.config/sm/endpoints.yaml`（规范）→ `~/.claude/global/endpoints.yaml`（legacy 兜底，本机零迁移）；新导出 `resolveConfigPath`/`clearEndpointsCache`（给 trellis 模型配置 UI 热重载用）。③ MIT LICENSE + 两包 README + repository 字段，llm 随包发 endpoints.example.yaml。**泄露闸已验**：npm pack 真打包逐文件清单只有 dist+LICENSE+README(+example yaml)，tarball 全文扫描无 key/个人路径/apps 内容。monorepo tsc 全绿。**Next**：用户 `npm login`（账号名需 smokingmouse）→ `npm publish --access public`（llm 先 agent 后）→ push。
+
+---
 Harbor P1–P4 落地完毕（跨设备执行 + 飞书/审批/worktree + automation/用量 + Web 看板），self-agent 已退役。当前等待用户环境的时间性验证（真双机 / 真飞书 / dogfood 一周）。
 
 ## Goals
