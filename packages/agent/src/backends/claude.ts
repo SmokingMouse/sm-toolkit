@@ -161,6 +161,10 @@ export class ClaudeBackend implements Backend {
     // 最后一条的值 = 主 agent 本轮结束时的真实 context 占用。result.usage 是
     // 跨迭代累计和(且含同模型 subagent),不能拿来算占用%。
     let lastAssistantContext: number | null = null;
+    // 子 agent:task_updated 只带 task_id 不带 tool_use_id(实测),而上游要靠
+    // tool_use_id 才能把事件挂回那条 Agent 工具调用 —— 用 started/progress 见过的
+    // 映射补齐;补不上的 task 事件直接丢(宁可少一条进度,不发无处可挂的孤儿)。
+    const taskToolUse = new Map<string, string>();
     // 交互通道:streamLines 会把 write/end 通道挂到 .channel 上(交互模式)。
     const interactiveSlot: { channel?: StdinChannel } = {};
     for await (const raw of streamLines("claude", args, {
@@ -224,6 +228,18 @@ export class ClaudeBackend implements Backend {
           model: obj.model,
           permissionMode: obj.permissionMode,
         });
+      } else if (t === "system" && TASK_SUBTYPES[obj.subtype as string]) {
+        // 子 agent 生命周期(started/progress/updated/completed)。
+        if (obj.tool_use_id && obj.task_id) taskToolUse.set(obj.task_id, obj.tool_use_id);
+        const toolUseId = obj.tool_use_id ?? taskToolUse.get(obj.task_id);
+        if (toolUseId) {
+          yield ev(this.name, EventType.Task, sid, {
+            ...taskData(obj),
+            phase: TASK_SUBTYPES[obj.subtype as string],
+            taskId: obj.task_id,
+            toolUseId,
+          });
+        }
       } else if (
         t === "stream_event" &&
         obj.event?.type === "content_block_delta" &&
@@ -254,10 +270,18 @@ export class ClaudeBackend implements Backend {
             (au.cache_read_input_tokens ?? 0) +
             (au.cache_creation_input_tokens ?? 0);
         }
-        // text 已走 delta;这里取 tool_use 开始(带 id 供与 done 配对)
+        // text 已走 delta;这里取 tool_use 开始(带 id 供与 done 配对)。
+        // parentToolUseId 非 null = 这条不是主 agent 发的,是某个子 agent(Task/Agent
+        // 工具)在自己的循环里调的 —— 上游据此把工具链分层,不然全平铺成一条。
+        const parentToolUseId = obj.parent_tool_use_id ?? null;
         for (const b of obj.message?.content ?? []) {
           if (b.type === "tool_use") {
-            yield ev(this.name, EventType.ToolCall, sid, { id: b.id, name: b.name, input: b.input });
+            yield ev(this.name, EventType.ToolCall, sid, {
+              id: b.id,
+              name: b.name,
+              input: b.input,
+              parentToolUseId,
+            });
           }
         }
       } else if (t === "user") {
@@ -320,6 +344,37 @@ export class ClaudeBackend implements Backend {
       }
     }
   }
+}
+
+// 子 agent 的四个 system subtype → 归一后的 phase。
+const TASK_SUBTYPES: Record<string, string> = {
+  task_started: "started",
+  task_progress: "progress",
+  task_updated: "updated",
+  task_notification: "completed",
+};
+
+/**
+ * task_* 行 → 扁平化的子 agent 元信息。各 subtype 只带自己那几个字段(started 有
+ * prompt、progress 有 usage/last_tool_name、notification 有 summary),所以这里按
+ * 出现即取、**剔掉 undefined** —— 上游是 patch 语义的浅合并,留着 undefined 会把
+ * 先前 phase 已经拿到的值抹掉。
+ */
+function taskData(obj: any): Record<string, unknown> {
+  const d: Record<string, unknown> = {
+    description: obj.description,
+    subagentType: obj.subagent_type,
+    prompt: obj.prompt,
+    lastToolName: obj.last_tool_name,
+    status: obj.status ?? obj.patch?.status,
+    summary: obj.summary,
+    outputFile: obj.output_file,
+    totalTokens: obj.usage?.total_tokens,
+    toolUses: obj.usage?.tool_uses,
+    durationMs: obj.usage?.duration_ms,
+  };
+  for (const k of Object.keys(d)) if (d[k] === undefined) delete d[k];
+  return d;
 }
 
 function claudePermissionArgs(p: PermissionPolicy): string[] {
