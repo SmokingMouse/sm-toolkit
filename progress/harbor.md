@@ -1,7 +1,7 @@
-# Harbor — 个人多设备 Agent 调度平台（Mew 复刻）技术方案
+# Harbor — 自托管多账户、多设备 Agent 调度平台（Mew 复刻）技术方案
 
-> 2026-07-15 起草。定位：把 Mew 的「配置即 Agent + Chat/Issue 分流 + Daemon 本地桥接」
-> 复刻为个人版，最大化组装 sm-toolkit 既有积木，新写面收缩到 server / daemon 壳 / Issue 状态机。
+> 2026-07-15 起草，2026-07-19 扩展为多账户终态。定位：把 Mew 的「配置即 Agent + Chat/Issue 分流 + Daemon 本地桥接」
+> 复刻为自托管产品，最大化组装 sm-toolkit 既有积木。账户、Workspace、Device 和 Agent 授权的后续方案见 `progress/harbor-account-system.md`。
 
 ## 0. 已定决策（讨论收敛，含理由）
 
@@ -10,28 +10,32 @@
 | BUILD thin，不基于 omnigent / vibe-kanban | 共性部分（daemon+spawn）sm-toolkit 已有，差异部分（Issue/cron/飞书）谁都没有 | omnigent：alpha 期 Python 重栈，绑死后仍要自建差异层；vibe-kanban：执行只在 server 本机 |
 | 网关 = @sm/llm env 注入，不引入 claude-code-router | 零额外跳数、无 proxy 保活负担；env 路由优先级有实测背书（sm-toolkit Verified Facts） | ccr 的增量只有请求级中心 trace，个人场景 @sm/audit 的 runner 级用量已够 |
 | 落在 `~/sdk/apps/harbor/`（单 package 三 bin） | 重度依赖 workspace:* 的 @sm/*；协议类型 server/daemon/CLI 三端共享，单包零复制 | 独立仓库：file: 依赖跨仓库摩擦（Fisher 踩过硬链接断链）；`~/python/ai/Harbor` 空目录废弃 |
-| 服务对象：个人多设备 | 用户拍板 | 砍掉 SSO/RBAC/Workspace 多租户；数据模型不留多租户字段（真要团队化时再迁移，不为想象需求付复杂度税） |
+| 服务对象：自托管多账户 + 多 Workspace + 多 Device | 个人部署机制已完成；2026-07-19 决定引入全局 Account、Membership、Device Grant 与 Agent ACL | Workspace 是实例内授权边界，但仍不做 SaaS 计费/席位/跨实例组织；完整决策见 `progress/harbor-account-system.md` |
 | 入口三阶段：CLI/API → 飞书 Bot → Web | 用户拍板（三个都要）；地基先行 | — |
 | self-agent 长期由 Harbor 飞书入口取代 | 不留双版本原则；Harbor 飞书入口是其超集 | Phase 2 完成搬迁后退役，Phase 1 期间两者并存互不干扰 |
 
 ## 1. 目标与非目标
 
-**目标**：任意入口（CLI / 飞书 / Web）把任务派给任意一台自有设备上的任意配置好的 Agent；
-任务以 Issue 形态留档、可多轮续、可定时触发；跑在自己机器上、直访本地代码。
+**目标**：任意已授权入口（CLI / 飞书 / Web）把任务派给任意一台已 grant Device 上的任意可运行 Agent；
+任务以 Issue 形态留档、可多轮续、可定时触发；跑在参与者自己的机器上、直访本地代码。
 
-**非目标**：多人协作 / 权限体系；请求级 HTTP trace（用量走 runner 级审计）；
+**非目标**：跨实例联邦、SaaS 计费/席位与 Agent 市场；请求级 HTTP trace（用量走 runner 级审计）；
 云沙箱执行（设备都是自有机器，Tailscale 可达）；SeedCLI 等内部 CLI 支持。
 
 ## 2. 领域模型（glossary，单一真相源）
 
 | 术语 | 定义 | 关键关系与边界 |
 |---|---|---|
-| **Device** | 一台注册过的自有机器，daemon 常驻其上 | 1 Device — N Agent。离线时其 Agent 的任务排队不丢 |
-| **Agent** | 一条配置绑定记录：device + backend(claude/codex) + model + permission + workdir + isolation + instruction | 归属恰好 1 个 Device（v0 不做跨设备漂移）。软删除（archived_at），历史 Run 引用不悬空 |
-| **Conversation** | 对话容器，`kind: chat \| issue` 二态。Chat=临时探索，Issue=留档任务 | 1 Conversation — 1 Agent（创建时绑定）— N Run。Chat 可一键升格为 Issue（改 kind + 补 title） |
-| **Issue 状态机** | `backlog → doing → review → done / canceled` | doing=有 run 在跑（自动）；review=agent 完成待人验收（自动）；done/canceled=人工。允许任意回退，转换全记日志 |
-| **Run** | 一次 CLI 进程调用（一条 prompt → 一个 result），Conversation 内靠 `claude_session_id` resume 串成多轮 | 状态 `queued → running → succeeded / failed / canceled`。daemon 崩溃恢复 = 新 Run 带 resume 重试。run succeeded → issue 进 review；failed/canceled → issue 回 backlog（没 run 在跑就不该停 doing，也没到 review）—— P1 实现时拍板 |
-| **Automation** | cron 定时器，触发时对指定 Agent 发 prompt | v0 只做 cron；webhook（git 事件）进 Phase 3。产物模式：每次新开 Issue，或追加到固定 Conversation |
+| **Account / Membership** | Account 是全局人类身份，Membership 是它在 Workspace 的角色 | 同一 Account 可加入多个 Workspace；身份与授权分离，见 `harbor-account-system.md` |
+| **Workspace** | Harbor 的资源、协作与授权边界 | 隔离 Agents / Skills / Conversations / Automations / prompt settings / Usage；不是 Repository、目录或 Device，不配置统一仓库地址 |
+| **Repository** | Agent 必选的逻辑代码资源 | `workspace_id` 只控制目录可见性；用户从 Agent 配置，通过 RepositoryMount 映射到各 Device checkout |
+| **RepositoryMount** | 某 Repository 在某 Device 上的绝对 checkout 路径 | `(repository, device)` 唯一；被 Agent、活跃任务、Run 或 worktree 引用时禁止删除 |
+| **Device** | Account 拥有、daemon 常驻其上的机器 principal | 不属于 Workspace；经显式 WorkspaceDeviceGrant 后可被多个 Workspace 调度。离线时其 Agent 的任务排队不丢 |
+| **Agent** | 一条配置绑定记录：workspace + device + repository + backend(claude/codex) + model + permission + isolation + instruction | 归属恰好 1 个 Workspace、1 个 Device、1 个 Repository；Repository 在 Agent 创建/详情配置。软删除后历史 Run 引用不悬空 |
+| **Conversation** | Workspace 内的对话容器，`kind: chat \| issue`。Chat=临时探索，Issue=留档任务 | 不独立选择 Repository；未指派 Inbox 可为空，指派后从 Agent 派生快照。Chat 始终绑定 Agent，Issue 当前 Assignee 可空。1 Conversation — N Run，同一 Conversation 严格串行 |
+| **Issue 状态机** | `backlog(Inbox) → todo(Ready) → doing(Running) → review → done / canceled` | implementation Run 排队/启动/成功分别推进 todo/doing/review；失败或取消回 todo；最终 Done 只接受人工验收。Reviewer Run 不改阶段与 Assignee |
+| **Run** | 一次 CLI 进程调用（一条 prompt → 一个 result），冻结 workspace / repository / mount / execution root 与 `purpose` | 一个 Run 最多写一个 Repository；状态 `queued → running → succeeded / failed / canceled`。跨仓库工作拆成多个 Conversation / Run，由 Workspace 聚合 |
+| **Automation** | Workspace 内的 Agent 执行规则：恰好一个 Output + 一个 Trigger | Output=`run/chat/issue`；Trigger=`schedule/codebase`。Schedule 使用 Agent primary Repository，Codebase 显式选择 Agent 可访问的 Repository 与一个 SCM event；purpose/overlap 不暴露给用户 |
 | **Approval** | permission=default 档下，daemon 上抛的工具授权请求 | 经 server 路由到发起入口（飞书卡片 / CLI / Web）等人批，回传 allow/deny |
 
 命名注意：Harbor 的 **Agent** 与 Claude Code 的 subagent、@sm/agent 包名三者语义不同，
@@ -57,7 +61,7 @@
 │  · 注册/心跳/能力上报（已装 CLI 版本 + endpoints.yaml 模型清单）│
 │  · 收 run → @sm/agent ClaudeBackend/CodexBackend 执行  │
 │  · 模型路由：本机 endpoints.yaml（@sm/llm，env 注入）    │
-│  · AgentEvent 流式回传（批量 flush，200ms/20 条）        │
+│  · AgentEvent 流式回传（连续 text/thinking 合并，200ms/20 条 flush）│
 │  · worktree 生命周期管理（isolation=worktree 的 Issue）  │
 │  · onCanUseTool → approval_request 上抛                │
 └─────────────────────────────────────────────────────┘
@@ -70,6 +74,8 @@ permission 四档/model 解析/env/onCanUseTool 双向审批，Harbor 直接消�
 **@sm/store 不复用其表结构**（那是会话专用 schema），Harbor 自建领域表，仅沿用 bun:sqlite 用法。
 
 ## 4. 数据模型（SQLite，id 一律 text 防大整数精度坑）
+
+> 下方 SQL 是 P1 初始 schema 快照；当前实现以 `apps/harbor/src/server/db.ts` 的 v10 schema 为准。v9 新增 workspaces / repositories / repository_mounts，v10 将 Repository 收敛为 Agent 必选绑定并兼容已运行过的 v9 数据库；旧 `workdir` 已迁移为 RepositoryMount。
 
 ```sql
 CREATE TABLE devices (
@@ -90,7 +96,9 @@ CREATE TABLE agents (
 );
 CREATE TABLE conversations (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('chat','issue')),
-  title TEXT, agent_id TEXT NOT NULL REFERENCES agents(id),
+  title TEXT, agent_id TEXT REFERENCES agents(id),
+  description TEXT,
+  priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('none','low','medium','high','urgent')),
   status TEXT NOT NULL DEFAULT 'backlog',     -- chat 恒为 open
   worktree_path TEXT,                         -- isolation=worktree 时 daemon 回填
   claude_session_id TEXT,                     -- 最新一轮，resume 用
@@ -102,6 +110,7 @@ CREATE TABLE runs (
   id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
   agent_id TEXT NOT NULL, device_id TEXT NOT NULL,   -- 快照，不 FK 约束（agent 可归档）
   prompt TEXT NOT NULL,
+  purpose TEXT NOT NULL DEFAULT 'implementation' CHECK (purpose IN ('implementation','review','verification')),
   status TEXT NOT NULL DEFAULT 'queued',
   claude_session_id TEXT, error TEXT,
   cost_usd REAL, input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER,
@@ -141,8 +150,9 @@ daemon → server
   approval_req {runId, requestId, toolName, input}
 
 server → daemon
-  run_start    {runId, spec: {backend, model, prompt, workdir, worktree?, permission,
-                systemPrompt, resume?, envOverrides?}}
+  run_start    {runId, spec: {backend, model, prompt, repositoryRoot, executionRoot,
+                worktreePath?, permission, sandboxNetworkAccess?, systemPrompt,
+                resume?, envOverrides?}}
   run_cancel   {runId}
   approval_res {requestId, behavior: allow|deny, updatedInput?, message?}
 ```
@@ -162,13 +172,13 @@ server → daemon
 
 ## 6. Worktree 隔离（对齐 Mew「修复机器人」模式，本方案新增项）
 
-- 粒度：**per-Issue**（不是 per-Run）——同一 Issue 的多轮迭代共享 worktree，续改不断档。
+- 粒度：**per-Issue + RepositoryMount**（不是 per-Run）——同一 Issue 的多轮迭代共享 worktree，续改不断档；worktree 永远绑定创建它的 mount。
 - 生命周期：Issue 首个 run 启动时 daemon 执行
-  `git worktree add <workdir>/../harbor-worktrees/<issue-id> -b harbor/<issue-id>`，
+  `git worktree add <mount-path>/../harbor-worktrees/<issue-id> -b harbor/<issue-id>`，
   路径回填 `conversations.worktree_path`；RunOptions.workspace 指向 worktree，主仓库不入 workspace（只读保护靠不加 --add-dir 实现）。
 - 收尾：Issue → done/canceled 时 daemon 收 `worktree_cleanup`，默认**保留分支删 worktree 目录**
   （成果在分支上，合并由人/后续 agent 决定；避免自动 merge 的风险面）。
-- isolation=none 的 Agent 直接跑 workdir（适合巡检/播报类只读角色）。
+- isolation=none 的 Agent 直接跑 Run 冻结的 mount path（适合巡检/播报类只读角色）。
 
 ## 7. 飞书入口设计（Phase 2）
 
@@ -290,6 +300,71 @@ CLI 批准 + claude 原地续跑 + 文件落盘核实）；同 repo 两 issue �
 ✅ 验收（agent-browser 实测截图）：看板 5 列渲染/issue 抽屉/事件回放（thinking/tool/正文
 分层）/用量图表全部正常；手机浏览器 = 同一页面（响应式 CSS），Tailscale 场景待真机。
 
+#### P4.10 — Mew 式敏捷闭环升级 ✅ 2026-07-17 完成
+
+- Harbor 主控明确为确定性的 control plane，不伪装成可配置 Agent；每设备并发、同 Conversation 串行。
+- Issue 支持可空 Assignee、description、priority、Ready 阶段；`Assign & Run` 一步完成指派与 implementation Run。
+- implementation 成功自动进 Review，失败/停止回 Ready；AI Review 是独立 `purpose=review` Run，不覆盖实现 Assignee、不自动 Done，最终由人 `Approve & Close`。
+- Reviewer 若无法在其 Device 上挂载 implementation Repository 会在调度层拒绝，REST/CLI/飞书不能绕过。
+- Web 采用 Mew 的 Board/List + 宽抽屉结构：brief、properties、Run history、实时日志、Activity 与上下文动作同屏；拖拽只映射真实工作流动作。
+- CLI/飞书/Automation 与 Web 共用同一动作语义；SQLite v4/v5 完成字段迁移和旧 `doing` 脏状态修复。
+- 真实 dogfood 发现逐 token thinking 会制造数千 SSE 帧：daemon 在 200ms 窗内合并连续流式片段，Web 回放按 50 帧批量入 state，避免 SQLite/SSE/React 放大。
+
+#### P4.11 — Mew AI 提单与对话式详情 ✅ 2026-07-17 完成
+
+- `AI draft` 不是 implementation 快捷键：新增隐藏 `issue_draft` Conversation 与 `purpose=triage` Run；只读分诊、不创建 worktree、不推进 Issue stage，人工确认 proposed title/description 后才发布到 Inbox/Ready。
+- 发布前草稿不进入 Chats / Issues / Automation target；发布后保留 triage Run 与 Claude session，可由同一 Agent 继续实现。
+- Issue 详情从遮罩宽抽屉升级为 Mew 式整页：可编辑正文、Agent 评论、`Worked for` 执行折叠、底部常驻消息框（Agent/permission/model 上下文）和右侧 properties。
+- composer 在 Inbox/Ready 映射 dispatch、在 Review 映射 request-changes；AI Review 与人工 Approve 仍走独立确定性动作，不靠聊天文案猜状态。
+
+#### P4.12 — Mew 式 Skill 配置 ✅ 2026-07-17 完成
+
+- Workspace Skill 支持手动创建/编辑、上传 `SKILL.md` 与本机 Runtime 同步；daemon 从 `.claude/.codex/.agents` 显式目录发现并解析 frontmatter，server 保存正文快照。
+- Agent–Skill 是有序多对多且可为空；runtime 来源只允许绑定同 Device、兼容 Runtime 的 Agent，避免远端看得见但实际不可用。
+- Skill 在 dispatch 时与 Agent instruction 合成 system prompt，Claude/Codex 两条 Backend 均真实生效；归档会解除全部绑定。
+- Web 新增 Mew 式 Skills 搜索列表 + 详情/创建/同步主从结构；Agent 创建与详情提供多选，超过 3 个给上下文冲突提示。
+- 市场没有可信 registry，暂不造空入口；scripts/assets/references bundle 分发不在本轮，当前执行语义是显式 `SKILL.md` 指令快照。
+
+#### P4.13 — Delivery control plane ✅ 2026-07-17 完成
+
+- Issue stage 保持 Inbox / Ready / Running / Review / Done；MR/PR、CI、合并、部署进入可选 `Delivery` 子流程，避免把外部流水线状态扩散为看板列。
+- Delivery 将 human review / checks / merge / deployment 作为正交事实持久化，展示状态只派生不直写；代码交付完成前 Issue 持续停留 Review。
+- `DeliveryService` 内置确定性 policy；SCM Provider 与 Deployment target/provider 正交。SCM 的 `manual` 要求显式确认、只记录外部事实；`github` 通过 server-only 凭证显式同步已有 PR/checks，并在相同 policy 后受控 merge。部署不能藏入 Agent prompt，也不能接受 Agent 自报成功。
+- 合并必须 human approved + CI passed；部署必须在 merged 后；无需部署或部署 succeeded 才由 system 推进 Done 并收尾 worktree。
+- 新 implementation 会作废未合并 Delivery 的旧验收/CI 证据；merged 后拒绝在原 Issue 继续返工。
+- Web 详情新增响应式 Delivery lane、四段进度轨与审计记录；非代码 Issue 保留显式 Complete without delivery。
+- 架构决策见 `progress/decisions/2026-07-17-harbor-delivery-control-plane.md`。
+
+#### P4.14 — Workspace / Repository scope ✅ 2026-07-17 完成
+
+- Workspace 当时实现为 Harbor 一级逻辑 scope，隔离 Agents / Skills / Issues / Chats / Automations / prompt settings / Usage；2026-07-19 的账户方案保留资源隔离并将其升级为实例内授权边界，但它仍不是仓库、目录或 Device。
+- Repository 是 Workspace 内的逻辑代码资源，RepositoryMount 表示它在某台 Device 上的 checkout；同一 Repository 可跨 Device 挂载。
+- Agent 固定归属 Workspace + Device，并必须绑定一个 Repository；Issue / Chat / AI draft / Schedule Automation 从 Agent 派生仓库，Codebase Trigger 可显式选择该 Agent 可访问的 Repository；Run 仍冻结实际 mount / execution root。
+- Scheduler 与 worktree 保持单 Run 单 Repository；跨仓库需求拆成多个 Issue / Run，通过 Workspace 汇总，不给单个 coding session 多个写根。
+- SQLite v9 将旧数据迁入稳定的 Personal Workspace，并把旧 Agent `workdir` 转成 Repository + mount；v10 把 `default_repository_id` 迁为必选 `repository_id`，旧的未绑定 Agent 会保留为待配置占位而不误执行。旧 CLI `--workdir` 继续自动注册资源。
+- Web 保留 Workspace switcher，把 Repository 与 checkout 创建/切换收进 Agent 创建和详情；删除独立 Repositories 页面及 Issue / Chat 的仓库选择。Automation 只有 Codebase Trigger 显式选择 Repository。飞书 Agent 引用支持 `workspace/agent`。
+- 架构决策见 `progress/decisions/2026-07-17-harbor-agent-repository-binding.md`；它取代上一版可选默认 Repository 关系。
+
+#### P4.16 — GitHub Delivery Provider ✅ 2026-07-18 完成
+
+- `manual | github` 共存；GitHub token 只从 server env/yaml 读取，缺配置只让 GitHub 动作 fail loudly，不影响 manual 或 server 启动。
+- Repository `remoteUrl` 验证 GitHub owner/repo；canonical PR URL 或 mapping + PR number 可定位已有 PR，非 GitHub、畸形与跨 Repository 引用全部拒绝。
+- 显式 sync 完整分页读取 latest check-runs、combined commit statuses、classic branch protection 与 active rulesets。同名 required context 跨 check-run/status 聚合；无/缺/pending 不会误判 passed。check-run/status 要求唯一 id；check-runs 的 total_count 必须稳定且只能精确读满，combined statuses 还要求跨页顶层 state/SHA/total 快照一致。重复、漂移、overshoot、不完整或 combined 顶层状态与本地 passed 矛盾均按 unavailable/fail-safe；unrelated context 不冒充 required failure。protected branch classic 404 权限歧义与 required workflows 同样 fail-safe。
+- SQLite v12 表示 closed-but-unmerged；v13 持久化 latest/approved head SHA 与 revision。head 改变作废旧 approval/check evidence；人工 approval 绑定 SHA，merge 只重验并提交同一 expected SHA。
+- 同一 Delivery 的 sync/merge 串行，Provider HTTP 返回再做 revision CAS；每次 implementation 无条件推进 revision，旧 generation 的慢 sync 直接丢弃且不自动重试。期间 implementation/request-changes 改变证据时不写 merged、不追加 merged event、不推进 Done，靠下一次显式 sync 对账外部事实。
+- Web 支持 GitHub 选择、Sync 与配置错误，closed PR 明确显示 `PR closed`；manual 文案/行为不变。下一步仍是自动 push/创建 PR、webhook reconciliation 与独立 Deployment Provider。
+- 架构决策见 `progress/decisions/2026-07-18-harbor-github-delivery-provider.md`。
+
+#### P4.17 — Local launchd Deployment Provider ✅ 2026-07-19 完成
+
+- Deployment target 来自 server env/管理员 `~/.harbor.yaml`，完整路径、argv、环境变量、health header 与凭证不进入 DB/REST/Web；Delivery 只引用 target id，SCM Provider 继续只负责 merge。
+- merge 已完成且 human approval / Harbor checks 通过后，server 幂等 enqueue SQLite durable job。job 冻结 generation、完整非敏感 target fingerprint/manifest 与 exact merged revision；重试创建新 generation，每次 claim/recovery 递增 host fencing epoch + nonce，旧 revision/fence、重复 callback 均不能覆盖当前 Delivery 或修改 host gate。
+- 独立 `harbor-deploy-worker` 以最小 env 从 fixed remote 受控 fetch exact revision，再执行 checkout/build/test；target 是显式 server + daemon 多 service manifest。cutover 前冻结原 rollback anchor并持久化 host-global DB singleton + 稳定路径 0600 sentinel；只有每个 exact label/PID 已可靠停止才允许 backup/替换 DB/plist/symlink。health只启动 server并验证 exact job/revision/fingerprint，放闸后才启动 daemon。
+- health/启动失败自动停净新 services、恢复冻结 baseline plist/current release/SQLite backup，先启旧 server验证 exact baseline，再放闸启旧 daemon；任何 bootout、PID、restore、fence 或 health 不确定都落为 needs recovery，禁止普通 Retry/Done。不可逆边界均做 generation/revision/fence CAS；maintenance 期间 server REST/WS/automation 与 daemon Run 全部 fail-closed。
+- canonical SQLite v17–v19 在 Agent-team v16 后分三阶段加入 target/job、recovery 与 host fencing：manual/GitHub no-target running语义保留，只有 active automatic job进入 recovery；无可信 baseline manifest拒绝自动 cutover，phase-1 legacy job缺 anchor使用显式 ack。Web 展示 target、active checkpoint/attempt/fence、有界脱敏 log、失败原因、Retry/recovery；无 target 时 manual fallback完全保留。
+- 测试只用 fake FS/process-group/launchd/HTTP/clock和隔离 SQLite，覆盖 server restart、duplicate/stale fence callback、health rollback/stale 2xx、逐 service bootout/ambiguous PID、SQLite restore epoch重建、healthy/rollback/terminal crash、target删除/漂移、并发 mutation拒绝、credential/path/log安全与 manual fallback；未操作本机 launchd、真实 DB 或真实 YAML。
+- 架构决策见 `progress/decisions/2026-07-19-harbor-local-launchd-deployment-provider.md`。
+
 ### Phase 5 — Dogfood 加固（「基础体验没问题」的兑现期）◐ 机制层完成，时间性验证待真实负载
 
 | # | 任务 | 要点 |
@@ -312,7 +387,7 @@ CLI 批准 + claude 原地续跑 + 文件落盘核实）；同 repo 两 issue �
 
 ## 10. 开放问题（不阻塞 Phase 1）
 
-1. worktree 分支的合并流：纯手动 vs `harbor issue merge` 命令 vs 交给 review-agent——Phase 2 用真实使用体感定。
-2. per-agent skill 隔离：Mew 有 skill 绑定；claude CLI 的 skill 加载是设备全局的，做 per-agent 收窄需要独立 CLAUDE_CONFIG_DIR / harness 目录方案，成本不小。v0 接受设备全局 skill + instruction 差异化，够用再说。
+1. ✅ worktree 分支的交付流已在 P4.13 定案，P4.16 接入首个 GitHub SCM Provider，P4.17 接入独立 Local launchd Deployment Provider：Repository mapping、显式 PR/check sync、受控 merge、durable deploy/rollback 已跑通 fake-host 验证，manual 保留。下一步拆分自动创建 PR、webhook reconciliation 与真实 SCM/CD acceptance；Agent/Skill 可以请求动作，但不能绕过 policy 或自报成功。
+2. ✅ per-agent Skill 绑定已在 P4.12 解决：Harbor 不依赖 Runtime 的设备全局自动发现语义，而是由 Workspace 显式快照 + Agent 绑定在 dispatch 时注入；runtime 来源仍校验 Device/Runtime 兼容性。
 3. Codex backend 的 resume 语义与 claude 是否对齐（@sm/agent CodexBackend 支持面需实测），Phase 1 以 claude 为主、codex 跑通基本执行即可。
 4. 手机端入口：飞书天然覆盖（P2 后手机可用），是否还需要 PWA 另议。

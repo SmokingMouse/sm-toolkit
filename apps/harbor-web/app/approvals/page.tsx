@@ -4,7 +4,7 @@ import { useState } from "react";
 import { decideApproval, listApprovals, type Approval } from "../../lib/api";
 import { ago, usePoll } from "../../lib/hooks";
 import { useToast } from "../../components/toast";
-import { btnDanger, btnPrimary, Empty, StatusBadge } from "../../components/ui";
+import { btnDanger, btnPrimary, Empty, PageHeader, StatusBadge } from "../../components/ui";
 
 const TTL_MS = 30 * 60 * 1000; // = protocol.APPROVAL_TTL_MS
 
@@ -14,8 +14,13 @@ export default function ApprovalsPage() {
   const decided = (all.data ?? []).filter((a) => a.status !== "pending");
 
   return (
-    <div className="mx-auto max-w-3xl p-6">
-      <h1 className="mb-4 text-lg font-semibold">Approvals</h1>
+    <div className="page-enter mx-auto max-w-4xl p-7 max-sm:p-4">
+      <PageHeader
+        eyebrow="Human in the loop"
+        title="Approvals"
+        description={pending.length > 0 ? `${pending.length} 个工具调用正暂停等待你的决策；30 分钟后会自动拒绝。` : "需要人工判断的工具调用会在这里暂停，不会静默越过权限边界。"}
+        actions={pending.length > 0 ? <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-review">{pending.length} pending</span> : undefined}
+      />
       {all.error && <div className="mb-3 text-sm text-canceled">{all.error}</div>}
 
       <div className="flex flex-col gap-3">
@@ -72,9 +77,9 @@ function PendingCard({ approval: a, onDecided }: { approval: Approval; onDecided
   };
 
   return (
-    <div className="rounded-xl border border-review/40 bg-panel p-4">
+    <div className="surface-shadow overflow-hidden rounded-2xl border border-review/35 bg-panel p-5">
       <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-        <span className="font-semibold">⏸ {a.toolName}</span>
+        <span className="inline-flex items-center gap-2 font-semibold"><span className="grid h-7 w-7 place-items-center rounded-lg bg-amber-50 text-review">Ⅱ</span>{a.toolName}</span>
         <span className="font-mono text-xs text-dim">run {a.runId.slice(0, 12)}</span>
         <span className="text-xs text-dim">等待 {ago(a.createdAt)}</span>
         <span className={`text-xs ${leftMin <= 5 ? "text-canceled" : "text-review"}`}>

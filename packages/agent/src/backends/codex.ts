@@ -52,8 +52,13 @@ export class CodexBackend implements Backend {
       ephemeral: opts.persistence === false,
       model: opts.model,
       resume: opts.resume ?? null,
+      additionalWritableDirs: opts.additionalWritableDirs ?? [],
+      sandboxNetworkAccess: opts.sandboxNetworkAccess === true,
       imagePaths: (opts.attachments ?? []).map((a) => a.path),
       prompt: finalPrompt,
+      additionalDirs: opts.additionalWorkspaces ?? [],
+      environmentSkills: opts.environmentSkills,
+      environmentSkillNames: opts.environmentSkillNames,
     });
 
     let sid: string | null = opts.resume ?? null;
@@ -129,22 +134,56 @@ export class CodexBackend implements Backend {
   }
 }
 
-function buildCodexArgs(o: {
+export function buildCodexArgs(o: {
   policy: PermissionPolicy;
   ephemeral: boolean;
   model?: string;
   resume: string | null;
+  additionalWritableDirs: string[];
+  sandboxNetworkAccess: boolean;
   imagePaths: string[];
   prompt: string;
+  additionalDirs?: string[];
+  environmentSkills?: boolean;
+  environmentSkillNames?: string[];
 }): string[] {
   const common = ["--json", "--skip-git-repo-check"];
+  if (o.environmentSkills === false) {
+    common.push(...codexEnvironmentSkillArgs(o.environmentSkillNames));
+  }
   if (o.model) common.push("-m", o.model);
+  // `codex exec resume` 当前没有 --add-dir；新会话才显式开放额外 Repository。
+  if (!o.resume) {
+    for (const directory of o.additionalDirs ?? []) common.push("--add-dir", directory);
+  }
   const imageArgs = o.imagePaths.flatMap((p) => ["--image", p]);
+  // default/readonly 都不能仅凭调用方传参扩大额外可写范围；Executor 另有领域闸，这里再做参数层防御。
+  const writableDirs =
+    o.policy === "auto-edit" || o.policy === "full" ? [...new Set(o.additionalWritableDirs)] : [];
+  // 只对 workspace-write 生效。显式写 false，避免 Runtime 默认值或旧 thread
+  // 配置漂移；readonly 不通过切换 workspace-write 来换网络，full 已绕过 sandbox。
+  const workspaceNetwork =
+    o.policy === "auto-edit" || o.policy === "default"
+      ? ["-c", `sandbox_workspace_write.network_access=${o.sandboxNetworkAccess ? "true" : "false"}`]
+      : [];
 
   if (o.resume) {
-    // resume 不接受 -s/--sandbox;full 时用 bypass 拿写权限,否则用 codex 默认(只读问答够用)。
-    const bypass = o.policy === "full" ? ["--dangerously-bypass-approvals-and-sandbox"] : [];
-    return ["exec", "resume", o.resume, ...common, ...bypass, ...imageArgs, o.prompt];
+    // codex 0.144.2 实测：resume parser 不接受 --sandbox/--add-dir，但接受 -c。
+    // 用等价 config override 保留 readonly/workspace-write 边界，绝不为续会话退化成 full access。
+    const sandbox =
+      o.policy === "full"
+        ? ["--dangerously-bypass-approvals-and-sandbox"]
+        : o.policy === "readonly"
+          ? ["-c", 'sandbox_mode="read-only"']
+          : [
+              "-c",
+              'sandbox_mode="workspace-write"',
+              ...workspaceNetwork,
+              ...(writableDirs.length > 0
+                ? ["-c", `sandbox_workspace_write.writable_roots=${JSON.stringify(writableDirs)}`]
+                : []),
+            ];
+    return ["exec", "resume", o.resume, ...common, ...sandbox, ...imageArgs, o.prompt];
   }
   const sandbox =
     o.policy === "readonly"
@@ -152,8 +191,38 @@ function buildCodexArgs(o: {
       : o.policy === "full"
         ? ["--dangerously-bypass-approvals-and-sandbox"]
         : ["--sandbox", "workspace-write"]; // auto-edit(以及兼容 default,codex 无独立 default 档)
+  const additionalWritableDirs = writableDirs.flatMap((dir) => ["--add-dir", dir]);
   const ephemeral = o.ephemeral ? ["--ephemeral"] : [];
-  return ["exec", ...common, ...ephemeral, ...sandbox, ...imageArgs, o.prompt];
+  return ["exec", ...common, ...ephemeral, ...sandbox, ...workspaceNetwork, ...additionalWritableDirs, ...imageArgs, o.prompt];
+}
+
+/**
+ * Codex 没有 Claude `--safe-mode` 的单一等价项：
+ * - ignore user config/rules，阻止本机配置和 exec policy 进入 Run；
+ * - 关闭 plugins，阻止插件携带的 Skills；
+ * - 不生成自动 Skills catalog；
+ * - 对启动时发现的名字逐一 disabled，阻止用户在 Issue prompt 中用 `$skill` 显式注入。
+ *
+ * 不使用 `skills.bundled.enabled=false`：Codex 0.144.x 会删除共享
+ * `$CODEX_HOME/skills/.system`，会影响 Harbor 之外的并发 Codex 会话。
+ */
+export function codexEnvironmentSkillArgs(skillNames: string[] = []): string[] {
+  const args = [
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--disable",
+    "plugins",
+    "-c",
+    "skills.include_instructions=false",
+  ];
+  const names = [...new Set(skillNames.map((name) => name.trim()).filter(Boolean))].sort();
+  if (names.length > 0) {
+    const rules = names
+      .map((name) => `{ name = ${JSON.stringify(name)}, enabled = false }`)
+      .join(", ");
+    args.push("-c", `skills.config=[${rules}]`);
+  }
+  return args;
 }
 
 function ev(

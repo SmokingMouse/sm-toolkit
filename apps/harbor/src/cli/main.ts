@@ -1,49 +1,98 @@
 #!/usr/bin/env bun
 /**
  * harbor CLI —— 入口层之一（P1）。
- * device ls / agent create·ls / chat / issue create·continue·ls·show·done·cancel / watch <run>
+ * device ls / agent create·ls / chat / issue draft·create·assign·continue·review·changes·done·cancel / watch
  * 连接配置：HARBOR_SERVER_URL / HARBOR_TOKEN（或 ~/.harbor.yaml）。
  */
 
-import { serverUrl, token } from "../config.js";
+import { Database } from "bun:sqlite";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { databasePath, serverUrl, token as harborToken, workspace as configuredWorkspace } from "../config.js";
 import { HarborClient } from "./client.js";
 import { RunRenderer, c, fmtAgo, fmtRunCost } from "./render.js";
 import type { ConversationStatus } from "../protocol.js";
+import {
+  daemonServiceStatus,
+  setupDaemonService,
+  showDaemonLogs,
+  uninstallDaemonService,
+} from "../daemon/service.js";
+import {
+  deploymentWorkerServiceStatus,
+  setupDeploymentWorkerService,
+  showDeploymentWorkerLogs,
+  uninstallDeploymentWorkerService,
+} from "../deployment-worker/service.js";
+import { recoverLocalDeployment } from "../deployment-worker/recovery.js";
+import { inspectIdentityNormalization } from "../server/identity-normalization.js";
+import { inspectGitHubAppMigration } from "../server/github-app-migration.js";
+import { inspectGitHubPrincipalMigration } from "../server/github-principal-migration.js";
 
 const USAGE = `${c.bold}harbor${c.reset} — 个人多设备 agent 调度
 
 ${c.bold}派活${c.reset}
+  harbor workspace ls · workspace create --name <n> [--slug <s>]
+  harbor repo ls · repo create --name <n> [--device <d> --path <绝对路径>]
+  harbor repo mount <repo> --device <d> --path <绝对路径>
   harbor device ls                                        已注册设备（在线状态/能力）
-  harbor agent create --name <n> --device <d> --workdir <路径>
+  harbor agent create --name <n> --device <d> [--repository <repo>]
+                      [--workdir <路径>]  # 兼容：自动注册 Repository mount
                       [--model <m>] [--permission readonly|auto-edit|full|default]
                       [--backend claude|codex] [--isolation none|worktree]
+                      [--network-access]  # Codex workspace-write 允许直接联网
                       [--instruction <系统提示>] [--description <说明>]
   harbor agent ls
-  harbor chat <agent> "<prompt>"        [--detach]        临时对话（不留 issue）
+  harbor chat <agent> "<prompt>"        [--detach]
+  harbor issue draft "<描述>" [--title <t>] [--priority <p>] [--agent <a>]
+                                                               保存到 Inbox，不启动 Run
   harbor issue create <agent> "<prompt>" [--title <t>] [--detach]
+  harbor issue assign <id> <agent> ["<prompt>"] [--detach]  指派并执行
   harbor issue continue <id> "<prompt>"  [--detach]        续多轮（resume 上下文）
-  harbor issue ls [--status backlog|doing|review|done|canceled]
+  harbor issue changes <id> "<反馈>" [--agent <a>] [--detach]
+  harbor issue review <id> <agent> ["<要求>"] [--detach]  独立 AI Review
+  harbor issue ls [--status backlog|todo|doing|review|done|canceled]
   harbor issue show <id>                                   详情 + run 流水
   harbor issue done <id> · harbor issue cancel <id>        人工验收/取消（收尾 worktree）
   harbor watch <run-id>                                    (重)连一个 run 的实时输出
+
+${c.bold}设备 daemon${c.reset}
+  harbor daemon setup [--server-url <url>] [--token <secret>] [--device-name <name>]
+  harbor daemon status
+  harbor daemon logs [--lines 100] [--follow]
+  harbor daemon uninstall                                  卸服务，保留配置与日志
+
+${c.bold}Harbor self-deployer sidecar（独立 LaunchAgent）${c.reset}
+  harbor self-deployer setup
+  harbor self-deployer status
+  harbor self-deployer logs [--lines 100] [--follow]
+  harbor self-deployer recover <job-id> --target <target-id> --confirm <job-id>
+  harbor self-deployer uninstall
+
+${c.bold}数据库迁移预检（只读，不启动 server）${c.reset}
+  harbor db identity-report [--database <v22.db>] [--json]   P6.1 identity normalization dry-run
+  harbor db github-app-report [--database <v28.db>] [--json] GitHub App v29 dry-run
+  harbor db github-principal-report [--database <v29.db>] [--json] RunPrincipal + user authorization v30 dry-run
 
 ${c.bold}审批${c.reset}（permission=default 的 agent 用工具时上抛）
   harbor approvals [--status pending]                      审批列表
   harbor approve <id> · harbor deny <id>                   批/拒（飞书卡片同步可批）
 
-${c.bold}定时${c.reset}
-  harbor auto create --name <n> --agent <a> --cron "<表达式>" --prompt "<p>"
-                     [--mode new_issue|append --target <conv-id>] [--notify-chat <oc_xx>]
+${c.bold}Automations${c.reset}
+  harbor auto create --name <n> --agent <a> --prompt "<p>"
+                     [--trigger schedule --cron "<表达式>" --timezone Asia/Shanghai
+                      | --trigger codebase --repository <repo> --event merge_request_opened]
+                     [--output run|chat|issue]
   harbor auto ls · auto log <id> · auto enable|disable|rm <id>
 
 ${c.bold}用量${c.reset}
   harbor usage [--days 7] [--agent <a>] [--runs]           agent×model×日聚合 / 逐 run 下钻
 
-${c.dim}id 支持前缀匹配；--detach 派活后不等输出。server 地址/token 走 env 或 ~/.harbor.yaml${c.reset}`;
+${c.dim}id 支持前缀匹配；--workspace <id|slug> 选择作用域；server 地址/token 走 env 或 ~/.harbor.yaml${c.reset}`;
 
 // ── 极简 argparse：--flag value / --flag（bool 白名单）+ 位置参数 ──
 
-const BOOL_FLAGS = new Set(["detach", "help", "runs"]);
+const BOOL_FLAGS = new Set(["detach", "follow", "help", "runs", "json", "network-access"]);
 
 function parseArgs(argv: string[]): { pos: string[]; flags: Record<string, string | true> } {
   const pos: string[] = [];
@@ -115,8 +164,211 @@ async function main(): Promise<number> {
     console.log(USAGE);
     return 0;
   }
-  const client = new HarborClient(serverUrl(), token());
   const [domain, verb] = [pos[0]!, pos[1]];
+
+  // 本机服务管理不依赖 server/token，必须在 HarborClient 初始化前处理。
+  if (domain === "daemon") {
+    if (verb === "setup") {
+      const status = await setupDaemonService({
+        serverUrl: typeof flags["server-url"] === "string" ? flags["server-url"] : undefined,
+        token: typeof flags.token === "string" ? flags.token : undefined,
+        deviceName: typeof flags["device-name"] === "string" ? flags["device-name"] : undefined,
+      });
+      console.log(`${c.green}✓${c.reset} harbord service 已安装并启动（${status.platform}）`);
+      console.log(`${c.dim}  state=${status.state} pid=${status.pid ?? "-"} definition=${status.definitionPath}${c.reset}`);
+      return status.running ? 0 : 1;
+    }
+    if (verb === "status") {
+      const status = daemonServiceStatus();
+      const color = status.running ? c.green : status.loaded ? c.yellow : c.red;
+      console.log(`${color}${status.running ? "● running" : status.loaded ? "● loaded" : "○ stopped"}${c.reset}`);
+      console.log(`${c.dim}  platform=${status.platform} state=${status.state} pid=${status.pid ?? "-"}${c.reset}`);
+      console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
+      if (status.stdoutPath) console.log(`${c.dim}  logs=${status.stdoutPath}, ${status.stderrPath}${c.reset}`);
+      return status.running ? 0 : 1;
+    }
+    if (verb === "logs") {
+      const lines = typeof flags.lines === "string" ? Number(flags.lines) : 100;
+      if (!Number.isFinite(lines) || lines <= 0) throw new Error("--lines 必须是正整数");
+      return showDaemonLogs(lines, flags.follow === true);
+    }
+    if (verb === "uninstall") {
+      const status = uninstallDaemonService();
+      console.log(`${c.green}✓${c.reset} harbord service 已卸载（配置与日志保留）`);
+      console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
+      return 0;
+    }
+    throw new Error("用法：harbor daemon setup|status|logs|uninstall");
+  }
+
+  if (domain === "self-deployer") {
+    if (verb === "setup") {
+      const status = setupDeploymentWorkerService();
+      console.log(`${c.green}✓${c.reset} Harbor self-deployer LaunchAgent 已安装并启动`);
+      console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
+      return 0;
+    }
+    if (verb === "status") {
+      const status = deploymentWorkerServiceStatus();
+      console.log(`${status.running ? c.green : c.yellow}${status.running ? "● running" : "○ stopped"}${c.reset} ${status.state}${status.pid ? ` pid=${status.pid}` : ""}`);
+      console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
+      return status.running ? 0 : 1;
+    }
+    if (verb === "logs") {
+      const lines = typeof flags.lines === "string" ? Number(flags.lines) : 100;
+      if (!Number.isFinite(lines) || lines <= 0) throw new Error("--lines 必须是正整数");
+      return showDeploymentWorkerLogs(lines, flags.follow === true);
+    }
+    if (verb === "recover") {
+      const jobId = pos[2];
+      if (!jobId) throw new Error("用法：harbor self-deployer recover <job-id> --target <target-id> --confirm <job-id>");
+      if (flags.confirm !== jobId) throw new Error("recovery 会操作 host service/rollback anchor；--confirm 必须精确重复完整 job-id");
+      await recoverLocalDeployment(jobId, req(flags, "target"));
+      console.log(`${c.green}✓${c.reset} Harbor self deployment ${jobId} 已恢复并验证旧 baseline`);
+      return 0;
+    }
+    if (verb === "uninstall") {
+      const status = uninstallDeploymentWorkerService();
+      console.log(`${c.green}✓${c.reset} Harbor self-deployer LaunchAgent 已卸载（配置与日志保留）`);
+      console.log(`${c.dim}  definition=${status.definitionPath}${c.reset}`);
+      return 0;
+    }
+    throw new Error("用法：harbor self-deployer setup|status|logs|recover|uninstall");
+  }
+
+  if (domain === "db") {
+    if (verb !== "identity-report" && verb !== "github-app-report" && verb !== "github-principal-report")
+      throw new Error("用法：harbor db identity-report|github-app-report|github-principal-report [--database <db>] [--json]");
+    const path = resolve(typeof flags.database === "string" ? flags.database : databasePath());
+    if (!existsSync(path)) throw new Error(`数据库不存在：${path}`);
+    const db = new Database(path, { readonly: true });
+    try {
+      if (verb === "github-principal-report") {
+        const report = inspectGitHubPrincipalMigration(db);
+        if (flags.json === true) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          const state = report.migratable ? `${c.green}PASS${c.reset}` : `${c.red}BLOCKED${c.reset}`;
+          const schema = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
+          console.log(`${c.bold}Harbor GitHub principal v30 dry-run${c.reset}  ${state}`);
+          console.log(`${c.dim}database=${path} schema=v${schema}${c.reset}`);
+          console.log(
+            `github-identities=${report.counts.githubAuthIdentities}` +
+            ` existing-authorizations=${report.counts.existingAuthorizations}` +
+            ` historical-runs=${report.counts.historicalRuns} automations=${report.counts.automations}`,
+          );
+          for (const entry of report.issues) {
+            const marker = entry.severity === "error" ? `${c.red}ERROR${c.reset}` : `${c.yellow}WARN${c.reset}`;
+            console.log(`${marker} ${entry.code}: ${entry.message}`);
+            console.log(`${c.dim}  refs=${entry.refs.join(", ") || "-"}${c.reset}`);
+          }
+          if (report.issues.length === 0) console.log(`${c.green}✓${c.reset} 无需 backfill`);
+        }
+        return report.migratable ? 0 : 2;
+      }
+      if (verb === "github-app-report") {
+        const report = inspectGitHubAppMigration(db);
+        if (flags.json === true) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          const state = report.migratable ? `${c.green}PASS${c.reset}` : `${c.red}BLOCKED${c.reset}`;
+          console.log(`${c.bold}Harbor GitHub App v29 dry-run${c.reset}  ${state}`);
+          console.log(`${c.dim}database=${path} schema=v${report.sourceSchemaVersion} report=v${report.reportVersion}${c.reset}`);
+          console.log(
+            `accounts=${report.counts.accounts} workspaces=${report.counts.workspaces}` +
+            ` repositories=${report.counts.repositories} github-remotes=${report.counts.githubRemoteRepositories}` +
+            ` github-identities=${report.counts.githubAuthIdentities} github-deliveries=${report.counts.githubDeliveries}`,
+          );
+          console.log(
+            `installation/repository connections=0（不会从 remote 或静态 token 猜测）` +
+            ` github-remote-alias-groups=${report.counts.githubRemoteAliasGroups}`,
+          );
+          for (const entry of report.issues) {
+            const marker = entry.severity === "error" ? `${c.red}ERROR${c.reset}` : `${c.yellow}WARN${c.reset}`;
+            console.log(`${marker} ${entry.code}: ${entry.message}`);
+            console.log(`${c.dim}  refs=${entry.refs.join(", ") || "-"}${c.reset}`);
+          }
+          if (report.issues.length === 0) console.log(`${c.green}✓${c.reset} 未发现阻断项或警告`);
+        }
+        return report.migratable ? 0 : 2;
+      }
+      const report = inspectIdentityNormalization(db);
+      if (flags.json === true) {
+        console.log(JSON.stringify(report, null, 2));
+      } else {
+        const state = report.migratable ? `${c.green}PASS${c.reset}` : `${c.red}BLOCKED${c.reset}`;
+        console.log(`${c.bold}Harbor P6.1 identity normalization dry-run${c.reset}  ${state}`);
+        console.log(`${c.dim}database=${path} schema=v${report.sourceSchemaVersion} report=v${report.reportVersion}${c.reset}`);
+        console.log(
+          `legacy members=${report.counts.legacyMembers} → accounts=${report.counts.projectedAccounts}` +
+          ` memberships=${report.counts.projectedMemberships} invitations=${report.counts.projectedInvitations}` +
+          ` auth identities=${report.counts.projectedAuthIdentities} PATs=${report.counts.workspaceApiTokens}`,
+        );
+        console.log(
+          `dedupe synthetic=${report.counts.syntheticMembers} external-members=${report.counts.externalIdentityMembers}` +
+          ` duplicate-email-groups=${report.duplicateEmails.length}（email 不参与自动合并）`,
+        );
+        for (const entry of report.issues) {
+          const marker = entry.severity === "error" ? `${c.red}ERROR${c.reset}` : `${c.yellow}WARN${c.reset}`;
+          console.log(`${marker} ${entry.code}: ${entry.message}`);
+          console.log(`${c.dim}  refs=${entry.refs.join(", ") || "-"}${c.reset}`);
+        }
+        if (report.issues.length === 0) console.log(`${c.green}✓${c.reset} 未发现阻断项或警告`);
+      }
+      return report.migratable ? 0 : 2;
+    } finally {
+      db.close();
+    }
+  }
+
+  const workspace = typeof flags.workspace === "string" ? flags.workspace : configuredWorkspace();
+  const client = new HarborClient(serverUrl(), harborToken(), workspace);
+
+  if (domain === "workspace" && verb === "ls") {
+    const workspaces = await client.workspaces();
+    table(workspaces.map((item) => [item.name, item.slug, item.id]), ["NAME", "SLUG", "ID"]);
+    return 0;
+  }
+
+  if (domain === "workspace" && verb === "create") {
+    const created = await client.createWorkspace({ name: req(flags, "name"), slug: flags.slug, description: flags.description });
+    console.log(`${c.green}✓${c.reset} workspace ${c.bold}${created.name}${c.reset}（${created.slug} · ${created.id}）已创建`);
+    return 0;
+  }
+
+  if (domain === "repo" && verb === "ls") {
+    const repositories = await client.repositories();
+    table(
+      repositories.map((repository) => [
+        repository.name,
+        repository.defaultBranch,
+        repository.mounts.map((mount) => `${mount.deviceName}:${mount.path}`).join(" · ") || "-",
+        repository.id,
+      ]),
+      ["NAME", "BRANCH", "MOUNTS", "ID"],
+    );
+    return 0;
+  }
+
+  if (domain === "repo" && verb === "create") {
+    const repository = await client.createRepository({
+      name: req(flags, "name"),
+      remoteUrl: flags.remote,
+      defaultBranch: flags.branch,
+      device: flags.device,
+      path: flags.path,
+    });
+    console.log(`${c.green}✓${c.reset} repository ${c.bold}${repository.name}${c.reset}（${repository.id}）已创建`);
+    return 0;
+  }
+
+  if (domain === "repo" && verb === "mount") {
+    const id = pos[2];
+    if (!id) throw new Error("用法：harbor repo mount <repo> --device <d> --path <绝对路径>");
+    await client.mountRepository(id, { device: req(flags, "device"), path: req(flags, "path") });
+    console.log(`${c.green}✓${c.reset} repository mount 已保存`);
+    return 0;
+  }
 
   if (domain === "device" && verb === "ls") {
     const devices = await client.devices();
@@ -126,7 +378,11 @@ async function main(): Promise<number> {
         d.online ? `${c.green}online${c.reset}` : `${c.red}offline${c.reset}`,
         fmtAgo(d.lastSeenAt),
         Object.entries(d.capabilities.clis).map(([k, v]) => `${k}@${v}`).join(" ") || "-",
-        String(new Set(d.capabilities.endpoints.map((e) => e.split(":")[0])).size || "-"),
+        String(
+          d.capabilities.modelRoutes
+            ? new Set(d.capabilities.modelRoutes.filter((route) => route.ready).map((route) => route.id)).size || "-"
+            : new Set(d.capabilities.endpoints).size || "-",
+        ),
         d.id,
       ]),
       ["NAME", "STATE", "SEEN", "CLIS", "MODELS", "ID"],
@@ -138,9 +394,11 @@ async function main(): Promise<number> {
     const agent = await client.createAgent({
       name: req(flags, "name"),
       device: req(flags, "device"),
-      workdir: req(flags, "workdir"),
+      repository: flags.repository,
+      workdir: flags.workdir,
       model: flags.model,
       permission: flags.permission,
+      sandboxNetworkAccess: flags["network-access"] === true,
       backend: flags.backend,
       isolation: flags.isolation,
       instruction: flags.instruction,
@@ -148,7 +406,7 @@ async function main(): Promise<number> {
     });
     console.log(`${c.green}✓${c.reset} agent ${c.bold}${agent.name}${c.reset}（${agent.id}）已创建`);
     console.log(
-      `${c.dim}  device=${agent.deviceId} model=${agent.model ?? "CLI 默认"} permission=${agent.permission} isolation=${agent.isolation} workdir=${agent.workdir}${c.reset}`,
+      `${c.dim}  device=${agent.deviceId} model=${agent.model ?? "CLI 默认"} permission=${agent.permission} network=${agent.backend === "codex" ? agent.sandboxNetworkAccess ? "direct" : "blocked" : "n/a"} isolation=${agent.isolation} repository=${agent.repositoryId ?? "none"}${c.reset}`,
     );
     return 0;
   }
@@ -163,10 +421,11 @@ async function main(): Promise<number> {
         a.backend,
         a.model ?? "(默认)",
         a.permission,
+        a.backend === "codex" ? a.sandboxNetworkAccess ? "direct" : "blocked" : "-",
         a.isolation === "worktree" ? "worktree" : "-",
-        a.workdir,
+        a.repositoryId ?? "-",
       ]),
-      ["NAME", "DEVICE", "BACKEND", "MODEL", "PERM", "ISO", "WORKDIR"],
+      ["NAME", "DEVICE", "BACKEND", "MODEL", "PERM", "NETWORK", "ISO", "REPOSITORY"],
     );
     return 0;
   }
@@ -182,6 +441,20 @@ async function main(): Promise<number> {
   }
 
   if (domain === "issue") {
+    if (verb === "draft") {
+      const description = pos.slice(2).join(" ");
+      if (!description) throw new Error(`用法：harbor issue draft "<描述>" [--title t] [--agent a]`);
+      const conv = await client.createConversation({
+        kind: "issue",
+        agent: flags.agent,
+        title: typeof flags.title === "string" ? flags.title : description.slice(0, 60),
+        description,
+        priority: flags.priority,
+      });
+      console.log(`${c.green}✓${c.reset} issue ${c.bold}${conv.id}${c.reset} 已保存到 Inbox${conv.agentId ? "（已指派，未执行）" : ""}`);
+      return 0;
+    }
+
     if (verb === "create") {
       const agent = pos[2];
       const prompt = pos.slice(3).join(" ");
@@ -190,9 +463,21 @@ async function main(): Promise<number> {
         kind: "issue",
         agent,
         title: typeof flags.title === "string" ? flags.title : prompt.slice(0, 60),
+        description: prompt,
+        priority: flags.priority,
       });
-      const run = await client.createRun(conv.id, prompt);
+      const run = await client.dispatchIssue(conv.id, agent, prompt);
       console.log(`${c.green}✓${c.reset} issue ${c.bold}${conv.id}${c.reset} · run ${run.id}`);
+      return flags.detach ? 0 : watchRun(client, run.id);
+    }
+
+    if (verb === "assign") {
+      const id = pos[2];
+      const agent = pos[3];
+      const prompt = pos.slice(4).join(" ") || undefined;
+      if (!id || !agent) throw new Error(`用法：harbor issue assign <id> <agent> ["<prompt>"]`);
+      const run = await client.dispatchIssue(id, agent, prompt);
+      console.log(`${c.dim}issue ${run.conversationId} · run ${run.id}（assign & run）${c.reset}`);
       return flags.detach ? 0 : watchRun(client, run.id);
     }
 
@@ -205,11 +490,30 @@ async function main(): Promise<number> {
       return flags.detach ? 0 : watchRun(client, run.id);
     }
 
+    if (verb === "changes") {
+      const id = pos[2];
+      const feedback = pos.slice(3).join(" ");
+      if (!id || !feedback) throw new Error(`用法：harbor issue changes <id> "<反馈>" [--agent a]`);
+      const run = await client.requestChanges(id, feedback, typeof flags.agent === "string" ? flags.agent : undefined);
+      console.log(`${c.dim}issue ${run.conversationId} · run ${run.id}（request changes）${c.reset}`);
+      return flags.detach ? 0 : watchRun(client, run.id);
+    }
+
+    if (verb === "review") {
+      const id = pos[2];
+      const agent = pos[3];
+      const prompt = pos.slice(4).join(" ") || undefined;
+      if (!id || !agent) throw new Error(`用法：harbor issue review <id> <agent> ["<要求>"]`);
+      const run = await client.reviewIssue(id, agent, prompt);
+      console.log(`${c.dim}issue ${run.conversationId} · review run ${run.id}${c.reset}`);
+      return flags.detach ? 0 : watchRun(client, run.id);
+    }
+
     if (verb === "ls") {
       const status = typeof flags.status === "string" ? flags.status : undefined;
       const convs = await client.conversations({ kind: "issue", status });
       table(
-        convs.map((cv) => [cv.id, cv.status, (cv.title ?? "").slice(0, 40), cv.agentName, fmtAgo(cv.updatedAt)]),
+        convs.map((cv) => [cv.id, cv.status, (cv.title ?? "").slice(0, 40), cv.agentName ?? "(unassigned)", fmtAgo(cv.updatedAt)]),
         ["ID", "STATUS", "TITLE", "AGENT", "UPDATED"],
       );
       return 0;
@@ -221,12 +525,12 @@ async function main(): Promise<number> {
       const { conversation, agent, runs } = await client.getConversation(id);
       console.log(`${c.bold}${conversation.title ?? "(无标题)"}${c.reset}  ${c.dim}${conversation.id}${c.reset}`);
       console.log(
-        `${c.dim}kind=${conversation.kind} status=${c.reset}${conversation.status}${c.dim} agent=${agent?.name ?? conversation.agentId} session=${conversation.claudeSessionId?.slice(0, 8) ?? "-"}${c.reset}`,
+        `${c.dim}kind=${conversation.kind} status=${c.reset}${conversation.status}${c.dim} priority=${conversation.priority} agent=${agent?.name ?? conversation.agentId ?? "unassigned"} session=${conversation.claudeSessionId?.slice(0, 8) ?? "-"}${c.reset}`,
       );
       table(
         runs.map((r) => [
           r.id,
-          r.status,
+          `${r.purpose}/${r.status}`,
           fmtAgo(r.queuedAt),
           fmtRunCost(r) || "-",
           (r.error ?? r.prompt).slice(0, 50),
@@ -239,8 +543,7 @@ async function main(): Promise<number> {
     if (verb === "done" || verb === "cancel") {
       const id = pos[2];
       if (!id) throw new Error(`用法：harbor issue ${verb} <id>`);
-      const to: ConversationStatus = verb === "done" ? "done" : "canceled";
-      const conv = await client.setConversationStatus(id, to);
+      const conv = verb === "done" ? await client.approveIssue(id) : await client.cancelIssue(id);
       console.log(`${c.green}✓${c.reset} issue ${conv.id} → ${conv.status}`);
       return 0;
     }
@@ -287,17 +590,29 @@ async function main(): Promise<number> {
   // ── automation ──
   if (domain === "auto") {
     if (verb === "create") {
+      const triggerType = String(flags.trigger ?? "schedule");
+      if (triggerType !== "schedule" && triggerType !== "codebase") {
+        throw new Error("--trigger 只支持 schedule/codebase");
+      }
       const auto = await client.createAutomation({
         name: req(flags, "name"),
         agent: req(flags, "agent"),
-        cron: req(flags, "cron"),
+        trigger: triggerType === "schedule"
+          ? {
+              type: "schedule",
+              cron: req(flags, "cron"),
+              timezone: String(flags.timezone ?? "Asia/Shanghai"),
+            }
+          : {
+              type: "codebase",
+              repository: req(flags, "repository"),
+              event: String(flags.event ?? "merge_request_opened"),
+            },
         prompt: req(flags, "prompt"),
-        mode: flags.mode,
-        target: flags.target,
-        notifyChat: flags["notify-chat"],
+        output: flags.output ?? "run",
       });
-      console.log(`${c.green}✓${c.reset} automation ${c.bold}${auto.name}${c.reset}（${auto.id}）已创建并排班`);
-      console.log(`${c.dim}  cron="${auto.cron}"（server 本机时区）mode=${auto.mode}${auto.notifyChatId ? ` notify=${auto.notifyChatId}` : ""}${c.reset}`);
+      console.log(`${c.green}✓${c.reset} automation ${c.bold}${auto.name}${c.reset}（${auto.id}）已创建`);
+      console.log(`${c.dim}  trigger=${auto.trigger.type} output=${auto.output}${c.reset}`);
       return 0;
     }
     if (verb === "ls") {
@@ -308,11 +623,13 @@ async function main(): Promise<number> {
           a.enabled ? `${c.green}on${c.reset}` : `${c.dim}off${c.reset}`,
           a.name,
           a.agentName,
-          a.cron,
-          a.mode,
+          a.trigger.type === "schedule"
+            ? `schedule:${a.trigger.cron} (${a.trigger.timezone})`
+            : `codebase:${a.trigger.codebaseEvent}`,
+          a.output,
           fmtAgo(a.lastFiredAt),
         ]),
-        ["ID", "STATE", "NAME", "AGENT", "CRON", "MODE", "LAST FIRED"],
+        ["ID", "STATE", "NAME", "AGENT", "TRIGGER", "OUTPUT", "LAST FIRED"],
       );
       return 0;
     }
@@ -323,7 +640,7 @@ async function main(): Promise<number> {
       table(
         rows.map((l) => [
           new Date(l.ts).toLocaleString("sv-SE"),
-          l.kind === "fired" ? `${c.green}fired${c.reset}` : `${c.yellow}missed${c.reset}`,
+          l.kind === "fired" ? `${c.green}fired${c.reset}` : `${c.yellow}${l.kind}${c.reset}`,
           l.runId ?? "-",
           l.note ?? "",
         ]),

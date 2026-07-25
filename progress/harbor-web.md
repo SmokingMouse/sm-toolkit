@@ -64,9 +64,9 @@
   `+ New`：device 下拉（GET devices）→ 联动 model 下拉（该 device 的 capabilities.endpoints +
   opus/sonnet/haiku 原生项 + 「CLI 默认」空值）+ workdir + permission 四档 + isolation +
   instruction。服务端校验错误（model 不在清单等）原样 toast。归档按钮（补丁 2）。
-- **Automations**：表格（name/agent/cron/mode/enabled/lastFired）+ enable·disable·删除 +
-  行展开看 log（fired/missed）。`+ New`：agent 下拉 + cron 文本（附 5 段语法提示与常用例）+
-  prompt + mode（append 时 target 会话下拉）+ notifyChat（可空，提示需 server 白名单）。
+- **Automations**：表格（name/agent/output/trigger/enabled/lastFired）+ run/edit/enable·disable·删除 +
+  行展开看 log。`+ New`：agent + prompt；Output 只选 Run/Chat/Issue；Trigger 二选一：Schedule
+  （cron + timezone）或 Codebase（Agent 可访问的 Repository + 单一 SCM event）。
 - **Approvals**：pending 列表（tool/input 预览/所属 run 链接/等待时长 + 30min 倒计时感）+
   批准/拒绝按钮（幂等：已决议 toast 现状）；历史区折叠。
 - **Usage**：现看板的 $/日柱图 + agent×model 明细表移植成组件；天数切换（7/14/30）。

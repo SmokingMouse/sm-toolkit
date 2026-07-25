@@ -13,15 +13,18 @@
 
 import type { DaemonMsg, ServerMsg } from "../protocol.js";
 import { HEARTBEAT_INTERVAL_MS } from "../protocol.js";
-import { deviceName, serverWsUrl, token } from "../config.js";
+import { deviceName, serverUrl, serverWsUrl, token } from "../config.js";
 import { detectCapabilities } from "./capabilities.js";
 import { Executor } from "./executor.js";
-import { removeWorktree } from "./worktree.js";
+import { removeReviewCheckout, removeWorktree, reviewWorktreePathFor } from "./worktree.js";
+import { HostMaintenanceSentinel } from "../deployment-worker/maintenance.js";
+import { DaemonMaintenanceLatch } from "./maintenance.js";
 
 const authToken = token(); // 缺失时这里就抛，fail loudly
 const name = deviceName();
 const wsUrl = serverWsUrl();
 const capabilities = detectCapabilities();
+const maintenance = new DaemonMaintenanceLatch(new HostMaintenanceSentinel());
 
 if (!capabilities.clis.claude && !capabilities.clis.codex) {
   console.warn("[harbord] 警告：本机未检测到 claude/codex CLI，收到 run 会直接失败");
@@ -38,10 +41,12 @@ const MUST_DELIVER = new Set<DaemonMsg["type"]>([
   "run_done",
   "approval_req",
   "worktree_ready",
+  "run_execution_ready",
   "worktree_cleanup_result",
 ]);
 
 function sendOrQueue(msg: DaemonMsg): void {
+  if (maintenance.isBlocked()) return;
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
       ws.send(JSON.stringify(msg));
@@ -53,23 +58,40 @@ function sendOrQueue(msg: DaemonMsg): void {
   if (MUST_DELIVER.has(msg.type)) outbox.push(msg);
 }
 
-const executor = new Executor(sendOrQueue);
+const executor = new Executor(
+  sendOrQueue,
+  `${serverUrl().replace(/\/$/, "")}/hooks/agent-actions/issues`,
+  authToken,
+);
 
 /** daemon 侧还认账的 run：执行中 + outbox 里有待送达消息的（见文件头对账口径） */
 function ownedRunIds(): string[] {
   const ids = new Set(executor.runningIds());
   for (const m of outbox) {
-    if (m.type === "run_done" || m.type === "approval_req" || m.type === "worktree_ready") ids.add(m.runId);
+    if (
+      m.type === "run_done" ||
+      m.type === "approval_req" ||
+      m.type === "worktree_ready" ||
+      m.type === "run_execution_ready"
+    ) ids.add(m.runId);
     else if (m.type === "run_event") for (const e of m.events) ids.add(e.runId);
   }
   return [...ids];
 }
 
-function connect(): void {
+async function connect(): Promise<void> {
+  if (await maintenance.refresh()) {
+    scheduleReconnect();
+    return;
+  }
   console.log(`[harbord] 连接 ${wsUrl} …（device=${name}）`);
   ws = new WebSocket(wsUrl);
 
-  ws.onopen = () => {
+  ws.onopen = async () => {
+    if (await maintenance.refresh()) {
+      ws?.close(1013, "deployment maintenance");
+      return;
+    }
     attempt = 0;
     ws!.send(
       JSON.stringify({
@@ -92,7 +114,11 @@ function connect(): void {
     }
   };
 
-  ws.onmessage = (e) => {
+  ws.onmessage = async (e) => {
+    if (await maintenance.refresh()) {
+      ws?.close(1013, "deployment maintenance");
+      return;
+    }
     let msg: ServerMsg;
     try {
       msg = JSON.parse(String(e.data)) as ServerMsg;
@@ -101,7 +127,9 @@ function connect(): void {
     }
     switch (msg.type) {
       case "hello_ok":
-        console.log(`[harbord] 已注册（deviceId=${msg.deviceId}），claude=${capabilities.clis.claude ?? "-"} endpoints=${capabilities.endpoints.length} 个`);
+        console.log(
+          `[harbord] 已注册（deviceId=${msg.deviceId}），claude=${capabilities.clis.claude ?? "-"} routes=${capabilities.modelRoutes?.filter((route) => route.ready).length ?? 0}/${capabilities.modelRoutes?.length ?? 0}`,
+        );
         break;
       case "hello_err":
         console.error(`[harbord] 注册被拒：${msg.message} —— 检查 HARBOR_TOKEN / ~/.harbor.yaml`);
@@ -109,7 +137,7 @@ function connect(): void {
         break;
       case "run_start":
         console.log(`[harbord] run_start ${msg.runId}（backend=${msg.spec.backend} model=${msg.spec.model ?? "默认"} resume=${msg.spec.resume ? "是" : "否"}）`);
-        executor.start(msg.runId, msg.spec);
+        if (!maintenance.isBlocked()) executor.start(msg.runId, msg.spec);
         break;
       case "run_cancel":
         executor.cancel(msg.runId);
@@ -119,9 +147,15 @@ function connect(): void {
         executor.resolveApproval(msg.runId, msg.requestId, msg.behavior, msg.updatedInput, msg.message);
         break;
       case "worktree_cleanup": {
-        const r = removeWorktree(msg.workdir, msg.worktreePath);
+        const r = removeWorktree(msg.repositoryRoot, msg.worktreePath);
         console.log(`[harbord] worktree_cleanup ${msg.conversationId}：${r.ok ? "✓" : "✗"} ${r.message}`);
         sendOrQueue({ type: "worktree_cleanup_result", conversationId: msg.conversationId, ok: r.ok, message: r.message });
+        break;
+      }
+      case "review_checkout_cleanup": {
+        const path = reviewWorktreePathFor(msg.repositoryRoot, msg.runId);
+        const result = removeReviewCheckout(msg.repositoryRoot, path);
+        console.log(`[harbord] review_checkout_cleanup ${msg.runId}：${result.ok ? "✓" : "✗"} ${result.message}`);
         break;
       }
     }
@@ -143,9 +177,13 @@ function scheduleReconnect(): void {
   console.log(`[harbord] 连接断开，${Math.round(delay / 1000)}s 后重连（第 ${attempt} 次）`);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    connect();
+    void connect();
   }, delay);
 }
 
 setInterval(() => sendOrQueue({ type: "heartbeat", ts: Date.now() }), HEARTBEAT_INTERVAL_MS);
-connect();
+setInterval(() => void maintenance.refresh().then((blocked) => {
+  if (blocked && ws) ws.close(1013, "deployment maintenance");
+}), 250);
+await maintenance.refresh();
+void connect();

@@ -1,6 +1,6 @@
 /**
- * Issue 状态机：backlog → doing → review → done/canceled，允许任意回退，转换全记 status_log。
- * doing/review 由系统自动流转（run 启动/完成），done/canceled/回退由人工。
+ * Issue 状态机：backlog → todo → doing → review → done/canceled。
+ * doing/review 由 implementation run 自动流转；裸状态 API 只允许人工分诊/验收/取消。
  * chat 恒为 open —— 任何转换请求都拒绝。
  */
 
@@ -17,8 +17,8 @@ export function transitionConversation(
   actor: Actor,
   now: number,
 ): void {
-  if (conv.kind === "chat") {
-    throw new Error(`chat conversation 状态恒为 open，不接受转换（${conv.id}）`);
+  if (conv.kind !== "issue") {
+    throw new Error(`${conv.kind} conversation 状态恒为 open，不接受转换（${conv.id}）`);
   }
   if (!ISSUE_STATUSES.includes(to)) {
     throw new Error(`非法 issue 状态 "${to}"（可选：${ISSUE_STATUSES.join("/")}）`);
