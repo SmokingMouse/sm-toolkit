@@ -1,14 +1,27 @@
 {
-  "name": "@sm/cli",
-  "version": "0.1.0",
+  "name": "@smokingmouse/cli",
+  "version": "0.3.0",
   "type": "module",
+  "description": "llm —— 统一 LLM 命令行：交互选模型启动 Claude Code session，或直连 API 问答。读 endpoints.yaml（$SM_ENDPOINTS_PATH / ~/.config/sm/endpoints.yaml）。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SmokingMouse/sm-toolkit.git",
+    "directory": "apps/cli"
+  },
   "bin": {
     "llm": "src/main.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
   },
   "scripts": {
     "build": "tsc --build"
   },
   "dependencies": {
-    "@smokingmouse/llm": "workspace:*"
+    "@smokingmouse/llm": "^0.3.0"
   }
 }

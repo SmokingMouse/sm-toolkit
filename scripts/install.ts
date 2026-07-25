@@ -162,12 +162,12 @@ function registerPackages(): void {
       linkPackage(dir, pkg.name)
     }
   }
-  console.log(`\n  ${c.dim('其他项目里跑 `bun link @smokingmouse/<包名>（或 @sm/<内部包名>）` 即可引用。')}`)
+  console.log(`\n  ${c.dim('其他项目里跑 `bun link @smokingmouse/<包名>` 即可引用。')}`)
 }
 
 function registerCli(): void {
   const cliDir = join(ROOT, 'apps/cli')
-  linkPackage(cliDir, '@sm/cli（全局命令 llm）')
+  linkPackage(cliDir, '@smokingmouse/cli（全局命令 llm）')
 }
 
 // ── Step F: install apps ────────────────────────────────

@@ -14,13 +14,13 @@
       },
     },
     "apps/cli": {
-      "name": "@sm/cli",
-      "version": "0.1.0",
+      "name": "@smokingmouse/cli",
+      "version": "0.3.0",
       "bin": {
         "llm": "src/main.ts",
       },
       "dependencies": {
-        "@smokingmouse/llm": "workspace:*",
+        "@smokingmouse/llm": "^0.3.0",
       },
     },
     "packages/agent": {
@@ -47,9 +47,9 @@
     },
   },
   "packages": {
-    "@sm/cli": ["@sm/cli@workspace:apps/cli"],
-
     "@smokingmouse/agent": ["@smokingmouse/agent@workspace:packages/agent"],
+
+    "@smokingmouse/cli": ["@smokingmouse/cli@workspace:apps/cli"],
 
     "@smokingmouse/llm": ["@smokingmouse/llm@workspace:packages/llm"],
 
