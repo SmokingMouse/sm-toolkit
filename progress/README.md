@@ -38,6 +38,7 @@
 ### 2026-07-25 — npm 发包完成 + 拆仓
 - **Done**：`@smokingmouse/llm@0.3.0` / `agent@0.3.0` 发布（agent 随后补 0.3.1——0.3.0 发布点早于 harbor 线 merge，缺 `IncomingMessage.resources` 等演进）；harbor 三件套迁出至私仓；死代码集群与 archive/self-agent 移除；root tsconfig references 收敛。
 - **Verified**：公开仓 `bun install` + `tsc --build` 全绿；trellis 从 registry 全新安装 + prod 验活（见 trellis progress S72）；harbor 私仓独立验证 456 tests pass。
+- **追记（同日）**：`@smokingmouse/cli@0.3.0` 发布——@sm/cli 改名，bin `llm`（bun shebang），dep llm ^0.3.0。任何机器 `bun install -g @smokingmouse/cli` 一步可用；本机既有 bun link 不受影响。三包齐：llm 0.3.0 / agent 0.3.1 / cli 0.3.0。
 
 ### 2026-07-17 — kimi k3 接入 + provider 级 claude env 覆盖层
 - **触发**：把用户的 ck() shell 函数（kimi coding API 启动 claude）收进 llm CLI；顺带落地「不同接入点配不同 env，全局 + 定制覆盖」。
