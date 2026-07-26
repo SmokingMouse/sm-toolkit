@@ -65,6 +65,10 @@ export class CodexBackend implements Backend {
     const finalText: string[] = [];
     // 按 item id 记已转发长度,防 item.updated/completed 对同一条重复 emit。
     const emittedLen = new Map<string, number>();
+    // 已发过 ToolCall 的 item id(item.started 先到;某些 build 只发 completed,
+    // 届时在 completed 补发 start 再发 done,保证上游永远能按 id 配对)。
+    const startedTools = new Set<string>();
+    let anonToolSeq = 0;
 
     for await (const raw of streamLines("codex", args, {
       cwd: opts.cwd ?? opts.workspace ?? undefined,
@@ -96,12 +100,39 @@ export class CodexBackend implements Backend {
           yield ev(this.name, EventType.TextChunk, sid, { text: delta });
           emittedLen.set(id, text.length);
         }
-      } else if (t === "item.completed" && obj.item?.type === "command_execution") {
-        yield ev(this.name, EventType.ToolCall, sid, { name: "shell", input: obj.item.command });
+      } else if ((t === "item.updated" || t === "item.completed") && obj.item?.type === "reasoning") {
+        // reasoning item = codex 的思考摘要。不发的话高 effort 下上游整个思考期
+        // 零反馈(与 claude Thinking 同一个失明问题)。按 id 长度 diff 去重。
+        const id = obj.item.id ?? "reasoning";
+        const text = obj.item.text ?? "";
+        const prev = emittedLen.get(id) ?? 0;
+        if (text.length > prev) {
+          yield ev(this.name, EventType.Thinking, sid, { text: text.slice(prev) });
+          emittedLen.set(id, text.length);
+        }
+      } else if (isToolItem(obj.item?.type) && (t === "item.started" || t === "item.completed")) {
+        // 工具生命周期:started 发 ToolCall(带 id 供配对),completed 发 ToolCallDone
+        // (带输出/错误)。此前只在 completed 发一条无 id 的 ToolCall——上游按 id
+        // 去重会把整轮工具吞到只剩一条,且永远 running。
+        const item = obj.item;
+        const id: string = item.id ?? `codex-tool-${anonToolSeq++}`;
+        const call = toolCallFields(item);
+        if (!startedTools.has(id)) {
+          startedTools.add(id);
+          yield ev(this.name, EventType.ToolCall, sid, { id, ...call, parentToolUseId: null });
+        }
+        if (t === "item.completed") {
+          yield ev(this.name, EventType.ToolCallDone, sid, {
+            id,
+            output: toolOutput(item),
+            stderr: null, // codex aggregated_output 不拆 stdout/stderr
+            isError:
+              item.status === "failed" ||
+              (typeof item.exit_code === "number" && item.exit_code !== 0),
+          });
+        }
       } else if (t === "item.completed" && obj.item?.type === "file_change") {
         yield ev(this.name, EventType.FileChange, sid, { changes: obj.item.changes });
-      } else if (t === "item.completed" && obj.item?.type === "mcp_tool_call") {
-        yield ev(this.name, EventType.ToolCall, sid, { name: obj.item.tool, input: obj.item.arguments });
       } else if (t === "turn.completed") {
         const u = obj.usage ?? {};
         const totalIn = u.input_tokens ?? 0,
@@ -132,6 +163,25 @@ export class CodexBackend implements Backend {
       }
     }
   }
+}
+
+// exec --json 里代表「一次工具调用」的 item 类型(file_change 单独走 FileChange)。
+function isToolItem(t: unknown): t is string {
+  return t === "command_execution" || t === "mcp_tool_call" || t === "web_search";
+}
+
+function toolCallFields(item: any): { name: string; input: unknown } {
+  if (item.type === "command_execution") return { name: "shell", input: item.command };
+  if (item.type === "mcp_tool_call") return { name: item.tool ?? "mcp", input: item.arguments };
+  return { name: "web_search", input: item.query ?? null };
+}
+
+function toolOutput(item: any): string | null {
+  if (item.type === "command_execution")
+    return typeof item.aggregated_output === "string" ? item.aggregated_output : null;
+  if (item.type === "mcp_tool_call")
+    return item.result !== undefined ? JSON.stringify(item.result) : null;
+  return null;
 }
 
 export function buildCodexArgs(o: {
@@ -183,7 +233,10 @@ export function buildCodexArgs(o: {
                 ? ["-c", `sandbox_workspace_write.writable_roots=${JSON.stringify(writableDirs)}`]
                 : []),
             ];
-    return ["exec", "resume", o.resume, ...common, ...sandbox, ...imageArgs, o.prompt];
+    // resume 也吃 --ephemeral(0.142.2 实测在 flag 清单里)——不加会让
+    // persistence:false 的承诺在多轮场景被静默违背。
+    const ephemeral = o.ephemeral ? ["--ephemeral"] : [];
+    return ["exec", "resume", o.resume, ...common, ...ephemeral, ...sandbox, ...imageArgs, o.prompt];
   }
   const sandbox =
     o.policy === "readonly"

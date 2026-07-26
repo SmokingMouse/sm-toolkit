@@ -116,4 +116,10 @@ describe("Codex argument construction", () => {
     expect(resumed.join(" ")).not.toContain("writable_roots");
     expect(resumed).not.toContain("--dangerously-bypass-approvals-and-sandbox");
   });
+
+  test("resume keeps the ephemeral promise", () => {
+    const resumed = args("readonly", { resume: "thread-1", ephemeral: true });
+    expect(resumed).toContain("--ephemeral");
+    expect(args("readonly", { resume: "thread-1" })).not.toContain("--ephemeral");
+  });
 });
