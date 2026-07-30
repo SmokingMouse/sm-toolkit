@@ -294,10 +294,16 @@ export class ClaudeBackend implements Backend {
         }
       } else if (t === "user") {
         // tool_result:工具执行完。Bash 的 stdout/stderr 在顶层 tool_use_result 隔离,优先用 stdout。
+        //
+        // 空 stdout 必须让位给 content:后台化的 Bash 和无输出的命令都报
+        // stdout:"",而真正有信息的那句("Command running in background with
+        // ID: …" / "(Bash completed with no output)")在 content 里。用 ??
+        // 的话空串是非 nullish,会把它顶掉,结果整条调用看上去没有任何输出。
         const tur = obj.tool_use_result;
         for (const b of obj.message?.content ?? []) {
           if (b.type === "tool_result") {
-            const stdout = typeof tur?.stdout === "string" ? tur.stdout : null;
+            const stdout =
+              typeof tur?.stdout === "string" && tur.stdout ? tur.stdout : null;
             const stderr = typeof tur?.stderr === "string" && tur.stderr ? tur.stderr : null;
             const output = stdout ?? (typeof b.content === "string" ? b.content : null);
             yield ev(this.name, EventType.ToolCallDone, sid, {
@@ -363,13 +369,27 @@ const TASK_SUBTYPES: Record<string, string> = {
 };
 
 /**
- * task_* 行 → 扁平化的子 agent 元信息。各 subtype 只带自己那几个字段(started 有
- * prompt、progress 有 usage/last_tool_name、notification 有 summary),所以这里按
- * 出现即取、**剔掉 undefined** —— 上游是 patch 语义的浅合并,留着 undefined 会把
- * 先前 phase 已经拿到的值抹掉。
+ * task_* 行 → 扁平化的 task 元信息。各 subtype 只带自己那几个字段(started 有
+ * task_type/prompt、progress 有 usage/last_tool_name/workflow_progress、
+ * notification 有 summary),所以这里按出现即取、**剔掉 undefined** —— 上游是
+ * patch 语义的浅合并,留着 undefined 会把先前 phase 已经拿到的值抹掉。
+ *
+ * `taskType` 是三类 task 的唯一判别位,**只在 task_started 出现**:
+ *   local_agent    —— 真子 agent(Task/Agent 工具)
+ *   local_bash     —— 长跑 Bash,后台的和前台慢命令都算
+ *   local_workflow —— Workflow 工具
+ * 不抽它的话上游只能看见「有 task 元信息」,把慢 Bash 和 workflow 一并误认成子
+ * agent(trellis 踩过:命令 stdout 被当成子 agent 报告短路掉,整段结果不可见)。
+ *
+ * `workflowProgress` 是 workflow 的**全量快照**(不是增量),CLI 侧约 1s 批一次
+ * 挂在 task_progress 上:phase 列表 + 每个 agent 的 label/phaseTitle/state/model/
+ * tokens/durationMs/resultPreview。浅合并语义下整份替换即正确。
  */
 function taskData(obj: any): Record<string, unknown> {
   const d: Record<string, unknown> = {
+    taskType: obj.task_type,
+    workflowName: obj.workflow_name,
+    workflowProgress: obj.workflow_progress,
     description: obj.description,
     subagentType: obj.subagent_type,
     prompt: obj.prompt,

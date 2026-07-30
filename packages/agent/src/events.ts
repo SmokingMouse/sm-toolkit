@@ -17,10 +17,14 @@ export const EventType = {
   Thinking: "thinking",
   ToolCall: "tool_call",
   ToolCallDone: "tool_call_done",
-  /** 子 agent(Task/Agent 工具)生命周期。claude 的 `system` 行 task_started /
-   * task_progress / task_updated / task_notification 归一成一个事件,data.phase
-   * 区分阶段,data.toolUseId 指回派生它的那条 tool_call —— 上游据此把子 agent 的
-   * 工具链挂到父调用下,并拿到实时进度 + 最终报告。 */
+  /** 后台 task 生命周期。claude 的 `system` 行 task_started / task_progress /
+   * task_updated / task_notification 归一成一个事件,data.phase 区分阶段,
+   * data.toolUseId 指回派生它的那条 tool_call —— 上游据此把工具链挂到父调用下,
+   * 并拿到实时进度 + 最终报告。
+   *
+   * **不止子 agent**:data.taskType 区分 local_agent(子 agent) / local_bash(长跑
+   * Bash,含前台慢命令) / local_workflow(Workflow 工具)。三者共用这一条通道,只看
+   * 「有没有 task 元信息」会把后两者误当子 agent。 */
   Task: "task",
   FileChange: "file_change",
   ImageOutput: "image_output", // 生图产物:data.paths = 本地图片路径数组
