@@ -75,6 +75,9 @@ export class ClaudeBackend implements Backend {
       reportsCapabilityAtRuntime: true, // init 自报 tools/model/permissionMode
       resume: true,
       configDrivenModelSwitch: true, // model 可解析 endpoints.yaml,切第三方 Anthropic 兼容端点
+      // 调用方据此探测 SDK 版本够不够新。缺了它而照传 agent/agents/pluginDirs,
+      // 字段会被结构类型放过、被运行时静默丢弃 —— agent 不生效但一切「正常」。
+      customAgents: true, // --agent / --agents / --plugin-dir / extraArgs
     };
   }
 
@@ -106,24 +109,57 @@ export class ClaudeBackend implements Backend {
     if (opts.resume) args.push("--resume", opts.resume);
     if (opts.resume && opts.forkSession) args.push("--fork-session");
     if (opts.persistence === false) args.push("--no-session-persistence");
-    if (opts.systemPrompt) args.push("--system-prompt", opts.systemPrompt);
+    // --system-prompt(整体替换) 与 --agent(激活人设) 同给时 CLI 的优先级无文档,
+    // 不赌:agent 赢。调用方本就该二选一,这里只是让「传错了」有确定行为而非静默随机。
+    if (opts.systemPrompt && !opts.agent) args.push("--system-prompt", opts.systemPrompt);
+    else if (opts.systemPrompt && opts.agent) {
+      console.warn("[claude] systemPrompt 与 agent 互斥,本次以 agent 为准并忽略 systemPrompt");
+    }
+    const hasCustomAgent = !!(opts.agent || opts.agents || opts.pluginDirs?.length);
     if (opts.environmentSkills === false) {
       // Harbor 的 Skill 由 control plane 直接写入 systemPrompt；Runtime 本机的
       // CLAUDE.md / Skills / plugins / hooks / MCP 不属于 Agent 配置，必须隔离。
       // --safe-mode 是 Claude Code 2.1.183+ 提供的完整 customization 隔离；
       // --disable-slash-commands 再显式封住 Skill/command 入口，避免边界依赖隐含语义。
-      args.push(...claudeEnvironmentSkillArgs(false));
+      //
+      // 互斥:--safe-mode 会把 --agents / --plugin-dir 注册的 agent 一起禁掉
+      // (2026-07-31 实测报 `--agent 'tester' not found`),而且是**静默的能力缺失**。
+      // 两者同给时以自定义 agent 为准 —— 显式配了 agent 就是要那个人设。
+      if (hasCustomAgent) {
+        console.warn(
+          "[claude] environmentSkills=false 与自定义 agent 互斥(--safe-mode 会禁掉 --agents/--plugin-dir);本次忽略 environmentSkills",
+        );
+      } else {
+        args.push(...claudeEnvironmentSkillArgs(false));
+      }
     }
     if (opts.settingSources === false) {
       // 砍全局 CLAUDE.md + 默认 MCP 省 context。实测一句 OK $0.28→$0.0015(↓184x)。
       // 等号形式而非 ("--setting-sources", ""):独立的空字符串 argv 在部分 runtime
       // (工作机 bun 实测)会被丢弃,导致后面的 --strict-mcp-config 被当成值吞掉、
       // CLI 报错 0 输出;等号把空值焊死在同一个 argv 里,两种写法 CLI 均实测接受。
-      args.push("--setting-sources=", "--strict-mcp-config");
+      args.push("--setting-sources=");
+      // 默认 true = 历史行为。设 false **不会**让本机 MCP 回来(2026-07-31 实测:
+      // 加不加它 init 事件里 mcp_servers 都是 []),它只在配了 --mcp-config 时有意义。
+      if (opts.strictMcp !== false) args.push("--strict-mcp-config");
     }
     if (opts.tools && opts.tools !== "all") {
       args.push("--tools", opts.tools.join(",")); // [] → "" 即无工具
     }
+    // 逗号连接而非变参展开 —— --disallowedTools 是 variadic,展开会吞掉后面的 flag。
+    if (opts.disallowedTools?.length) {
+      args.push("--disallowedTools", opts.disallowedTools.join(","));
+    }
+    // 顺序焊死在这里:plugin 必须先注册,后面的 --agent 才选得中里面的 agent。
+    for (const dir of opts.pluginDirs ?? []) args.push("--plugin-dir", dir);
+    if (opts.agents) {
+      args.push(
+        "--agents",
+        typeof opts.agents === "string" ? opts.agents : JSON.stringify(opts.agents),
+      );
+    }
+    if (opts.agent) args.push("--agent", opts.agent);
+    if (opts.extraArgs?.length) args.push(...opts.extraArgs);
     if (opts.workspace) {
       args.push("--add-dir", opts.workspace);
       for (const directory of opts.additionalWorkspaces ?? []) args.push("--add-dir", directory);
