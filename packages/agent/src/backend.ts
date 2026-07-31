@@ -49,8 +49,29 @@ export interface RunOptions {
   permission?: PermissionPolicy;
   /** 工具白名单:[] = 无工具,["WebSearch","WebFetch"] = 仅这些,"all"/缺省 = 后端默认全部 */
   tools?: string[] | "all";
-  /** 是否加载项目/全局配置(claude CLAUDE.md)。false = 砍掉省 context。默认 true */
+  /** 是否加载项目/全局配置(claude CLAUDE.md)。false = 砍掉省 context。默认 true。
+   * 注意实测边界:false **同时**砍掉本机 MCP servers(它们也来自 settings sources)——
+   * 隔离 = 无 CLAUDE.md + 无本机 skill + 无 MCP 三件套,`strictMcp` 救不回来。
+   * 想给隔离会话配 MCP 只能显式走 --mcp-config。 */
   settingSources?: boolean;
+  /** 是否附带 --strict-mcp-config(仅在 settingSources === false 时有意义)。默认 true。
+   * 实测它只在配了 --mcp-config 时才改变行为;单独设 false **不会**让本机 MCP 回来。 */
+  strictMcp?: boolean;
+  /** claude --agent:把某个已注册 agent 激活成本次会话的主 agent。
+   * 与 systemPrompt 互斥(替换 vs 人设两种语义,同给的优先级 CLI 无文档),由调用方保证只传一个。 */
+  agent?: string;
+  /** claude --agents:内联 JSON 注册 agent,无需 plugin 目录。
+   * 形如 { slug: { description, prompt, tools?, model? } }。传对象或已序列化字符串均可。 */
+  agents?: Record<string, unknown> | string;
+  /** claude --plugin-dir:从任意路径加载 plugin(agents/ + skills/ + commands/)。可多个。
+   * 必须排在 --agent 之前注册,本 backend 内部保证顺序。 */
+  pluginDirs?: string[];
+  /** claude --disallowedTools:工具黑名单。与 tools 白名单正交,可同时给。 */
+  disallowedTools?: string[];
+  /** 逃生舱:原样追加到 argv(在 permission 的变参之前)。
+   * 用于本类型尚未建模的 CLI flag(--mcp-config / --max-budget-usd / --effort ...),
+   * 免去「加一个 flag 发一次版」。调用方必须只从结构化配置派生,绝不接用户自由文本。 */
+  extraArgs?: string[];
   /**
    * 是否暴露 Runtime 所在机器的 Skills。默认 true，保持通用 Backend 的历史行为。
    * false 时调用方提供的 systemPrompt 仍会生效，但 Claude/Codex 不再向模型暴露
