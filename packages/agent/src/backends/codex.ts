@@ -6,6 +6,9 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { EventType, type AgentEvent, type Cost } from "../events.js";
 import type { Backend, RunOptions, PermissionPolicy } from "../backend.js";
 import { streamLines } from "./stream-lines.js";
@@ -13,6 +16,35 @@ import { loadEndpoints, resolveEndpoint, getApiKey } from "@smokingmouse/llm";
 
 // 示意单价(USD / token),真实值由上游配置注入。
 const CODEX_PRICE = { input: 1.25 / 1_000_000, output: 10.0 / 1_000_000 };
+
+/**
+ * headless fork —— codex exec 没有 fork 子命令(交互版 `codex fork` 有),用等价
+ * 机制模拟:把父 thread 的 rollout jsonl 复制成新 uuid(文件名 + 全文替换 id),
+ * 之后 resume 新 id 即是一条继承完整历史、与父线双向隔离的新线(2026-08-04
+ * codex 0.146.0 实测:历史继承 ✓ 隔离 ✓;resume 需带与录制一致的 -m,否则
+ * model 漂移告警且曾实测触发上游 400)。
+ * 找不到父 rollout(id 不存在 / CODEX_HOME 不对 / 父线未持久化)→ throw,由
+ * run() fail loud —— 静默退化成线性 resume 会让两个"分支"共写同一 thread,
+ * 上游以为隔离实则互相污染,是错误行为不是降级。
+ */
+export function forkCodexSession(parentId: string, sessionsRoot?: string): string {
+  const root =
+    sessionsRoot ??
+    path.join(process.env.CODEX_HOME ?? path.join(process.env.HOME ?? "", ".codex"), "sessions");
+  // rollout 布局 sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl,按文件名匹配 uuid。
+  const entries = fs.readdirSync(root, { recursive: true, encoding: "utf8" }) as string[];
+  const rel = entries.find(
+    (e) => e.includes("rollout-") && e.endsWith(`-${parentId}.jsonl`),
+  );
+  if (!rel) {
+    throw new Error(`rollout for thread ${parentId} not found under ${root}`);
+  }
+  const src = path.join(root, rel);
+  const newId = randomUUID();
+  const dst = path.join(path.dirname(src), path.basename(src).replace(parentId, newId));
+  fs.writeFileSync(dst, fs.readFileSync(src, "utf8").split(parentId).join(newId));
+  return newId;
+}
 
 /**
  * 把 RunOptions.model 解析成 { model, configOverrides?, env? },对齐
@@ -74,6 +106,8 @@ export class CodexBackend implements Backend {
       structuredOutput: true, // --output-schema
       reportsCapabilityAtRuntime: false, // thread.started 不含 tools/model
       resume: true,
+      // headless fork:exec 无原生 fork 子命令,由 rollout copy 模拟(forkCodexSession)。
+      forkSession: true,
       // model 可解析 endpoints.yaml,切显式标记的第三方 Responses 端点(-c 注入);
       // 约束:codex ≥0.146 只认 wire_api="responses",chat-only 端点不可用。
       configDrivenModelSwitch: true,
@@ -98,6 +132,20 @@ export class CodexBackend implements Backend {
     const spawnEnv: Record<string, string> | undefined =
       resolved.env || opts.env ? { ...resolved.env, ...opts.env } : undefined;
 
+    // fork 续会话:headless 模拟 claude --fork-session(rollout copy,见 forkCodexSession)。
+    // 失败必须 fail loud,绝不静默线性 resume(那会让树形分支互相污染)。
+    let resumeId = opts.resume ?? null;
+    if (resumeId && opts.forkSession) {
+      try {
+        resumeId = forkCodexSession(resumeId);
+      } catch (e) {
+        yield ev(this.name, EventType.Error, null, {
+          message: `codex fork 失败(线程 ${resumeId}):${e instanceof Error ? e.message : String(e)}`,
+        });
+        return;
+      }
+    }
+
     // codex 无 --system-prompt,把它 inline 到 prompt 前(read-only sandbox 时主要影响风格)。
     const finalPrompt = opts.systemPrompt ? `${opts.systemPrompt}\n\n---\n\n${prompt}` : prompt;
     const policy: PermissionPolicy = opts.permission ?? (opts.workspace ? "auto-edit" : "readonly");
@@ -106,7 +154,7 @@ export class CodexBackend implements Backend {
       ephemeral: opts.persistence === false,
       model: resolved.model,
       configOverrides: resolved.configOverrides,
-      resume: opts.resume ?? null,
+      resume: resumeId,
       additionalWritableDirs: opts.additionalWritableDirs ?? [],
       sandboxNetworkAccess: opts.sandboxNetworkAccess === true,
       imagePaths: (opts.attachments ?? []).map((a) => a.path),
@@ -116,7 +164,7 @@ export class CodexBackend implements Backend {
       environmentSkillNames: opts.environmentSkillNames,
     });
 
-    let sid: string | null = opts.resume ?? null;
+    let sid: string | null = resumeId;
     const finalText: string[] = [];
     // 按 item id 记已转发长度,防 item.updated/completed 对同一条重复 emit。
     const emittedLen = new Map<string, number>();
