@@ -7,6 +7,17 @@ export interface ProviderConfig {
   models: string[]
   /** provider 级 claude session 配置，env 覆盖顶层 claude: 同名项，args 追加其后 */
   claude?: ClaudeSettings
+  /** 显式声明该端点可供 codex CLI 使用（及其 wire 协议）。不写 = 不给 codex 注入 */
+  codex?: CodexSettings
+}
+
+/**
+ * codex CLI 端点声明。codex 0.146.0 起 wire_api="chat" 已废弃（openai/codex#7782），
+ * 只有 Responses API 端点能接——所以这是显式 opt-in 标记：chat-only 的 openai_url
+ * （deepseek/gemini/ark 等）绝不能标，注入了也只会 400。
+ */
+export interface CodexSettings {
+  wire_api: 'responses'
 }
 
 /** 启动 claude CLI 交互 session 时的附加配置（llm 无 -p 路径透传） */
@@ -33,6 +44,8 @@ export interface EndpointConfig {
   protocol: 'openai' | 'anthropic'
   /** 所属 provider 的 claude 块（若有），供启动 claude session 的调用方合并 */
   claude?: ClaudeSettings
+  /** 所属 provider 的 codex 块（若有），供 CodexBackend 判定可否注入端点 */
+  codex?: CodexSettings
 }
 
 // ── listing types ───────────────────────────────────────

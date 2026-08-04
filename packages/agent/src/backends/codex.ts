@@ -1,16 +1,59 @@
 /**
  * Codex CLI 后端 —— spawn `codex` + 把 jsonl 事件归一成统一 Event。
- * 移植自 agent-gateway src/backends.ts,原样搬入(codex 的模型切换不在本次范围内,
- * 这个后端本身也没有 endpoints.yaml 接入 —— 见 ClaudeBackend 的对比)。
+ * 移植自 agent-gateway src/backends.ts。模型解析对齐 ClaudeBackend:接入
+ * endpoints.yaml(@smokingmouse/llm),`--model` 可以是显式标记了 codex 支持的
+ * 第三方端点的模型名(见 resolveCodexModel)。其余 spawn/解析逻辑保持移植原样。
  */
 
 import { spawnSync } from "node:child_process";
 import { EventType, type AgentEvent, type Cost } from "../events.js";
 import type { Backend, RunOptions, PermissionPolicy } from "../backend.js";
 import { streamLines } from "./stream-lines.js";
+import { loadEndpoints, resolveEndpoint, getApiKey } from "@smokingmouse/llm";
 
 // 示意单价(USD / token),真实值由上游配置注入。
 const CODEX_PRICE = { input: 1.25 / 1_000_000, output: 10.0 / 1_000_000 };
+
+/**
+ * 把 RunOptions.model 解析成 { model, configOverrides?, env? },对齐
+ * resolveClaudeModel 的三分支语义:
+ *   ① endpoints.yaml 解析出的端点带 codex.wire_api="responses" 显式标记 →
+ *      真实 model 名 + `-c model_provider(s)` 注入参数 + api key env。
+ *   ② 解析出的端点无 codex 标记(chat-only 的 openai_url 等)→ 原样透传,
+ *      走用户全局 ~/.codex/config.toml —— codex 0.146.0 起 wire_api="chat"
+ *      已废弃(openai/codex#7782),chat 端点静默注入只会 400,必须 opt-in。
+ *   ③ 解析失败(codex 原生模型名如 gpt-5.5、CLI 新别名)→ 原样透传给 -m,
+ *      让 codex CLI 自己校验 —— 不在这一层生降级用户的请求。
+ * 注入用固定 provider id "sm_endpoint",经 `-c` 与全局 config.toml merge,
+ * 不落盘不污染用户配置;鉴权走 env_key 指向 endpoints.yaml 的 api_key_env,
+ * key 值显式放进 spawn env(2026-08-04 codex 0.146.0 正负向实测均通过)。
+ */
+function resolveCodexModel(model: string | undefined): {
+  model: string | undefined;
+  configOverrides?: string[];
+  env?: Record<string, string>;
+} {
+  if (!model) return { model: undefined };
+  try {
+    const { endpoint } = resolveEndpoint(loadEndpoints(), model, "openai");
+    if (!endpoint.base_url) return { model: endpoint.model };
+    if (endpoint.codex?.wire_api !== "responses") return { model };
+    const p = "model_providers.sm_endpoint";
+    return {
+      model: endpoint.model,
+      configOverrides: [
+        "-c", `model_provider="sm_endpoint"`,
+        "-c", `${p}.name="sm-endpoint"`,
+        "-c", `${p}.base_url="${endpoint.base_url}"`,
+        "-c", `${p}.env_key="${endpoint.api_key_env}"`,
+        "-c", `${p}.wire_api="${endpoint.codex.wire_api}"`,
+      ],
+      env: { [endpoint.api_key_env]: getApiKey(endpoint) },
+    };
+  } catch {
+    return { model };
+  }
+}
 
 export class CodexBackend implements Backend {
   readonly name = "codex";
@@ -31,18 +74,29 @@ export class CodexBackend implements Backend {
       structuredOutput: true, // --output-schema
       reportsCapabilityAtRuntime: false, // thread.started 不含 tools/model
       resume: true,
+      // model 可解析 endpoints.yaml,切显式标记的第三方 Responses 端点(-c 注入);
+      // 约束:codex ≥0.146 只认 wire_api="responses",chat-only 端点不可用。
+      configDrivenModelSwitch: true,
     };
   }
 
   async *run(prompt: string, opts: RunOptions): AsyncGenerator<AgentEvent> {
+    const resolved = resolveCodexModel(opts.model);
     // 登录检查(便宜 ~50ms):给清晰可操作错误,避免浪费一次必 401 的往返。
-    const login = spawnSync("codex", ["login", "status"], { encoding: "utf8", timeout: 5000 });
-    if (login.status !== 0) {
-      yield ev(this.name, EventType.Error, null, {
-        message: "codex 未登录。请先在终端运行 `codex login` 后重试。",
-      });
-      return;
+    // 注入端点时跳过 —— 鉴权走 env_key(API key),不依赖 ChatGPT 登录态。
+    if (!resolved.configOverrides) {
+      const login = spawnSync("codex", ["login", "status"], { encoding: "utf8", timeout: 5000 });
+      if (login.status !== 0) {
+        yield ev(this.name, EventType.Error, null, {
+          message: "codex 未登录。请先在终端运行 `codex login` 后重试。",
+        });
+        return;
+      }
     }
+
+    // caller 显式传的 env 优先级高于按 model 解析出的 env(对齐 ClaudeBackend)。
+    const spawnEnv: Record<string, string> | undefined =
+      resolved.env || opts.env ? { ...resolved.env, ...opts.env } : undefined;
 
     // codex 无 --system-prompt,把它 inline 到 prompt 前(read-only sandbox 时主要影响风格)。
     const finalPrompt = opts.systemPrompt ? `${opts.systemPrompt}\n\n---\n\n${prompt}` : prompt;
@@ -50,7 +104,8 @@ export class CodexBackend implements Backend {
     const args = buildCodexArgs({
       policy,
       ephemeral: opts.persistence === false,
-      model: opts.model,
+      model: resolved.model,
+      configOverrides: resolved.configOverrides,
       resume: opts.resume ?? null,
       additionalWritableDirs: opts.additionalWritableDirs ?? [],
       sandboxNetworkAccess: opts.sandboxNetworkAccess === true,
@@ -69,11 +124,15 @@ export class CodexBackend implements Backend {
     // 届时在 completed 补发 start 再发 done,保证上游永远能按 id 配对)。
     const startedTools = new Set<string>();
     let anonToolSeq = 0;
+    // stderr 兜底(对齐 ClaudeBackend):CLI 报错而事件流无信息量时拼 stderr 尾部,
+    // 避免只剩 generic "codex error"。
+    const stderrSink = { text: "" };
 
     for await (const raw of streamLines("codex", args, {
       cwd: opts.cwd ?? opts.workspace ?? undefined,
-      env: opts.env,
+      env: spawnEnv,
       signal: opts.signal,
+      stderrSink,
     })) {
       let obj: any;
       try {
@@ -86,7 +145,9 @@ export class CodexBackend implements Backend {
         sid = obj.thread_id ?? sid;
         yield ev(this.name, EventType.SessionStart, sid, {
           tools: null,
-          model: null,
+          // thread.started 不自报 model;注入端点时后端确知实际命中的 model,
+          // 回填之。透传场景仍 null(全局 config.toml 可能改写,不冒充事实)。
+          model: resolved.configOverrides ? (resolved.model ?? null) : null,
           note: "capability from static declaration",
         });
       } else if ((t === "item.updated" || t === "item.completed") && obj.item?.type === "agent_message") {
@@ -151,13 +212,19 @@ export class CodexBackend implements Backend {
         yield ev(this.name, EventType.Result, sid, { text: finalText.join(""), cost });
         return;
       } else if (t === "turn.failed") {
-        yield ev(this.name, EventType.Error, sid, { message: obj.error?.message ?? "codex turn failed" });
+        const stderrTail = stderrSink.text.trim();
+        const message =
+          obj.error?.message || (stderrTail ? stderrTail.slice(-500) : null) || "codex turn failed";
+        yield ev(this.name, EventType.Error, sid, { message });
         return;
       } else if (t === "error") {
         // "Reconnecting..." 是瞬态重连,吞掉(解决 normalizer 噪音);其余才报。
         const msg = (obj.message as string) ?? "";
         if (!msg.toLowerCase().startsWith("reconnecting")) {
-          yield ev(this.name, EventType.Error, sid, { message: msg || "codex error" });
+          const stderrTail = stderrSink.text.trim();
+          yield ev(this.name, EventType.Error, sid, {
+            message: msg || (stderrTail ? stderrTail.slice(-500) : "codex error"),
+          });
           return;
         }
       }
@@ -188,6 +255,8 @@ export function buildCodexArgs(o: {
   policy: PermissionPolicy;
   ephemeral: boolean;
   model?: string;
+  /** resolveCodexModel 产出的 `-c` 端点注入参数;resume parser 同样接受 -c(0.144.2 实测) */
+  configOverrides?: string[];
   resume: string | null;
   additionalWritableDirs: string[];
   sandboxNetworkAccess: boolean;
@@ -197,7 +266,7 @@ export function buildCodexArgs(o: {
   environmentSkills?: boolean;
   environmentSkillNames?: string[];
 }): string[] {
-  const common = ["--json", "--skip-git-repo-check"];
+  const common = ["--json", "--skip-git-repo-check", ...(o.configOverrides ?? [])];
   if (o.environmentSkills === false) {
     common.push(...codexEnvironmentSkillArgs(o.environmentSkillNames));
   }
