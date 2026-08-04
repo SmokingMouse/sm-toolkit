@@ -1,5 +1,11 @@
 # Sessions（倒序，最近 5 条；更早的移入 archive.md）
 
+### 2026-08-04 — CodexBackend 实现 forkSession(rollout copy 模拟 headless fork)
+- **机制**:codex exec 无 fork 子命令(交互版 `codex fork` 有)。`forkCodexSession()` 把父 thread 的 rollout jsonl 复制成新 uuid(文件名 + 全文替换 id)再 resume 新 id;失败 fail loud——静默线性 resume 会让树形分支共写同一 thread 互相污染。claude/codex capabilities 均补 `forkSession: true` 供上游探测。
+- **Verified**:单测 3 个(复制改写 id / 同父双 fork 互异 / 缺档 throw),agent 16/16;端到端:fork 出新 id、答出父线暗号(历史继承),fork 线 cachedTokens 79k(前缀相同 → provider prompt cache 命中,cache 继承白捡);CLI 层已验证双向隔离(fork 写入新暗号,父线不可见);负向 fail loud 带 id + 路径。
+- **注意**:resume 必须带与录制一致的 -m(model 漂移曾实测触发上游 400);rollout 格式是 codex 内部实现,版本升级需回归(0.146.0 实测)。
+- **Next**:与 endpoint 注入一起发版(minor)。
+
 ### 2026-08-04 — CodexBackend 接入 endpoints.yaml + 本地仓追平 origin
 - **背景**：本地 clone 落后 origin/main 70 commit（0.3.1→0.4.0 发包线全在远端）；先在旧 base 做完 codex 端点注入，发现落后后备份改动（/tmp/sm-backup）、ff pull 至 acb0443（0.4.0），在新 base 重放。
 - **Done**:
@@ -37,9 +43,3 @@
   - 下游解耦 content-studio venv：svg-diagram review.py / xianyu gen_image.py+check_image.py / x-api x_api.py 的解释器改 `/usr/bin/python3`（ai-legion 纯 stdlib，3.9 实测可跑）。
 - **Verified**（全部实测）：`llm --list --json` ✓ `--fallback` chat ✓ vision 图片（比特币图正确描述）✓ vision 音频（say 生成 m4a → Files API 上传轮询转写）✓ imagen 生图（1024×1024 PNG 落盘；首跑遇瞬时 API 错误，已补 withRetry）✓ ai-legion status/ask/ask--json/vision/image 五路 ✓ 系统 python3.9 跑 vision.py ✓；codex 生图路径已发起（~2min 异步确认）。
 - **Next**：codex 并发生图（多进程 mkdtemp）真实场景观察；content-studio 已无 skill 层依赖，可择机退役。
-
-### 2026-07-15 — claude 后端 --setting-sources 改等号形式（工作机 0 输出修复上游化）
-- **触发**：工作机 pull trellis a29f9b5 后 chat 仍 0 输出，排查是 `("--setting-sources", "")` 的独立空字符串 argv 在该机 runtime 下被丢弃 → `--strict-mcp-config` 被当成 setting-sources 的值 → CLI 报错退出。本机 bun 1.3.14 实测**不**吞空 argv（不复现），但等号形式把值焊死在同一 argv 里对 runtime 差异免疫，语义不变（仍是"不加载任何 settings source"，不是工作机临时用的 `=local`——那会让真实 cwd 的 caller 突然加载 .claude/settings.local.json，通用 SDK 不做该语义漂移）。
-- **验证**：`--setting-sources=` 与 `=local` 裸 CLI 均实测接受；trellis 隔离实例真 spawn 纯 chat 回答正常。
-- **Next**：工作机收敛——`git checkout -- packages/agent/src && git pull && bun run build`（其手工 Thinking 补丁与上游 a3ce7b2 等价，等号修复本条已含）。
-

@@ -3,6 +3,7 @@
 - **codex CLI ≥0.146.0 废弃 `wire_api = "chat"`，只认 `responses`**：config 含 chat 直接启动报错 `Error loading config.toml: wire_api = "chat" is no longer supported`，官方指向 openai/codex discussions#7782。推论：endpoints.yaml 里 chat-only 的 openai_url（deepseek / gemini / ark-coding）从协议上给不了 codex，故 `codex:` 块设计为显式 opt-in。来源：2026-08-04 本机 `codex exec -c 'model_providers.sm_ep.wire_api="chat"' …` 实测（codex-cli 0.146.0）。
 - **codex `-c model_provider` per-run 注入真实生效（非静默 fallback 全局 config.toml）**：注入 `env_key="NONEXISTENT_KEY_XYZ"` 报 `Missing environment variable`；正常 key 走通、坏 key 401 且报错 url = 注入的 base_url。来源：2026-08-04 实测，详见 sessions.md 当日条目。
 - **`codex exec resume` 不接受 `--sandbox`/`--add-dir` 但接受 `-c` overrides**（codex 0.144.2 实测）——endpoint 注入参数放 common 对 resume 路径同样可用。来源：`packages/agent/src/backends/codex.ts` buildCodexArgs 注释。
+- **codex headless fork 可由 rollout copy 模拟**:复制 `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` 并全文替换 uuid,resume 新 id 即继承完整历史、与父线双向隔离的新 thread(交互版 `codex fork` 的等价物,exec 无该子命令);前缀相同还命中 provider prompt cache。约束:resume 需带录制时的 -m;rollout 格式为内部实现,codex 升级需回归。来源:2026-08-04 codex 0.146.0 三步实测(继承/隔离/负向),见 sessions.md 当日条目。
 
 ## 迁移自 README「Verified Facts」区
 

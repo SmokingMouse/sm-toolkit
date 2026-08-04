@@ -1,6 +1,52 @@
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { PermissionPolicy } from "../backend.js";
-import { buildCodexArgs, codexEnvironmentSkillArgs } from "./codex.js";
+import { buildCodexArgs, codexEnvironmentSkillArgs, forkCodexSession } from "./codex.js";
+
+describe("forkCodexSession", () => {
+  const PARENT = "019fcca2-16f1-70c0-903e-5ab3345aeb41";
+
+  function seedRollout(): { root: string; day: string; src: string } {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-fork-"));
+    const day = path.join(root, "2026", "08", "04");
+    fs.mkdirSync(day, { recursive: true });
+    const src = path.join(day, `rollout-2026-08-04T19-56-42-${PARENT}.jsonl`);
+    fs.writeFileSync(
+      src,
+      JSON.stringify({ type: "session_meta", payload: { session_id: PARENT, id: PARENT } }) +
+        "\n" +
+        JSON.stringify({ type: "event_msg", payload: { type: "task_started" } }) +
+        "\n",
+    );
+    return { root, day, src };
+  }
+
+  test("copies the rollout under a fresh uuid, rewriting every id occurrence", () => {
+    const { root, day, src } = seedRollout();
+    const child = forkCodexSession(PARENT, root);
+    expect(child).not.toBe(PARENT);
+    const dst = path.join(day, `rollout-2026-08-04T19-56-42-${child}.jsonl`);
+    const forked = fs.readFileSync(dst, "utf8");
+    expect(forked).toContain(`"session_id":"${child}"`);
+    expect(forked).not.toContain(PARENT);
+    // 父线原样保留(fork 是复制不是搬移)
+    expect(fs.readFileSync(src, "utf8")).toContain(PARENT);
+  });
+
+  test("two forks of the same parent yield distinct threads", () => {
+    const { root } = seedRollout();
+    const a = forkCodexSession(PARENT, root);
+    const b = forkCodexSession(PARENT, root);
+    expect(a).not.toBe(b);
+  });
+
+  test("throws loudly when the parent rollout is missing", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-fork-"));
+    expect(() => forkCodexSession("0000-no-such-thread", root)).toThrow(/not found/);
+  });
+});
 
 function args(
   policy: PermissionPolicy,

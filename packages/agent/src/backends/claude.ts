@@ -74,6 +74,7 @@ export class ClaudeBackend implements Backend {
       structuredOutput: true, // --json-schema
       reportsCapabilityAtRuntime: true, // init 自报 tools/model/permissionMode
       resume: true,
+      forkSession: true, // 原生 --fork-session
       configDrivenModelSwitch: true, // model 可解析 endpoints.yaml,切第三方 Anthropic 兼容端点
       // 调用方据此探测 SDK 版本够不够新。缺了它而照传 agent/agents/pluginDirs,
       // 字段会被结构类型放过、被运行时静默丢弃 —— agent 不生效但一切「正常」。
