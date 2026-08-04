@@ -122,4 +122,47 @@ describe("Codex argument construction", () => {
     expect(resumed).toContain("--ephemeral");
     expect(args("readonly", { resume: "thread-1" })).not.toContain("--ephemeral");
   });
+
+  const ENDPOINT_OVERRIDES = [
+    "-c", 'model_provider="sm_endpoint"',
+    "-c", 'model_providers.sm_endpoint.name="sm-endpoint"',
+    "-c", 'model_providers.sm_endpoint.base_url="https://cpa.example/v1"',
+    "-c", 'model_providers.sm_endpoint.env_key="CPA_API_KEY"',
+    "-c", 'model_providers.sm_endpoint.wire_api="responses"',
+  ];
+
+  test("endpoint config overrides ride along with model on initial exec", () => {
+    const initial = args("readonly", { model: "gpt-5.4-mini", configOverrides: ENDPOINT_OVERRIDES });
+    expect(initial.join(" ")).toContain('model_provider="sm_endpoint"');
+    expect(initial.join(" ")).toContain('model_providers.sm_endpoint.wire_api="responses"');
+    expect(initial.slice(initial.indexOf("-m"))).toContain("gpt-5.4-mini");
+    // -c 必须在 prompt 之前(prompt 是位置参数,永远收尾)
+    expect(initial[initial.length - 1]).toBe("ship it");
+  });
+
+  test("endpoint config overrides survive resume", () => {
+    const resumed = args("readonly", {
+      resume: "thread-1",
+      model: "gpt-5.4-mini",
+      configOverrides: ENDPOINT_OVERRIDES,
+    });
+    expect(resumed.slice(0, 3)).toEqual(["exec", "resume", "thread-1"]);
+    expect(resumed.join(" ")).toContain('model_provider="sm_endpoint"');
+    expect(resumed.join(" ")).toContain('model_providers.sm_endpoint.env_key="CPA_API_KEY"');
+    // 注入不得挤掉 resume 自身的 sandbox config override
+    expect(resumed).toContain('sandbox_mode="read-only"');
+  });
+
+  test("no overrides means args stay identical to the pre-endpoint behavior", () => {
+    expect(args("readonly", { model: "gpt-5.5" })).toEqual([
+      "exec",
+      "--json",
+      "--skip-git-repo-check",
+      "-m",
+      "gpt-5.5",
+      "--sandbox",
+      "read-only",
+      "ship it",
+    ]);
+  });
 });

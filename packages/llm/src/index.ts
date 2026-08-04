@@ -20,6 +20,7 @@ export { anthropicProvider } from './providers/anthropic.js'
 export type {
   ProviderConfig,
   ClaudeSettings,
+  CodexSettings,
   ConfigFile,
   EndpointConfig,
   Message,
