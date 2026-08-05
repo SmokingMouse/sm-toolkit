@@ -59,32 +59,67 @@ export function forkCodexSession(parentId: string, sessionsRoot?: string): strin
  * 注入用固定 provider id "sm_endpoint",经 `-c` 与全局 config.toml merge,
  * 不落盘不污染用户配置;鉴权走 env_key 指向 endpoints.yaml 的 api_key_env,
  * key 值显式放进 spawn env(2026-08-04 codex 0.146.0 正负向实测均通过)。
+ *
+ * 2026-08-05 细分失败路径 —— 此前三种"没走注入"全被一个 catch 吞成静默
+ * 透传,叠加下面的登录闸后,机器间 yaml 未同步 / key 缺失都会伪装成
+ * 「codex 未登录」(trellis 二号机实锅):
+ *   degraded:端点在 yaml 里但没标记 codex 支持 → 仍透传(2026-08-04 定的
+ *     opt-in 语义不变),但把原因带出去,登录闸失败时拼进报错;
+ *   fatal:端点已标记注入、key 却缺失 → 直接报错。配置自相矛盾时静默换一条
+ *     鉴权路线,是把配置错误变成别的症状,不是降级。
  */
 function resolveCodexModel(model: string | undefined): {
   model: string | undefined;
   configOverrides?: string[];
   env?: Record<string, string>;
+  /** 端点在 yaml 里但未走注入的原因(诊断用;登录闸失败时拼进错误信息)。 */
+  degraded?: string;
+  /** 配置矛盾(已标记注入但 key 缺失)→ run() 直接报错,不 spawn。 */
+  fatal?: string;
 } {
   if (!model) return { model: undefined };
+  let endpoint;
   try {
-    const { endpoint } = resolveEndpoint(loadEndpoints(), model, "openai");
-    if (!endpoint.base_url) return { model: endpoint.model };
-    if (endpoint.codex?.wire_api !== "responses") return { model };
-    const p = "model_providers.sm_endpoint";
-    return {
-      model: endpoint.model,
-      configOverrides: [
-        "-c", `model_provider="sm_endpoint"`,
-        "-c", `${p}.name="sm-endpoint"`,
-        "-c", `${p}.base_url="${endpoint.base_url}"`,
-        "-c", `${p}.env_key="${endpoint.api_key_env}"`,
-        "-c", `${p}.wire_api="${endpoint.codex.wire_api}"`,
-      ],
-      env: { [endpoint.api_key_env]: getApiKey(endpoint) },
-    };
+    ({ endpoint } = resolveEndpoint(loadEndpoints(), model, "openai"));
   } catch {
+    // 不在 yaml(codex 原生模型名 / 本机没有 yaml)→ 原样透传给 -m,让 codex
+    // 自己校验 —— 不在这一层生降级用户的请求。
     return { model };
   }
+  if (!endpoint.base_url) return { model: endpoint.model };
+  if (endpoint.codex?.wire_api !== "responses") {
+    return {
+      model,
+      degraded:
+        `模型「${model}」命中的 endpoints.yaml 端点未标记 codex 支持` +
+        `(codex: { wire_api: responses }),本次按原生模式透传 —— ` +
+        `若该端点在别的机器上标记过,多半是这台机器的 yaml 没同步`,
+    };
+  }
+  let key: string;
+  try {
+    key = getApiKey(endpoint);
+  } catch (e) {
+    return {
+      model,
+      fatal:
+        `模型「${model}」的端点已标记 codex 注入,但 key 缺失:` +
+        `${e instanceof Error ? e.message : String(e)}` +
+        `(本机 ~/.agent-gateway.env 或 endpoints.yaml 的 env_file 未配这台机器的 key)`,
+    };
+  }
+  const p = "model_providers.sm_endpoint";
+  return {
+    model: endpoint.model,
+    configOverrides: [
+      "-c", `model_provider="sm_endpoint"`,
+      "-c", `${p}.name="sm-endpoint"`,
+      "-c", `${p}.base_url="${endpoint.base_url}"`,
+      "-c", `${p}.env_key="${endpoint.api_key_env}"`,
+      "-c", `${p}.wire_api="${endpoint.codex.wire_api}"`,
+    ],
+    env: { [endpoint.api_key_env]: key },
+  };
 }
 
 export class CodexBackend implements Backend {
@@ -116,13 +151,23 @@ export class CodexBackend implements Backend {
 
   async *run(prompt: string, opts: RunOptions): AsyncGenerator<AgentEvent> {
     const resolved = resolveCodexModel(opts.model);
+    // 配置矛盾(端点标记了注入但 key 缺失)→ 报真实原因,不 spawn。
+    if (resolved.fatal) {
+      yield ev(this.name, EventType.Error, null, { message: resolved.fatal });
+      return;
+    }
     // 登录检查(便宜 ~50ms):给清晰可操作错误,避免浪费一次必 401 的往返。
     // 注入端点时跳过 —— 鉴权走 env_key(API key),不依赖 ChatGPT 登录态。
     if (!resolved.configOverrides) {
       const login = spawnSync("codex", ["login", "status"], { encoding: "utf8", timeout: 5000 });
       if (login.status !== 0) {
+        // 报错必须把解析降级的原因带上:透传模式走的是 ChatGPT 登录态,而用户
+        // 以为自己选了第三方端点 —— 只喊「未登录」会把配置漂移伪装成登录问题。
+        const hint =
+          resolved.degraded ??
+          "若期望走第三方端点(不依赖 ChatGPT 登录),对应 endpoints.yaml 端点需带 codex: { wire_api: responses } 标记,且本机配有它的 key。";
         yield ev(this.name, EventType.Error, null, {
-          message: "codex 未登录。请先在终端运行 `codex login` 后重试。",
+          message: `codex 未登录(ChatGPT)。原生模式需先在终端运行 \`codex login\`。\n${hint}`,
         });
         return;
       }
