@@ -7,14 +7,203 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { EventType, type AgentEvent, type Cost } from "../events.js";
-import type { Backend, RunOptions, PermissionPolicy } from "../backend.js";
+import type { Backend, RunOptions, PermissionPolicy, McpServerConfig } from "../backend.js";
 import { streamLines, type StdinChannel } from "./stream-lines.js";
 import { loadEndpoints, resolveEndpoint, getApiKey } from "@smokingmouse/llm";
 
 // claude CLI 自己认识的裸 tier 别名 —— 这些不查 endpoints.yaml,直通给 CLI 自己
 // 的别名表解析(它们不在 endpoints.yaml 的 model 列表里,查了也找不到)。
 const NATIVE_TIER_ALIASES = new Set(["opus", "sonnet", "haiku"]);
+
+type JsonRpcMessage = Record<string, unknown> & {
+  jsonrpc?: "2.0";
+  id?: string | number | null;
+  method?: string;
+};
+
+type SdkMcpServerInstance = {
+  connect: (transport: ClaudeSdkMcpTransport) => Promise<void>;
+};
+
+/**
+ * 官方 SDK Server 与 claude CLI control protocol 之间的极薄内存 transport。
+ * Server 对 CLI request 的 response 会先解开 receive()；其余主动消息写回 stdin。
+ */
+export class ClaudeSdkMcpTransport {
+  onclose?: () => void;
+  onerror?: (error: Error) => void;
+  onmessage?: (message: JsonRpcMessage) => void;
+  private closed = false;
+  private requestSequence = 0;
+  private readonly pending = new Map<
+    string,
+    { resolve: (message: JsonRpcMessage) => void; reject: (error: Error) => void }
+  >();
+
+  constructor(
+    private readonly serverName: string,
+    private readonly channel: () => StdinChannel | undefined,
+  ) {}
+
+  async start(): Promise<void> {}
+
+  async send(message: JsonRpcMessage): Promise<void> {
+    if (this.closed) throw new Error("SDK MCP transport is closed");
+    if (message.id !== undefined && message.id !== null) {
+      const pending = this.pending.get(String(message.id));
+      if (pending) {
+        this.pending.delete(String(message.id));
+        pending.resolve(message);
+        return;
+      }
+    }
+    const channel = this.channel();
+    if (!channel) throw new Error("SDK MCP transport stdin is not ready");
+    channel.write({
+      type: "control_request",
+      request_id: `sm_agent_mcp_${this.serverName}_${++this.requestSequence}`,
+      request: { subtype: "mcp_message", server_name: this.serverName, message },
+    });
+  }
+
+  async receive(message: JsonRpcMessage): Promise<JsonRpcMessage> {
+    if (this.closed) throw new Error("SDK MCP transport is closed");
+    if (message.method && message.id !== undefined && message.id !== null) {
+      return new Promise<JsonRpcMessage>((resolve, reject) => {
+        const key = String(message.id);
+        this.pending.set(key, { resolve, reject });
+        if (this.onmessage) this.onmessage(message);
+        else {
+          this.pending.delete(key);
+          reject(new Error("SDK MCP transport has no message handler"));
+        }
+      });
+    }
+    this.onmessage?.(message);
+    return { jsonrpc: "2.0", result: {}, id: 0 };
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    const error = new Error("SDK MCP transport closed");
+    for (const { reject } of this.pending.values()) reject(error);
+    this.pending.clear();
+    this.onclose?.();
+  }
+}
+
+export type ClaudeMcpServerPlan = {
+  configServers: Record<string, Exclude<McpServerConfig, { type: "sdk" }>>;
+  sdkServers: Map<string, SdkMcpServerInstance>;
+};
+
+/** 纯规划：拆分 CLI config 与进程内 Server，并在产生副作用前完成冲突/模式校验。 */
+export function claudeMcpServerPlan(
+  servers: RunOptions["mcpServers"],
+  extraArgs: RunOptions["extraArgs"],
+  persistentStdinRequested: boolean,
+): ClaudeMcpServerPlan {
+  const entries = Object.entries(servers ?? {});
+  if (
+    entries.length > 0 &&
+    extraArgs?.some((arg) => arg === "--mcp-config" || arg.startsWith("--mcp-config="))
+  ) {
+    throw new Error("mcpServers conflicts with extraArgs --mcp-config");
+  }
+  const configServers: ClaudeMcpServerPlan["configServers"] = {};
+  const sdkServers = new Map<string, SdkMcpServerInstance>();
+  for (const [name, config] of entries) {
+    if (config.type === "sdk") {
+      if (!persistentStdinRequested) {
+        throw new Error("sdk mcpServers require interactive persistent stdin");
+      }
+      const instance = config.instance as Partial<SdkMcpServerInstance> | null;
+      if (!instance || typeof instance.connect !== "function") {
+        throw new Error(`sdk mcpServers entry '${name}' must provide an MCP Server instance`);
+      }
+      sdkServers.set(name, instance as SdkMcpServerInstance);
+    } else {
+      configServers[name] = config;
+    }
+  }
+  return { configServers, sdkServers };
+}
+
+/** CLI mcp-config 文件内容；没有 http/stdio server 时不生成文件。 */
+export function claudeMcpConfig(
+  servers: ClaudeMcpServerPlan["configServers"],
+): { mcpServers: ClaudeMcpServerPlan["configServers"] } | undefined {
+  return Object.keys(servers).length > 0 ? { mcpServers: servers } : undefined;
+}
+
+function writeClaudeMcpConfig(
+  servers: ClaudeMcpServerPlan["configServers"],
+): { path: string; cleanup: () => void } {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "sm-agent-mcp-"));
+  const configPath = path.join(directory, "mcp-config.json");
+  try {
+    fs.writeFileSync(configPath, JSON.stringify(claudeMcpConfig(servers)));
+  } catch (error) {
+    fs.rmSync(directory, { recursive: true, force: true });
+    throw error;
+  }
+  return {
+    path: configPath,
+    cleanup: () => fs.rmSync(directory, { recursive: true, force: true }),
+  };
+}
+
+async function connectClaudeSdkMcpServers(
+  servers: Map<string, SdkMcpServerInstance>,
+  channel: () => StdinChannel | undefined,
+): Promise<Map<string, ClaudeSdkMcpTransport>> {
+  const transports = new Map<string, ClaudeSdkMcpTransport>();
+  try {
+    for (const [name, instance] of servers) {
+      const transport = new ClaudeSdkMcpTransport(name, channel);
+      transports.set(name, transport);
+      await instance.connect(transport);
+    }
+    return transports;
+  } catch (error) {
+    await Promise.all([...transports.values()].map((transport) => transport.close()));
+    throw error;
+  }
+}
+
+async function respondToMcpControlRequest(
+  slot: { channel?: StdinChannel },
+  controlRequest: any,
+  transport: ClaudeSdkMcpTransport | undefined,
+): Promise<void> {
+  try {
+    if (!transport) {
+      throw new Error(`SDK MCP server not found: ${controlRequest.request?.server_name}`);
+    }
+    const mcpResponse = await transport.receive(controlRequest.request.message);
+    slot.channel?.write({
+      type: "control_response",
+      response: {
+        subtype: "success",
+        request_id: controlRequest.request_id,
+        response: { mcp_response: mcpResponse },
+      },
+    });
+  } catch (error) {
+    slot.channel?.write({
+      type: "control_response",
+      response: {
+        subtype: "error",
+        request_id: controlRequest.request_id,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    });
+  }
+}
 
 /**
  * 把 RunOptions.model 解析成 { model, env? }。三种结果:
@@ -85,9 +274,6 @@ export class ClaudeBackend implements Backend {
   async *run(prompt: string, opts: RunOptions): AsyncGenerator<AgentEvent> {
     const hasImages = (opts.attachments?.length ?? 0) > 0;
     const interactive = !!opts.onCanUseTool; // 双向交互模式(can_use_tool control protocol)
-    // skills 白名单与动态审批共用 initialize control request；只要显式传了
-    // skills（包括 []），就必须切到 stream-json stdin 才有通道发送该 payload。
-    const initializesControlProtocol = interactive || opts.skills !== undefined;
     const delayFirstMessage = opts.delayFirstMessageMs !== undefined;
     if (
       delayFirstMessage &&
@@ -95,6 +281,19 @@ export class ClaudeBackend implements Backend {
     ) {
       throw new Error("delayFirstMessageMs must be a finite non-negative number");
     }
+    // sdk server 不能替调用方静默改变一次性 stdin 契约；必须已有一个明确的
+    // 常开理由。delayFirstMessageMs:0 是不需要审批/skills 时的显式交互开关。
+    const persistentStdinRequested =
+      interactive || opts.skills !== undefined || delayFirstMessage;
+    const mcpPlan = claudeMcpServerPlan(
+      opts.mcpServers,
+      opts.extraArgs,
+      persistentStdinRequested,
+    );
+    const sdkMcpServerNames = [...mcpPlan.sdkServers.keys()];
+    // skills 白名单、动态审批、sdk MCP 共用 initialize control request。
+    const initializesControlProtocol =
+      interactive || opts.skills !== undefined || sdkMcpServerNames.length > 0;
     // 延时首条消息也必须走常开的 stream-json stdin；否则 prompt 已经焊在 argv
     // 里，进程 spawn 时就发出，delay 只是表面生效。
     const { streamJsonInput, persistentStdin } = claudeInputMode(
@@ -148,6 +347,8 @@ export class ClaudeBackend implements Backend {
       }
     }
     args.push(...claudeSettingSourceArgs(opts.settingSources, opts.strictMcp));
+    // 临时文件在完成所有同步参数/图片处理后才创建；这里先记住稳定插入位。
+    const mcpConfigArgIndex = args.length;
     if (opts.tools && opts.tools !== "all") {
       args.push("--tools", opts.tools.join(",")); // [] → "" 即无工具
     }
@@ -202,7 +403,7 @@ export class ClaudeBackend implements Backend {
       // 被静默忽略,headless 对需授权工具直接 auto-deny,can_use_tool 永远不会下发;
       // 握手后 claude 回 control_response(success) 并开始把权限请求路由到 stdio。
       const initData = initializesControlProtocol
-        ? JSON.stringify(claudeInitializeRequest(opts.skills)) + "\n"
+        ? JSON.stringify(claudeInitializeRequest(opts.skills, sdkMcpServerNames)) + "\n"
         : undefined;
       if (delayFirstMessage) {
         // control initialize 不是 user message：仍应立即握手，只延后 prompt。
@@ -225,193 +426,217 @@ export class ClaudeBackend implements Backend {
     const taskToolUse = new Map<string, string>();
     // 交互通道:streamLines 会把 write/end 通道挂到 .channel 上(交互模式)。
     const interactiveSlot: { channel?: StdinChannel } = {};
-    for await (const raw of streamLines("claude", args, {
-      cwd: opts.cwd ?? opts.workspace ?? undefined,
-      env: spawnEnv,
-      stdinData,
-      delayedStdinData,
-      signal: opts.signal,
-      stderrSink,
-      interactive: persistentStdin ? interactiveSlot : undefined,
-      stdinDelayMs: opts.delayFirstMessageMs,
-    })) {
-      let obj: any;
-      try {
-        obj = JSON.parse(raw);
-      } catch {
-        continue;
+    const cleanupTasks: Array<() => Promise<void> | void> = [];
+    try {
+      if (Object.keys(mcpPlan.configServers).length > 0) {
+        const tempConfig = writeClaudeMcpConfig(mcpPlan.configServers);
+        args.splice(mcpConfigArgIndex, 0, "--mcp-config", tempConfig.path);
+        cleanupTasks.push(tempConfig.cleanup);
       }
-      const t = obj.type;
-      // 交互:can_use_tool control_request → 调 onCanUseTool 拿决策 → 回 control_response。
-      // claude 在此 block 等响应,期间不发新 stdout 行,故 await 阻塞循环是安全的。
-      if (interactive && t === "control_request" && obj.request?.subtype === "can_use_tool") {
-        // 回调可能等很久(等用户)。期间若 abort:streamLines 的 onAbort 已 kill 进程,
-        // 但 await 还卡在回调里 —— race 一个 abort promise,让循环能及时跳出收尾。
-        const callbackP = opts.onCanUseTool!({
-          toolName: obj.request.tool_name,
-          toolUseId: obj.request.tool_use_id,
-          requestId: obj.request_id,
-          input: obj.request.input,
-        });
-        const ABORTED = Symbol("aborted");
-        const r = opts.signal
-          ? await Promise.race([
-              callbackP,
-              new Promise<typeof ABORTED>((resolve) => {
-                if (opts.signal!.aborted) return resolve(ABORTED);
-                opts.signal!.addEventListener("abort", () => resolve(ABORTED), { once: true });
-              }),
-            ])
-          : await callbackP;
-        if (r === ABORTED) {
-          interactiveSlot.channel?.end();
-          return; // 进程已被 onAbort kill,直接收尾退出
+      const sdkTransports = await connectClaudeSdkMcpServers(
+        mcpPlan.sdkServers,
+        () => interactiveSlot.channel,
+      );
+      cleanupTasks.push(async () => {
+        await Promise.all([...sdkTransports.values()].map((transport) => transport.close()));
+      });
+
+      const lines = streamLines("claude", args, {
+        cwd: opts.cwd ?? opts.workspace ?? undefined,
+        env: spawnEnv,
+        stdinData,
+        delayedStdinData,
+        signal: opts.signal,
+        stderrSink,
+        interactive: persistentStdin ? interactiveSlot : undefined,
+        stdinDelayMs: opts.delayFirstMessageMs,
+      });
+      for await (const raw of lines) {
+        let obj: any;
+        try {
+          obj = JSON.parse(raw);
+        } catch {
+          continue;
         }
-        interactiveSlot.channel?.write({
-          type: "control_response",
-          response: {
-            subtype: "success",
-            request_id: obj.request_id,
-            response: {
-              behavior: r.behavior,
-              ...(r.updatedInput !== undefined ? { updatedInput: r.updatedInput } : {}),
-              ...(r.message ? { message: r.message } : {}),
-            },
-          },
-        });
-        continue;
-      }
-      if (t === "system" && obj.subtype === "init") {
-        sid = obj.session_id ?? sid;
-        yield ev(this.name, EventType.SessionStart, sid, {
-          tools: obj.tools,
-          model: obj.model,
-          permissionMode: obj.permissionMode,
-          // MCP server 首轮状态([{name,status}])。外部 MCP 场景的核心可观测点:
-          // status 非 connected(pending)= 工具对模型不可见(2026-08-01 实测),
-          // 上游要判"MCP 真就绪"只能靠这里 —— 不透传它,事件流里无从核验。
-          mcpServers: obj.mcp_servers,
-        });
-      } else if (t === "system" && TASK_SUBTYPES[obj.subtype as string]) {
-        // 子 agent 生命周期(started/progress/updated/completed)。
-        if (obj.tool_use_id && obj.task_id) taskToolUse.set(obj.task_id, obj.tool_use_id);
-        const toolUseId = obj.tool_use_id ?? taskToolUse.get(obj.task_id);
-        if (toolUseId) {
-          yield ev(this.name, EventType.Task, sid, {
-            ...taskData(obj),
-            phase: TASK_SUBTYPES[obj.subtype as string],
-            taskId: obj.task_id,
-            toolUseId,
+        const t = obj.type;
+        if (t === "control_request" && obj.request?.subtype === "mcp_message") {
+          const transport = sdkTransports.get(obj.request.server_name);
+          void respondToMcpControlRequest(interactiveSlot, obj, transport);
+          continue;
+        }
+        // 交互:can_use_tool control_request → 调 onCanUseTool 拿决策 → 回 control_response。
+        // claude 在此 block 等响应,期间不发新 stdout 行,故 await 阻塞循环是安全的。
+        if (interactive && t === "control_request" && obj.request?.subtype === "can_use_tool") {
+          // 回调可能等很久(等用户)。期间若 abort:streamLines 的 onAbort 已 kill 进程,
+          // 但 await 还卡在回调里 —— race 一个 abort promise,让循环能及时跳出收尾。
+          const callbackP = opts.onCanUseTool!({
+            toolName: obj.request.tool_name,
+            toolUseId: obj.request.tool_use_id,
+            requestId: obj.request_id,
+            input: obj.request.input,
           });
+          const ABORTED = Symbol("aborted");
+          const r = opts.signal
+            ? await Promise.race([
+                callbackP,
+                new Promise<typeof ABORTED>((resolve) => {
+                  if (opts.signal!.aborted) return resolve(ABORTED);
+                  opts.signal!.addEventListener("abort", () => resolve(ABORTED), { once: true });
+                }),
+              ])
+            : await callbackP;
+          if (r === ABORTED) {
+            interactiveSlot.channel?.end();
+            return; // 进程已被 onAbort kill,直接收尾退出
+          }
+          interactiveSlot.channel?.write({
+            type: "control_response",
+            response: {
+              subtype: "success",
+              request_id: obj.request_id,
+              response: {
+                behavior: r.behavior,
+                ...(r.updatedInput !== undefined ? { updatedInput: r.updatedInput } : {}),
+                ...(r.message ? { message: r.message } : {}),
+              },
+            },
+          });
+          continue;
         }
-      } else if (
-        t === "stream_event" &&
-        obj.event?.type === "content_block_delta" &&
-        obj.event?.delta?.type === "text_delta"
-      ) {
-        const d = obj.event.delta.text; // 真流式逐 token
-        if (typeof d === "string" && d.length > 0) {
-          yield ev(this.name, EventType.TextChunk, sid, { text: d });
-        }
-      } else if (
-        t === "stream_event" &&
-        obj.event?.type === "content_block_delta" &&
-        obj.event?.delta?.type === "thinking_delta"
-      ) {
-        // extended thinking 逐 token(delta.thinking 携文本)。正文前必有 thinking
-        // 块(claude 2.x 默认),不发事件上游会把思考期当"卡死"。
-        const d = obj.event.delta.thinking;
-        if (typeof d === "string" && d.length > 0) {
-          yield ev(this.name, EventType.Thinking, sid, { text: d });
-        }
-      } else if (t === "assistant") {
-        // 覆盖式记录本条 assistant 的 context 占用(input+cache_read+cache_creation);
-        // 末条即主 agent 当前窗口实际占用,供 result 直报给上游算占用%。
-        const au = obj.message?.usage;
-        if (au) {
-          lastAssistantContext =
-            (au.input_tokens ?? 0) +
-            (au.cache_read_input_tokens ?? 0) +
-            (au.cache_creation_input_tokens ?? 0);
-        }
-        // text 已走 delta;这里取 tool_use 开始(带 id 供与 done 配对)。
-        // parentToolUseId 非 null = 这条不是主 agent 发的,是某个子 agent(Task/Agent
-        // 工具)在自己的循环里调的 —— 上游据此把工具链分层,不然全平铺成一条。
-        const parentToolUseId = obj.parent_tool_use_id ?? null;
-        for (const b of obj.message?.content ?? []) {
-          if (b.type === "tool_use") {
-            yield ev(this.name, EventType.ToolCall, sid, {
-              id: b.id,
-              name: b.name,
-              input: b.input,
-              parentToolUseId,
+        if (t === "system" && obj.subtype === "init") {
+          sid = obj.session_id ?? sid;
+          yield ev(this.name, EventType.SessionStart, sid, {
+            tools: obj.tools,
+            model: obj.model,
+            permissionMode: obj.permissionMode,
+            // MCP server 首轮状态([{name,status}])。外部 MCP 场景的核心可观测点:
+            // status 非 connected(pending)= 工具对模型不可见(2026-08-01 实测),
+            // 上游要判"MCP 真就绪"只能靠这里 —— 不透传它,事件流里无从核验。
+            mcpServers: obj.mcp_servers,
+          });
+        } else if (t === "system" && TASK_SUBTYPES[obj.subtype as string]) {
+          // 子 agent 生命周期(started/progress/updated/completed)。
+          if (obj.tool_use_id && obj.task_id) taskToolUse.set(obj.task_id, obj.tool_use_id);
+          const toolUseId = obj.tool_use_id ?? taskToolUse.get(obj.task_id);
+          if (toolUseId) {
+            yield ev(this.name, EventType.Task, sid, {
+              ...taskData(obj),
+              phase: TASK_SUBTYPES[obj.subtype as string],
+              taskId: obj.task_id,
+              toolUseId,
             });
           }
-        }
-      } else if (t === "user") {
-        // tool_result:工具执行完。Bash 的 stdout/stderr 在顶层 tool_use_result 隔离,优先用 stdout。
-        //
-        // 空 stdout 必须让位给 content:后台化的 Bash 和无输出的命令都报
-        // stdout:"",而真正有信息的那句("Command running in background with
-        // ID: …" / "(Bash completed with no output)")在 content 里。用 ??
-        // 的话空串是非 nullish,会把它顶掉,结果整条调用看上去没有任何输出。
-        const tur = obj.tool_use_result;
-        for (const b of obj.message?.content ?? []) {
-          if (b.type === "tool_result") {
-            const stdout =
-              typeof tur?.stdout === "string" && tur.stdout ? tur.stdout : null;
-            const stderr = typeof tur?.stderr === "string" && tur.stderr ? tur.stderr : null;
-            const output = stdout ?? (typeof b.content === "string" ? b.content : null);
-            yield ev(this.name, EventType.ToolCallDone, sid, {
-              id: b.tool_use_id,
-              output,
-              stderr,
-              isError: !!b.is_error,
-            });
+        } else if (
+          t === "stream_event" &&
+          obj.event?.type === "content_block_delta" &&
+          obj.event?.delta?.type === "text_delta"
+        ) {
+          const d = obj.event.delta.text; // 真流式逐 token
+          if (typeof d === "string" && d.length > 0) {
+            yield ev(this.name, EventType.TextChunk, sid, { text: d });
           }
+        } else if (
+          t === "stream_event" &&
+          obj.event?.type === "content_block_delta" &&
+          obj.event?.delta?.type === "thinking_delta"
+        ) {
+          // extended thinking 逐 token(delta.thinking 携文本)。正文前必有 thinking
+          // 块(claude 2.x 默认),不发事件上游会把思考期当"卡死"。
+          const d = obj.event.delta.thinking;
+          if (typeof d === "string" && d.length > 0) {
+            yield ev(this.name, EventType.Thinking, sid, { text: d });
+          }
+        } else if (t === "assistant") {
+          // 覆盖式记录本条 assistant 的 context 占用(input+cache_read+cache_creation);
+          // 末条即主 agent 当前窗口实际占用,供 result 直报给上游算占用%。
+          const au = obj.message?.usage;
+          if (au) {
+            lastAssistantContext =
+              (au.input_tokens ?? 0) +
+              (au.cache_read_input_tokens ?? 0) +
+              (au.cache_creation_input_tokens ?? 0);
+          }
+          // text 已走 delta;这里取 tool_use 开始(带 id 供与 done 配对)。
+          // parentToolUseId 非 null = 这条不是主 agent 发的,是某个子 agent(Task/Agent
+          // 工具)在自己的循环里调的 —— 上游据此把工具链分层,不然全平铺成一条。
+          const parentToolUseId = obj.parent_tool_use_id ?? null;
+          for (const b of obj.message?.content ?? []) {
+            if (b.type === "tool_use") {
+              yield ev(this.name, EventType.ToolCall, sid, {
+                id: b.id,
+                name: b.name,
+                input: b.input,
+                parentToolUseId,
+              });
+            }
+          }
+        } else if (t === "user") {
+          // tool_result:工具执行完。Bash 的 stdout/stderr 在顶层 tool_use_result 隔离,优先用 stdout。
+          //
+          // 空 stdout 必须让位给 content:后台化的 Bash 和无输出的命令都报
+          // stdout:"",而真正有信息的那句("Command running in background with
+          // ID: …" / "(Bash completed with no output)")在 content 里。用 ??
+          // 的话空串是非 nullish,会把它顶掉,结果整条调用看上去没有任何输出。
+          const tur = obj.tool_use_result;
+          for (const b of obj.message?.content ?? []) {
+            if (b.type === "tool_result") {
+              const stdout =
+                typeof tur?.stdout === "string" && tur.stdout ? tur.stdout : null;
+              const stderr = typeof tur?.stderr === "string" && tur.stderr ? tur.stderr : null;
+              const output = stdout ?? (typeof b.content === "string" ? b.content : null);
+              yield ev(this.name, EventType.ToolCallDone, sid, {
+                id: b.tool_use_id,
+                output,
+                stderr,
+                isError: !!b.is_error,
+              });
+            }
+          }
+        } else if (t === "result") {
+          // 交互模式:本轮结束 → 关 stdin 让进程收尾退出。
+          if (persistentStdin) interactiveSlot.channel?.end();
+          if (obj.is_error) {
+            // result 常为空(如 --resume 命中不存在的 session → "No conversation
+            // found"),空时退而取 subtype,再退而取缓冲的 stderr,避免吞成无信息量
+            // 的 "claude CLI error"。
+            const stderrTail = stderrSink.text.trim();
+            const message =
+              obj.result ||
+              obj.subtype ||
+              (stderrTail ? stderrTail.slice(-500) : null) ||
+              "claude CLI error";
+            yield ev(this.name, EventType.Error, sid, { message });
+            return;
+          }
+          const u = obj.usage ?? {};
+          const cost: Cost = {
+            usd: obj.total_cost_usd ?? null,
+            inputTokens: u.input_tokens ?? 0,
+            outputTokens: u.output_tokens ?? 0,
+            cachedTokens: u.cache_read_input_tokens ?? 0,
+            cacheCreation: u.cache_creation_input_tokens ?? 0,
+            estimated: false,
+            // 末条 assistant 的占用;若整轮没 assistant usage(异常),退回 result 累计
+            // 的 input+cache(仍比纯 inputTokens 接近,且不会比真值更离谱)。
+            contextTokens:
+              lastAssistantContext ??
+              ((u.input_tokens ?? 0) +
+                (u.cache_read_input_tokens ?? 0) +
+                (u.cache_creation_input_tokens ?? 0)),
+          };
+          yield ev(this.name, EventType.Result, sid, { text: obj.result, cost });
+        } else if (t === "error") {
+          const msg =
+            typeof obj.message === "string"
+              ? obj.message
+              : typeof obj.error === "string"
+                ? obj.error
+                : "claude error";
+          yield ev(this.name, EventType.Error, sid, { message: msg });
         }
-      } else if (t === "result") {
-        // 交互模式:本轮结束 → 关 stdin 让进程收尾退出。
-        if (persistentStdin) interactiveSlot.channel?.end();
-        if (obj.is_error) {
-          // result 常为空(如 --resume 命中不存在的 session → "No conversation
-          // found"),空时退而取 subtype,再退而取缓冲的 stderr,避免吞成无信息量
-          // 的 "claude CLI error"。
-          const stderrTail = stderrSink.text.trim();
-          const message =
-            obj.result ||
-            obj.subtype ||
-            (stderrTail ? stderrTail.slice(-500) : null) ||
-            "claude CLI error";
-          yield ev(this.name, EventType.Error, sid, { message });
-          return;
-        }
-        const u = obj.usage ?? {};
-        const cost: Cost = {
-          usd: obj.total_cost_usd ?? null,
-          inputTokens: u.input_tokens ?? 0,
-          outputTokens: u.output_tokens ?? 0,
-          cachedTokens: u.cache_read_input_tokens ?? 0,
-          cacheCreation: u.cache_creation_input_tokens ?? 0,
-          estimated: false,
-          // 末条 assistant 的占用;若整轮没 assistant usage(异常),退回 result 累计
-          // 的 input+cache(仍比纯 inputTokens 接近,且不会比真值更离谱)。
-          contextTokens:
-            lastAssistantContext ??
-            ((u.input_tokens ?? 0) +
-              (u.cache_read_input_tokens ?? 0) +
-              (u.cache_creation_input_tokens ?? 0)),
-        };
-        yield ev(this.name, EventType.Result, sid, { text: obj.result, cost });
-      } else if (t === "error") {
-        const msg =
-          typeof obj.message === "string"
-            ? obj.message
-            : typeof obj.error === "string"
-              ? obj.error
-              : "claude error";
-        yield ev(this.name, EventType.Error, sid, { message: msg });
       }
+    } finally {
+      for (const cleanup of cleanupTasks.reverse()) await cleanup();
     }
   }
 }
@@ -478,8 +703,11 @@ export function claudeInputMode(
   };
 }
 
-/** initialize control request；skills===undefined 时字段必须彻底省略。 */
-export function claudeInitializeRequest(skills: RunOptions["skills"]): Record<string, unknown> {
+/** initialize control request；可选字段没有值时必须彻底省略。 */
+export function claudeInitializeRequest(
+  skills: RunOptions["skills"],
+  sdkMcpServers: string[] = [],
+): Record<string, unknown> {
   return {
     request_id: "sm_agent_init_1",
     type: "control_request",
@@ -487,6 +715,7 @@ export function claudeInitializeRequest(skills: RunOptions["skills"]): Record<st
       subtype: "initialize",
       hooks: {},
       ...(skills !== undefined ? { skills } : {}),
+      ...(sdkMcpServers.length > 0 ? { sdkMcpServers } : {}),
     },
   };
 }

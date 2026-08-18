@@ -17,6 +17,11 @@ import type { AgentEvent } from "./events.js";
  */
 export type PermissionPolicy = "readonly" | "auto-edit" | "full" | "default";
 
+export type McpServerConfig =
+  | { type: "http"; url: string; headers?: Record<string, string> }
+  | { type: "stdio"; command: string; args?: string[]; env?: Record<string, string> }
+  | { type: "sdk"; instance: unknown };
+
 export interface RunOptions {
   /** 文件工具可达范围(--add-dir + 权限);null/缺省 = 无(纯对话,无文件工具) */
   workspace?: string | null;
@@ -66,6 +71,13 @@ export interface RunOptions {
   /** 是否附带 --strict-mcp-config(仅在 settingSources 为 false/[] 时有意义)。默认 true。
    * 实测它只在配了 --mcp-config 时才改变行为;单独设 false **不会**让本机 MCP 回来。 */
   strictMcp?: boolean;
+  /**
+   * Claude MCP servers。http/stdio 写入临时 --mcp-config；sdk 接受官方
+   * @modelcontextprotocol/sdk Server instance，消息经 stream-json control protocol
+   * 回流宿主进程执行。sdk 形态要求调用方已用 onCanUseTool、skills 或
+   * delayFirstMessageMs 开启常开 stdin；否则 fail loud。仅 Claude 消费。
+   */
+  mcpServers?: Record<string, McpServerConfig>;
   /** claude --agent:把某个已注册 agent 激活成本次会话的主 agent。
    * 与 systemPrompt 互斥(替换 vs 人设两种语义,同给的优先级 CLI 无文档),由调用方保证只传一个。 */
   agent?: string;
