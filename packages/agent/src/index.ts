@@ -1,8 +1,8 @@
 // ── CLI 运行时引擎(吸收自 agent-gateway,claude/codex 统一 Backend 抽象) ──
 export { EventType, fmtEvent, type AgentEvent, type Cost } from "./events.js";
 export type { Backend, RunOptions, PermissionPolicy } from "./backend.js";
-export { ClaudeBackend } from "./backends/claude.js";
-export { CodexBackend } from "./backends/codex.js";
+export { ClaudeBackend, resolveClaudeModel } from "./backends/claude.js";
+export { CodexBackend, type CodexBackendOptions } from "./backends/codex.js";
 export { MockBackend } from "./backends/mock.js";
 
 // ── 历史门面(self-agent 消费,内部已委托给 ClaudeBackend) ──
