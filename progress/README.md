@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-本仓已收敛为纯开源 SDK（@smokingmouse/llm + agent + cli 三包上 npm，harbor 迁出私仓）；当前线是双 backend 能力打平——codex 已接 endpoints.yaml 端点注入、事件面与 claude 对齐，服务 trellis 的 provider 切换，待发版。
+纯开源 SDK；工作区两批未 commit 改动待 review 同发 0.6.0——外部 MCP 契约三件套（E2E 3/3）+ CodexBackend app-server transport（codex 逐 token 流，单测 40/40 + 真机 e2e 10 项，老版本自动回退 exec）。
 
 ## Goals
 

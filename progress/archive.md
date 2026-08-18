@@ -42,6 +42,14 @@
 
 ## Session Log（轮转条目，倒序）
 
+### 2026-08-04 — 归档：README Current Focus 迁移前原文快照
+**拆仓：SDK 与个人基础设施分家（2026-07-25）**：本仓收敛为纯开源 SDK——`@smokingmouse/llm`（0.3.0，chat 直连客户端）+ `@smokingmouse/agent`（0.3.1，Claude Code / Codex CLI 编排引擎）+ `apps/cli`（llm 命令行壳）。npm 发包已完成（2FA + granular token；两包均 `--access public`）。迁出：apps/harbor + apps/harbor-web + packages/channel-feishu → 私仓 `SmokingMouse/harbor`（filter-repo 保留 100 commit 历史，deps 切 registry，tsc + 456 tests 全绿）；同轮清掉零消费者的 @sm/store / audit / sandbox / guardrails 与 archive/self-agent（历史可捞）。**注**：harbor 历史仍在本公开仓 git history 中（评估不值得重写历史，代码无凭证）；harbor 控制面对本仓的 GitHub App / Repository binding 重绑在 harbor 仓侧待办。
+
+### 2026-07-25 — npm 发包完成 + 拆仓
+- **Done**：`@smokingmouse/llm@0.3.0` / `agent@0.3.0` 发布（agent 随后补 0.3.1——0.3.0 发布点早于 harbor 线 merge，缺 `IncomingMessage.resources` 等演进）；harbor 三件套迁出至私仓；死代码集群与 archive/self-agent 移除；root tsconfig references 收敛。
+- **Verified**：公开仓 `bun install` + `tsc --build` 全绿；trellis 从 registry 全新安装 + prod 验活（见 trellis progress S72）；harbor 私仓独立验证 456 tests pass。
+- **追记（同日）**：`@smokingmouse/cli@0.3.0` 发布——@sm/cli 改名，bin `llm`（bun shebang），dep llm ^0.3.0。任何机器 `bun install -g @smokingmouse/cli` 一步可用；本机既有 bun link 不受影响。三包齐：llm 0.3.0 / agent 0.3.1 / cli 0.3.0。
+
 ### 2026-07-15 — claude 后端 --setting-sources 改等号形式（工作机 0 输出修复上游化）
 - **触发**：工作机 pull trellis a29f9b5 后 chat 仍 0 输出，排查是 `("--setting-sources", "")` 的独立空字符串 argv 在该机 runtime 下被丢弃 → `--strict-mcp-config` 被当成 setting-sources 的值 → CLI 报错退出。本机 bun 1.3.14 实测**不**吞空 argv（不复现），但等号形式把值焊死在同一 argv 里对 runtime 差异免疫，语义不变（仍是"不加载任何 settings source"，不是工作机临时用的 `=local`——那会让真实 cwd 的 caller 突然加载 .claude/settings.local.json，通用 SDK 不做该语义漂移）。
 - **验证**：`--setting-sources=` 与 `=local` 裸 CLI 均实测接受；trellis 隔离实例真 spawn 纯 chat 回答正常。

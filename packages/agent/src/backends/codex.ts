@@ -13,6 +13,11 @@ import { EventType, type AgentEvent, type Cost } from "../events.js";
 import type { Backend, RunOptions, PermissionPolicy } from "../backend.js";
 import { streamLines } from "./stream-lines.js";
 import { loadEndpoints, resolveEndpoint, getApiKey } from "@smokingmouse/llm";
+import {
+  AppServerPreflight,
+  codexTransportPlan,
+  runViaAppServer,
+} from "./codex-app-server.js";
 
 // 示意单价(USD / token),真实值由上游配置注入。
 const CODEX_PRICE = { input: 1.25 / 1_000_000, output: 10.0 / 1_000_000 };
@@ -122,10 +127,22 @@ function resolveCodexModel(model: string | undefined): {
   };
 }
 
+export interface CodexBackendOptions {
+  /**
+   * 传输层选择。缺省 = app-server 优先(逐 token 流 + 原生 fork/interrupt),
+   * preflight 失败或选项组合不支持时自动回退 exec;"exec" = 强制走老路径
+   * (行为与 0.5.x 完全一致,留作兼容逃生舱)。
+   */
+  transport?: "app-server" | "exec";
+}
+
 export class CodexBackend implements Backend {
   readonly name = "codex";
 
+  constructor(private readonly options: CodexBackendOptions = {}) {}
+
   capabilities(): Record<string, unknown> {
+    const execForced = this.options.transport === "exec";
     return {
       workspace: true,
       tools: true,
@@ -133,15 +150,20 @@ export class CodexBackend implements Backend {
       sandboxModes: ["read-only", "workspace-write", "full-access"],
       permissionPolicies: ["readonly", "auto-edit", "full"],
       readonlyEnforcement: "os-sandbox", // OS 级只读,Bash 也无法绕过
-      dynamicPermissionCallback: false, // Phase 2:需 app-server JSON-RPC
-      vision: true, // --image FILE
+      dynamicPermissionCallback: false, // 审批回调是独立 phase(需上游 dispatcher),暂未接
+      vision: true, // --image FILE / localImage input
       toolAllowlist: false, // codex 无工具白名单(sandbox 决定可达)
-      streaming: "block", // codex --json 不发 per-token,agent_message 整段出
+      // app-server transport 走 item/agentMessage/delta 逐 token;exec --json
+      // 的输出层有意丢 delta(2026-08-18 源码级核实),故强制 exec 时退回 block。
+      // "token" 档下若 preflight 回退 exec,单次 run 实际表现为 block(降级不失败)。
+      streaming: execForced ? "block" : "token",
+      transport: execForced ? "exec" : "app-server+exec-fallback",
       costInStream: false, // 只给 token,$ 需上游按单价估
-      structuredOutput: true, // --output-schema
+      structuredOutput: true, // --output-schema(经 extraArgs,走 exec 路径)
       reportsCapabilityAtRuntime: false, // thread.started 不含 tools/model
       resume: true,
-      // headless fork:exec 无原生 fork 子命令,由 rollout copy 模拟(forkCodexSession)。
+      // fork:app-server 用原生 thread/fork;exec 由 rollout copy 模拟
+      // (forkCodexSession)。两者共用同一份 rollout 存储,id 完全互通(2026-08-18 实测)。
       forkSession: true,
       // model 可解析 endpoints.yaml,切显式标记的第三方 Responses 端点(-c 注入);
       // 约束:codex ≥0.146 只认 wire_api="responses",chat-only 端点不可用。
@@ -150,6 +172,9 @@ export class CodexBackend implements Backend {
   }
 
   async *run(prompt: string, opts: RunOptions): AsyncGenerator<AgentEvent> {
+    // Codex CLI 没有 Claude 的 settings source 或首条 stream-json 消息概念；
+    // settingSources（含数组）与 delayFirstMessageMs 按 temperature/jsonMode 的
+    // 跨 backend 契约惰性忽略，不伪造等价行为。
     const resolved = resolveCodexModel(opts.model);
     // 配置矛盾(端点标记了注入但 key 缺失)→ 报真实原因,不 spawn。
     if (resolved.fatal) {
@@ -177,6 +202,34 @@ export class CodexBackend implements Backend {
     const spawnEnv: Record<string, string> | undefined =
       resolved.env || opts.env ? { ...resolved.env, ...opts.env } : undefined;
 
+    // codex 无 --system-prompt,把它 inline 到 prompt 前(read-only sandbox 时主要影响风格)。
+    // app-server 有原生 baseInstructions 字段但刻意不用 —— 换 transport 只换传输,
+    // 不换 prompt 语义(baseInstructions 是整体替换 codex 基础指令,行为差异大)。
+    const finalPrompt = opts.systemPrompt ? `${opts.systemPrompt}\n\n---\n\n${prompt}` : prompt;
+    const policy: PermissionPolicy = opts.permission ?? (opts.workspace ? "auto-edit" : "readonly");
+
+    // ---- transport 分派:app-server 优先(逐 token 流),preflight 失败回退 exec ----
+    // 契约:AppServerPreflight 仅在零事件产出前抛,回退不会让模型跑两遍;
+    // turn 已开跑后的错误在 runViaAppServer 内部以 Error 事件产出,不会到这里。
+    if (codexTransportPlan(this.options.transport, opts) === "app-server") {
+      try {
+        yield* runViaAppServer({
+          backend: this.name,
+          prompt: finalPrompt,
+          opts,
+          policy,
+          model: resolved.model,
+          configOverrides: resolved.configOverrides,
+          env: spawnEnv,
+        });
+        return;
+      } catch (e) {
+        if (!(e instanceof AppServerPreflight)) throw e;
+        // 老版本 codex 无 app-server v2 / spawn 失败等 → 静默降级 exec(block 流)。
+      }
+    }
+
+    // ---- exec 路径(0.5.x 原实现,兼容逃生舱 + 回退目标) ----
     // fork 续会话:headless 模拟 claude --fork-session(rollout copy,见 forkCodexSession)。
     // 失败必须 fail loud,绝不静默线性 resume(那会让树形分支互相污染)。
     let resumeId = opts.resume ?? null;
@@ -190,10 +243,6 @@ export class CodexBackend implements Backend {
         return;
       }
     }
-
-    // codex 无 --system-prompt,把它 inline 到 prompt 前(read-only sandbox 时主要影响风格)。
-    const finalPrompt = opts.systemPrompt ? `${opts.systemPrompt}\n\n---\n\n${prompt}` : prompt;
-    const policy: PermissionPolicy = opts.permission ?? (opts.workspace ? "auto-edit" : "readonly");
     const args = buildCodexArgs({
       policy,
       ephemeral: opts.persistence === false,
