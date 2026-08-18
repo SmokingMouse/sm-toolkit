@@ -4,11 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearEndpointsCache } from "@smokingmouse/llm";
 import {
+  claudeAskToolsArgs,
   claudeEnvironmentSkillArgs,
   claudeInitializeRequest,
   claudeInputMode,
+  claudeMcpConfig,
+  claudeMcpServerPlan,
   claudeMaxTurnsArgs,
   claudeSettingSourceArgs,
+  ClaudeSdkMcpTransport,
   resolveClaudeModel,
 } from "./claude.js";
 import { scheduleInitialStdin } from "./stream-lines.js";
@@ -129,6 +133,24 @@ describe("Claude maxTurns argv", () => {
   });
 });
 
+describe("Claude askTools argv", () => {
+  test("keeps the existing omitted and named-list behavior", () => {
+    expect(claudeAskToolsArgs(undefined)).toEqual([]);
+    expect(claudeAskToolsArgs([])).toEqual([]);
+    expect(claudeAskToolsArgs(["Bash"])).toEqual([
+      "--settings",
+      JSON.stringify({ permissions: { ask: ["Bash"] } }),
+    ]);
+  });
+
+  test("maps full interception to the CLI permission wildcard", () => {
+    expect(claudeAskToolsArgs("all")).toEqual([
+      "--settings",
+      JSON.stringify({ permissions: { ask: ["*"] } }),
+    ]);
+  });
+});
+
 describe("Claude initialize skills payload", () => {
   test("uses persistent stream-json stdin when initialize is required", () => {
     expect(claudeInputMode(false, true, false)).toEqual({
@@ -148,6 +170,116 @@ describe("Claude initialize skills payload", () => {
 
   test("serializes a non-empty whitelist verbatim", () => {
     expect((claudeInitializeRequest(["pdf"]) as any).request.skills).toEqual(["pdf"]);
+  });
+
+  test("serializes sdk MCP server names only when present", () => {
+    expect(JSON.stringify(claudeInitializeRequest(undefined))).not.toContain("sdkMcpServers");
+    expect((claudeInitializeRequest(undefined, ["embedded"]) as any).request.sdkMcpServers).toEqual([
+      "embedded",
+    ]);
+  });
+});
+
+describe("Claude mcpServers planning", () => {
+  test("generates no config without external servers", () => {
+    const plan = claudeMcpServerPlan(undefined, undefined, false);
+    expect(claudeMcpConfig(plan.configServers)).toBeUndefined();
+  });
+
+  test("generates an HTTP mcp-config", () => {
+    const plan = claudeMcpServerPlan(
+      { remote: { type: "http", url: "https://example.test/mcp", headers: { Authorization: "x" } } },
+      undefined,
+      false,
+    );
+    expect(claudeMcpConfig(plan.configServers)).toEqual({
+      mcpServers: {
+        remote: {
+          type: "http",
+          url: "https://example.test/mcp",
+          headers: { Authorization: "x" },
+        },
+      },
+    });
+  });
+
+  test("generates a stdio mcp-config", () => {
+    const plan = claudeMcpServerPlan(
+      { local: { type: "stdio", command: "node", args: ["server.js"], env: { TOKEN: "x" } } },
+      undefined,
+      false,
+    );
+    expect(claudeMcpConfig(plan.configServers)).toEqual({
+      mcpServers: {
+        local: {
+          type: "stdio",
+          command: "node",
+          args: ["server.js"],
+          env: { TOKEN: "x" },
+        },
+      },
+    });
+  });
+
+  test("rejects sdk servers without persistent stdin", () => {
+    expect(() =>
+      claudeMcpServerPlan(
+        { embedded: { type: "sdk", instance: { connect: async () => {} } } },
+        undefined,
+        false,
+      ),
+    ).toThrow("sdk mcpServers require interactive persistent stdin");
+  });
+
+  test("rejects a second --mcp-config source", () => {
+    for (const extraArgs of [["--mcp-config", "legacy.json"], ["--mcp-config=legacy.json"]]) {
+      expect(() =>
+        claudeMcpServerPlan(
+          { remote: { type: "http", url: "https://example.test/mcp" } },
+          extraArgs,
+          false,
+        ),
+      ).toThrow("mcpServers conflicts with extraArgs --mcp-config");
+    }
+  });
+});
+
+describe("Claude SDK MCP transport", () => {
+  test("routes CLI requests to the instance and returns its JSON-RPC response", async () => {
+    const transport = new ClaudeSdkMcpTransport("embedded", () => undefined);
+    transport.onmessage = (message) => {
+      void transport.send({ jsonrpc: "2.0", id: message.id, result: { canary: true } });
+    };
+    await expect(
+      transport.receive({ jsonrpc: "2.0", id: 7, method: "tools/list", params: {} }),
+    ).resolves.toEqual({ jsonrpc: "2.0", id: 7, result: { canary: true } });
+    await transport.close();
+  });
+
+  test("acks notifications and wraps instance-initiated messages for the CLI", async () => {
+    const writes: any[] = [];
+    const transport = new ClaudeSdkMcpTransport("embedded", () => ({
+      write: (message) => writes.push(message),
+      end: () => {},
+    }));
+    const notifications: unknown[] = [];
+    transport.onmessage = (message) => notifications.push(message);
+    const notification = { jsonrpc: "2.0" as const, method: "notifications/initialized" };
+    await expect(transport.receive(notification)).resolves.toEqual({
+      jsonrpc: "2.0",
+      result: {},
+      id: 0,
+    });
+    expect(notifications).toEqual([notification]);
+
+    const log = { jsonrpc: "2.0" as const, method: "notifications/message", params: { level: "info" } };
+    await transport.send(log);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      type: "control_request",
+      request: { subtype: "mcp_message", server_name: "embedded", message: log },
+    });
+    await transport.close();
   });
 });
 
