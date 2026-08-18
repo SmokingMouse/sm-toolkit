@@ -206,3 +206,10 @@
   - 真机跑 `bun run scripts/install.ts` 全流程走完：模型配置走了"已存在→无新增 provider→保留 key/default"的幂等分支，`server.yaml` 未被误覆盖；`bun link` 后 `~/.bun/install/global/node_modules/@sm/` 下 7 个包 + cli 全部就位，`llm` 命令仍可用；Step F 正确发现 self-agent 为唯一可安装 app 并按默认 N 跳过
   - `/tmp` 隔离环境验证了 `server.yaml` 缺失时的自举分支（从 `server.example.yaml` 正确复制出占位符版本）
 - **Next**: 无（本轮范围内已闭环）；若未来 `apps/` 下新增 app，只需给它的 `package.json` 加 `scripts.setup` 即可被根安装器自动发现
+
+### 2026-08-05 — CodexBackend 解析降级不再伪装成登录问题(0.5.1)
+
+- **触发**:trellis 二号机指定了 cpa provider 仍报「codex 未登录」。根因不在登录——那台机器的 endpoints.yaml 没有 codex 标记(标记躺在一号机 ~/.claude 未提交改动里),resolveCodexModel 静默降级成透传后撞上登录闸,配置漂移伪装成登录问题。
+- **改动**(`backends/codex.ts`):拆掉一揽子 catch——①端点在 yaml 但无 codex 标记 → 仍透传(opt-in 语义不变)但带 `degraded` 原因,登录闸失败时拼进报错;②端点已标记注入但 key 缺失 → `fatal` 直接报错不 spawn(配置自相矛盾时静默换鉴权路线是把配置错误变成别的症状);③不在 yaml → 照旧透传。登录闸报错永远带诊断(degraded 原因或通用指引)。
+- **Verified**:四分支子进程实测(SM_ENDPOINTS_PATH 指 yaml 变体 + 假 codex 二进制)——key 缺失报 fatal 且点名 env var;无标记+未登录报「yaml 没同步」;标记+key 齐时登录闸被跳过(假 codex login 恒 exit 1 仍 NO_ERROR)且 argv 含 `-c model_provider="sm_endpoint"`、spawn env 含 key;原生名+未登录给通用指引。tsc build 零错。
+- **Next**:发 agent@0.5.1;trellis bump 并按 facts 清单验 registry 产物。

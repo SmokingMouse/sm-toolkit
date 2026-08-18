@@ -1,5 +1,12 @@
 # Sessions（倒序，最近 5 条；更早的移入 archive.md）
 
+### 2026-08-19 — 静默死亡显式化：零终局行退出必吐 Error(0.8.1)
+
+- **触发**:Fisher 生产实录(2026-08-18 晚)——launchd PATH 只有 claude shim 没有真身,shim exit 127 + 零 stdout,ClaudeBackend 零事件"干净"走完,上游把启动失败折算成空回复,买家侧已读不回,全链路无一处报错。
+- **改动**:`stream-lines` 加 exitSink(close 写 code / spawn 失败写 spawnError)、'error' 挂监听(Node 无监听 = uncaught)、死因回填 stderrSink、rl.close() 终止读循环(Bun 实测 spawn 失败 stdout 不自行终结,destroy 叫不醒 for-await);`claude` 跟踪 sawTerminal,流走完没见过 result/error 行 → 显式 Error 带 exit code + stderr 尾巴(此前 stderrSink 只在 is_error result 分支被读,该场景等不到 result 行)。
+- **Verified**:62/62(新增 4:stream-lines 三态 + 假 claude 脚本复现零输出死亡恰好一个 Error)+ tsc 零错;Fisher 侧同日已加 resolveLoopOutcome 二道兜底(BACKEND_SILENT_EXIT)。
+- **Next**:发 0.8.1;Fisher bump 依赖并重启 console 验证。
+
 ### 2026-08-18 — Fisher 磨刀石：Claude 四项标准协议补齐(0.7.0)
 
 - **触发**:Fisher 换底座的接口核对充当磨刀石，暴露 `@smokingmouse/agent` 相对官方 claude-agent-sdk 的四个通用缺口；严格不引入 Fisher 审批状态机/guardStub 等域语义，所有字段可选，Codex 行为未改。
@@ -33,10 +40,3 @@
 - **E2E 波折**：Codex 手写 JSON-RPC server 的握手不被 CLI MCP client 接受（5 次 initialize 重试，永不到 tools/list）→ 判据如实记 0/3 blocked；换官方 `@modelcontextprotocol/sdk` StreamableHTTP（stateless 模式）后 **3/3**（init `probe: connected` + 真 ping tool_use + canary 原文；`delayFirstMessageMs: 300` + `settingSources: ['user']` + 显式 --mcp-config）。复跑脚本 `/tmp/mcp-e2e/rerun-e2e.ts`，证据 `rerun-output.json`。
 - **Verified**：`tsc --build` 全绿；`bun test` 23/23（基线 16）；runner.ts 冻结未动；真 CLI 调用 Codex 5 次 + 复跑 6 次。改动留工作区**未 commit**。
 - **Next**：用户 review 后发 0.6.0（minor）；SdkBackend（进程内 claude-agent-sdk 封装，Fisher 换底座前置）待依赖决策（倾向 optional peerDependency）。
-
-### 2026-08-05 — CodexBackend 解析降级不再伪装成登录问题(0.5.1)
-
-- **触发**:trellis 二号机指定了 cpa provider 仍报「codex 未登录」。根因不在登录——那台机器的 endpoints.yaml 没有 codex 标记(标记躺在一号机 ~/.claude 未提交改动里),resolveCodexModel 静默降级成透传后撞上登录闸,配置漂移伪装成登录问题。
-- **改动**(`backends/codex.ts`):拆掉一揽子 catch——①端点在 yaml 但无 codex 标记 → 仍透传(opt-in 语义不变)但带 `degraded` 原因,登录闸失败时拼进报错;②端点已标记注入但 key 缺失 → `fatal` 直接报错不 spawn(配置自相矛盾时静默换鉴权路线是把配置错误变成别的症状);③不在 yaml → 照旧透传。登录闸报错永远带诊断(degraded 原因或通用指引)。
-- **Verified**:四分支子进程实测(SM_ENDPOINTS_PATH 指 yaml 变体 + 假 codex 二进制)——key 缺失报 fatal 且点名 env var;无标记+未登录报「yaml 没同步」;标记+key 齐时登录闸被跳过(假 codex login 恒 exit 1 仍 NO_ERROR)且 argv 含 `-c model_provider="sm_endpoint"`、spawn env 含 key;原生名+未登录给通用指引。tsc build 零错。
-- **Next**:发 agent@0.5.1;trellis bump 并按 facts 清单验 registry 产物。

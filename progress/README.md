@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-纯开源 SDK；四项 Claude 协议已全部上线——maxTurns/skills 随 0.7.0 发出，askTools 全拦 + mcpServers 经 PR #15 review 合并后发 0.8.0；下一候选 SdkBackend（Fisher 换底座）。
+纯开源 SDK；0.8.1 修掉静默死亡（零终局行退出必吐 Error，Fisher 生产实录驱动）；下一候选 SdkBackend（Fisher 换底座）。
 
 ## Goals
 
