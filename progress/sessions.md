@@ -1,5 +1,14 @@
 # Sessions（倒序，最近 5 条；更早的移入 archive.md）
 
+### 2026-08-18 — Fisher 磨刀石：Claude 四项标准协议补齐(0.7.0)
+
+- **触发**:Fisher 换底座的接口核对充当磨刀石，暴露 `@smokingmouse/agent` 相对官方 claude-agent-sdk 的四个通用缺口；严格不引入 Fisher 审批状态机/guardStub 等域语义，所有字段可选，Codex 行为未改。
+- **Done（按 4→2→3→1）**:① `maxTurns` 正整数 → 官方隐藏 `--max-turns` ② `skills` 三态 → initialize payload，`[]` 封住默认 Skill 泄漏 ③ `askTools:"all"` → CLI `permissions.ask:["*"]`，覆盖 settings allow，让全部工具进 `onCanUseTool` ④ `mcpServers` 一等字段：http/stdio 临时 config；sdk 名单进 `initialize.sdkMcpServers`，官方 MCP Server 经 `mcp_message` control protocol 回流宿主执行。
+- **参照系**:本机 `@anthropic-ai/claude-agent-sdk` 0.3.207 的 `sdk.mjs/sdk.d.ts`（max-turns argv、initialize skills/sdkMcpServers、canUseTool spawn、SDK MCP transport/control 分支）+ Claude CLI 2.1.207 wildcard 实测；MCP E2E 统一用官方 `@modelcontextprotocol/sdk` 1.29.0。
+- **Verified**:agent 单测 58/58 + tsc；真 CLI E2E 四份全绿——maxTurns 一轮截止、skills 默认/空/单名单、全拦 allow+deny 后会话继续、SDK canary `CANARY-7391` + handler throw 存活、http 新字段 connected。任务 3 变异：去掉 wildcard 后 E2E 必红（`intercepted=[]`、deny handler 被执行），恢复后复绿。
+- **Commits**:`54ffe3d` maxTurns；`8a8e3fa` skills；`8e9b201` 全拦；`7734a18` mcpServers。包版本已由同期 Codex 线合入提交标为 0.7.0；本轮未 publish。
+- **Next**:停在人工 review；确认四项协议与同期 Codex 变更可共同进入 0.7.0 后再发布。
+
 ### 2026-08-18 — codex 审批回调 + multi-agent 子线隔离与 Task 映射(0.7.0)
 
 - **触发**:0.6.0 后的下一批(审批回调/Task 树)。multi-agent 实测顺带暴露 0.6.0 潜伏 bug:**子 agent 的事件走同一 app-server 连接**(带子 threadId)——不按 threadId 过滤,子线 turn/completed 会提前终结整个 run、子线文本混进主回答。
@@ -30,9 +39,3 @@
 - **改动**(`backends/codex.ts`):拆掉一揽子 catch——①端点在 yaml 但无 codex 标记 → 仍透传(opt-in 语义不变)但带 `degraded` 原因,登录闸失败时拼进报错;②端点已标记注入但 key 缺失 → `fatal` 直接报错不 spawn(配置自相矛盾时静默换鉴权路线是把配置错误变成别的症状);③不在 yaml → 照旧透传。登录闸报错永远带诊断(degraded 原因或通用指引)。
 - **Verified**:四分支子进程实测(SM_ENDPOINTS_PATH 指 yaml 变体 + 假 codex 二进制)——key 缺失报 fatal 且点名 env var;无标记+未登录报「yaml 没同步」;标记+key 齐时登录闸被跳过(假 codex login 恒 exit 1 仍 NO_ERROR)且 argv 含 `-c model_provider="sm_endpoint"`、spawn env 含 key;原生名+未登录给通用指引。tsc build 零错。
 - **Next**:发 agent@0.5.1;trellis bump 并按 facts 清单验 registry 产物。
-
-### 2026-08-04 — CodexBackend 实现 forkSession(rollout copy 模拟 headless fork)
-- **机制**:codex exec 无 fork 子命令(交互版 `codex fork` 有)。`forkCodexSession()` 把父 thread 的 rollout jsonl 复制成新 uuid(文件名 + 全文替换 id)再 resume 新 id;失败 fail loud——静默线性 resume 会让树形分支共写同一 thread 互相污染。claude/codex capabilities 均补 `forkSession: true` 供上游探测。
-- **Verified**:单测 3 个(复制改写 id / 同父双 fork 互异 / 缺档 throw),agent 16/16;端到端:fork 出新 id、答出父线暗号(历史继承),fork 线 cachedTokens 79k(前缀相同 → provider prompt cache 命中,cache 继承白捡);CLI 层已验证双向隔离(fork 写入新暗号,父线不可见);负向 fail loud 带 id + 路径。
-- **注意**:resume 必须带与录制一致的 -m(model 漂移曾实测触发上游 400);rollout 格式是 codex 内部实现,版本升级需回归(0.146.0 实测)。
-- **Next**:已完成——llm@0.4.0 + agent@0.5.0 同日发布。
