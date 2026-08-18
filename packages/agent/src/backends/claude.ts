@@ -120,6 +120,7 @@ export class ClaudeBackend implements Backend {
       args.push("--settings", JSON.stringify({ permissions: { ask: opts.askTools } }));
     }
     if (partial) args.push("--include-partial-messages");
+    args.push(...claudeMaxTurnsArgs(opts.maxTurns));
     if (resolved.model) args.push("--model", resolved.model);
     if (opts.resume) args.push("--resume", opts.resume);
     if (opts.resume && opts.forkSession) args.push("--fork-session");
@@ -493,6 +494,15 @@ export function claudeSettingSourceArgs(
     return ["--setting-sources=", ...(strictMcp ? ["--strict-mcp-config"] : [])];
   }
   return ["--setting-sources", sources.join(",")];
+}
+
+/** 导出纯参数构造，锁住 maxTurns 的省略语义与 fail-loud 校验。 */
+export function claudeMaxTurnsArgs(maxTurns: RunOptions["maxTurns"]): string[] {
+  if (maxTurns === undefined) return [];
+  if (!Number.isInteger(maxTurns) || maxTurns <= 0) {
+    throw new Error("maxTurns must be a positive integer");
+  }
+  return ["--max-turns", String(maxTurns)];
 }
 
 function claudePermissionArgs(p: PermissionPolicy): string[] {

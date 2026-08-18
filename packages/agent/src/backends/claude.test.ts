@@ -6,6 +6,7 @@ import { clearEndpointsCache } from "@smokingmouse/llm";
 import {
   claudeEnvironmentSkillArgs,
   claudeInputMode,
+  claudeMaxTurnsArgs,
   claudeSettingSourceArgs,
   resolveClaudeModel,
 } from "./claude.js";
@@ -111,6 +112,19 @@ describe("Claude settingSources argv", () => {
       "--strict-mcp-config",
     ]);
     expect(claudeSettingSourceArgs([])).toEqual(claudeSettingSourceArgs(false));
+  });
+});
+
+describe("Claude maxTurns argv", () => {
+  test("omits the flag by default and serializes one turn", () => {
+    expect(claudeMaxTurnsArgs(undefined)).toEqual([]);
+    expect(claudeMaxTurnsArgs(1)).toEqual(["--max-turns", "1"]);
+  });
+
+  test("rejects non-positive and non-finite values", () => {
+    for (const value of [0, -1, Number.NaN]) {
+      expect(() => claudeMaxTurnsArgs(value)).toThrow("maxTurns must be a positive integer");
+    }
   });
 });
 

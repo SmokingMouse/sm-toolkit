@@ -112,6 +112,11 @@ export interface RunOptions {
   /** 逐 token 流(claude --include-partial-messages)。默认 true */
   partialMessages?: boolean;
   /**
+   * Claude agentic turn 上限，对应 CLI `--max-turns`。必须是正整数；省略时保持
+   * CLI 默认。仅 Claude 消费，Codex 忽略。
+   */
+  maxTurns?: number;
+  /**
    * 首条 user message 延后 N ms 写入常开的 stream-json stdin，给显式外部
    * MCP server 留握手窗口。独立于 onCanUseTool 生效，仅 Claude 消费。
    * 负数、NaN、Infinity 会 fail loud；0 仍强制走 stdin 常开模式。
