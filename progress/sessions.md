@@ -1,5 +1,22 @@
 # Sessions（倒序，最近 5 条；更早的移入 archive.md）
 
+### 2026-08-18 — CodexBackend 接入 app-server transport:codex 逐 token 流(0.6.0 第二批)
+
+- **触发**:trellis 反馈 codex provider 无流式/工具卡/子 agent。调研(两 research agent 挖 openai/codex 0.147 源码 + 本机三组协议探针)推翻推迟前提:v1 会话 API 已整体移除、v2 唯一默认;TUI/exec 自身也是 app-server 客户端;exec --json 的 delta 是输出层**有意丢弃**(event_processor_with_jsonl_output.rs 兜底分支)且无 flag 可开;官方 Python SDK 即 app-server stdio 客户端。实测 app-server `thread/resume` 直接续 exec 录的 rollout(同一存储、id 互通),切换不孤儿化存量会话。
+- **Done**(新 `backends/codex-app-server.ts` + codex.ts 分派):per-run spawn `codex app-server`(stdio JSON-RPC v2)——initialize → thread/start|resume|fork → turn/start;通知映射:agentMessage/delta→TextChunk(退订时靠 completed 余量补发=block)、reasoning summary/textDelta→Thinking、item 生命周期→ToolCall/Done(含 collabAgentToolCall 多 agent / dynamicToolCall / imageGeneration)、fileChange→FileChange、tokenUsage→Cost(净 input/cacheWrite→cacheCreation/context 取 last);原生 thread/fork 替代 rollout copy;abort→turn/interrupt(2s grace 再 SIGTERM);审批类 server 请求自动拒答防挂死。**preflight 契约**:turn/start 响应前零事件产出,失败抛 AppServerPreflight 静默回退 exec(prompt 绝不跑两遍);`codexTransportPlan` 纯函数预分流不支持组合(environmentSkills=false / extraArgs / ephemeral resume)走 exec;`CodexBackendOptions.transport:"exec"` 逃生舱;capabilities streaming 如实报 "token"/"block"。
+- **Verified**:单测 40/40(新 17:transport 决策矩阵 / 逐档 sandbox 映射对齐 buildCodexArgs / item 映射 / cost 映射);真机 e2e 10 项全过(`scripts/e2e-codex-appserver.ts`):流式 100 chunks vs 强制 exec 1 chunk、resume 同 id 记忆在、fork 新 id 且父线不见子线暗号、readonly OS sandbox 拒写、workspace-write 圈内可写、full 圈外可写、abort 5.5s 收尾无 Result、usage 合理。tsc 全绿。改动留工作区**未 commit**(与 08-17 批同归 0.6.0)。
+- **注意**:approvalPolicy 恒 "never"(非交互 parity);onCanUseTool 仍未接(独立 phase,需上游 dispatcher);experimental 标签仍在,锁 schema + exec fallback 对冲协议漂移。
+- **Next**:用户 review 后两批同发 0.6.0;trellis `bun update @smokingmouse/agent` 即自动获得 codex 流式(零代码改动);后续独立 phase:审批回调(dynamicPermissionCallback)、turn/steer、subAgentActivity→Task 映射。
+
+### 2026-08-17 — 外部 MCP 契约三件套：settingSources 数组 + delayFirstMessageMs + resolveClaudeModel 导出（Codex 执行 + Claude review）
+
+- **触发**：Fisher（闲鱼底座）迁移评估点出三个契约缺口。任务书 `/tmp/sm-agent-contract-task.md` 派 Codex 执行，Claude review + 解 E2E blocker。
+- **Done**：① `resolveClaudeModel` 包根导出 + 三档单测（Fisher agent-loop 手拼的同构逻辑将换成引用，那份缺 provider 级 claude.env 合并）② `settingSources: boolean | Array<'user'|'project'|'local'>`——boolean 行为逐字节保持，`[]` 与 false 对齐走 `--setting-sources=`；08-01 外部 MCP pending 与 07-15 全局 allowlist 两条实测知识进类型注释 ③ `delayFirstMessageMs`：独立于 onCanUseTool 也开常开 stream-json stdin；与 onCanUseTool 组合时 control initialize 立即发、只延 user prompt；`claudeInputMode` / `claudeSettingSourceArgs` 抽纯函数锁行为；codex 惰性忽略 ④ SessionStart 补透传 `mcp_servers`（review 时补：不透传则上游在事件流里永远无法核验「MCP 真就绪」）。
+- **🔴 waitForMcpServers 被前置探测证伪，不实现**：stream-json stdin 常开、不写首条消息，5 秒 stdout 只有 hook 行、**零 system/init**——CLI 要收到首条 user message 才吐 init，「等 init 再发首条」= 死锁。该模式下固定延时是唯一可行形态。
+- **E2E 波折**：Codex 手写 JSON-RPC server 的握手不被 CLI MCP client 接受（5 次 initialize 重试，永不到 tools/list）→ 判据如实记 0/3 blocked；换官方 `@modelcontextprotocol/sdk` StreamableHTTP（stateless 模式）后 **3/3**（init `probe: connected` + 真 ping tool_use + canary 原文；`delayFirstMessageMs: 300` + `settingSources: ['user']` + 显式 --mcp-config）。复跑脚本 `/tmp/mcp-e2e/rerun-e2e.ts`，证据 `rerun-output.json`。
+- **Verified**：`tsc --build` 全绿；`bun test` 23/23（基线 16）；runner.ts 冻结未动；真 CLI 调用 Codex 5 次 + 复跑 6 次。改动留工作区**未 commit**。
+- **Next**：用户 review 后发 0.6.0（minor）；SdkBackend（进程内 claude-agent-sdk 封装，Fisher 换底座前置）待依赖决策（倾向 optional peerDependency）。
+
 ### 2026-08-05 — CodexBackend 解析降级不再伪装成登录问题(0.5.1)
 
 - **触发**:trellis 二号机指定了 cpa provider 仍报「codex 未登录」。根因不在登录——那台机器的 endpoints.yaml 没有 codex 标记(标记躺在一号机 ~/.claude 未提交改动里),resolveCodexModel 静默降级成透传后撞上登录闸,配置漂移伪装成登录问题。
@@ -23,11 +40,3 @@
 - **Verified**：根级 typecheck 全绿；agent 包 13/13 pass；端到端（gpt-5.4-mini 走 cpa）：`session_start` 带 model 回填、`tool_call`/`tool_call_done` 按 id 配对且 output `trellis-e2e\n` 回传、负向坏 `CPA_API_KEY` → 401 且 url = 注入 base_url（判别性证明非 fallback 全局 config.toml bearer）
 - **能力打平备忘（trellis 选 codex provider 视角）**：0.3.2 已补事件面（工具生命周期 id 配对 + aggregated_output / reasoning→Thinking / web_search）；本轮补注入 + model 回填 + stderr 兜底。剩余是 codex CLI 天花板：onCanUseTool 双向审批（trellis PendingInteraction 在 codex 下不可用）、逐 token 流、forkSession、tools 白名单 / askTools、settingSources。cost 仍 CODEX_PRICE 估算（estimated:true 契约诚实；trellis 记 token 不记 usd）。
 - **Next**：发版 `@smokingmouse/llm` + `agent`（minor）trellis 才吃得到注入；发布动作待用户确认。
-
-### 2026-08-04 — 归档：README Current Focus 迁移前原文快照
-**拆仓：SDK 与个人基础设施分家（2026-07-25）**：本仓收敛为纯开源 SDK——`@smokingmouse/llm`（0.3.0，chat 直连客户端）+ `@smokingmouse/agent`（0.3.1，Claude Code / Codex CLI 编排引擎）+ `apps/cli`（llm 命令行壳）。npm 发包已完成（2FA + granular token；两包均 `--access public`）。迁出：apps/harbor + apps/harbor-web + packages/channel-feishu → 私仓 `SmokingMouse/harbor`（filter-repo 保留 100 commit 历史，deps 切 registry，tsc + 456 tests 全绿）；同轮清掉零消费者的 @sm/store / audit / sandbox / guardrails 与 archive/self-agent（历史可捞）。**注**：harbor 历史仍在本公开仓 git history 中（评估不值得重写历史，代码无凭证）；harbor 控制面对本仓的 GitHub App / Repository binding 重绑在 harbor 仓侧待办。
-
-### 2026-07-25 — npm 发包完成 + 拆仓
-- **Done**：`@smokingmouse/llm@0.3.0` / `agent@0.3.0` 发布（agent 随后补 0.3.1——0.3.0 发布点早于 harbor 线 merge，缺 `IncomingMessage.resources` 等演进）；harbor 三件套迁出至私仓；死代码集群与 archive/self-agent 移除；root tsconfig references 收敛。
-- **Verified**：公开仓 `bun install` + `tsc --build` 全绿；trellis 从 registry 全新安装 + prod 验活（见 trellis progress S72）；harbor 私仓独立验证 456 tests pass。
-- **追记（同日）**：`@smokingmouse/cli@0.3.0` 发布——@sm/cli 改名，bin `llm`（bun shebang），dep llm ^0.3.0。任何机器 `bun install -g @smokingmouse/cli` 一步可用；本机既有 bun link 不受影响。三包齐：llm 0.3.0 / agent 0.3.1 / cli 0.3.0。
