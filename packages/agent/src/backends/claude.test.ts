@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearEndpointsCache } from "@smokingmouse/llm";
 import {
+  claudeAskToolsArgs,
   claudeEnvironmentSkillArgs,
   claudeInitializeRequest,
   claudeInputMode,
@@ -126,6 +127,24 @@ describe("Claude maxTurns argv", () => {
     for (const value of [0, -1, Number.NaN]) {
       expect(() => claudeMaxTurnsArgs(value)).toThrow("maxTurns must be a positive integer");
     }
+  });
+});
+
+describe("Claude askTools argv", () => {
+  test("keeps the existing omitted and named-list behavior", () => {
+    expect(claudeAskToolsArgs(undefined)).toEqual([]);
+    expect(claudeAskToolsArgs([])).toEqual([]);
+    expect(claudeAskToolsArgs(["Bash"])).toEqual([
+      "--settings",
+      JSON.stringify({ permissions: { ask: ["Bash"] } }),
+    ]);
+  });
+
+  test("maps full interception to the CLI permission wildcard", () => {
+    expect(claudeAskToolsArgs("all")).toEqual([
+      "--settings",
+      JSON.stringify({ permissions: { ask: ["*"] } }),
+    ]);
   });
 });
 

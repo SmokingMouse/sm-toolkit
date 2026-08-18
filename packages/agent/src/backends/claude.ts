@@ -116,12 +116,7 @@ export class ClaudeBackend implements Backend {
     else args.push("-p", prompt);
     args.push("--output-format", "stream-json", "--verbose");
     if (interactive) args.push("--permission-prompt-tool", "stdio");
-    if (opts.askTools && opts.askTools.length > 0) {
-      // ask 规则 > 用户 settings 的 allow 规则(实测):强制这些工具走审批,
-      // 不然全局 allowlist(裸 "Bash" 等)会静默放行。--settings 是增量 merge,
-      // CLAUDE.md/skills 不受影响。
-      args.push("--settings", JSON.stringify({ permissions: { ask: opts.askTools } }));
-    }
+    args.push(...claudeAskToolsArgs(opts.askTools));
     if (partial) args.push("--include-partial-messages");
     args.push(...claudeMaxTurnsArgs(opts.maxTurns));
     if (resolved.model) args.push("--model", resolved.model);
@@ -517,6 +512,13 @@ export function claudeMaxTurnsArgs(maxTurns: RunOptions["maxTurns"]): string[] {
     throw new Error("maxTurns must be a positive integer");
   }
   return ["--max-turns", String(maxTurns)];
+}
+
+/** ask 规则 > settings allow；"all" 用 CLI 规则通配符强制每个工具进审批。 */
+export function claudeAskToolsArgs(askTools: RunOptions["askTools"]): string[] {
+  if (askTools === undefined || (Array.isArray(askTools) && askTools.length === 0)) return [];
+  const ask = askTools === "all" ? ["*"] : askTools;
+  return ["--settings", JSON.stringify({ permissions: { ask } })];
 }
 
 function claudePermissionArgs(p: PermissionPolicy): string[] {
