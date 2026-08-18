@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { clearEndpointsCache } from "@smokingmouse/llm";
 import {
   claudeEnvironmentSkillArgs,
+  claudeInitializeRequest,
   claudeInputMode,
   claudeMaxTurnsArgs,
   claudeSettingSourceArgs,
@@ -125,6 +126,28 @@ describe("Claude maxTurns argv", () => {
     for (const value of [0, -1, Number.NaN]) {
       expect(() => claudeMaxTurnsArgs(value)).toThrow("maxTurns must be a positive integer");
     }
+  });
+});
+
+describe("Claude initialize skills payload", () => {
+  test("uses persistent stream-json stdin when initialize is required", () => {
+    expect(claudeInputMode(false, true, false)).toEqual({
+      streamJsonInput: true,
+      persistentStdin: true,
+    });
+  });
+
+  test("omits skills when the option is absent", () => {
+    const serialized = JSON.stringify(claudeInitializeRequest(undefined));
+    expect(serialized).not.toContain('"skills"');
+  });
+
+  test("preserves an explicit empty whitelist", () => {
+    expect((claudeInitializeRequest([]) as any).request.skills).toEqual([]);
+  });
+
+  test("serializes a non-empty whitelist verbatim", () => {
+    expect((claudeInitializeRequest(["pdf"]) as any).request.skills).toEqual(["pdf"]);
   });
 });
 

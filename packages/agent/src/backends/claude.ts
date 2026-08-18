@@ -85,6 +85,9 @@ export class ClaudeBackend implements Backend {
   async *run(prompt: string, opts: RunOptions): AsyncGenerator<AgentEvent> {
     const hasImages = (opts.attachments?.length ?? 0) > 0;
     const interactive = !!opts.onCanUseTool; // 双向交互模式(can_use_tool control protocol)
+    // skills 白名单与动态审批共用 initialize control request；只要显式传了
+    // skills（包括 []），就必须切到 stream-json stdin 才有通道发送该 payload。
+    const initializesControlProtocol = interactive || opts.skills !== undefined;
     const delayFirstMessage = opts.delayFirstMessageMs !== undefined;
     if (
       delayFirstMessage &&
@@ -96,7 +99,7 @@ export class ClaudeBackend implements Backend {
     // 里，进程 spawn 时就发出，delay 只是表面生效。
     const { streamJsonInput, persistentStdin } = claudeInputMode(
       hasImages,
-      interactive,
+      initializesControlProtocol,
       delayFirstMessage,
     );
     const partial = opts.partialMessages !== false; // 默认开逐 token 流
@@ -177,6 +180,7 @@ export class ClaudeBackend implements Backend {
     // 交互模式:prompt 走 stdin user 消息(纯文本),stdin 常开等 control_response。
     let stdinData: string | undefined;
     let delayedStdinData: string | undefined;
+    let userMessage: string | undefined;
     if (hasImages) {
       const content = [
         ...opts.attachments!.map((a) => ({
@@ -189,31 +193,28 @@ export class ClaudeBackend implements Backend {
         })),
         { type: "text", text: prompt },
       ];
-      const userMessage =
-        JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
-      if (delayFirstMessage) delayedStdinData = userMessage;
-      else stdinData = userMessage;
-    } else if (interactive || delayFirstMessage) {
-      // 交互模式:先发 initialize 握手,再送 prompt(user 消息),stdin 常开。
-      // claude 2.1.207 实测(2026-07-15):不发 initialize 则 --permission-prompt-tool stdio
-      // 被静默忽略,headless 对需授权工具直接 auto-deny,can_use_tool 永远不会下发;
-      // 握手后 claude 回 control_response(success) 并开始把权限请求路由到 stdio。
-      const initHandshake = {
-        request_id: "sm_agent_init_1",
-        type: "control_request",
-        request: { subtype: "initialize", hooks: {} },
-      };
-      const interactivePrompt = {
+      userMessage = JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
+    } else if (initializesControlProtocol || delayFirstMessage) {
+      const streamPrompt = {
         type: "user",
         message: { role: "user", content: [{ type: "text", text: prompt }] },
       };
-      const userMessage = JSON.stringify(interactivePrompt) + "\n";
+      userMessage = JSON.stringify(streamPrompt) + "\n";
+    }
+    if (userMessage) {
+      // 需要 control protocol 时先发 initialize，再送 prompt；stdin 常开。
+      // claude 2.1.207 实测(2026-07-15):不发 initialize 则 --permission-prompt-tool stdio
+      // 被静默忽略,headless 对需授权工具直接 auto-deny,can_use_tool 永远不会下发;
+      // 握手后 claude 回 control_response(success) 并开始把权限请求路由到 stdio。
+      const initData = initializesControlProtocol
+        ? JSON.stringify(claudeInitializeRequest(opts.skills)) + "\n"
+        : undefined;
       if (delayFirstMessage) {
-        // control initialize 不是 user message：动态审批场景仍应立即握手，只延后 prompt。
-        if (interactive) stdinData = JSON.stringify(initHandshake) + "\n";
+        // control initialize 不是 user message：仍应立即握手，只延后 prompt。
+        stdinData = initData;
         delayedStdinData = userMessage;
       } else {
-        stdinData = JSON.stringify(initHandshake) + "\n" + userMessage;
+        stdinData = (initData ?? "") + userMessage;
       }
     }
 
@@ -473,12 +474,25 @@ export function claudeEnvironmentSkillArgs(enabled = true): string[] {
 /** 纯输入传输决策：delay 必须同时切 stream-json 与常开 stdin。 */
 export function claudeInputMode(
   hasImages: boolean,
-  interactive: boolean,
+  initializesControlProtocol: boolean,
   delayFirstMessage: boolean,
 ): { streamJsonInput: boolean; persistentStdin: boolean } {
   return {
-    streamJsonInput: hasImages || interactive || delayFirstMessage,
-    persistentStdin: interactive || delayFirstMessage,
+    streamJsonInput: hasImages || initializesControlProtocol || delayFirstMessage,
+    persistentStdin: initializesControlProtocol || delayFirstMessage,
+  };
+}
+
+/** initialize control request；skills===undefined 时字段必须彻底省略。 */
+export function claudeInitializeRequest(skills: RunOptions["skills"]): Record<string, unknown> {
+  return {
+    request_id: "sm_agent_init_1",
+    type: "control_request",
+    request: {
+      subtype: "initialize",
+      hooks: {},
+      ...(skills !== undefined ? { skills } : {}),
+    },
   };
 }
 

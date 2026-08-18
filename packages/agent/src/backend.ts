@@ -88,6 +88,13 @@ export interface RunOptions {
    */
   environmentSkills?: boolean;
   /**
+   * Claude 主会话可见的 Skill 白名单。省略 = 保持 CLI 默认；[] = 不暴露任何
+   * Skill；非空数组 = 只暴露匹配名称。`environmentSkills:false` 是 safe-mode
+   * 级总闸，本字段是 initialize payload 上的名单级细闸，两者可以叠加。
+   * 仅 Claude 消费，Codex 忽略。
+   */
+  skills?: string[];
+  /**
    * Runtime 启动时已发现的环境 Skill 名称。Codex 没有单一 safe-mode 参数，
    * environmentSkills=false 时用这份快照禁用显式 `$skill` 注入；Claude 忽略此字段。
    */
