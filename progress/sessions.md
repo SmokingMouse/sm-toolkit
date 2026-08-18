@@ -8,6 +8,7 @@
 - **Verified**:agent 单测 58/58 + tsc；真 CLI E2E 四份全绿——maxTurns 一轮截止、skills 默认/空/单名单、全拦 allow+deny 后会话继续、SDK canary `CANARY-7391` + handler throw 存活、http 新字段 connected。任务 3 变异：去掉 wildcard 后 E2E 必红（`intercepted=[]`、deny handler 被执行），恢复后复绿。
 - **Commits**:`54ffe3d` maxTurns；`8a8e3fa` skills；`8e9b201` 全拦；`7734a18` mcpServers。包版本已由同期 Codex 线合入提交标为 0.7.0；本轮未 publish。
 - **Next**:停在人工 review；确认四项协议与同期 Codex 变更可共同进入 0.7.0 后再发布。
+- **后记（同日）**:review 以 PR #15 完成（前两项 maxTurns/skills 已随 0.7.0 出包）;askTools 全拦 + mcpServers 合并后发 **0.8.0**（干净 main 构建,58/58 复核）。
 
 ### 2026-08-18 — codex 审批回调 + multi-agent 子线隔离与 Task 映射(0.7.0)
 

@@ -1,6 +1,6 @@
 {
   "name": "@smokingmouse/agent",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "type": "module",
   "description": "Claude Code / Codex CLI 编排引擎 —— 统一 Backend 抽象(吸收自 agent-gateway),原生接入 @smokingmouse/llm 的 endpoints.yaml 做模型/端点解析。",
   "license": "MIT",

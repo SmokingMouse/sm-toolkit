@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-纯开源 SDK；@smokingmouse/agent 0.7.0 已补齐 Claude 四项标准协议并合入 Codex 审批/子线修复，全量验证通过，停在人工 review 与发布前。
+纯开源 SDK；四项 Claude 协议已全部上线——maxTurns/skills 随 0.7.0 发出，askTools 全拦 + mcpServers 经 PR #15 review 合并后发 0.8.0；下一候选 SdkBackend（Fisher 换底座）。
 
 ## Goals
 
