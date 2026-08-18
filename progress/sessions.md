@@ -1,5 +1,12 @@
 # Sessions（倒序，最近 5 条；更早的移入 archive.md）
 
+### 2026-08-18 — codex 审批回调 + multi-agent 子线隔离与 Task 映射(0.7.0)
+
+- **触发**:0.6.0 后的下一批(审批回调/Task 树)。multi-agent 实测顺带暴露 0.6.0 潜伏 bug:**子 agent 的事件走同一 app-server 连接**(带子 threadId)——不按 threadId 过滤,子线 turn/completed 会提前终结整个 run、子线文本混进主回答。
+- **Done**(`codex-app-server.ts` + codex.ts):①审批:policy "default" + onCanUseTool 在场 → approvalPolicy "untrusted"(可信白名单命令 codex 自动放行,2026-08-18 实测 echo 直跑/python3 弹审批);`item/commandExecution/requestApproval` → 回调 toolName "Bash"(input.command 取 commandActions 裸命令,非 /bin/zsh -lc 包装)、`item/fileChange/requestApproval` → 回调 toolName "Edit"(diff 从先行 item/started 缓存进 input.changes);allow→accept / deny→decline / abort→cancel(Promise.race 对齐 claude);权限确认模式 preflight 失败**不再静默回退 exec**(审批协议缺位=安全语义降级)→ fail loud 提示升级 CLI。②子线路由:threadId 非主线的通知一律不进主输出;`subAgentActivity`(id=spawn call id、agentThreadId=子线、kind started/interacted/interrupted)→ 合成 spawn_agent 工具卡 + Task started(taskType local_agent);子线工具项挂 parentToolUseId;子线 turn/completed → Task completed(summary=子线最终回答)+ spawn ToolCallDone;子线 tokenUsage → Task progress。collab agentsStates 充当 wait/spawn 输出。capabilities `dynamicPermissionCallback: true`(强制 exec 时 false)。
+- **Verified**:单测 48/48;审批 e2e 3/3(`scripts/e2e-codex-approvals.ts`:allow 收 Bash+裸命令→42 落地、deny→item declined+模型答 SKIPPED、multi-agent Result 恰为最后事件+spawn/Task started/completed+summary 391);回归 e2e 11/11(流式/fork/三档 sandbox/abort/exec 强制)。tsc 全绿。
+- **Next**:发 0.7.0;trellis 侧三闸已放开(approvalAvailable / route 钳制 / interactive),bump 后真机点权限卡;turn/steer 经评估推迟(树模型无消费位,决策记 trellis decisions.md)。
+
 ### 2026-08-18 — CodexBackend 接入 app-server transport:codex 逐 token 流(0.6.0 第二批)
 
 - **触发**:trellis 反馈 codex provider 无流式/工具卡/子 agent。调研(两 research agent 挖 openai/codex 0.147 源码 + 本机三组协议探针)推翻推迟前提:v1 会话 API 已整体移除、v2 唯一默认;TUI/exec 自身也是 app-server 客户端;exec --json 的 delta 是输出层**有意丢弃**(event_processor_with_jsonl_output.rs 兜底分支)且无 flag 可开;官方 Python SDK 即 app-server stdio 客户端。实测 app-server `thread/resume` 直接续 exec 录的 rollout(同一存储、id 互通),切换不孤儿化存量会话。
@@ -29,14 +36,3 @@
 - **Verified**:单测 3 个(复制改写 id / 同父双 fork 互异 / 缺档 throw),agent 16/16;端到端:fork 出新 id、答出父线暗号(历史继承),fork 线 cachedTokens 79k(前缀相同 → provider prompt cache 命中,cache 继承白捡);CLI 层已验证双向隔离(fork 写入新暗号,父线不可见);负向 fail loud 带 id + 路径。
 - **注意**:resume 必须带与录制一致的 -m(model 漂移曾实测触发上游 400);rollout 格式是 codex 内部实现,版本升级需回归(0.146.0 实测)。
 - **Next**:已完成——llm@0.4.0 + agent@0.5.0 同日发布。
-
-### 2026-08-04 — CodexBackend 接入 endpoints.yaml + 本地仓追平 origin
-- **背景**：本地 clone 落后 origin/main 70 commit（0.3.1→0.4.0 发包线全在远端）；先在旧 base 做完 codex 端点注入，发现落后后备份改动（/tmp/sm-backup）、ff pull 至 acb0443（0.4.0），在新 base 重放。
-- **Done**:
-  - `@smokingmouse/llm`：`CodexSettings { wire_api: 'responses' }`，`ProviderConfig`/`EndpointConfig` 加 `codex` 块透传 + 导出；endpoints.yaml（legacy 位 `~/.claude/global/`）cpa 标记 `codex: { wire_api: responses }`（显式 opt-in，chat-only 端点勿标）
-  - `@smokingmouse/agent` codex.ts：`resolveCodexModel()` 镜像 claude 版三分支——标记端点 → 真实 model + `-c model_provider(s).sm_endpoint` 五件套注入 + api key 进 spawn env；未标记 / 解析失败 → 原样透传不降级；注入时跳过 `codex login status`（env_key 鉴权不依赖登录态）；`buildCodexArgs` 加 `configOverrides`（exec/resume 共用 common）；capabilities 加 `configDrivenModelSwitch: true`
-  - 小补：stderrSink 兜底（turn.failed/error 无信息量时拼 stderr 尾部，对齐 claude）；SessionStart 在注入时回填 model（透传场景仍 null，不冒充全局 config 可能改写的事实）
-  - codex.test.ts +3 用例（initial/resume 注入、无注入时 args 与旧行为逐字节一致）
-- **Verified**：根级 typecheck 全绿；agent 包 13/13 pass；端到端（gpt-5.4-mini 走 cpa）：`session_start` 带 model 回填、`tool_call`/`tool_call_done` 按 id 配对且 output `trellis-e2e\n` 回传、负向坏 `CPA_API_KEY` → 401 且 url = 注入 base_url（判别性证明非 fallback 全局 config.toml bearer）
-- **能力打平备忘（trellis 选 codex provider 视角）**：0.3.2 已补事件面（工具生命周期 id 配对 + aggregated_output / reasoning→Thinking / web_search）；本轮补注入 + model 回填 + stderr 兜底。剩余是 codex CLI 天花板：onCanUseTool 双向审批（trellis PendingInteraction 在 codex 下不可用）、逐 token 流、forkSession、tools 白名单 / askTools、settingSources。cost 仍 CODEX_PRICE 估算（estimated:true 契约诚实；trellis 记 token 不记 usd）。
-- **Next**：发版 `@smokingmouse/llm` + `agent`（minor）trellis 才吃得到注入；发布动作待用户确认。

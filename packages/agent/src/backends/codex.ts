@@ -150,7 +150,10 @@ export class CodexBackend implements Backend {
       sandboxModes: ["read-only", "workspace-write", "full-access"],
       permissionPolicies: ["readonly", "auto-edit", "full"],
       readonlyEnforcement: "os-sandbox", // OS 级只读,Bash 也无法绕过
-      dynamicPermissionCallback: false, // 审批回调是独立 phase(需上游 dispatcher),暂未接
+      // app-server transport 已接 onCanUseTool:permission "default" + 回调在场时
+      // approvalPolicy=untrusted,commandExecution/fileChange 逐项走回调裁决
+      // (可信白名单命令 codex 自动放行)。exec 无 stdio 审批协议,强制 exec 时为 false。
+      dynamicPermissionCallback: !execForced,
       vision: true, // --image FILE / localImage input
       toolAllowlist: false, // codex 无工具白名单(sandbox 决定可达)
       // app-server transport 走 item/agentMessage/delta 逐 token;exec --json
@@ -225,7 +228,17 @@ export class CodexBackend implements Backend {
         return;
       } catch (e) {
         if (!(e instanceof AppServerPreflight)) throw e;
-        // 老版本 codex 无 app-server v2 / spawn 失败等 → 静默降级 exec(block 流)。
+        // 权限确认模式(default + 回调)依赖 app-server 审批协议 —— 回退 exec 会让
+        // 该跑审批的命令在沙箱里静默直跑,是安全语义降级,必须 fail loud。
+        if (policy === "default" && opts.onCanUseTool) {
+          yield ev(this.name, EventType.Error, null, {
+            message:
+              `codex 权限确认模式需要 app-server 支持,但 preflight 失败:${e.message}。` +
+              `请升级 codex CLI(需 ≥0.147 的 v2 协议),或关闭该会话的权限确认。`,
+          });
+          return;
+        }
+        // 其余场景:老版本 codex / spawn 失败等 → 静默降级 exec(block 流)。
       }
     }
 
