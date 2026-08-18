@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearEndpointsCache } from "@smokingmouse/llm";
 import {
+  ClaudeBackend,
   claudeAskToolsArgs,
   claudeEnvironmentSkillArgs,
   claudeInitializeRequest,
@@ -304,4 +305,34 @@ test("delayed stdin does not write until the injected scheduler fires", () => {
   expect(scheduledDelay).toBe(300);
   scheduled!();
   expect(writes).toBe(1);
+});
+
+/**
+ * 静默死亡 → 显式 Error。claude 可执行文件没跑起来(shim 找不到真身 exit 127 /
+ * PATH 解析失败)时零 stdout 秒退,修复前流"干净地"结束、零事件 —— 上游把启动失败
+ * 当正常空回复(2026-08-18 Fisher 生产实录)。用假 claude 脚本确定性复现。
+ */
+describe("ClaudeBackend silent process death", () => {
+  test("零输出退出 → 恰好一个 Error 事件,带 exit code 与 stderr 死因", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sm-agent-fake-claude-"));
+    writeFileSync(
+      join(dir, "claude"),
+      "#!/bin/sh\necho 'fake shim: real claude not found' >&2\nexit 127\n",
+      { mode: 0o755 },
+    );
+    try {
+      const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+      // env.PATH 只含假目录:spawn 按子进程 env 解析可执行文件,只找得到假 claude。
+      for await (const e of new ClaudeBackend().run("hi", { env: { PATH: dir } })) {
+        events.push(e as never);
+      }
+      expect(events).toHaveLength(1);
+      expect(events[0]!.type).toBe("error");
+      const msg = String(events[0]!.data.message);
+      expect(msg).toContain("exited with code 127");
+      expect(msg).toContain("real claude not found");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

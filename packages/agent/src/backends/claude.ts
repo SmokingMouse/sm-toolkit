@@ -416,6 +416,12 @@ export class ClaudeBackend implements Backend {
 
     let sid: string | null = opts.resume ?? null;
     const stderrSink = { text: "" };
+    const exitSink: { code?: number | null; spawnError?: string } = {};
+    // 进程是否吐过终局行(result / error)。没吐过就走完 = 静默死亡(可执行文件
+    // 没跑起来 / argv 解析失败,报错全在 stderr) —— 必须转成显式 Error,否则上游
+    // 只看到"流正常结束、零事件",把启动失败当成空回复(2026-08-18 Fisher 生产实录:
+    // launchd PATH 缺真 claude,shim exit 127,整晚每条买家消息静默空转无一处报错)。
+    let sawTerminal = false;
     // 「当前上下文窗口占用」追踪:每条 assistant message 的 input+cache 覆盖更新,
     // 最后一条的值 = 主 agent 本轮结束时的真实 context 占用。result.usage 是
     // 跨迭代累计和(且含同模型 subagent),不能拿来算占用%。
@@ -448,6 +454,7 @@ export class ClaudeBackend implements Backend {
         delayedStdinData,
         signal: opts.signal,
         stderrSink,
+        exitSink,
         interactive: persistentStdin ? interactiveSlot : undefined,
         stdinDelayMs: opts.delayFirstMessageMs,
       });
@@ -593,6 +600,7 @@ export class ClaudeBackend implements Backend {
             }
           }
         } else if (t === "result") {
+          sawTerminal = true;
           // 交互模式:本轮结束 → 关 stdin 让进程收尾退出。
           if (persistentStdin) interactiveSlot.channel?.end();
           if (obj.is_error) {
@@ -626,6 +634,7 @@ export class ClaudeBackend implements Backend {
           };
           yield ev(this.name, EventType.Result, sid, { text: obj.result, cost });
         } else if (t === "error") {
+          sawTerminal = true;
           const msg =
             typeof obj.message === "string"
               ? obj.message
@@ -634,6 +643,18 @@ export class ClaudeBackend implements Backend {
                 : "claude error";
           yield ev(this.name, EventType.Error, sid, { message: msg });
         }
+      }
+      // 流走完却没见过 result/error 行 = 静默死亡(abort 路径在循环内 return,不会到
+      // 这里)。stderrSink 原本只在 is_error result 分支被读,而这个场景等不到 result
+      // 行 —— 死因(shim 报错 / usage 输出 / spawn ENOENT)只存在于 stderr,在此拼出。
+      if (!sawTerminal) {
+        const stderrTail = stderrSink.text.trim();
+        const cause = exitSink.spawnError
+          ? `spawn failed: ${exitSink.spawnError}`
+          : `exited with code ${exitSink.code ?? "unknown"} before emitting any result`;
+        yield ev(this.name, EventType.Error, sid, {
+          message: `claude CLI ${cause}${stderrTail ? ` — stderr: ${stderrTail.slice(-500)}` : ""}`,
+        });
       }
     } finally {
       for (const cleanup of cleanupTasks.reverse()) await cleanup();

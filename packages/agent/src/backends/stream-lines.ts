@@ -48,6 +48,11 @@ export async function* streamLines(
     // 截断到 4KB),供 caller 在 CLI 报错而 stdout 无信息量(如 result.result
     // 为空)时拼进 fallback message。不传则照旧 drain。
     stderrSink?: { text: string };
+    // 可选退出信息槽。子进程可能**一行 stdout 都没吐就死**(可执行文件不在 PATH、
+    // shim 找不到真身 exit 127、argv 解析失败——报错全在 stderr),此时流"干净地"
+    // 结束,caller 无从区分正常完成与启动失败。传入后 close 时写 .code、spawn
+    // 失败写 .spawnError,caller 据此把静默死亡转成显式错误。
+    exitSink?: { code?: number | null; spawnError?: string };
     // 交互模式:stdin 常开、不立即 end()。传入此对象时 streamLines 把 write/end
     // 通道挂到它的 .channel 上供 caller 双向通信(初始 prompt 也走它写入)。
     // 不传则照旧:有 stdinData 就写完即 end、否则 ignore stdin。
@@ -90,6 +95,23 @@ export async function* streamLines(
   }
   const onAbort = () => proc.kill("SIGTERM");
   opts.signal?.addEventListener("abort", onAbort);
+  const rl = readline.createInterface({ input: proc.stdout! });
+  // close/error 监听必须在读循环开始前挂上。'error'(如 ENOENT)在 Node 下无监听
+  // 会直接 crash 进程,且 spawn 失败时 stdout 不会自行终结(Bun 实测:destroy 掉它
+  // rl 的 for-await 也不退,只有 rl.close() 能让读循环走到尾部收尾)。
+  const closed = new Promise<void>((res) => {
+    proc.on("close", (code) => {
+      if (opts.exitSink) opts.exitSink.code = code;
+      res();
+    });
+    proc.on("error", (err) => {
+      if (opts.exitSink) opts.exitSink.spawnError = String(err);
+      // spawn 失败连 stderr 都不会有 —— 把原因塞进 sink,别让 caller 拿到三无死亡
+      if (opts.stderrSink && !opts.stderrSink.text) opts.stderrSink.text = String(err);
+      rl.close();
+      res();
+    });
+  });
   if (opts.stderrSink) {
     // 缓冲 stderr,尾部保留最近 4KB(错误信息通常在末尾)。
     const sink = opts.stderrSink;
@@ -99,13 +121,12 @@ export async function* streamLines(
   } else {
     proc.stderr?.resume(); // drain，非 JSON 噪音走 stderr
   }
-  const rl = readline.createInterface({ input: proc.stdout! });
   try {
     for await (const line of rl) {
       const s = line.trim();
       if (s) yield s;
     }
-    await new Promise<void>((res) => proc.on("close", () => res()));
+    await closed;
   } finally {
     cancelInitialStdin();
     opts.signal?.removeEventListener("abort", onAbort);
