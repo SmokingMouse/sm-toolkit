@@ -70,6 +70,23 @@ describe("appServerThreadOptions — 与 buildCodexArgs 逐档对齐(安全红�
       sandbox_workspace_write: { network_access: true, writable_roots: ["/a", "/b"] },
     });
   });
+  test("权限确认:仅 default+approvals → untrusted;其余档位不受回调影响", () => {
+    const base = { additionalWritableDirs: [], sandboxNetworkAccess: false };
+    expect(appServerThreadOptions({ ...base, policy: "default", approvals: true }).approvalPolicy).toBe(
+      "untrusted",
+    );
+    expect(appServerThreadOptions({ ...base, policy: "default" }).approvalPolicy).toBe("never");
+    // 审批只在 default 档激活:full 是 YOLO、auto-edit 是自动批、readonly 是硬沙箱
+    expect(appServerThreadOptions({ ...base, policy: "auto-edit", approvals: true }).approvalPolicy).toBe(
+      "never",
+    );
+    expect(appServerThreadOptions({ ...base, policy: "full", approvals: true }).approvalPolicy).toBe(
+      "never",
+    );
+    expect(appServerThreadOptions({ ...base, policy: "readonly", approvals: true }).approvalPolicy).toBe(
+      "never",
+    );
+  });
 });
 
 describe("appServerToolCall / appServerToolResult", () => {
@@ -110,6 +127,19 @@ describe("appServerToolCall / appServerToolResult", () => {
     });
     expect(call?.name).toBe("wait");
     expect(call?.input).toEqual({ prompt: "compute 2+2", receiverThreadIds: ["t-2"], model: null });
+  });
+  test("collab 完成时 agentsStates 作为输出可见;空则 null", () => {
+    expect(
+      appServerToolResult({
+        type: "collabAgentToolCall",
+        status: "completed",
+        agentsStates: { "t-2": { status: "completed" } },
+      }).output,
+    ).toBe('{"t-2":{"status":"completed"}}');
+    expect(
+      appServerToolResult({ type: "collabAgentToolCall", status: "completed", agentsStates: {} })
+        .output,
+    ).toBeNull();
   });
   test("webSearch / dynamicToolCall / imageGeneration 覆盖", () => {
     expect(appServerToolCall({ type: "webSearch", query: "q" })).toEqual({

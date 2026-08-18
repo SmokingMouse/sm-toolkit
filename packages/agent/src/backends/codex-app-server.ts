@@ -67,16 +67,19 @@ export function codexTransportPlan(
  *   auto-edit/default → "workspace-write" + config.sandbox_workspace_write
  *     (network_access 显式写、writable_roots 仅此两档生效 —— 同 exec)
  *   full      → "danger-full-access"(exec 的 --dangerously-bypass 等价物)
- * approvalPolicy 恒为 "never":非交互 parity —— exec 从不弹审批,v1 的
- * app-server 路径也不弹(动态审批回调是后续独立 phase,需上游 dispatcher 配合)。
+ * approvalPolicy 默认 "never"(非交互 parity,exec 从不弹审批);唯一例外:
+ * `approvals`(= policy "default" + onCanUseTool 在场,即上游权限确认模式)
+ * → "untrusted",不可信命令/patch 逐个发 requestApproval 由回调裁决——
+ * 可信白名单命令(ls/cat/echo…)codex 自动放行,2026-08-18 实测。
  */
 export function appServerThreadOptions(o: {
   policy: PermissionPolicy;
   additionalWritableDirs: string[];
   sandboxNetworkAccess: boolean;
+  approvals?: boolean;
 }): {
   sandbox: "read-only" | "workspace-write" | "danger-full-access";
-  approvalPolicy: "never";
+  approvalPolicy: "never" | "untrusted";
   config?: Record<string, unknown>;
 } {
   if (o.policy === "readonly") return { sandbox: "read-only", approvalPolicy: "never" };
@@ -85,7 +88,7 @@ export function appServerThreadOptions(o: {
   const writable = [...new Set(o.additionalWritableDirs)];
   return {
     sandbox: "workspace-write",
-    approvalPolicy: "never",
+    approvalPolicy: o.policy === "default" && o.approvals ? "untrusted" : "never",
     config: {
       sandbox_workspace_write: {
         network_access: o.sandboxNetworkAccess === true,
@@ -147,6 +150,12 @@ export function appServerToolResult(item: Record<string, unknown>): {
   if (item.type === "imageGeneration") {
     return { output: typeof item.savedPath === "string" ? item.savedPath : null, isError: failed };
   }
+  if (item.type === "collabAgentToolCall") {
+    // agentsStates = 目标子线的最后已知状态(spawn/wait 的可观测结果)。
+    const states = item.agentsStates;
+    const hasStates = states && typeof states === "object" && Object.keys(states).length > 0;
+    return { output: hasStates ? JSON.stringify(states) : null, isError: failed };
+  }
   return { output: null, isError: failed };
 }
 
@@ -187,6 +196,18 @@ export function appServerCost(u: { total?: TokenBreakdown; last?: TokenBreakdown
 
 type Json = Record<string, unknown>;
 
+/** 送进主循环的两类消息:通知,以及需要回调裁决的审批请求(带响应 id)。 */
+type Incoming =
+  | { kind: "notif"; method: string; params: Json }
+  | { kind: "approval"; rpcId: unknown; method: string; params: Json };
+
+// 走 onCanUseTool 裁决的 server→client 请求;其余(permissions/requestUserInput/
+// elicitation…)仍在 startRpc 内联自动应答。
+const APPROVAL_METHODS = new Set([
+  "item/commandExecution/requestApproval",
+  "item/fileChange/requestApproval",
+]);
+
 /** 无界 push→pull 队列:JSON-RPC 回调世界 → async generator 世界的桥。 */
 class AsyncQueue<T> {
   private items: T[] = [];
@@ -215,7 +236,9 @@ interface Rpc {
   child: ChildProcess;
   request: (method: string, params: Json, timeoutMs?: number) => Promise<Json>;
   notify: (method: string, params?: Json) => void;
-  notifications: AsyncQueue<{ method: string; params: Json }>;
+  /** 审批请求的应答通道(主循环拿到用户决策后回写)。 */
+  respond: (rpcId: unknown, result: Json) => void;
+  incoming: AsyncQueue<Incoming>;
   stderrTail: () => string;
   kill: () => void;
 }
@@ -235,21 +258,22 @@ function startRpc(o: { args: string[]; cwd?: string; env?: Record<string, string
 
   let seq = 0;
   const pending = new Map<number, { resolve: (v: Json) => void; reject: (e: Error) => void }>();
-  const notifications = new AsyncQueue<{ method: string; params: Json }>();
+  const incoming = new AsyncQueue<Incoming>();
 
   const write = (obj: Json) => {
     if (child.stdin?.writable) child.stdin.write(JSON.stringify(obj) + "\n");
   };
 
-  // 审批类 server→client 请求自动拒答:approvalPolicy=never 下不应出现,真出现
-  // (granular 语义漂移/未来新增)时拒掉比挂死等待强 —— 挂死是最坏结局。
-  const respondToServerRequest = (id: unknown, method: string) => {
+  // 非审批类 server→client 请求内联自动应答;真审批(APPROVAL_METHODS)进队列由
+  // 主循环裁决(有回调走回调,没有则 decline)。未知请求拒掉比挂死等待强。
+  const respondToServerRequest = (id: unknown, method: string, params: Json) => {
     const reply = (result: Json) => write({ jsonrpc: "2.0", id: id as number, result });
+    if (APPROVAL_METHODS.has(method)) {
+      incoming.push({ kind: "approval", rpcId: id, method, params });
+      return;
+    }
     switch (method) {
-      case "item/commandExecution/requestApproval":
-      case "item/fileChange/requestApproval":
-        return reply({ decision: "decline" });
-      case "execCommandApproval": // v1 遗留双胞胎,shape 不同
+      case "execCommandApproval": // v1 遗留双胞胎,shape 不同,v2 turn 不应出现
       case "applyPatchApproval":
         return reply({ decision: "denied" });
       case "item/permissions/requestApproval":
@@ -288,31 +312,32 @@ function startRpc(o: { args: string[]; cwd?: string; env?: Record<string, string
       return;
     }
     if (msg.id !== undefined && typeof msg.method === "string") {
-      respondToServerRequest(msg.id, msg.method);
+      respondToServerRequest(msg.id, msg.method, (msg.params ?? {}) as Json);
       return;
     }
     if (typeof msg.method === "string") {
-      notifications.push({ method: msg.method, params: (msg.params ?? {}) as Json });
+      incoming.push({ kind: "notif", method: msg.method, params: (msg.params ?? {}) as Json });
     }
   });
 
   child.on("close", () => {
-    notifications.close();
+    incoming.close();
     const err = new Error("codex app-server exited");
     for (const [, p] of pending) p.reject(err);
     pending.clear();
   });
   child.on("error", (e) => {
     // spawn 失败(codex 不在 PATH 等):close 可能不来,主动收尾。
-    notifications.close();
+    incoming.close();
     for (const [, p] of pending) p.reject(e);
     pending.clear();
   });
 
   return {
     child,
-    notifications,
+    incoming,
     stderrTail: () => stderr.trim(),
+    respond: (rpcId, result) => write({ jsonrpc: "2.0", id: rpcId as number, result }),
     notify: (method, params) => write({ jsonrpc: "2.0", method, ...(params ? { params } : {}) }),
     request: (method, params, timeoutMs = PREFLIGHT_TIMEOUT_MS) =>
       new Promise<Json>((resolve, reject) => {
@@ -397,6 +422,8 @@ export async function* runViaAppServer(ctx: AppServerRunContext): AsyncGenerator
       policy: ctx.policy,
       additionalWritableDirs: opts.additionalWritableDirs ?? [],
       sandboxNetworkAccess: opts.sandboxNetworkAccess === true,
+      // 权限确认模式:上游要求逐项审批且给了裁决回调 → untrusted。
+      approvals: !!opts.onCanUseTool,
     });
     const cwd = opts.cwd ?? opts.workspace ?? undefined;
     const common: Json = {
@@ -451,6 +478,23 @@ export async function* runViaAppServer(ctx: AppServerRunContext): AsyncGenerator
   const startedTools = new Set<string>();
   let usage: { total?: TokenBreakdown; last?: TokenBreakdown } | null = null;
   let lastError: string | null = null;
+  // 权限确认(与 threadOpts 的 untrusted 条件同源):回调在场且档位为 default。
+  const approvalsActive = ctx.policy === "default" && !!opts.onCanUseTool;
+  // fileChange 审批请求只带 itemId,diff 在先行的 item/started 里 —— 缓存备查。
+  const fileChanges = new Map<string, Json>();
+  // multi-agent(2026-08-18 实测):子 agent 的事件走同一连接、带子 threadId。
+  // spawnByThread: 子 threadId → 派生它的 subAgentActivity call id(Task 挂载点);
+  // childText: 子线最后一条 agentMessage 全文(Task summary + spawn 调用的输出)。
+  const spawnByThread = new Map<string, string>();
+  const childText = new Map<string, string>();
+  const seenActivity = new Set<string>(); // subAgentActivity started/completed 双发去重
+  const ABORTED = Symbol("aborted");
+  const abortPromise: Promise<typeof ABORTED> | null = opts.signal
+    ? new Promise((resolve) => {
+        if (opts.signal!.aborted) return resolve(ABORTED);
+        opts.signal!.addEventListener("abort", () => resolve(ABORTED), { once: true });
+      })
+    : null;
 
   try {
     yield ev(EventType.SessionStart, threadId, {
@@ -461,7 +505,7 @@ export async function* runViaAppServer(ctx: AppServerRunContext): AsyncGenerator
     });
 
     for (;;) {
-      const n = await rpc.notifications.next();
+      const n = await rpc.incoming.next();
       if (n === null) {
         // 进程退出而 turn 未收尾 —— 报最后已知错误/stderr,绝不静默。
         const tail = rpc.stderrTail();
@@ -470,7 +514,119 @@ export async function* runViaAppServer(ctx: AppServerRunContext): AsyncGenerator
         });
         return;
       }
+      // ---- 审批请求:映射成 claude 形状的 can_use_tool,拿决策回写 ----
+      if (n.kind === "approval") {
+        const itemId = String(n.params.itemId ?? "");
+        if (!approvalsActive || !opts.onCanUseTool) {
+          // 非权限确认模式不该出现(approvalPolicy=never);真出现拒掉防挂死。
+          rpc.respond(n.rpcId, { decision: "decline" });
+          continue;
+        }
+        let toolName: string;
+        let input: Json;
+        if (n.method === "item/commandExecution/requestApproval") {
+          // commandActions[0].command 是裸命令(不带 /bin/zsh -lc 包装),对齐
+          // claude Bash 卡片的 input.command 语义;渲染层能直接出等宽命令块。
+          const actions = n.params.commandActions as Array<{ command?: string }> | undefined;
+          toolName = "Bash";
+          input = {
+            command: actions?.[0]?.command ?? String(n.params.command ?? ""),
+            ...(n.params.cwd ? { cwd: n.params.cwd } : {}),
+            ...(n.params.reason ? { reason: n.params.reason } : {}),
+          };
+        } else {
+          toolName = "Edit";
+          const fc = fileChanges.get(itemId);
+          input = {
+            changes: (fc?.changes as unknown) ?? [],
+            ...(n.params.reason ? { reason: n.params.reason } : {}),
+            ...(n.params.grantRoot ? { grantRoot: n.params.grantRoot } : {}),
+          };
+        }
+        const callbackP = opts.onCanUseTool({
+          toolName,
+          toolUseId: itemId,
+          requestId: String(n.rpcId),
+          input,
+        });
+        // 回调可能等很久(等用户);abort 时回 cancel(codex 语义:取消并中断 turn),
+        // 外层 onAbort 的 interrupt + 延时 kill 继续兜底,循环等正常收尾事件。
+        const r = abortPromise ? await Promise.race([callbackP, abortPromise]) : await callbackP;
+        if (r === ABORTED) {
+          rpc.respond(n.rpcId, { decision: "cancel" });
+          continue;
+        }
+        // codex 审批不支持改写入参(仅 execpolicy amendment),updatedInput 忽略。
+        rpc.respond(n.rpcId, { decision: r.behavior === "allow" ? "accept" : "decline" });
+        continue;
+      }
       const { method, params } = n;
+      // ---- 子线程路由:threadId 非主线的一律不进主输出 ----
+      // 不过滤的话子 agent 的 turn/completed 会提前终结整个 run、子线文本混进主
+      // 回答(0.6.0 的潜伏 bug,multi-agent 实测暴露)。子线事件降维成 Task 进度
+      // + 挂在 spawn 调用下的子工具调用,对齐 claude 子 agent 的 parentToolUseId 树。
+      const evThread = typeof params.threadId === "string" ? params.threadId : threadId;
+      if (evThread !== threadId) {
+        const spawnId = spawnByThread.get(evThread);
+        if (!spawnId) continue; // 未经 subAgentActivity 宣告的线程,不认
+        if (method === "item/started" || method === "item/completed") {
+          const item = (params.item ?? {}) as Json;
+          if (item.type === "agentMessage") {
+            if (method === "item/completed") childText.set(evThread, String(item.text ?? ""));
+          } else {
+            const call = appServerToolCall(item);
+            if (call) {
+              const childItemId = String(item.id ?? "");
+              if (!startedTools.has(childItemId)) {
+                startedTools.add(childItemId);
+                yield ev(EventType.ToolCall, threadId, {
+                  id: childItemId,
+                  ...call,
+                  parentToolUseId: spawnId,
+                });
+              }
+              if (method === "item/completed") {
+                const r = appServerToolResult(item);
+                yield ev(EventType.ToolCallDone, threadId, {
+                  id: childItemId,
+                  output: r.output,
+                  stderr: null,
+                  isError: r.isError,
+                });
+              }
+            }
+          }
+        } else if (method === "turn/completed") {
+          const turn = (params.turn ?? {}) as Json;
+          const status = String(turn.status ?? "completed");
+          const summary = childText.get(evThread);
+          yield ev(EventType.Task, threadId, {
+            toolUseId: spawnId,
+            taskId: evThread,
+            phase: "completed",
+            status,
+            ...(summary ? { summary } : {}),
+          });
+          // spawn 调用的输出 = 子线最终回答(对齐 claude Task 工具的报告回传)。
+          yield ev(EventType.ToolCallDone, threadId, {
+            id: spawnId,
+            output: summary ?? null,
+            stderr: null,
+            isError: status === "failed",
+          });
+        } else if (method === "thread/tokenUsage/updated") {
+          const tu = (params.tokenUsage as { total?: TokenBreakdown } | null)?.total;
+          if (tu?.totalTokens !== undefined) {
+            yield ev(EventType.Task, threadId, {
+              toolUseId: spawnId,
+              taskId: evThread,
+              phase: "progress",
+              totalTokens: tu.totalTokens,
+            });
+          }
+        }
+        continue; // 子线 delta/reasoning 等其余通知不进主输出
+      }
       if (method === "item/agentMessage/delta") {
         const delta = String(params.delta ?? "");
         const itemId = String(params.itemId ?? "default");
@@ -500,8 +656,53 @@ export async function* runViaAppServer(ctx: AppServerRunContext): AsyncGenerator
             }
           }
         } else if (item.type === "fileChange") {
+          // started 先缓存:审批请求(item/fileChange/requestApproval)只带 itemId,
+          // diff 内容在这条 item 里 —— 权限卡要展示改了什么全靠它。
+          if (method === "item/started") fileChanges.set(itemId, item);
           if (method === "item/completed") {
+            fileChanges.delete(itemId);
             yield ev(EventType.FileChange, threadId, { changes: item.changes });
+          }
+        } else if (item.type === "subAgentActivity") {
+          // multi-agent 生命周期标记:id 就是 spawn 调用的 call id(实测),
+          // agentThreadId 是子线。据此①合成 spawn 工具卡(trellis 的
+          // tool_call_update 只认已存在的调用)②发 Task started 挂上去
+          // ③登记路由表,后续子线事件降维挂载。started/completed 双发,按
+          // itemId+kind 去重。
+          const kind = String(item.kind ?? "");
+          const agentThreadId = String(item.agentThreadId ?? "");
+          const dedupeKey = `${itemId}:${kind}`;
+          if (agentThreadId && !seenActivity.has(dedupeKey)) {
+            seenActivity.add(dedupeKey);
+            const agentPath = typeof item.agentPath === "string" ? item.agentPath : undefined;
+            if (kind === "started") {
+              spawnByThread.set(agentThreadId, itemId);
+              if (!startedTools.has(itemId)) {
+                startedTools.add(itemId);
+                yield ev(EventType.ToolCall, threadId, {
+                  id: itemId,
+                  name: "spawn_agent",
+                  input: { ...(agentPath ? { agentPath } : {}), agentThreadId },
+                  parentToolUseId: null,
+                });
+              }
+              yield ev(EventType.Task, threadId, {
+                toolUseId: itemId,
+                taskId: agentThreadId,
+                taskType: "local_agent",
+                phase: "started",
+                ...(agentPath ? { description: agentPath } : {}),
+              });
+            } else if (kind === "interrupted") {
+              const spawnId = spawnByThread.get(agentThreadId) ?? itemId;
+              yield ev(EventType.Task, threadId, {
+                toolUseId: spawnId,
+                taskId: agentThreadId,
+                phase: "completed",
+                status: "interrupted",
+              });
+            }
+            // kind "interacted":子线间消息传递,暂无对应 AgentEvent
           }
         } else {
           const call = appServerToolCall(item);

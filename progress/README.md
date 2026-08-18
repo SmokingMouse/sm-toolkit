@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-纯开源 SDK；工作区两批未 commit 改动待 review 同发 0.6.0——外部 MCP 契约三件套（E2E 3/3）+ CodexBackend app-server transport（codex 逐 token 流，单测 40/40 + 真机 e2e 10 项，老版本自动回退 exec）。
+纯开源 SDK；codex app-server 线第二批已落——审批回调（untrusted + onCanUseTool 映射 Bash/Edit）+ multi-agent 子线隔离与 Task 映射，发 0.7.0；余留候选：SdkBackend（Fisher 换底座）、turn/steer（trellis 侧已决策推迟）。
 
 ## Goals
 
