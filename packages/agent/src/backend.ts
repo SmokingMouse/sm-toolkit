@@ -49,12 +49,21 @@ export interface RunOptions {
   permission?: PermissionPolicy;
   /** 工具白名单:[] = 无工具,["WebSearch","WebFetch"] = 仅这些,"all"/缺省 = 后端默认全部 */
   tools?: string[] | "all";
-  /** 是否加载项目/全局配置(claude CLAUDE.md)。false = 砍掉省 context。默认 true。
-   * 注意实测边界:false **同时**砍掉本机 MCP servers(它们也来自 settings sources)——
-   * 隔离 = 无 CLAUDE.md + 无本机 skill + 无 MCP 三件套,`strictMcp` 救不回来。
-   * 想给隔离会话配 MCP 只能显式走 --mcp-config。 */
-  settingSources?: boolean;
-  /** 是否附带 --strict-mcp-config(仅在 settingSources === false 时有意义)。默认 true。
+  /**
+   * Claude settings 来源。true/缺省 = CLI 默认全加载；false/[] = 全不加载；
+   * 数组按 CLI 原生语义传 `--setting-sources user,project`。仅 Claude 消费。
+   *
+   * 2026-08-01 单变量对照实测：`--setting-sources` 不含 user 时，显式
+   * `--mcp-config` 注入的外部 MCP 首轮停在 pending、工具对模型不可见
+   * （不传 flag → connected；空串/project → pending；user → connected）。可用
+   * `delayFirstMessageMs` 给握手留窗口；不能靠 strictMcp 把它救回来。
+   *
+   * 反过来，含 user 会引入 ~/.claude/settings.json 的 permissions.allow；
+   * 2026-07-15 实测它会让 onCanUseTool 回调永不触发、审批形同虚设，动态
+   * 审批场景必须用 askTools 对冲全局 allowlist。
+   */
+  settingSources?: boolean | Array<"user" | "project" | "local">;
+  /** 是否附带 --strict-mcp-config(仅在 settingSources 为 false/[] 时有意义)。默认 true。
    * 实测它只在配了 --mcp-config 时才改变行为;单独设 false **不会**让本机 MCP 回来。 */
   strictMcp?: boolean;
   /** claude --agent:把某个已注册 agent 激活成本次会话的主 agent。
@@ -102,6 +111,12 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** 逐 token 流(claude --include-partial-messages)。默认 true */
   partialMessages?: boolean;
+  /**
+   * 首条 user message 延后 N ms 写入常开的 stream-json stdin，给显式外部
+   * MCP server 留握手窗口。独立于 onCanUseTool 生效，仅 Claude 消费。
+   * 负数、NaN、Infinity 会 fail loud；0 仍强制走 stdin 常开模式。
+   */
+  delayFirstMessageMs?: number;
   /** 采样温度。仅裸 API backend(@smokingmouse/llm 的 LLMClient)消费;claude/codex 惰性忽略。 */
   temperature?: number;
   /** 要求 JSON 输出(OpenAI response_format)。仅裸 API backend 消费;claude/codex 惰性忽略。 */

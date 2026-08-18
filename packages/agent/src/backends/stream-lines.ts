@@ -15,6 +15,23 @@ export interface StdinChannel {
   end: () => void;
 }
 
+/**
+ * 调度首批 stdin 数据。scheduler 可注入，单测无需真的 sleep 就能证伪
+ * 「delay 被忽略、spawn 后立即写 prompt」这类时序回归。返回取消函数。
+ */
+export function scheduleInitialStdin(
+  write: () => void,
+  delayMs: number | undefined,
+  scheduler: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout> = setTimeout,
+): () => void {
+  if (delayMs === undefined) {
+    write();
+    return () => {};
+  }
+  const timer = scheduler(write, delayMs);
+  return () => clearTimeout(timer);
+}
+
 export async function* streamLines(
   cmd: string,
   args: string[],
@@ -22,6 +39,10 @@ export async function* streamLines(
     cwd?: string;
     env?: Record<string, string>;
     stdinData?: string;
+    /** interactive 下立即写入 stdinData 后，再延时写入这一批数据。 */
+    delayedStdinData?: string;
+    /** 仅配合 interactive：延后首批 stdinData 写入；stdin 保持常开。 */
+    stdinDelayMs?: number;
     signal?: AbortSignal;
     // 可选 stderr 收集槽。传入时 streamLines 把 stderr 缓冲进 .text(尾部
     // 截断到 4KB),供 caller 在 CLI 报错而 stdout 无信息量(如 result.result
@@ -39,6 +60,7 @@ export async function* streamLines(
     env: opts.env ? { ...process.env, ...opts.env } : undefined,
     stdio: [opts.stdinData || interactive ? "pipe" : "ignore", "pipe", "pipe"],
   });
+  let cancelInitialStdin = () => {};
   if (interactive && proc.stdin) {
     // 交互模式:暴露常开的写通道,stdin 不立即 end —— 只在 caller 显式 end()
     // (turn 结束)或 abort 时关闭。初始 prompt 若由 stdinData 给则立即写入(不 end),
@@ -53,7 +75,15 @@ export async function* streamLines(
         if (proc.stdin && !proc.stdin.destroyed) proc.stdin.end();
       },
     };
-    if (opts.stdinData) proc.stdin.write(opts.stdinData); // 写但不 end
+    if (opts.stdinData) proc.stdin.write(opts.stdinData);
+    if (opts.delayedStdinData) {
+      cancelInitialStdin = scheduleInitialStdin(
+        () => {
+          if (proc.stdin?.writable) proc.stdin.write(opts.delayedStdinData);
+        },
+        opts.stdinDelayMs,
+      );
+    }
   } else if (opts.stdinData && proc.stdin) {
     proc.stdin.write(opts.stdinData);
     proc.stdin.end();
@@ -77,6 +107,7 @@ export async function* streamLines(
     }
     await new Promise<void>((res) => proc.on("close", () => res()));
   } finally {
+    cancelInitialStdin();
     opts.signal?.removeEventListener("abort", onAbort);
     if (!proc.killed) proc.kill("SIGTERM");
   }

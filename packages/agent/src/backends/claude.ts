@@ -24,7 +24,7 @@ const NATIVE_TIER_ALIASES = new Set(["opus", "sonnet", "haiku"]);
  *   ③ 解析失败(如已废弃的 legacy id、CLI 新别名还没进 YAML)→ 原样透传给
  *      --model,让 claude CLI 自己校验 —— 不在这一层生降级用户的请求。
  */
-function resolveClaudeModel(model: string | undefined): {
+export function resolveClaudeModel(model: string | undefined): {
   model: string | undefined;
   env?: Record<string, string>;
 } {
@@ -85,6 +85,20 @@ export class ClaudeBackend implements Backend {
   async *run(prompt: string, opts: RunOptions): AsyncGenerator<AgentEvent> {
     const hasImages = (opts.attachments?.length ?? 0) > 0;
     const interactive = !!opts.onCanUseTool; // 双向交互模式(can_use_tool control protocol)
+    const delayFirstMessage = opts.delayFirstMessageMs !== undefined;
+    if (
+      delayFirstMessage &&
+      (!Number.isFinite(opts.delayFirstMessageMs) || opts.delayFirstMessageMs! < 0)
+    ) {
+      throw new Error("delayFirstMessageMs must be a finite non-negative number");
+    }
+    // 延时首条消息也必须走常开的 stream-json stdin；否则 prompt 已经焊在 argv
+    // 里，进程 spawn 时就发出，delay 只是表面生效。
+    const { streamJsonInput, persistentStdin } = claudeInputMode(
+      hasImages,
+      interactive,
+      delayFirstMessage,
+    );
     const partial = opts.partialMessages !== false; // 默认开逐 token 流
 
     const resolved = resolveClaudeModel(opts.model);
@@ -95,7 +109,7 @@ export class ClaudeBackend implements Backend {
     const args: string[] = [];
     // 交互或有图都走 stdin stream-json;交互模式 prompt 走 stdin user 消息且 stdin 常开。
     // 否则纯文本走 -p。
-    if (hasImages || interactive) args.push("-p", "--input-format", "stream-json");
+    if (streamJsonInput) args.push("-p", "--input-format", "stream-json");
     else args.push("-p", prompt);
     args.push("--output-format", "stream-json", "--verbose");
     if (interactive) args.push("--permission-prompt-tool", "stdio");
@@ -134,16 +148,7 @@ export class ClaudeBackend implements Backend {
         args.push(...claudeEnvironmentSkillArgs(false));
       }
     }
-    if (opts.settingSources === false) {
-      // 砍全局 CLAUDE.md + 默认 MCP 省 context。实测一句 OK $0.28→$0.0015(↓184x)。
-      // 等号形式而非 ("--setting-sources", ""):独立的空字符串 argv 在部分 runtime
-      // (工作机 bun 实测)会被丢弃,导致后面的 --strict-mcp-config 被当成值吞掉、
-      // CLI 报错 0 输出;等号把空值焊死在同一个 argv 里,两种写法 CLI 均实测接受。
-      args.push("--setting-sources=");
-      // 默认 true = 历史行为。设 false **不会**让本机 MCP 回来(2026-07-31 实测:
-      // 加不加它 init 事件里 mcp_servers 都是 []),它只在配了 --mcp-config 时有意义。
-      if (opts.strictMcp !== false) args.push("--strict-mcp-config");
-    }
+    args.push(...claudeSettingSourceArgs(opts.settingSources, opts.strictMcp));
     if (opts.tools && opts.tools !== "all") {
       args.push("--tools", opts.tools.join(",")); // [] → "" 即无工具
     }
@@ -170,6 +175,7 @@ export class ClaudeBackend implements Backend {
     // vision:把图片 + 文本拼成一条 stream-json user message 从 stdin 喂入
     // 交互模式:prompt 走 stdin user 消息(纯文本),stdin 常开等 control_response。
     let stdinData: string | undefined;
+    let delayedStdinData: string | undefined;
     if (hasImages) {
       const content = [
         ...opts.attachments!.map((a) => ({
@@ -182,8 +188,11 @@ export class ClaudeBackend implements Backend {
         })),
         { type: "text", text: prompt },
       ];
-      stdinData = JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
-    } else if (interactive) {
+      const userMessage =
+        JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
+      if (delayFirstMessage) delayedStdinData = userMessage;
+      else stdinData = userMessage;
+    } else if (interactive || delayFirstMessage) {
       // 交互模式:先发 initialize 握手,再送 prompt(user 消息),stdin 常开。
       // claude 2.1.207 实测(2026-07-15):不发 initialize 则 --permission-prompt-tool stdio
       // 被静默忽略,headless 对需授权工具直接 auto-deny,can_use_tool 永远不会下发;
@@ -197,7 +206,14 @@ export class ClaudeBackend implements Backend {
         type: "user",
         message: { role: "user", content: [{ type: "text", text: prompt }] },
       };
-      stdinData = JSON.stringify(initHandshake) + "\n" + JSON.stringify(interactivePrompt) + "\n";
+      const userMessage = JSON.stringify(interactivePrompt) + "\n";
+      if (delayFirstMessage) {
+        // control initialize 不是 user message：动态审批场景仍应立即握手，只延后 prompt。
+        if (interactive) stdinData = JSON.stringify(initHandshake) + "\n";
+        delayedStdinData = userMessage;
+      } else {
+        stdinData = JSON.stringify(initHandshake) + "\n" + userMessage;
+      }
     }
 
     let sid: string | null = opts.resume ?? null;
@@ -216,9 +232,11 @@ export class ClaudeBackend implements Backend {
       cwd: opts.cwd ?? opts.workspace ?? undefined,
       env: spawnEnv,
       stdinData,
+      delayedStdinData,
       signal: opts.signal,
       stderrSink,
-      interactive: interactive ? interactiveSlot : undefined,
+      interactive: persistentStdin ? interactiveSlot : undefined,
+      stdinDelayMs: opts.delayFirstMessageMs,
     })) {
       let obj: any;
       try {
@@ -272,6 +290,10 @@ export class ClaudeBackend implements Backend {
           tools: obj.tools,
           model: obj.model,
           permissionMode: obj.permissionMode,
+          // MCP server 首轮状态([{name,status}])。外部 MCP 场景的核心可观测点:
+          // status 非 connected(pending)= 工具对模型不可见(2026-08-01 实测),
+          // 上游要判"MCP 真就绪"只能靠这里 —— 不透传它,事件流里无从核验。
+          mcpServers: obj.mcp_servers,
         });
       } else if (t === "system" && TASK_SUBTYPES[obj.subtype as string]) {
         // 子 agent 生命周期(started/progress/updated/completed)。
@@ -353,7 +375,7 @@ export class ClaudeBackend implements Backend {
         }
       } else if (t === "result") {
         // 交互模式:本轮结束 → 关 stdin 让进程收尾退出。
-        if (interactive) interactiveSlot.channel?.end();
+        if (persistentStdin) interactiveSlot.channel?.end();
         if (obj.is_error) {
           // result 常为空(如 --resume 命中不存在的 session → "No conversation
           // found"),空时退而取 subtype,再退而取缓冲的 stderr,避免吞成无信息量
@@ -445,6 +467,32 @@ function taskData(obj: any): Record<string, unknown> {
 /** 导出纯参数构造，避免隔离边界只能靠集成运行肉眼验证。 */
 export function claudeEnvironmentSkillArgs(enabled = true): string[] {
   return enabled ? [] : ["--safe-mode", "--disable-slash-commands"];
+}
+
+/** 纯输入传输决策：delay 必须同时切 stream-json 与常开 stdin。 */
+export function claudeInputMode(
+  hasImages: boolean,
+  interactive: boolean,
+  delayFirstMessage: boolean,
+): { streamJsonInput: boolean; persistentStdin: boolean } {
+  return {
+    streamJsonInput: hasImages || interactive || delayFirstMessage,
+    persistentStdin: interactive || delayFirstMessage,
+  };
+}
+
+/** 导出纯参数构造，锁住 boolean 兼容与数组的 CLI argv 语义。 */
+export function claudeSettingSourceArgs(
+  sources: RunOptions["settingSources"],
+  strictMcp = true,
+): string[] {
+  if (sources === undefined || sources === true) return [];
+  if (sources === false || sources.length === 0) {
+    // false/[] 语义对齐。等号形式避免独立空 argv 被部分 runtime 丢弃，继而让
+    // 后续 --strict-mcp-config 被误吞成 setting-sources 的值。
+    return ["--setting-sources=", ...(strictMcp ? ["--strict-mcp-config"] : [])];
+  }
+  return ["--setting-sources", sources.join(",")];
 }
 
 function claudePermissionArgs(p: PermissionPolicy): string[] {
