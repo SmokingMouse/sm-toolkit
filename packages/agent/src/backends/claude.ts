@@ -590,7 +590,7 @@ export class ClaudeBackend implements Backend {
               const stdout =
                 typeof tur?.stdout === "string" && tur.stdout ? tur.stdout : null;
               const stderr = typeof tur?.stderr === "string" && tur.stderr ? tur.stderr : null;
-              const output = stdout ?? (typeof b.content === "string" ? b.content : null);
+              const output = stdout ?? extractResultText(b.content);
               yield ev(this.name, EventType.ToolCallDone, sid, {
                 id: b.tool_use_id,
                 output,
@@ -687,6 +687,29 @@ const TASK_SUBTYPES: Record<string, string> = {
  * 挂在 task_progress 上:phase 列表 + 每个 agent 的 label/phaseTitle/state/model/
  * tokens/durationMs/resultPreview。浅合并语义下整份替换即正确。
  */
+/**
+ * tool_result 的 content 有两副面孔:内置工具(Bash/Read)是 string;MCP 工具是
+ * content block 数组(`[{type:'text',text:'…'}]`)。只认 string 会把 MCP 工具的
+ * 全部输出静默丢成 null —— 2026-08-19 Fisher 真流量实录:审计时间线里每个进程内
+ * MCP 工具(safe_lookup)的结果都是空串,排查时只能猜工具到底回了什么。
+ */
+export function extractResultText(content: unknown): string | null {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((p) =>
+        typeof p === "string"
+          ? p
+          : typeof (p as { text?: unknown })?.text === "string"
+            ? String((p as { text: string }).text)
+            : null,
+      )
+      .filter((s): s is string => s !== null);
+    return parts.length ? parts.join("\n") : null;
+  }
+  return null;
+}
+
 function taskData(obj: any): Record<string, unknown> {
   const d: Record<string, unknown> = {
     taskType: obj.task_type,

@@ -14,6 +14,7 @@ import {
   claudeMaxTurnsArgs,
   claudeSettingSourceArgs,
   ClaudeSdkMcpTransport,
+  extractResultText,
   resolveClaudeModel,
 } from "./claude.js";
 import { scheduleInitialStdin } from "./stream-lines.js";
@@ -334,5 +335,32 @@ describe("ClaudeBackend silent process death", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("extractResultText (tool_result content 两副面孔)", () => {
+  test("string content 原样返回(内置工具形态)", () => {
+    expect(extractResultText("hello")).toBe("hello");
+    expect(extractResultText("")).toBe(""); // 空串是合法输出,不折算成 null
+  });
+
+  test("MCP content block 数组提取 text 并拼接", () => {
+    expect(
+      extractResultText([
+        { type: "text", text: "订单 123: 已付款" },
+        { type: "text", text: "第二段" },
+      ]),
+    ).toBe("订单 123: 已付款\n第二段");
+  });
+
+  test("数组里混入非 text block 时跳过,全部无 text 时 null", () => {
+    expect(extractResultText([{ type: "image", data: "…" }])).toBeNull();
+    expect(extractResultText([{ type: "image" }, { type: "text", text: "x" }])).toBe("x");
+  });
+
+  test("null/undefined/对象 → null", () => {
+    expect(extractResultText(null)).toBeNull();
+    expect(extractResultText(undefined)).toBeNull();
+    expect(extractResultText({ foo: 1 })).toBeNull();
   });
 });
