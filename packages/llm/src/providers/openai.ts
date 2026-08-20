@@ -25,6 +25,9 @@ function buildPayload(
     messages: messages.map((m) => ({ role: m.role, content: m.content })),
     stream,
   }
+  // 流式默认拿不到 usage（OpenAI 规范需显式开启），少了它 --json 与 bench
+  // 的 token 统计全是 0
+  if (stream) payload.stream_options = { include_usage: true }
   if (opts.temperature !== undefined) payload.temperature = opts.temperature
   if (opts.max_tokens !== undefined) payload.max_tokens = opts.max_tokens
   if (opts.json_mode) payload.response_format = { type: 'json_object' }

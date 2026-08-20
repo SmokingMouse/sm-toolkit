@@ -211,6 +211,7 @@ export function listEndpoints(config: ConfigFile): EndpointInfo[] {
 export function listProviders(config: ConfigFile): ProviderInfo[] {
   return Object.entries(config.providers).map(([name, prov]) => ({
     name,
+    api_key_env: prov.api_key_env,
     openai_url: prov.openai_url,
     anthropic_url: prov.anthropic_url,
     hasKey: !!process.env[prov.api_key_env],

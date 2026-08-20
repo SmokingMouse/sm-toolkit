@@ -1,5 +1,16 @@
 # Sessions（倒序，最近 5 条；更早的移入 archive.md）
 
+### 2026-08-20 — llm bench 全端点测速子命令
+- **触发**：需要一眼看清 endpoints.yaml 全部 endpoint 的联通性与吞吐（key 失效 / 网关哪条通道坏 / 谁快谁慢）。注：本轮改动最初误落在旧 clone `~/ai-coding/sm-toolkit-harbor`（落后 28 commit），已整体移植回本仓并把旧 clone 恢复原样。
+- **Done**：
+  - `@smokingmouse/llm` 新增 `bench.ts`：`benchEndpoint(ep, name, opts)` 单 endpoint 一次流式请求（走 provider.stream 无重试，测裸网络真相），返回 ttft / tps / output_tokens / deltas；`ProviderInfo` 补 `api_key_env`；openai provider 流式补 `stream_options.include_usage`——此前流式 usage 恒 0，`--stream --json` 与 bench 都拿不到 token 数。
+  - `apps/cli` 新增 `llm bench`：全 provider × 全模型（filter = provider 名 / 模型前缀 / 限定名前缀），provider 间并行、内部默认串行防限流（`--concurrency` 可调）；`--quick` 每 provider 首模型；`--protocol` 强制线协议（默认按 -p 解析：双协议走 openai，测 claude session 路径用 anthropic）；`--json` 全量结果（错误全文不截断，表格渲染才截）。表格按 yaml 顺序分组，无 key provider 折叠一行 skip。
+  - 度量语义：ttft = 首个可见 token（thinking 烧完 cap 无正文 → null，tps 回退总时长——deepseek v4 实测触发）；tps = output/(总时长−ttft)，无 usage 按 chars/4 估算带 `~`；均摊每 delta >100 tok 判整块缓冲送达，tps 标 `*` 且不进吞吐榜（cpa gpt-5.3-codex-spark 实测灌包 4500+ 假 tps）。prompt 用有界计数题——cpa gemini 通道实测忽略 max_tokens，有界题兜住成本上限。
+  - 附带修正：`apps/cli` 依赖 `@smokingmouse/llm` 从 `^0.3.0` 提到 `^0.4.0`——workspace llm 升 0.4.0 后旧 range 不再匹配，bun 静默从 registry 拉 0.3.0 顶替（见 facts）；全局 `llm` bin 用 `bun link` 从 registry 副本指回本仓。
+- **Verified**：全量 tsc ✓；旧 clone 中真实全量跑（39 测 / 24 skip）+ 移植后本仓复测 deepseek/cpa ✓：deepseek、gemini、cpa gemini+claude 通道 ✓ 带真实 tps；暴露真问题——ark-coding 全模型 400 InvalidSubscription（订阅失效）、kimi 402 membership、cpa gpt-5.6 503 auth_unavailable + gpt-5.2-pro 403 错组（vultr-tokyo codex 号池/分组配置坏）。`--json` 字段全 ✓。
+- **追记（同日，发版完成）**：`@smokingmouse/llm@0.5.0`（benchEndpoint 新 API + openai 流式 stream_options）+ `@smokingmouse/cli@0.4.0`（bench 子命令，dep ^0.5.0）已 publish，registry latest 确认；feat + release 两 commit 入 main。
+- **Next**：ark / kimi / cpa-codex 三处账号侧问题待用户处置。
+
 ### 2026-08-20 — Codex 图片 argv 边界与静默退出修复（0.8.4）
 
 - **触发**：Harbor 非 Personal Chat 的 Codex 图片 Run 实际失败；附件已成功写入 message/run，CLI 启动阶段报 `Reading prompt from stdin... No prompt provided via stdin.`。
@@ -31,10 +42,3 @@
 - **Verified**:单测 48/48;审批 e2e 3/3(`scripts/e2e-codex-approvals.ts`:allow 收 Bash+裸命令→42 落地、deny→item declined+模型答 SKIPPED、multi-agent Result 恰为最后事件+spawn/Task started/completed+summary 391);回归 e2e 11/11(流式/fork/三档 sandbox/abort/exec 强制)。tsc 全绿。
 - **Next**:发 0.7.0;trellis 侧三闸已放开(approvalAvailable / route 钳制 / interactive),bump 后真机点权限卡;turn/steer 经评估推迟(树模型无消费位,决策记 trellis decisions.md)。
 
-### 2026-08-18 — CodexBackend 接入 app-server transport:codex 逐 token 流(0.6.0 第二批)
-
-- **触发**:trellis 反馈 codex provider 无流式/工具卡/子 agent。调研(两 research agent 挖 openai/codex 0.147 源码 + 本机三组协议探针)推翻推迟前提:v1 会话 API 已整体移除、v2 唯一默认;TUI/exec 自身也是 app-server 客户端;exec --json 的 delta 是输出层**有意丢弃**(event_processor_with_jsonl_output.rs 兜底分支)且无 flag 可开;官方 Python SDK 即 app-server stdio 客户端。实测 app-server `thread/resume` 直接续 exec 录的 rollout(同一存储、id 互通),切换不孤儿化存量会话。
-- **Done**(新 `backends/codex-app-server.ts` + codex.ts 分派):per-run spawn `codex app-server`(stdio JSON-RPC v2)——initialize → thread/start|resume|fork → turn/start;通知映射:agentMessage/delta→TextChunk(退订时靠 completed 余量补发=block)、reasoning summary/textDelta→Thinking、item 生命周期→ToolCall/Done(含 collabAgentToolCall 多 agent / dynamicToolCall / imageGeneration)、fileChange→FileChange、tokenUsage→Cost(净 input/cacheWrite→cacheCreation/context 取 last);原生 thread/fork 替代 rollout copy;abort→turn/interrupt(2s grace 再 SIGTERM);审批类 server 请求自动拒答防挂死。**preflight 契约**:turn/start 响应前零事件产出,失败抛 AppServerPreflight 静默回退 exec(prompt 绝不跑两遍);`codexTransportPlan` 纯函数预分流不支持组合(environmentSkills=false / extraArgs / ephemeral resume)走 exec;`CodexBackendOptions.transport:"exec"` 逃生舱;capabilities streaming 如实报 "token"/"block"。
-- **Verified**:单测 40/40(新 17:transport 决策矩阵 / 逐档 sandbox 映射对齐 buildCodexArgs / item 映射 / cost 映射);真机 e2e 10 项全过(`scripts/e2e-codex-appserver.ts`):流式 100 chunks vs 强制 exec 1 chunk、resume 同 id 记忆在、fork 新 id 且父线不见子线暗号、readonly OS sandbox 拒写、workspace-write 圈内可写、full 圈外可写、abort 5.5s 收尾无 Result、usage 合理。tsc 全绿。改动留工作区**未 commit**(与 08-17 批同归 0.6.0)。
-- **注意**:approvalPolicy 恒 "never"(非交互 parity);onCanUseTool 仍未接(独立 phase,需上游 dispatcher);experimental 标签仍在,锁 schema + exec fallback 对冲协议漂移。
-- **Next**:用户 review 后两批同发 0.6.0;trellis `bun update @smokingmouse/agent` 即自动获得 codex 流式(零代码改动);后续独立 phase:审批回调(dynamicPermissionCallback)、turn/steer、subAgentActivity→Task 映射。

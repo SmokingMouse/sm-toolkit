@@ -52,6 +52,7 @@ export interface EndpointConfig {
 
 export interface ProviderInfo {
   name: string
+  api_key_env: string
   openai_url?: string
   anthropic_url?: string
   hasKey: boolean

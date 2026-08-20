@@ -6,6 +6,8 @@
 - **codex `-c model_provider` per-run 注入真实生效（非静默 fallback 全局 config.toml）**：注入 `env_key="NONEXISTENT_KEY_XYZ"` 报 `Missing environment variable`；正常 key 走通、坏 key 401 且报错 url = 注入的 base_url。来源：2026-08-04 实测，详见 sessions.md 当日条目。
 - **`codex exec resume` 不接受 `--sandbox`/`--add-dir` 但接受 `-c` overrides**（codex 0.144.2 实测）——endpoint 注入参数放 common 对 resume 路径同样可用。来源：`packages/agent/src/backends/codex.ts` buildCodexArgs 注释。
 - **codex headless fork 可由 rollout copy 模拟**:复制 `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` 并全文替换 uuid,resume 新 id 即继承完整历史、与父线双向隔离的新 thread(交互版 `codex fork` 的等价物,exec 无该子命令);前缀相同还命中 provider prompt cache。约束:resume 需带录制时的 -m;rollout 格式为内部实现,codex 升级需回归。来源:2026-08-04 codex 0.146.0 三步实测(继承/隔离/负向),见 sessions.md 当日条目。
+- **OpenAI 兼容端点流式默认不回 usage**：请求体需带 `stream_options: {include_usage: true}` 才在末 chunk 给 usage。来源：2026-08-20 实测 deepseek / gemini openai-compat / cpa 三端点加该字段后 usage 正常返回、无一拒收；openai provider 已默认带（`packages/llm/src/providers/openai.ts` buildPayload）。
+- **bun workspace 内依赖 range 不匹配 workspace 版本时会静默从 registry 拉旧版顶替**：workspace llm 升 0.4.0 后 apps/cli 仍声明 `^0.3.0`，bun 装了 registry 0.3.0（isolated 布局 `node_modules/.bun/@smokingmouse+llm@0.3.0`），新导出全部 missing 而无任何警告。来源：2026-08-20 本仓实测（tsc TS2305 + 运行时 SyntaxError 定位到 .bun 路径），修复 = range 提到 `^0.4.0` 后重装即回 workspace symlink。发版忘 bump 消费方 range 就会复发。
 
 ## 迁移自 README「Verified Facts」区
 

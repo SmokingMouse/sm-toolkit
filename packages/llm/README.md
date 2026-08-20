@@ -19,4 +19,14 @@ const client = new LLMClient()
 const reply = await client.chat(undefined, [{ role: 'user', content: 'hi' }])
 ```
 
+## 测速
+
+```ts
+import { benchEndpoint } from '@smokingmouse/llm'
+// 对单 endpoint 发一次流式小请求（无重试），返回 ttft / tps / token 数等度量
+const m = await benchEndpoint(ep, 'provider:model', { max_tokens: 256 })
+```
+
+CLI 封装见 `llm bench`（全端点联通 + 吞吐测速）。
+
 源码与文档：[SmokingMouse/sm-toolkit](https://github.com/SmokingMouse/sm-toolkit)

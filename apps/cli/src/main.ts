@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 import { readFileSync, readSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
-import { LLMClient } from '@smokingmouse/llm'
-import type { Message } from '@smokingmouse/llm'
+import { LLMClient, benchEndpoint } from '@smokingmouse/llm'
+import type { Message, BenchMeasurement, EndpointConfig } from '@smokingmouse/llm'
 
 const client = new LLMClient()
 
@@ -225,6 +225,9 @@ function printHelp() {
             [--negative "..."] [--ref FILE] [--target-size N] [--output DIR]
       生图。imagen 默认（快/可控），codex = GPT-Image-1 via codex exec
       （支持 --ref 参考图）。stdout 每行一个图片绝对路径
+  llm bench [filter...] [--quick] [--tokens N] [--timeout S] [--json]
+      全端点测速：联通 / 首响延迟(ttft) / 解码吞吐(tps)。
+      filter = provider 名或模型名前缀。详见 llm bench --help
 
 Providers:`)
   for (const p of providers) {
@@ -468,12 +471,295 @@ async function cmdImage(argv: string[]): Promise<void> {
   for (const p of paths) console.log(p)
 }
 
+// ── subcommand: bench ───────────────────────────────────
+
+interface BenchRow {
+  provider: string
+  model: string
+  qualified: string
+  ep?: EndpointConfig
+  status: 'pending' | 'ok' | 'error' | 'skip'
+  reason?: string
+  m?: BenchMeasurement
+}
+
+// 完整错误信息留在 row.reason（--json 要全文），表格/进度行渲染时才截断
+function benchErrMsg(e: any, timeoutS: number): string {
+  if (e?.name === 'TimeoutError' || e?.name === 'AbortError')
+    return `超时 >${timeoutS}s`
+  const code = e?.cause?.code ?? e?.code
+  let msg = String(e?.message ?? e).replace(/\s+/g, ' ')
+  if (code && !msg.includes(String(code))) msg = `${code}: ${msg}`
+  return msg
+}
+
+function fmtTtft(r: BenchRow): string {
+  const ms = r.m?.ttft_ms
+  return ms == null ? '-' : `${(ms / 1000).toFixed(2)}s`
+}
+
+// 均摊每个 delta >100 token = 整块缓冲送达，tps 是灌包速度不是解码速度
+function isBurst(r: BenchRow): boolean {
+  const m = r.m
+  return !!m && m.deltas > 0 && m.output_tokens / m.deltas > 100
+}
+
+function fmtTps(r: BenchRow): string {
+  const tps = r.m?.tps
+  if (tps == null) return '-'
+  return `${r.m!.tokens_estimated ? '~' : ''}${tps.toFixed(1)}${isBurst(r) ? '*' : ''}`
+}
+
+async function cmdBench(argv: string[]): Promise<void> {
+  let tokens = 256
+  let timeoutS = 60
+  let quick = false
+  let json = false
+  let concurrency = 1
+  let protocol: 'openai' | 'anthropic' | undefined
+  const filters: string[] = []
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!
+    if (a === '--tokens') tokens = parseInt(argv[++i]!, 10)
+    else if (a === '--timeout') timeoutS = parseInt(argv[++i]!, 10)
+    else if (a === '--quick') quick = true
+    else if (a === '--json') json = true
+    else if (a === '--concurrency')
+      concurrency = Math.max(1, parseInt(argv[++i]!, 10))
+    else if (a === '--protocol') {
+      const p = argv[++i]
+      if (p !== 'openai' && p !== 'anthropic') {
+        console.error(`--protocol 只接受 openai / anthropic，收到 "${p}"`)
+        process.exit(1)
+      }
+      protocol = p
+    } else if (a === '-h' || a === '--help') {
+      console.log(`llm bench — endpoints.yaml 全端点测速（联通 + ttft + tps）
+
+用法:
+  llm bench                     全部 provider × 全部模型
+  llm bench cpa kimi            只测这些 provider（也可给模型名/限定名前缀）
+  llm bench --quick             每个 provider 只测第一个模型
+
+选项:
+  --tokens N        每次生成的 max_tokens（默认 256）
+  --timeout S       单请求超时秒数（默认 60）
+  --concurrency N   provider 内并发请求数（默认 1，防误触发限流；provider 间天然并行）
+  --protocol P      强制线协议 openai|anthropic（默认按 llm -p 的解析规则：
+                    双协议 provider 走 openai；claude session 实际走 anthropic，
+                    要测那条路加 --protocol anthropic）
+  --json            输出 JSON 结果（进度仍打 stderr）
+
+指标: ttft = 首个可见 token 延迟；tps = output_tokens / (总时长 - ttft)，
+端点没报 usage 时按字符数/4 估算（显示带 ~ 前缀）。单次请求无重试，测的是裸网络真相。`)
+      return
+    } else if (!a.startsWith('-')) filters.push(a)
+  }
+
+  // build rows（保持 yaml 声明顺序）
+  const providers = client.listProviders()
+  const rows: BenchRow[] = []
+  for (const prov of providers) {
+    let models = prov.models
+    if (filters.length > 0 && !filters.includes(prov.name)) {
+      models = models.filter((m) =>
+        filters.some((f) => m.startsWith(f) || `${prov.name}:${m}`.startsWith(f)),
+      )
+      if (models.length === 0) continue
+    }
+    if (quick) models = models.slice(0, 1)
+
+    for (const model of models) {
+      const row: BenchRow = {
+        provider: prov.name,
+        model,
+        qualified: `${prov.name}:${model}`,
+        status: 'pending',
+      }
+      if (!prov.hasKey) {
+        row.status = 'skip'
+        row.reason = `no key (${prov.api_key_env})`
+      } else {
+        try {
+          row.ep = client.getEndpointConfig(row.qualified, protocol).endpoint
+        } catch (e: any) {
+          row.status = 'skip'
+          row.reason = String(e?.message ?? e).slice(0, 96)
+        }
+      }
+      rows.push(row)
+    }
+  }
+
+  if (rows.length === 0) {
+    console.error(
+      filters.length > 0
+        ? `没有 endpoint 命中过滤条件: ${filters.join(' ')}`
+        : '没有可测的 endpoint',
+    )
+    process.exit(1)
+  }
+
+  // run：provider 间并行，provider 内按 --concurrency 排队（默认串行防限流）
+  const pending = rows.filter((r) => r.status === 'pending')
+  const width = String(pending.length).length
+  let done = 0
+
+  const runRow = async (row: BenchRow) => {
+    try {
+      row.m = await benchEndpoint(row.ep!, row.qualified, {
+        max_tokens: tokens,
+        timeout_ms: timeoutS * 1000,
+      })
+      row.status = 'ok'
+    } catch (e: any) {
+      row.status = 'error'
+      row.reason = benchErrMsg(e, timeoutS)
+    }
+    done++
+    const tag =
+      row.status === 'ok' ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`
+    const detail =
+      row.status === 'ok'
+        ? `ttft ${fmtTtft(row)}  tps ${fmtTps(row)}`
+        : (row.reason ?? '').slice(0, 96)
+    console.error(
+      `  [${String(done).padStart(width)}/${pending.length}] ${tag} ${row.qualified}  ${c.dim}${detail}${c.reset}`,
+    )
+  }
+
+  const byProvider = new Map<string, BenchRow[]>()
+  for (const r of pending) {
+    const g = byProvider.get(r.provider) ?? []
+    g.push(r)
+    byProvider.set(r.provider, g)
+  }
+  if (pending.length > 0) {
+    console.error(
+      `→ bench ${pending.length} 个 endpoint（${byProvider.size} 个 provider 并行 × 内部并发 ${concurrency}），tokens=${tokens} timeout=${timeoutS}s`,
+    )
+  }
+  await Promise.all(
+    [...byProvider.values()].map(async (group) => {
+      const queue = [...group]
+      const workers = Array.from(
+        { length: Math.min(concurrency, queue.length) },
+        async () => {
+          while (queue.length > 0) await runRow(queue.shift()!)
+        },
+      )
+      await Promise.all(workers)
+    }),
+  )
+
+  if (json) {
+    console.log(
+      JSON.stringify(
+        rows.map((r) => ({
+          provider: r.provider,
+          model: r.model,
+          endpoint: r.qualified,
+          base_url: r.ep?.base_url ?? null,
+          protocol: r.ep?.protocol ?? null,
+          status: r.status,
+          reason: r.reason ?? null,
+          ttft_ms: r.m?.ttft_ms ?? null,
+          total_ms: r.m?.total_ms ?? null,
+          output_tokens: r.m?.output_tokens ?? null,
+          tokens_estimated: r.m?.tokens_estimated ?? null,
+          tps: r.m?.tps ?? null,
+          deltas: r.m?.deltas ?? null,
+        })),
+        null,
+        2,
+      ),
+    )
+    return
+  }
+
+  // final table
+  const okN = rows.filter((r) => r.status === 'ok').length
+  const errN = rows.filter((r) => r.status === 'error').length
+  const skipN = rows.filter((r) => r.status === 'skip').length
+  const w = Math.min(36, Math.max(24, ...rows.map((r) => r.model.length)))
+
+  console.log('')
+  console.log(
+    `${c.bold}llm bench${c.reset} ${c.dim}— ${c.reset}${c.green}${okN} ✓${c.reset} · ${c.red}${errN} ✗${c.reset} · ${c.dim}${skipN} skip · tokens=${tokens} timeout=${timeoutS}s${protocol ? ` protocol=${protocol}` : ''}${c.reset}`,
+  )
+  for (const prov of providers) {
+    const group = rows.filter((r) => r.provider === prov.name)
+    if (group.length === 0) continue
+
+    // skip 行没有 resolved ep，回退到 provider 声明的 URL（与默认解析同序：openai 优先）
+    const urls = [
+      ...new Set(
+        group.map(
+          (r) =>
+            r.ep?.base_url ?? prov.openai_url ?? prov.anthropic_url ?? '官方 API',
+        ),
+      ),
+    ]
+    console.log('')
+    console.log(`${c.bold}${prov.name}${c.reset}  ${c.dim}${urls.join(' / ')}${c.reset}`)
+
+    if (
+      group.length > 1 &&
+      group.every((r) => r.status === 'skip' && r.reason === group[0]!.reason)
+    ) {
+      console.log(`  ${c.dim}– 跳过 ×${group.length}: ${group[0]!.reason}${c.reset}`)
+      continue
+    }
+    for (const r of group) {
+      if (r.status === 'ok') {
+        console.log(
+          `  ${c.green}✓${c.reset} ${r.model.padEnd(w)} ttft ${fmtTtft(r).padStart(6)}  tps ${fmtTps(r).padStart(7)}  ${String(r.m!.output_tokens).padStart(4)} tok  ${(r.m!.total_ms / 1000).toFixed(1).padStart(5)}s`,
+        )
+      } else if (r.status === 'error') {
+        console.log(
+          `  ${c.red}✗${c.reset} ${r.model.padEnd(w)} ${c.red}${(r.reason ?? '').slice(0, 96)}${c.reset}`,
+        )
+      } else {
+        console.log(
+          `  ${c.dim}– ${r.model.padEnd(w)} skip: ${r.reason}${c.reset}`,
+        )
+      }
+    }
+  }
+
+  const oks = rows.filter((r) => r.status === 'ok' && r.m)
+  if (oks.length > 0) {
+    const fastest = oks
+      .filter((r) => r.m!.ttft_ms != null)
+      .sort((a, b) => a.m!.ttft_ms! - b.m!.ttft_ms!)[0]
+    // 缓冲送达的 tps 是灌包速度，不参与吞吐榜
+    const streamed = oks.filter((r) => r.m!.tps != null && !isBurst(r))
+    const top = streamed.sort((a, b) => b.m!.tps! - a.m!.tps!)[0]
+    console.log('')
+    if (fastest)
+      console.log(
+        `  最快首响 ${c.cyan}${fastest.qualified}${c.reset} ${fmtTtft(fastest)}`,
+      )
+    if (top)
+      console.log(
+        `  最高吞吐 ${c.cyan}${top.qualified}${c.reset} ${fmtTps(top)} tok/s`,
+      )
+    if (oks.some(isBurst))
+      console.log(
+        `  ${c.dim}* = 响应整块缓冲送达（非逐 token 流），tps 为灌包速度，不计入吞吐榜${c.reset}`,
+      )
+    console.log('')
+  }
+}
+
 // ── main ────────────────────────────────────────────────
 
 async function main() {
   const rawArgv = process.argv.slice(2)
   if (rawArgv[0] === 'vision') return cmdVision(rawArgv.slice(1))
   if (rawArgv[0] === 'image') return cmdImage(rawArgv.slice(1))
+  if (rawArgv[0] === 'bench') return cmdBench(rawArgv.slice(1))
 
   const args = parseArgs(rawArgv)
 
