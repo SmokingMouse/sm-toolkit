@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-发布 agent 0.8.3 修正 Codex 图片 argv 边界，并让 Harbor 升级依赖、删除精确版本 patch、验证真实图片 Run。
+发布 agent 0.8.4 修正 Codex 图片 argv 边界与静默非零退出，并让 Harbor 升级依赖、删除精确版本 patch、验证真实图片 Run。
 
 ## Goals
 

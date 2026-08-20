@@ -282,12 +282,15 @@ export class CodexBackend implements Backend {
     // stderr 兜底(对齐 ClaudeBackend):CLI 报错而事件流无信息量时拼 stderr 尾部,
     // 避免只剩 generic "codex error"。
     const stderrSink = { text: "" };
+    const exitSink: { code?: number | null; spawnError?: string } = {};
+    let sawTerminal = false;
 
     for await (const raw of streamLines("codex", args, {
       cwd: opts.cwd ?? opts.workspace ?? undefined,
       env: spawnEnv,
       signal: opts.signal,
       stderrSink,
+      exitSink,
     })) {
       let obj: any;
       try {
@@ -350,6 +353,7 @@ export class CodexBackend implements Backend {
       } else if (t === "item.completed" && obj.item?.type === "file_change") {
         yield ev(this.name, EventType.FileChange, sid, { changes: obj.item.changes });
       } else if (t === "turn.completed") {
+        sawTerminal = true;
         const u = obj.usage ?? {};
         const totalIn = u.input_tokens ?? 0,
           cached = u.cached_input_tokens ?? 0;
@@ -367,6 +371,7 @@ export class CodexBackend implements Backend {
         yield ev(this.name, EventType.Result, sid, { text: finalText.join(""), cost });
         return;
       } else if (t === "turn.failed") {
+        sawTerminal = true;
         const stderrTail = stderrSink.text.trim();
         const message =
           obj.error?.message || (stderrTail ? stderrTail.slice(-500) : null) || "codex turn failed";
@@ -376,6 +381,7 @@ export class CodexBackend implements Backend {
         // "Reconnecting..." 是瞬态重连,吞掉(解决 normalizer 噪音);其余才报。
         const msg = (obj.message as string) ?? "";
         if (!msg.toLowerCase().startsWith("reconnecting")) {
+          sawTerminal = true;
           const stderrTail = stderrSink.text.trim();
           yield ev(this.name, EventType.Error, sid, {
             message: msg || (stderrTail ? stderrTail.slice(-500) : "codex error"),
@@ -383,6 +389,15 @@ export class CodexBackend implements Backend {
           return;
         }
       }
+    }
+    if (!sawTerminal && !opts.signal?.aborted) {
+      const stderrTail = stderrSink.text.trim();
+      const cause = exitSink.spawnError
+        ? `spawn failed: ${exitSink.spawnError}`
+        : `exited with code ${exitSink.code ?? "unknown"} before emitting any terminal event`;
+      yield ev(this.name, EventType.Error, sid, {
+        message: `codex CLI ${cause}${stderrTail ? ` — stderr: ${stderrTail.slice(-500)}` : ""}`,
+      });
     }
   }
 }

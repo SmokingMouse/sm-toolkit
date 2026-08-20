@@ -1,11 +1,11 @@
 # Sessions（倒序，最近 5 条；更早的移入 archive.md）
 
-### 2026-08-20 — Codex 图片 argv 边界修复（0.8.3）
+### 2026-08-20 — Codex 图片 argv 边界与静默退出修复（0.8.4）
 
 - **触发**：Harbor 非 Personal Chat 的 Codex 图片 Run 实际失败；附件已成功写入 message/run，CLI 启动阶段报 `Reading prompt from stdin... No prompt provided via stdin.`。
-- **根因/改动**：Codex 0.147.0 的 `--image <FILE>...` 是可变长参数，`buildCodexArgs` 原先把 prompt 紧跟其后，prompt 被吞成图片路径。initial/resume 统一改为 `...imageArgs, "--", prompt`；无图也保留分隔符，保护以 `-` 开头的 prompt。版本升 0.8.3。
-- **Verified**：真实 CLI 正反探针复现/证伪；initial 多图、resume 单图、无图 dash prompt 三条精确 argv 回归；agent 单测 69/69、package build、`git diff --check` 全绿。
-- **Next**：提交并发布 0.8.3；Harbor 升级 0.5.1→0.8.3、删除旧 stderr patch，按 pinned Bun 与真实图片 Run 验收。
+- **根因/改动**：Codex 0.147.0 的 `--image <FILE>...` 是可变长参数，`buildCodexArgs` 原先把 prompt 紧跟其后，prompt 被吞成图片路径。initial/resume 统一改为 `...imageArgs, "--", prompt`；无图也保留分隔符，保护以 `-` 开头的 prompt。Harbor 退役旧 patch 的集成回归又证实 Codex 漏消费 0.8.1 已有的 `exitSink`，现补 `sawTerminal` 终局检查，把 stderr-only 非零退出转为唯一 Error。版本升 0.8.4。
+- **Verified**：真实 CLI 正反探针复现/证伪；initial 多图、resume 单图、无图 dash prompt 三条精确 argv 回归；假 Codex exit 23 进程级回归；agent 单测 70/70、package build、`git diff --check` 全绿。
+- **Next**：提交并发布 0.8.4；Harbor 升级 0.5.1→0.8.4、删除旧 stderr patch，按 pinned Bun 与真实图片 Run 验收。
 
 ### 2026-08-19 — 静默死亡显式化：零终局行退出必吐 Error(0.8.1)
 

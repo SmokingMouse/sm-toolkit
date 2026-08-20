@@ -3,7 +3,37 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { PermissionPolicy } from "../backend.js";
-import { buildCodexArgs, codexEnvironmentSkillArgs, forkCodexSession } from "./codex.js";
+import { CodexBackend, buildCodexArgs, codexEnvironmentSkillArgs, forkCodexSession } from "./codex.js";
+
+describe("CodexBackend silent process death", () => {
+  test("零输出非零退出 → 恰好一个 Error，带 exit code 与 stderr", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sm-agent-fake-codex-"));
+    const previousPath = process.env.PATH;
+    fs.writeFileSync(
+      path.join(dir, "codex"),
+      "#!/bin/sh\nif [ \"$1\" = login ]; then exit 0; fi\necho 'fatal image sandbox denial' >&2\nexit 23\n",
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${dir}:${previousPath ?? ""}`;
+    try {
+      const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+      for await (const event of new CodexBackend({ transport: "exec" }).run("inspect image", {
+        env: { PATH: process.env.PATH },
+      })) {
+        events.push(event as never);
+      }
+      expect(events).toHaveLength(1);
+      expect(events[0]!.type).toBe("error");
+      const message = String(events[0]!.data.message);
+      expect(message).toContain("exited with code 23");
+      expect(message).toContain("fatal image sandbox denial");
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("forkCodexSession", () => {
   const PARENT = "019fcca2-16f1-70c0-903e-5ab3345aeb41";
