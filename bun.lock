@@ -15,17 +15,17 @@
     },
     "apps/cli": {
       "name": "@smokingmouse/cli",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "bin": {
         "llm": "src/main.ts",
       },
       "dependencies": {
-        "@smokingmouse/llm": "^0.3.0",
+        "@smokingmouse/llm": "^0.4.0",
       },
     },
     "packages/agent": {
       "name": "@smokingmouse/agent",
-      "version": "0.6.0",
+      "version": "0.8.4",
       "dependencies": {
         "@smokingmouse/llm": "^0.4.0",
       },
@@ -37,7 +37,7 @@
     },
     "packages/llm": {
       "name": "@smokingmouse/llm",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "dependencies": {
         "yaml": "^2.7.1",
       },
@@ -246,7 +246,7 @@
 
     "zod-to-json-schema": ["zod-to-json-schema@3.25.2", "https://registry.npmmirror.com/zod-to-json-schema/-/zod-to-json-schema-3.25.2.tgz", { "peerDependencies": { "zod": "^3.25.28 || ^4" } }, "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA=="],
 
-    "@smokingmouse/cli/@smokingmouse/llm": ["@smokingmouse/llm@0.3.0", "", { "dependencies": { "yaml": "^2.7.1" } }, "sha512-IAQfK3emDx4fYpdmviav1T75dvgxoVI8zuYpJCXQImJe2d5RdSQYmC8O+AvIOFr227vWbJ08gM5wBUPXLqzodQ=="],
+    "@smokingmouse/agent/@smokingmouse/llm": ["@smokingmouse/llm@0.4.0", "", { "dependencies": { "yaml": "^2.7.1" } }, "sha512-AeZIGhp0fsq5lZtYuoLkWUPoI6RknDtZrqES3+rF5FhUWQ3p2QEh9VSC3nSCPlOfKEsWA15eJgBOjVvVsKE99w=="],
 
     "body-parser/content-type": ["content-type@2.1.0", "https://registry.npmmirror.com/content-type/-/content-type-2.1.0.tgz", {}, "sha512-mj7UPXE0jaqaOsukNZRUEfEi2AcL7C/vwmwcHV0O97eO1E1pxBZuyjlZrx5seTaNBg1U6+o35wpa35Qfcc+7ag=="],
 

@@ -1,8 +1,8 @@
 {
   "name": "@smokingmouse/cli",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
-  "description": "llm —— 统一 LLM 命令行：交互选模型启动 Claude Code session，或直连 API 问答。读 endpoints.yaml（$SM_ENDPOINTS_PATH / ~/.config/sm/endpoints.yaml）。",
+  "description": "llm —— 统一 LLM 命令行：交互选模型启动 Claude Code session，或直连 API 问答，bench 全端点测速。读 endpoints.yaml（$SM_ENDPOINTS_PATH / ~/.config/sm/endpoints.yaml）。",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -22,6 +22,6 @@
     "build": "tsc --build"
   },
   "dependencies": {
-    "@smokingmouse/llm": "^0.3.0"
+    "@smokingmouse/llm": "^0.5.0"
   }
 }
