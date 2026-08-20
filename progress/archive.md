@@ -1,5 +1,14 @@
 # Archive（轮转出的旧 session log + 已完成 goals）
 
+### 2026-08-17 — 外部 MCP 契约三件套：settingSources 数组 + delayFirstMessageMs + resolveClaudeModel 导出（Codex 执行 + Claude review）
+
+- **触发**：Fisher（闲鱼底座）迁移评估点出三个契约缺口。任务书 `/tmp/sm-agent-contract-task.md` 派 Codex 执行，Claude review + 解 E2E blocker。
+- **Done**：① `resolveClaudeModel` 包根导出 + 三档单测（Fisher agent-loop 手拼的同构逻辑将换成引用，那份缺 provider 级 claude.env 合并）② `settingSources: boolean | Array<'user'|'project'|'local'>`——boolean 行为逐字节保持，`[]` 与 false 对齐走 `--setting-sources=`；08-01 外部 MCP pending 与 07-15 全局 allowlist 两条实测知识进类型注释 ③ `delayFirstMessageMs`：独立于 onCanUseTool 也开常开 stream-json stdin；与 onCanUseTool 组合时 control initialize 立即发、只延 user prompt；`claudeInputMode` / `claudeSettingSourceArgs` 抽纯函数锁行为；codex 惰性忽略 ④ SessionStart 补透传 `mcp_servers`（review 时补：不透传则上游在事件流里永远无法核验「MCP 真就绪」）。
+- **🔴 waitForMcpServers 被前置探测证伪，不实现**：stream-json stdin 常开、不写首条消息，5 秒 stdout 只有 hook 行、**零 system/init**——CLI 要收到首条 user message 才吐 init，「等 init 再发首条」= 死锁。该模式下固定延时是唯一可行形态。
+- **E2E 波折**：Codex 手写 JSON-RPC server 的握手不被 CLI MCP client 接受（5 次 initialize 重试，永不到 tools/list）→ 判据如实记 0/3 blocked；换官方 `@modelcontextprotocol/sdk` StreamableHTTP（stateless 模式）后 **3/3**（init `probe: connected` + 真 ping tool_use + canary 原文；`delayFirstMessageMs: 300` + `settingSources: ['user']` + 显式 --mcp-config）。复跑脚本 `/tmp/mcp-e2e/rerun-e2e.ts`，证据 `rerun-output.json`。
+- **Verified**：`tsc --build` 全绿；`bun test` 23/23（基线 16）；runner.ts 冻结未动；真 CLI 调用 Codex 5 次 + 复跑 6 次。改动留工作区**未 commit**。
+- **Next**：用户 review 后发 0.6.0（minor）；SdkBackend（进程内 claude-agent-sdk 封装，Fisher 换底座前置）待依赖决策（倾向 optional peerDependency）。
+
 ## 已完成 Goals（迁移自 README）
 
 ### 2026-07-17 — kimi k3 接入 + provider 级 claude env 覆盖层

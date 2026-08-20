@@ -1,5 +1,12 @@
 # Sessions（倒序，最近 5 条；更早的移入 archive.md）
 
+### 2026-08-20 — Codex 图片 argv 边界修复（0.8.3）
+
+- **触发**：Harbor 非 Personal Chat 的 Codex 图片 Run 实际失败；附件已成功写入 message/run，CLI 启动阶段报 `Reading prompt from stdin... No prompt provided via stdin.`。
+- **根因/改动**：Codex 0.147.0 的 `--image <FILE>...` 是可变长参数，`buildCodexArgs` 原先把 prompt 紧跟其后，prompt 被吞成图片路径。initial/resume 统一改为 `...imageArgs, "--", prompt`；无图也保留分隔符，保护以 `-` 开头的 prompt。版本升 0.8.3。
+- **Verified**：真实 CLI 正反探针复现/证伪；initial 多图、resume 单图、无图 dash prompt 三条精确 argv 回归；agent 单测 69/69、package build、`git diff --check` 全绿。
+- **Next**：提交并发布 0.8.3；Harbor 升级 0.5.1→0.8.3、删除旧 stderr patch，按 pinned Bun 与真实图片 Run 验收。
+
 ### 2026-08-19 — 静默死亡显式化：零终局行退出必吐 Error(0.8.1)
 
 - **触发**:Fisher 生产实录(2026-08-18 晚)——launchd PATH 只有 claude shim 没有真身,shim exit 127 + 零 stdout,ClaudeBackend 零事件"干净"走完,上游把启动失败折算成空回复,买家侧已读不回,全链路无一处报错。
@@ -31,12 +38,3 @@
 - **Verified**:单测 40/40(新 17:transport 决策矩阵 / 逐档 sandbox 映射对齐 buildCodexArgs / item 映射 / cost 映射);真机 e2e 10 项全过(`scripts/e2e-codex-appserver.ts`):流式 100 chunks vs 强制 exec 1 chunk、resume 同 id 记忆在、fork 新 id 且父线不见子线暗号、readonly OS sandbox 拒写、workspace-write 圈内可写、full 圈外可写、abort 5.5s 收尾无 Result、usage 合理。tsc 全绿。改动留工作区**未 commit**(与 08-17 批同归 0.6.0)。
 - **注意**:approvalPolicy 恒 "never"(非交互 parity);onCanUseTool 仍未接(独立 phase,需上游 dispatcher);experimental 标签仍在,锁 schema + exec fallback 对冲协议漂移。
 - **Next**:用户 review 后两批同发 0.6.0;trellis `bun update @smokingmouse/agent` 即自动获得 codex 流式(零代码改动);后续独立 phase:审批回调(dynamicPermissionCallback)、turn/steer、subAgentActivity→Task 映射。
-
-### 2026-08-17 — 外部 MCP 契约三件套：settingSources 数组 + delayFirstMessageMs + resolveClaudeModel 导出（Codex 执行 + Claude review）
-
-- **触发**：Fisher（闲鱼底座）迁移评估点出三个契约缺口。任务书 `/tmp/sm-agent-contract-task.md` 派 Codex 执行，Claude review + 解 E2E blocker。
-- **Done**：① `resolveClaudeModel` 包根导出 + 三档单测（Fisher agent-loop 手拼的同构逻辑将换成引用，那份缺 provider 级 claude.env 合并）② `settingSources: boolean | Array<'user'|'project'|'local'>`——boolean 行为逐字节保持，`[]` 与 false 对齐走 `--setting-sources=`；08-01 外部 MCP pending 与 07-15 全局 allowlist 两条实测知识进类型注释 ③ `delayFirstMessageMs`：独立于 onCanUseTool 也开常开 stream-json stdin；与 onCanUseTool 组合时 control initialize 立即发、只延 user prompt；`claudeInputMode` / `claudeSettingSourceArgs` 抽纯函数锁行为；codex 惰性忽略 ④ SessionStart 补透传 `mcp_servers`（review 时补：不透传则上游在事件流里永远无法核验「MCP 真就绪」）。
-- **🔴 waitForMcpServers 被前置探测证伪，不实现**：stream-json stdin 常开、不写首条消息，5 秒 stdout 只有 hook 行、**零 system/init**——CLI 要收到首条 user message 才吐 init，「等 init 再发首条」= 死锁。该模式下固定延时是唯一可行形态。
-- **E2E 波折**：Codex 手写 JSON-RPC server 的握手不被 CLI MCP client 接受（5 次 initialize 重试，永不到 tools/list）→ 判据如实记 0/3 blocked；换官方 `@modelcontextprotocol/sdk` StreamableHTTP（stateless 模式）后 **3/3**（init `probe: connected` + 真 ping tool_use + canary 原文；`delayFirstMessageMs: 300` + `settingSources: ['user']` + 显式 --mcp-config）。复跑脚本 `/tmp/mcp-e2e/rerun-e2e.ts`，证据 `rerun-output.json`。
-- **Verified**：`tsc --build` 全绿；`bun test` 23/23（基线 16）；runner.ts 冻结未动；真 CLI 调用 Codex 5 次 + 复跑 6 次。改动留工作区**未 commit**。
-- **Next**：用户 review 后发 0.6.0（minor）；SdkBackend（进程内 claude-agent-sdk 封装，Fisher 换底座前置）待依赖决策（倾向 optional peerDependency）。

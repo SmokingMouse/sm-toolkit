@@ -1,5 +1,6 @@
 # Facts（已验证事实，每条必带来源指针）
 
+- **Codex CLI 0.147.0 的 `--image <FILE>...` 会继续吞掉后面的 prompt，调用方必须用 `--` 显式结束可变长参数**：`codex exec --image /tmp/a.png HARBOR_PARSER_PROBE </dev/null` 直接报 `Reading prompt from stdin... No prompt provided via stdin.`；改为 `--image /tmp/a.png -- HARBOR_PARSER_PROBE` 后进入正常 thread/model 初始化，resume 形态也进入 thread id 校验而非 stdin 报错。实现与 initial/resume 精确 argv 回归见 `packages/agent/src/backends/codex.ts` / `codex.test.ts`。
 - **codex CLI ≥0.146.0 废弃 `wire_api = "chat"`，只认 `responses`**：config 含 chat 直接启动报错 `Error loading config.toml: wire_api = "chat" is no longer supported`，官方指向 openai/codex discussions#7782。推论：endpoints.yaml 里 chat-only 的 openai_url（deepseek / gemini / ark-coding）从协议上给不了 codex，故 `codex:` 块设计为显式 opt-in。来源：2026-08-04 本机 `codex exec -c 'model_providers.sm_ep.wire_api="chat"' …` 实测（codex-cli 0.146.0）。
 - **codex `-c model_provider` per-run 注入真实生效（非静默 fallback 全局 config.toml）**：注入 `env_key="NONEXISTENT_KEY_XYZ"` 报 `Missing environment variable`；正常 key 走通、坏 key 401 且报错 url = 注入的 base_url。来源：2026-08-04 实测，详见 sessions.md 当日条目。
 - **`codex exec resume` 不接受 `--sandbox`/`--add-dir` 但接受 `-c` overrides**（codex 0.144.2 实测）——endpoint 注入参数放 common 对 resume 路径同样可用。来源：`packages/agent/src/backends/codex.ts` buildCodexArgs 注释。

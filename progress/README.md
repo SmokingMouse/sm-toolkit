@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-纯开源 SDK；0.8.1 修掉静默死亡（零终局行退出必吐 Error，Fisher 生产实录驱动）；下一候选 SdkBackend（Fisher 换底座）。
+发布 agent 0.8.3 修正 Codex 图片 argv 边界，并让 Harbor 升级依赖、删除精确版本 patch、验证真实图片 Run。
 
 ## Goals
 

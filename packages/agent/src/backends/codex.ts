@@ -431,6 +431,10 @@ export function buildCodexArgs(o: {
     for (const directory of o.additionalDirs ?? []) common.push("--add-dir", directory);
   }
   const imageArgs = o.imagePaths.flatMap((p) => ["--image", p]);
+  // `--image <FILE>...` 是可变长参数；不显式结束 options，Clap 会把尾部 prompt
+  // 一并吃成图片路径，随后 Codex 回退读 stdin 并报 "No prompt provided"。
+  // 无图片时也保留分隔符，避免以 `-` 开头的 prompt 被误解析成 flag。
+  const positionalPrompt = ["--", o.prompt];
   // default/readonly 都不能仅凭调用方传参扩大额外可写范围；Executor 另有领域闸，这里再做参数层防御。
   const writableDirs =
     o.policy === "auto-edit" || o.policy === "full" ? [...new Set(o.additionalWritableDirs)] : [];
@@ -460,7 +464,7 @@ export function buildCodexArgs(o: {
     // resume 也吃 --ephemeral(0.142.2 实测在 flag 清单里)——不加会让
     // persistence:false 的承诺在多轮场景被静默违背。
     const ephemeral = o.ephemeral ? ["--ephemeral"] : [];
-    return ["exec", "resume", o.resume, ...common, ...ephemeral, ...sandbox, ...imageArgs, o.prompt];
+    return ["exec", "resume", o.resume, ...common, ...ephemeral, ...sandbox, ...imageArgs, ...positionalPrompt];
   }
   const sandbox =
     o.policy === "readonly"
@@ -470,7 +474,16 @@ export function buildCodexArgs(o: {
         : ["--sandbox", "workspace-write"]; // auto-edit(以及兼容 default,codex 无独立 default 档)
   const additionalWritableDirs = writableDirs.flatMap((dir) => ["--add-dir", dir]);
   const ephemeral = o.ephemeral ? ["--ephemeral"] : [];
-  return ["exec", ...common, ...ephemeral, ...sandbox, ...workspaceNetwork, ...additionalWritableDirs, ...imageArgs, o.prompt];
+  return [
+    "exec",
+    ...common,
+    ...ephemeral,
+    ...sandbox,
+    ...workspaceNetwork,
+    ...additionalWritableDirs,
+    ...imageArgs,
+    ...positionalPrompt,
+  ];
 }
 
 /**

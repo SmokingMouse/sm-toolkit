@@ -106,7 +106,53 @@ describe("Codex argument construction", () => {
       "/repo/.git",
       "--add-dir",
       "/shared/cache",
+      "--",
       "ship it",
+    ]);
+  });
+
+  test("terminates variadic image args before the initial prompt", () => {
+    expect(
+      args("auto-edit", {
+        imagePaths: ["/tmp/first.png", "/tmp/second.png"],
+        prompt: "inspect both images",
+      }),
+    ).toEqual([
+      "exec",
+      "--json",
+      "--skip-git-repo-check",
+      "--sandbox",
+      "workspace-write",
+      "-c",
+      "sandbox_workspace_write.network_access=false",
+      "--image",
+      "/tmp/first.png",
+      "--image",
+      "/tmp/second.png",
+      "--",
+      "inspect both images",
+    ]);
+  });
+
+  test("terminates variadic image args before a resumed prompt", () => {
+    const resumed = args("readonly", {
+      resume: "thread-1",
+      imagePaths: ["/tmp/screen.png"],
+      prompt: "continue from the screenshot",
+    });
+
+    expect(resumed.slice(-4)).toEqual([
+      "--image",
+      "/tmp/screen.png",
+      "--",
+      "continue from the screenshot",
+    ]);
+  });
+
+  test("protects a prompt that starts with a dash even without images", () => {
+    expect(args("readonly", { prompt: "--literal prompt" }).slice(-2)).toEqual([
+      "--",
+      "--literal prompt",
     ]);
   });
 
@@ -182,7 +228,8 @@ describe("Codex argument construction", () => {
     expect(initial.join(" ")).toContain('model_provider="sm_endpoint"');
     expect(initial.join(" ")).toContain('model_providers.sm_endpoint.wire_api="responses"');
     expect(initial.slice(initial.indexOf("-m"))).toContain("gpt-5.4-mini");
-    // -c 必须在 prompt 之前(prompt 是位置参数,永远收尾)
+    // -c 必须在分隔符与 prompt 之前(prompt 是位置参数,永远收尾)
+    expect(initial[initial.length - 2]).toBe("--");
     expect(initial[initial.length - 1]).toBe("ship it");
   });
 
@@ -208,6 +255,7 @@ describe("Codex argument construction", () => {
       "gpt-5.5",
       "--sandbox",
       "read-only",
+      "--",
       "ship it",
     ]);
   });
