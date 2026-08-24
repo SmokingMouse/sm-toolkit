@@ -1,8 +1,12 @@
 #!/usr/bin/env bun
-import { readFileSync, readSync } from 'node:fs'
-import { spawn, spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { LLMClient, benchEndpoint } from '@smokingmouse/llm'
 import type { Message, BenchMeasurement, EndpointConfig } from '@smokingmouse/llm'
+import { pickEndpoint } from './picker.js'
+import { resolveModelTarget, BUILTIN_ALIASES } from './resolver.js'
+import { recordRecentEndpoint } from './recent.js'
+import { cmdUpdate, getCurrentVersion } from './update.js'
 
 const client = new LLMClient()
 
@@ -18,176 +22,6 @@ const c = {
   yellow: '\x1b[33m',
   white: '\x1b[37m',
   bgCyan: '\x1b[46m\x1b[30m',
-  hideCursor: '\x1b[?25l',
-  showCursor: '\x1b[?25h',
-  clearLine: '\x1b[2K',
-  moveUp: (n: number) => `\x1b[${n}A`,
-}
-
-// ── interactive picker (two-level) ──────────────────────
-
-function renderList(
-  title: string,
-  items: { label: string; detail?: string; status?: string }[],
-  cursor: number,
-  hint: string,
-): string {
-  const lines: string[] = []
-  lines.push('')
-  lines.push(`  ${c.bold}llm${c.reset} ${c.dim}— ${title}${c.reset}`)
-  lines.push('')
-
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i]!
-    const selected = i === cursor
-    const label = item.label.padEnd(20)
-    const detail = (item.detail ?? '').padEnd(28)
-    const status = item.status ?? ''
-
-    if (selected) {
-      lines.push(
-        `  ${c.cyan}›${c.reset} ${c.bold}${c.cyan}${label}${c.reset} ${detail} ${status}`,
-      )
-    } else {
-      lines.push(
-        `    ${c.white}${label}${c.reset} ${c.dim}${detail}${c.reset} ${status}`,
-      )
-    }
-  }
-
-  lines.push('')
-  lines.push(`  ${c.dim}${hint}${c.reset}`)
-  lines.push('')
-  return lines.join('\n')
-}
-
-function selectFromList(
-  title: string,
-  items: { label: string; detail?: string; status?: string }[],
-  hint: string,
-): number | null {
-  if (items.length === 0) return null
-
-  let cursor = 0
-  const total = items.length
-
-  const output = renderList(title, items, cursor, hint)
-  const lineCount = output.split('\n').length - 1
-
-  // 不碰 process.stdin：bun 的 stdin reader 一旦启动无法真正释放（pause 停不掉
-  // 在途 read），会和随后 spawn 的 claude 争抢 tty 字节——终端应答序列（DA/XTVERSION/
-  // 鼠标上报）被偷走 ESC 前缀后，尾巴以明文漏进 claude 输入框。
-  // 改为 stty 设终端模式 + readSync(0) 同步读，父进程全程零 stdin reader。
-  const saved = spawnSync('stty', ['-g'], {
-    stdio: ['inherit', 'pipe', 'inherit'],
-  }).stdout?.toString().trim()
-  spawnSync('stty', ['-icanon', '-echo', '-isig', 'min', '1', 'time', '0'], {
-    stdio: 'inherit',
-  })
-  process.stderr.write(c.hideCursor + output)
-
-  const buf = Buffer.alloc(64)
-  try {
-    while (true) {
-      let n: number
-      try {
-        n = readSync(0, buf, 0, buf.length, null)
-      } catch (e: any) {
-        if (e?.code === 'EAGAIN') continue
-        throw e
-      }
-      if (n <= 0) return null
-      const key = buf.toString('utf8', 0, n)
-
-      if (key === '\x03' || key === '\x04' || key === 'q' || key === '\x1b') return null
-      if (key === '\r' || key === '\n') return cursor
-
-      if (key === '\x1b[A' || key === 'k') {
-        cursor = (cursor - 1 + total) % total
-      } else if (key === '\x1b[B' || key === 'j') {
-        cursor = (cursor + 1) % total
-      } else {
-        continue
-      }
-      process.stderr.write(c.moveUp(lineCount) + '\r')
-      process.stderr.write(renderList(title, items, cursor, hint))
-    }
-  } finally {
-    process.stderr.write(c.moveUp(lineCount) + '\r')
-    for (let i = 0; i < lineCount + 1; i++) {
-      process.stderr.write(c.clearLine + '\n')
-    }
-    process.stderr.write(c.moveUp(lineCount + 1) + '\r')
-    process.stderr.write(c.showCursor)
-    if (saved) spawnSync('stty', [saved], { stdio: 'inherit' })
-  }
-}
-
-function pickEndpoint(): string | null {
-  const providers = client.listProviders()
-  if (providers.length === 0) {
-    console.error('没有可用的 provider')
-    return null
-  }
-
-  // level 1: pick provider
-  const providerItems = providers.map((p) => ({
-    label: p.name,
-    detail: `${p.models.length} 个模型`,
-    status: p.hasKey ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`,
-  }))
-  const providerIdx = selectFromList(
-    '选择厂商',
-    providerItems,
-    '↑↓ 选择  Enter 确认  q 退出',
-  )
-  if (providerIdx === null) return null
-
-  const provider = providers[providerIdx]!
-
-  // single model → skip level 2
-  if (provider.models.length === 1) {
-    return provider.models[0]!
-  }
-
-  // level 2: pick model
-  const modelItems = provider.models.map((m) => ({
-    label: m,
-  }))
-  const modelIdx = selectFromList(
-    `${provider.name} — 选择模型`,
-    modelItems,
-    '↑↓ 选择  Enter 确认  Esc 返回  q 退出',
-  )
-  if (modelIdx === null) return null
-
-  return provider.models[modelIdx]!
-}
-
-// ── endpoint resolution (prefix + alias) ──────────────────
-
-const ALIASES: Record<string, string> = {
-  ds: 'deepseek-chat',
-  dr: 'deepseek-reasoner',
-  gf: 'gemini-2.5-flash',
-  qw: 'qwen3.5-plus',
-}
-
-function resolveEndpointName(input: string): string | null {
-  try {
-    const { name } = client.getEndpointConfig(input)
-    return name
-  } catch {
-    // try alias
-    const aliased = ALIASES[input]
-    if (aliased) {
-      try {
-        const { name } = client.getEndpointConfig(aliased)
-        return name
-      } catch {}
-    }
-    return null
-  }
 }
 
 // ── help ──────────────────────────────────────────────────
@@ -200,7 +34,7 @@ function printHelp() {
 
 用法:
   llm                           交互选择模型，启动 Claude Code session
-  llm <model|provider>          直接指定模型启动交互 session
+  llm <model|provider|alias>    直接指定模型/厂商/别名启动交互 session
   llm <model> -p "prompt"      直调 API
   llm -p "prompt"               直调 API（default: ${defaultModel}）
   echo "data" | llm -p "..."   stdin + prompt
@@ -215,9 +49,12 @@ function printHelp() {
   --json          JSON 格式输出（含 usage；配 --list 输出 provider 状态 JSON）
   --fallback      逗号分隔的 endpoint 链，依次尝试直到成功（配 -p 使用）
   --list          列出所有 providers
+  -v, --version   显示当前版本
   -h, --help      帮助
 
 子命令:
+  llm update [--check] [--registry url]
+      检查并升级 @smokingmouse/cli 到最新版本（支持 bun / npm）
   llm vision -f <file> -p <prompt> [-m model]
       图片/视频/音频理解。图片走 openai-compat（默认 Gemini），
       视频/音频走 Gemini Files API（上传+轮询，进度打 stderr）
@@ -229,6 +66,15 @@ function printHelp() {
       全端点测速：联通 / 首响延迟(ttft) / 解码吞吐(tps)。
       filter = provider 名或模型名前缀。详见 llm bench --help
 
+常用快捷别名 / 关键词:
+  fa / fable      claude-fable-5
+  op / opus       claude-opus-4-8
+  so / sonnet     claude-sonnet-5
+  flash / 3.7     gemini-3.7-flash-high
+  k3              k3 (kimi)
+  ds / dr         deepseek-v4-flash / deepseek-v4-pro
+  gpt / 5.6       gpt-5.6
+
 Providers:`)
   for (const p of providers) {
     const status = p.hasKey ? '✓' : '✗'
@@ -239,11 +85,11 @@ Providers:`)
     }
   }
   console.log(`\n  * = default（直调 API 时使用）`)
-  console.log(`\n示例:`)
-  console.log(`  llm                     交互选择模型`)
-  console.log(`  llm claude              打开 Claude Code 交互（单模型厂商直接启动）`)
-  console.log(`  llm ds -p "hello"       用 deepseek-chat 直调 API`)
-  console.log(`  llm -p "hello" --stream 流式输出`)
+  console.log(`\n交互选择器特性:`)
+  console.log(`  • 即时模糊打字过滤（无需区分大小写，支持多词空格组合）`)
+  console.log(`  • 最近使用自动置顶（打开按回车即可直接秒开上次模型）`)
+  console.log(`  • Tab 键快速切换平铺搜索与厂商分组浏览`)
+  console.log(`  • 视窗平滑滚动，防止超长列表刷屏`)
 }
 
 // ── arg parsing ──────────────────────────────────────────
@@ -343,6 +189,9 @@ function buildMessages(
 async function execClaude(endpointName?: string): Promise<void> {
   const { name, endpoint: ep } = client.getEndpointConfig(endpointName, 'anthropic')
 
+  // 记录最近使用
+  recordRecentEndpoint(name)
+
   const env: Record<string, string> = { ...process.env } as Record<
     string,
     string
@@ -350,8 +199,6 @@ async function execClaude(endpointName?: string): Promise<void> {
   const key = process.env[ep.api_key_env]
 
   if (ep.base_url) {
-    // 代理 endpoint：key 缺失时 claude 会以"无凭证"启动并要求 /login，
-    // 必须在这里拦下报错，而不是静默拉起
     if (!key) {
       console.error(`✗ 环境变量 ${ep.api_key_env} 未设置，endpoint [${name}] 需要 API key`)
       console.error(`  检查 endpoints.yaml 的 env_file 是否存在且包含 ${ep.api_key_env}=...`)
@@ -359,13 +206,8 @@ async function execClaude(endpointName?: string): Promise<void> {
       process.exit(1)
     }
     env.ANTHROPIC_BASE_URL = ep.base_url
-    // 代理（super-relay 等）通过 ANTHROPIC_AUTH_TOKEN 认证，同时也设
-    // ANTHROPIC_API_KEY 以兼容不同版本的 claude CLI
     env.ANTHROPIC_AUTH_TOKEN = key
     env.ANTHROPIC_API_KEY = key
-    // 代理 endpoint 的推导默认值：tier 全部映射到该模型（否则 subagent /
-    // 后台任务会去找代理上不存在的官方 tier 模型）、放宽超时、关非必要流量。
-    // endpoints.yaml 的 claude.env 可覆盖这里任何一项。
     env.ANTHROPIC_MODEL = ep.model
     env.ANTHROPIC_DEFAULT_OPUS_MODEL = ep.model
     env.ANTHROPIC_DEFAULT_SONNET_MODEL = ep.model
@@ -378,8 +220,6 @@ async function execClaude(endpointName?: string): Promise<void> {
     env.ANTHROPIC_API_KEY = key
   }
 
-  // endpoints.yaml 的 claude: 块——顶层为全局，provider 级覆盖同名 env、args 追加。
-  // 优先级：自动推导 < 全局 claude.env < provider claude.env
   const settings = client.claudeSettings
   for (const [k, v] of Object.entries({
     ...settings.env,
@@ -404,7 +244,7 @@ async function execClaude(endpointName?: string): Promise<void> {
   process.exit(code)
 }
 
-// ── subcommands: vision / image ─────────────────────────
+// ── subcommands: vision / image / bench ───────────────────
 
 async function cmdVision(argv: string[]): Promise<void> {
   let file: string | undefined
@@ -471,8 +311,6 @@ async function cmdImage(argv: string[]): Promise<void> {
   for (const p of paths) console.log(p)
 }
 
-// ── subcommand: bench ───────────────────────────────────
-
 interface BenchRow {
   provider: string
   model: string
@@ -483,7 +321,6 @@ interface BenchRow {
   m?: BenchMeasurement
 }
 
-// 完整错误信息留在 row.reason（--json 要全文），表格/进度行渲染时才截断
 function benchErrMsg(e: any, timeoutS: number): string {
   if (e?.name === 'TimeoutError' || e?.name === 'AbortError')
     return `超时 >${timeoutS}s`
@@ -498,7 +335,6 @@ function fmtTtft(r: BenchRow): string {
   return ms == null ? '-' : `${(ms / 1000).toFixed(2)}s`
 }
 
-// 均摊每个 delta >100 token = 整块缓冲送达，tps 是灌包速度不是解码速度
 function isBurst(r: BenchRow): boolean {
   const m = r.m
   return !!m && m.deltas > 0 && m.output_tokens / m.deltas > 100
@@ -557,7 +393,6 @@ async function cmdBench(argv: string[]): Promise<void> {
     } else if (!a.startsWith('-')) filters.push(a)
   }
 
-  // build rows（保持 yaml 声明顺序）
   const providers = client.listProviders()
   const rows: BenchRow[] = []
   for (const prov of providers) {
@@ -601,7 +436,6 @@ async function cmdBench(argv: string[]): Promise<void> {
     process.exit(1)
   }
 
-  // run：provider 间并行，provider 内按 --concurrency 排队（默认串行防限流）
   const pending = rows.filter((r) => r.status === 'pending')
   const width = String(pending.length).length
   let done = 0
@@ -678,7 +512,6 @@ async function cmdBench(argv: string[]): Promise<void> {
     return
   }
 
-  // final table
   const okN = rows.filter((r) => r.status === 'ok').length
   const errN = rows.filter((r) => r.status === 'error').length
   const skipN = rows.filter((r) => r.status === 'skip').length
@@ -692,7 +525,6 @@ async function cmdBench(argv: string[]): Promise<void> {
     const group = rows.filter((r) => r.provider === prov.name)
     if (group.length === 0) continue
 
-    // skip 行没有 resolved ep，回退到 provider 声明的 URL（与默认解析同序：openai 优先）
     const urls = [
       ...new Set(
         group.map(
@@ -733,7 +565,6 @@ async function cmdBench(argv: string[]): Promise<void> {
     const fastest = oks
       .filter((r) => r.m!.ttft_ms != null)
       .sort((a, b) => a.m!.ttft_ms! - b.m!.ttft_ms!)[0]
-    // 缓冲送达的 tps 是灌包速度，不参与吞吐榜
     const streamed = oks.filter((r) => r.m!.tps != null && !isBurst(r))
     const top = streamed.sort((a, b) => b.m!.tps! - a.m!.tps!)[0]
     console.log('')
@@ -757,6 +588,13 @@ async function cmdBench(argv: string[]): Promise<void> {
 
 async function main() {
   const rawArgv = process.argv.slice(2)
+  if (rawArgv[0] === 'version' || rawArgv[0] === '-v' || rawArgv[0] === '--version') {
+    console.log(`v${getCurrentVersion()}`)
+    return
+  }
+  if (rawArgv[0] === 'update' || rawArgv[0] === 'upgrade') {
+    return cmdUpdate(rawArgv.slice(1))
+  }
   if (rawArgv[0] === 'vision') return cmdVision(rawArgv.slice(1))
   if (rawArgv[0] === 'image') return cmdImage(rawArgv.slice(1))
   if (rawArgv[0] === 'bench') return cmdBench(rawArgv.slice(1))
@@ -777,21 +615,40 @@ async function main() {
     return
   }
 
-  // resolve endpoint name (fuzzy match)
-  let endpoint = args.endpoint
-  if (endpoint) {
-    const resolved = resolveEndpointName(endpoint)
-    if (!resolved) {
-      console.error(
-        `未知 endpoint: "${endpoint}"\n运行 llm --list 查看可用 endpoints`,
-      )
-      process.exit(1)
-    }
-    endpoint = resolved
-  }
-
   const stdinData = await readStdin()
   const hasPrompt = !!args.prompt || !!stdinData
+
+  let endpoint: string | undefined
+
+  if (args.endpoint) {
+    const res = resolveModelTarget(client, args.endpoint, {
+      isInteractive: !hasPrompt && process.stdin.isTTY,
+    })
+
+    if (res.type === 'exact') {
+      endpoint = res.name
+    } else if (res.type === 'provider') {
+      const picked = pickEndpoint(client, { providerLock: res.provider })
+      if (!picked) return
+      endpoint = picked
+    } else if (res.type === 'ambiguous') {
+      const picked = pickEndpoint(client, { initialQuery: res.query })
+      if (!picked) return
+      endpoint = picked
+    } else {
+      // not_found
+      if (!hasPrompt && process.stdin.isTTY) {
+        const picked = pickEndpoint(client, { initialQuery: args.endpoint })
+        if (!picked) return
+        endpoint = picked
+      } else {
+        console.error(
+          `未知 endpoint 或模型: "${args.endpoint}"\n运行 llm --list 查看可用 endpoints`,
+        )
+        process.exit(1)
+      }
+    }
+  }
 
   // no prompt, no endpoint → interactive picker
   if (!hasPrompt && !endpoint) {
@@ -799,12 +656,12 @@ async function main() {
       printHelp()
       return
     }
-    const picked = pickEndpoint()
+    const picked = pickEndpoint(client)
     if (!picked) return
     endpoint = picked
   }
 
-  // no prompt → interactive session
+  // no prompt → interactive Claude Code session
   if (!hasPrompt) {
     await execClaude(endpoint)
     return
@@ -830,6 +687,10 @@ async function main() {
     const result = await client.chatWithFallback(chain, messages, chatOpts)
     console.log(args.json ? JSON.stringify(result, null, 2) : result.text)
     return
+  }
+
+  if (endpoint) {
+    recordRecentEndpoint(endpoint)
   }
 
   if (args.stream) {

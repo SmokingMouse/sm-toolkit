@@ -68,6 +68,17 @@ export interface EndpointInfo {
   hasKey: boolean
 }
 
+export interface EndpointMatch {
+  name: string
+  model: string
+  provider: string
+  qualified: string
+  hasKey: boolean
+  isDefault: boolean
+  score: number
+  isRecent?: boolean
+}
+
 // ── chat types ──────────────────────────────────────────
 
 export interface Message {

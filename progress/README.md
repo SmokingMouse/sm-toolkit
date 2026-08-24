@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-发布 agent 0.8.4 修正 Codex 图片 argv 边界与静默非零退出，并让 Harbor 升级依赖、删除精确版本 patch、验证真实图片 Run。
+优化 llm CLI 模型选择链路与交互选择器体验，重构实时打字模糊搜索、MRU 置顶秒启与智能参数路由。
 
 ## Goals
 

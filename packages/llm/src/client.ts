@@ -3,6 +3,7 @@ import {
   resolveEndpoint,
   listEndpoints,
   listProviders,
+  searchEndpoints,
 } from './config.js'
 import type { Protocol } from './config.js'
 import { openaiProvider } from './providers/openai.js'
@@ -22,6 +23,7 @@ import type {
   StreamChunk,
   EndpointInfo,
   ProviderInfo,
+  EndpointMatch,
   Provider,
 } from './types.js'
 
@@ -128,6 +130,13 @@ export class LLMClient {
 
   listProviders(): ProviderInfo[] {
     return listProviders(this.#config)
+  }
+
+  searchEndpoints(
+    query?: string,
+    options?: { recent?: string[] },
+  ): EndpointMatch[] {
+    return searchEndpoints(this.#config, query, options)
   }
 
   get defaultEndpoint(): string {

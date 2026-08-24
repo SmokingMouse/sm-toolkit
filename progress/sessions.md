@@ -1,5 +1,17 @@
 # Sessions（倒序，最近 5 条；更早的移入 archive.md）
 
+### 2026-08-24 — llm CLI 模型选择与智能路由体验全链路重塑
+- **触发**：用户反馈模型选择路径过长、两级菜单层级深且无模糊搜索、Esc 回退失效、命令行参数匹配死板等体验痛点。
+- **Done**：
+  - `@smokingmouse/llm`：`config.ts` 新增 `searchEndpoints`，支持全端点打分与多词模糊匹配（小写分词、边界加权、fuzzy 子序列、hasKey / Recent / default 智能提权）；`resolveEndpoint` 新增安全唯一子串匹配（如 `fable` 直接命中 `claude-fable-5`）；导出 `EndpointMatch` 契约。
+  - `@smokingmouse/cli`：
+    - `recent.ts`：实现 MRU 历史记录（`~/.config/sm/recent.json`），启动自动记录与去重，无输入时顶部自动置顶常用模型，打开按 Enter 0 成本秒开。
+    - `picker.ts`：重构为单层即时平铺模糊搜索器（实时打字过滤+字符高亮），集成 10 行滚动视窗防刷屏，支持 Tab 在平铺与厂商分组模式无缝切换，彻底修复 Esc 返回厂商列表与清空搜索词的交互逻辑，支持全键盘导航（`↑↓`/`Ctrl-N`/`Ctrl-P`/`PageUp`/`PageDown`/`Home`/`End`/`Backspace`/`Ctrl-U`）。
+    - `resolver.ts`：完善常见模型/版本别名（`fa`/`fable`、`3.7`/`flash`、`op`/`opus`、`so`/`sonnet`、`k3`、`ds`/`dr`、`5.6` 等）；支持命令行参数智能解析：唯一匹配直接秒启，指定多模型厂商或歧义关键词时自动预填搜索词唤起交互选择器。
+    - `update.ts`：新增 `llm update` / `llm upgrade` 子命令与 `-v` / `--version`，支持远端 registry 版本探测、语义版本比较、`--check` 只读检查与自动全局升级（bun / npm）。
+- **Verified**：全量 `tsc --build` ✓；新增 4 组单元测试（`config.test.ts`、`recent.test.ts`、`resolver.test.ts`、`update.test.ts`），全仓库 98/98 tests 全部通过 ✓；`llm --help` 帮助文档与 README 均已同步更新。
+- **Next**：用户在终端实际体验新交互流程。
+
 ### 2026-08-20 — llm bench 全端点测速子命令
 - **触发**：需要一眼看清 endpoints.yaml 全部 endpoint 的联通性与吞吐（key 失效 / 网关哪条通道坏 / 谁快谁慢）。注：本轮改动最初误落在旧 clone `~/ai-coding/sm-toolkit-harbor`（落后 28 commit），已整体移植回本仓并把旧 clone 恢复原样。
 - **Done**：
@@ -34,11 +46,3 @@
 - **Commits**:`54ffe3d` maxTurns；`8a8e3fa` skills；`8e9b201` 全拦；`7734a18` mcpServers。包版本已由同期 Codex 线合入提交标为 0.7.0；本轮未 publish。
 - **Next**:停在人工 review；确认四项协议与同期 Codex 变更可共同进入 0.7.0 后再发布。
 - **后记（同日）**:review 以 PR #15 完成（前两项 maxTurns/skills 已随 0.7.0 出包）;askTools 全拦 + mcpServers 合并后发 **0.8.0**（干净 main 构建,58/58 复核）。
-
-### 2026-08-18 — codex 审批回调 + multi-agent 子线隔离与 Task 映射(0.7.0)
-
-- **触发**:0.6.0 后的下一批(审批回调/Task 树)。multi-agent 实测顺带暴露 0.6.0 潜伏 bug:**子 agent 的事件走同一 app-server 连接**(带子 threadId)——不按 threadId 过滤,子线 turn/completed 会提前终结整个 run、子线文本混进主回答。
-- **Done**(`codex-app-server.ts` + codex.ts):①审批:policy "default" + onCanUseTool 在场 → approvalPolicy "untrusted"(可信白名单命令 codex 自动放行,2026-08-18 实测 echo 直跑/python3 弹审批);`item/commandExecution/requestApproval` → 回调 toolName "Bash"(input.command 取 commandActions 裸命令,非 /bin/zsh -lc 包装)、`item/fileChange/requestApproval` → 回调 toolName "Edit"(diff 从先行 item/started 缓存进 input.changes);allow→accept / deny→decline / abort→cancel(Promise.race 对齐 claude);权限确认模式 preflight 失败**不再静默回退 exec**(审批协议缺位=安全语义降级)→ fail loud 提示升级 CLI。②子线路由:threadId 非主线的通知一律不进主输出;`subAgentActivity`(id=spawn call id、agentThreadId=子线、kind started/interacted/interrupted)→ 合成 spawn_agent 工具卡 + Task started(taskType local_agent);子线工具项挂 parentToolUseId;子线 turn/completed → Task completed(summary=子线最终回答)+ spawn ToolCallDone;子线 tokenUsage → Task progress。collab agentsStates 充当 wait/spawn 输出。capabilities `dynamicPermissionCallback: true`(强制 exec 时 false)。
-- **Verified**:单测 48/48;审批 e2e 3/3(`scripts/e2e-codex-approvals.ts`:allow 收 Bash+裸命令→42 落地、deny→item declined+模型答 SKIPPED、multi-agent Result 恰为最后事件+spawn/Task started/completed+summary 391);回归 e2e 11/11(流式/fork/三档 sandbox/abort/exec 强制)。tsc 全绿。
-- **Next**:发 0.7.0;trellis 侧三闸已放开(approvalAvailable / route 钳制 / interactive),bump 后真机点权限卡;turn/steer 经评估推迟(树模型无消费位,决策记 trellis decisions.md)。
-

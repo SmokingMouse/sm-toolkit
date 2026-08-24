@@ -8,5 +8,6 @@
   "references": [
     { "path": "../../packages/llm" }
   ],
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
 }

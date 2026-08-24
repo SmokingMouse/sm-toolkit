@@ -7,6 +7,7 @@ import type {
   EndpointConfig,
   EndpointInfo,
   ProviderInfo,
+  EndpointMatch,
 } from './types.js'
 
 // endpoints.yaml 搜索顺序（先命中先用）：
@@ -126,6 +127,39 @@ export function resolveEndpoint(
     }
   }
 
+  // 4. substring match on model names if unique match (prefer hasKey models)
+  const nLower = n.toLowerCase()
+  const substringMatches: { prov: ProviderConfig; model: string; qualified: string; hasKey: boolean }[] = []
+  for (const [provName, prov] of Object.entries(config.providers)) {
+    for (const m of prov.models) {
+      if (m.toLowerCase().includes(nLower)) {
+        substringMatches.push({
+          prov,
+          model: m,
+          qualified: `${provName}:${m}`,
+          hasKey: !!process.env[prov.api_key_env],
+        })
+      }
+    }
+  }
+
+  if (substringMatches.length === 1) {
+    const match = substringMatches[0]!
+    return {
+      name: match.model,
+      endpoint: toEndpointConfig(match.prov, match.model, preferProtocol),
+    }
+  } else if (substringMatches.length > 1) {
+    const withKey = substringMatches.filter((m) => m.hasKey)
+    if (withKey.length === 1) {
+      const match = withKey[0]!
+      return {
+        name: match.model,
+        endpoint: toEndpointConfig(match.prov, match.model, preferProtocol),
+      }
+    }
+  }
+
   const allModels = Object.values(config.providers).flatMap((p) => p.models)
   throw new Error(`unknown model "${n}". available: ${allModels.join(', ')}`)
 }
@@ -217,6 +251,127 @@ export function listProviders(config: ConfigFile): ProviderInfo[] {
     hasKey: !!process.env[prov.api_key_env],
     models: prov.models,
   }))
+}
+
+function fuzzySubsequenceMatch(text: string, pattern: string): boolean {
+  let tIdx = 0
+  let pIdx = 0
+  while (tIdx < text.length && pIdx < pattern.length) {
+    if (text[tIdx] === pattern[pIdx]) {
+      pIdx++
+    }
+    tIdx++
+  }
+  return pIdx === pattern.length
+}
+
+export function searchEndpoints(
+  config: ConfigFile,
+  query?: string,
+  options?: {
+    recent?: string[]
+  },
+): EndpointMatch[] {
+  const q = (query ?? '').trim().toLowerCase()
+  const terms = q.length > 0 ? q.split(/\s+/).filter(Boolean) : []
+  const recentList = options?.recent ?? []
+
+  const results: EndpointMatch[] = []
+
+  for (const [provName, prov] of Object.entries(config.providers)) {
+    const hasKey = !!process.env[prov.api_key_env]
+    const provLower = provName.toLowerCase()
+
+    for (const model of prov.models) {
+      const modelLower = model.toLowerCase()
+      const qualified = `${provName}:${model}`
+      const qualifiedLower = qualified.toLowerCase()
+      const isDefault = config.default === model
+
+      const recentIdx = recentList.findIndex(
+        (r) => r === qualified || r === model || r === `${provName}/${model}`,
+      )
+      const isRecent = recentIdx !== -1
+
+      if (terms.length === 0) {
+        let score = 0
+        if (isRecent) {
+          score += 1000 - Math.min(recentIdx, 50) * 10
+        }
+        if (hasKey) score += 50
+        if (isDefault) score += 20
+
+        results.push({
+          name: model,
+          model,
+          provider: provName,
+          qualified,
+          hasKey,
+          isDefault,
+          isRecent,
+          score,
+        })
+        continue
+      }
+
+      let totalMatchScore = 0
+      let allTermsMatched = true
+
+      for (const term of terms) {
+        let termScore = 0
+
+        if (modelLower === term) {
+          termScore = Math.max(termScore, 500)
+        } else if (qualifiedLower === term) {
+          termScore = Math.max(termScore, 450)
+        } else if (modelLower.startsWith(term)) {
+          termScore = Math.max(termScore, 350)
+        } else if (qualifiedLower.startsWith(term)) {
+          termScore = Math.max(termScore, 300)
+        } else if (modelLower.includes(term)) {
+          const idx = modelLower.indexOf(term)
+          const isBoundary =
+            idx === 0 ||
+            /[\-_./]/.test(modelLower[idx - 1]!) ||
+            idx + term.length === modelLower.length ||
+            /[\-_./]/.test(modelLower[idx + term.length]!)
+          termScore = Math.max(termScore, isBoundary ? 260 : 200)
+        } else if (provLower === term) {
+          termScore = Math.max(termScore, 180)
+        } else if (provLower.startsWith(term)) {
+          termScore = Math.max(termScore, 140)
+        } else if (provLower.includes(term)) {
+          termScore = Math.max(termScore, 100)
+        } else if (fuzzySubsequenceMatch(qualifiedLower, term)) {
+          termScore = Math.max(termScore, 60)
+        } else {
+          allTermsMatched = false
+          break
+        }
+
+        totalMatchScore += termScore
+      }
+
+      if (!allTermsMatched) continue
+
+      if (hasKey) totalMatchScore += 30
+      if (isRecent) totalMatchScore += 20 - Math.min(recentIdx, 10)
+      if (isDefault) totalMatchScore += 10
+
+      results.push({
+        name: model,
+        model,
+        provider: provName,
+        qualified,
+        hasKey,
+        isDefault,
+        isRecent,
+        score: totalMatchScore,
+      })
+    }
+  }
+
+  return results.sort((a, b) => b.score - a.score)
 }
 
 function loadEnvFile(envPath: string): void {

@@ -4,6 +4,7 @@ export {
   resolveEndpoint,
   listEndpoints,
   listProviders,
+  searchEndpoints,
   getApiKey,
   resolveConfigPath,
   clearEndpointsCache,
@@ -30,6 +31,7 @@ export type {
   ChatResult,
   StreamChunk,
   EndpointInfo,
+  EndpointMatch,
   ProviderInfo,
   Provider,
 } from './types.js'
