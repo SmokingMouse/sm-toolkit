@@ -216,8 +216,20 @@ async function execClaude(endpointName?: string): Promise<void> {
     env.ANTHROPIC_SMALL_FAST_MODEL = ep.model
     env.API_TIMEOUT_MS ??= '3000000'
     env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ??= '1'
-  } else if (key) {
-    env.ANTHROPIC_API_KEY = key
+  } else {
+    // 官方原生 Claude 端点：清理可能从父进程继承的代理重定向环境变量，防止被污染
+    delete env.ANTHROPIC_BASE_URL
+    delete env.ANTHROPIC_AUTH_TOKEN
+    delete env.ANTHROPIC_MODEL
+    delete env.ANTHROPIC_DEFAULT_OPUS_MODEL
+    delete env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL
+    delete env.ANTHROPIC_DEFAULT_FABLE_MODEL
+    delete env.ANTHROPIC_SMALL_FAST_MODEL
+
+    if (key) {
+      env.ANTHROPIC_API_KEY = key
+    }
   }
 
   const settings = client.claudeSettings

@@ -2,6 +2,7 @@ import type { LLMClient, EndpointMatch } from '@smokingmouse/llm'
 
 export const BUILTIN_ALIASES: Record<string, string> = {
   // Claude 系列
+  claude: 'claude-fable-5',
   fa: 'claude-fable-5',
   fable: 'claude-fable-5',
   op: 'claude-opus-4-8',

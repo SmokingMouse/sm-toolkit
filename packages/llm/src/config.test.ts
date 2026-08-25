@@ -74,6 +74,21 @@ describe('searchEndpoints', () => {
     expect(results.length).toBe(2)
     expect(results.map((r) => r.model)).toContain('k3')
   })
+  it('marks native provider (without custom URLs) as having key by default', () => {
+    delete process.env.ANTHROPIC_API_KEY
+    const nativeConfig: ConfigFile = {
+      default: 'claude-fable-5',
+      providers: {
+        claude: {
+          api_key_env: 'ANTHROPIC_API_KEY',
+          models: ['claude-fable-5'],
+        },
+      },
+    }
+    const results = searchEndpoints(nativeConfig, '')
+    expect(results.length).toBe(1)
+    expect(results[0]?.hasKey).toBe(true)
+  })
 })
 
 describe('resolveEndpoint substring fallback', () => {

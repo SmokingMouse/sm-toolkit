@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-优化 llm CLI 模型选择链路与交互选择器体验，重构实时打字模糊搜索、MRU 置顶秒启与智能参数路由。
+修复官方 Native Claude 端点凭据误判、父进程环境变量污染与 claude 快捷直启别名。
 
 ## Goals
 

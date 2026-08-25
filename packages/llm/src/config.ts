@@ -224,10 +224,15 @@ export function getApiKey(ep: EndpointConfig): string {
   return key
 }
 
+export function isNativeProvider(prov: ProviderConfig): boolean {
+  return !prov.anthropic_url && !prov.openai_url
+}
+
 export function listEndpoints(config: ConfigFile): EndpointInfo[] {
   const result: EndpointInfo[] = []
   for (const [provName, prov] of Object.entries(config.providers)) {
-    const hasKey = !!process.env[prov.api_key_env]
+    const isNative = isNativeProvider(prov)
+    const hasKey = isNative || !!process.env[prov.api_key_env]
     for (const model of prov.models) {
       result.push({
         name: model,
@@ -243,14 +248,17 @@ export function listEndpoints(config: ConfigFile): EndpointInfo[] {
 }
 
 export function listProviders(config: ConfigFile): ProviderInfo[] {
-  return Object.entries(config.providers).map(([name, prov]) => ({
-    name,
-    api_key_env: prov.api_key_env,
-    openai_url: prov.openai_url,
-    anthropic_url: prov.anthropic_url,
-    hasKey: !!process.env[prov.api_key_env],
-    models: prov.models,
-  }))
+  return Object.entries(config.providers).map(([name, prov]) => {
+    const isNative = isNativeProvider(prov)
+    return {
+      name,
+      api_key_env: prov.api_key_env,
+      openai_url: prov.openai_url,
+      anthropic_url: prov.anthropic_url,
+      hasKey: isNative || !!process.env[prov.api_key_env],
+      models: prov.models,
+    }
+  })
 }
 
 function fuzzySubsequenceMatch(text: string, pattern: string): boolean {
@@ -279,7 +287,8 @@ export function searchEndpoints(
   const results: EndpointMatch[] = []
 
   for (const [provName, prov] of Object.entries(config.providers)) {
-    const hasKey = !!process.env[prov.api_key_env]
+    const isNative = isNativeProvider(prov)
+    const hasKey = isNative || !!process.env[prov.api_key_env]
     const provLower = provName.toLowerCase()
 
     for (const model of prov.models) {

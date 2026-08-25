@@ -25,7 +25,7 @@
     "build": "tsc --build"
   },
   "dependencies": {
-    "@smokingmouse/llm": "^0.6.0"
+    "@smokingmouse/llm": "^0.6.1"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

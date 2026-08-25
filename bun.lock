@@ -15,7 +15,7 @@
     },
     "apps/cli": {
       "name": "@smokingmouse/cli",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "bin": {
         "llm": "src/main.ts",
       },
@@ -27,7 +27,7 @@
       "name": "@smokingmouse/agent",
       "version": "0.8.4",
       "dependencies": {
-        "@smokingmouse/llm": "^0.6.0",
+        "@smokingmouse/llm": "^0.6.1",
       },
       "devDependencies": {
         "@modelcontextprotocol/sdk": "1.29.0",
@@ -37,7 +37,7 @@
     },
     "packages/llm": {
       "name": "@smokingmouse/llm",
-      "version": "0.6.0",
+      "version": "0.6.1",
       "dependencies": {
         "yaml": "^2.7.1",
       },

@@ -1,5 +1,16 @@
 # Sessions（倒序，最近 5 条；更早的移入 archive.md）
 
+### 2026-08-25 — 修复官方 Native Claude 端点凭据误判、父进程环境变量污染与 claude 快捷直启
+- **触发**：用户反馈优化之后默认的 `claude` 用不了。
+- **根因/Done**：
+  - `@smokingmouse/llm`：官方 `claude` provider 无自定义 URL（走本机 OAuth / Keychain，无须 `ANTHROPIC_API_KEY`）。`config.ts` 抽象 `isNativeProvider`，原生端点默认 `hasKey = true`，不再被误判为 `✗ no key` 或在模糊搜索中降权，解决别名匹配（如 `fa`/`fable`）被错误劫持至三方代理网关的问题。
+  - `@smokingmouse/cli`：
+    - `resolver.ts`：在 `BUILTIN_ALIASES` 补齐 `claude: 'claude-fable-5'`，支持 `llm claude` 秒启官方最新模型。
+    - `main.ts`：在 `execClaude` 启动原生 Claude 会话时，主动清理可能从父进程继承的 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_MODEL` 等代理变量，防止流量被污染劫持至代理网关。
+  - 版本发布：`@smokingmouse/llm@0.6.1` + `@smokingmouse/cli@0.5.1`。
+- **Verified**：全量 `tsc --build` 零错误；新增/更新测试用例（Native provider 凭据状态与 `claude` 别名解析），99/99 tests 全绿；发布前 NPM auth 与 package.json 依赖 range 核验完毕。
+- **Next**：NPM 发布 `@smokingmouse/llm@0.6.1` 和 `@smokingmouse/cli@0.5.1`。
+
 ### 2026-08-24 — llm CLI 模型选择与智能路由体验全链路重塑
 - **触发**：用户反馈模型选择路径过长、两级菜单层级深且无模糊搜索、Esc 回退失效、命令行参数匹配死板等体验痛点。
 - **Done**：
@@ -37,12 +48,3 @@
 - **Verified**:62/62(新增 4:stream-lines 三态 + 假 claude 脚本复现零输出死亡恰好一个 Error)+ tsc 零错;Fisher 侧同日已加 resolveLoopOutcome 二道兜底(BACKEND_SILENT_EXIT)。
 - **Next**:发 0.8.1;Fisher bump 依赖并重启 console 验证。
 
-### 2026-08-18 — Fisher 磨刀石：Claude 四项标准协议补齐(0.7.0)
-
-- **触发**:Fisher 换底座的接口核对充当磨刀石，暴露 `@smokingmouse/agent` 相对官方 claude-agent-sdk 的四个通用缺口；严格不引入 Fisher 审批状态机/guardStub 等域语义，所有字段可选，Codex 行为未改。
-- **Done（按 4→2→3→1）**:① `maxTurns` 正整数 → 官方隐藏 `--max-turns` ② `skills` 三态 → initialize payload，`[]` 封住默认 Skill 泄漏 ③ `askTools:"all"` → CLI `permissions.ask:["*"]`，覆盖 settings allow，让全部工具进 `onCanUseTool` ④ `mcpServers` 一等字段：http/stdio 临时 config；sdk 名单进 `initialize.sdkMcpServers`，官方 MCP Server 经 `mcp_message` control protocol 回流宿主执行。
-- **参照系**:本机 `@anthropic-ai/claude-agent-sdk` 0.3.207 的 `sdk.mjs/sdk.d.ts`（max-turns argv、initialize skills/sdkMcpServers、canUseTool spawn、SDK MCP transport/control 分支）+ Claude CLI 2.1.207 wildcard 实测；MCP E2E 统一用官方 `@modelcontextprotocol/sdk` 1.29.0。
-- **Verified**:agent 单测 58/58 + tsc；真 CLI E2E 四份全绿——maxTurns 一轮截止、skills 默认/空/单名单、全拦 allow+deny 后会话继续、SDK canary `CANARY-7391` + handler throw 存活、http 新字段 connected。任务 3 变异：去掉 wildcard 后 E2E 必红（`intercepted=[]`、deny handler 被执行），恢复后复绿。
-- **Commits**:`54ffe3d` maxTurns；`8a8e3fa` skills；`8e9b201` 全拦；`7734a18` mcpServers。包版本已由同期 Codex 线合入提交标为 0.7.0；本轮未 publish。
-- **Next**:停在人工 review；确认四项协议与同期 Codex 变更可共同进入 0.7.0 后再发布。
-- **后记（同日）**:review 以 PR #15 完成（前两项 maxTurns/skills 已随 0.7.0 出包）;askTools 全拦 + mcpServers 合并后发 **0.8.0**（干净 main 构建,58/58 复核）。

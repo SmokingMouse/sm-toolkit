@@ -6,6 +6,10 @@ describe('resolveModelTarget', () => {
   const client = new LLMClient()
 
   it('resolves built-in aliases', () => {
+    const r0 = resolveModelTarget(client, 'claude')
+    expect(r0.type).toBe('exact')
+    expect((r0 as any).name).toContain('claude-fable-5')
+
     const r1 = resolveModelTarget(client, 'fable')
     expect(r1.type).toBe('exact')
     expect((r1 as any).name).toContain('claude-fable-5')

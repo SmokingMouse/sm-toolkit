@@ -1,6 +1,6 @@
 {
   "name": "@smokingmouse/llm",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "type": "module",
   "description": "配置驱动的 LLM 直连 API 客户端 —— 读 endpoints.yaml（$SM_ENDPOINTS_PATH / ~/.config/sm/endpoints.yaml），OpenAI/Anthropic 兼容 provider + retry。",
   "license": "MIT",
