@@ -125,7 +125,9 @@ client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
 源日志、队列、审批和引擎不变。新 thread 在 `thread/started` 前原子写入前缀，
 继承 item ID、payload、时间戳、status、seq、completedSeq；turnId 重映射为新 ID，
 继承 turn 作为已结束的历史容器，不入队、不携带 clientTurnId、usage 或审批。
-运行中 item 的 payload 是调用时冻结快照，不接收源后续 delta；其 inProgress 状态仅属历史记录。
+允许运行中 fork：运行中 item 的 payload 是调用时冻结快照，不接收源后续 delta；
+复制到分支的 `inProgress` item 状态改为 `failed`（该工作未在分支完成），播种历史也使用此状态。
+源 item 不变；不伪造完成时间或完成事件，既有时间戳与游标保持原值。
 新 thread 的 nextSeq = 前缀所有 seq/completedSeq 最大值 + 1（空前缀为 1），允许空洞，
 之后只在新 thread 内递增。`thread/attach` / `thread/items/list` 可读完整继承历史，
 不重新广播历史 item 事件。原 thread 后续增加的 item 不进入分支。

@@ -16,6 +16,7 @@ function fixture(databasePath = ":memory:") {
   servers.push(server); return { server, engines };
 }
 const withoutTurn = ({ turnId: _, ...item }: Item) => item;
+const frozen = (item: Item) => withoutTurn(item.status === "inProgress" ? { ...item, status: "failed" } : item);
 
 for (const backend of ["claude", "codex"] as const) describe(`midfork ${backend}`, () => {
   test("P2-2: nested native forks retain only prefix checkpoints; seeded forks report fallback without copying coordinates", async () => {
@@ -139,7 +140,7 @@ test("midfork: idle tip without native coordinate seeds its captured prefix desp
   expect(server.log.snapshot(fork.thread.id).items.map(withoutTurn)).toEqual(before.map(withoutTurn));
 });
 
-test("midfork: every item kind is a valid boundary and live payload is frozen", async () => {
+test("P2-3: every item boundary freezes live payload as failed and continuation leaves no orphan", async () => {
   const { server, engines } = fixture(), c = await client(server);
   const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
   const { turn } = await c.request("turn/start", { threadId: thread.id, input: input("user") });
@@ -162,12 +163,23 @@ test("midfork: every item kind is a valid boundary and live payload is frozen", 
   for (let index = 0; index < original.items.length; index++) {
     const item = original.items[index];
     const { thread: fork } = await c.request("thread/fork", { threadId: thread.id, fromItemId: item.id });
-    expect(server.log.snapshot(fork.id).items.map(withoutTurn)).toEqual(original.items.slice(0, index + 1).map(withoutTurn));
+    expect(server.log.snapshot(fork.id).items.map(withoutTurn)).toEqual(original.items.slice(0, index + 1).map(frozen));
+    expect(server.log.snapshot(fork.id).items.some(item => item.status === "inProgress")).toBe(false);
   }
   const branch = server.log.allThreads().find(t => t.forkedFrom?.itemId === "a")!;
   server.log.delta(thread.id, "a", "text", " added later");
   expect(server.log.item(branch.id, "a").payload).toEqual({ text: "partial" });
   expect(engines[2].options?.seedHistory?.at(-1)?.payload).toEqual({ text: "partial" });
+  expect(engines[2].options?.seedHistory?.at(-1)?.status).toBe("failed");
+  expect(server.log.item(thread.id, "a").status).toBe("inProgress");
+  const commandBranch = server.log.allThreads().find(t => t.forkedFrom?.itemId === "cmd")!;
+  const commandEngine = engines.find(engine => engine.options?.threadId === commandBranch.id)!;
+  expect(commandEngine.options?.seedHistory?.at(-1)?.status).toBe("failed");
+  const next = await c.request("turn/start", { threadId: commandBranch.id, input: input("continue") });
+  commandEngine.emit({ type: "turnCompleted", turnId: next.turn.id, status: "completed" });
+  await until(() => server.threads.get(commandBranch.id).status.type === "idle");
+  expect(server.log.item(commandBranch.id, "cmd").status).toBe("failed");
+  expect(server.log.snapshot(commandBranch.id).items.some(item => item.status === "inProgress")).toBe(false);
   const other = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
   await expect(c.request("thread/fork", { threadId: other.thread.id, fromItemId: "a" })).rejects.toMatchObject({ code: -32602 });
 });

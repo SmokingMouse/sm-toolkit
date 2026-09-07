@@ -154,7 +154,10 @@ export class ThreadManager {
     const all = this.log.snapshot(source.id).items;
     const index = params.fromItemId === undefined ? all.length - 1 : all.findIndex(item => item.id === params.fromItemId);
     if (params.fromItemId !== undefined && index < 0) throw new ProtocolError(ErrorCode.invalid_params, "fromItemId does not belong to the source thread", { threadId: source.id, itemId: params.fromItemId });
-    const prefix = all.slice(0, index + 1), itemId = prefix.at(-1)?.id ?? null;
+    // Work in the source process cannot complete in the branch. Freeze its
+    // payload, but mark the inherited item terminal in both AS and seed history.
+    const prefix = all.slice(0, index + 1).map(item => item.status === "inProgress" ? { ...item, status: "failed" as const } : item);
+    const itemId = prefix.at(-1)?.id ?? null;
     const forkPoint = itemId ? this.log.forkPoint(source.id, itemId) : undefined;
     // Unmapped and live boundaries must never silently inherit a later native suffix.
     const unflushedSeed = source.backend === "claude" && this.log.options<SessionOptions>(source.id).seedHistory !== undefined;
