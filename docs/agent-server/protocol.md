@@ -27,6 +27,7 @@
   "token":"…bearer…",                       // WebSocket 走这里；unix socket 亦校验
   "client":{"name":"trellis-web","version":"0.9.0","kind":"web","label":"MacBook Safari"},
   "capabilities":{
+    "pendingRequests":true,                   // 只读请求状态，不授予答复能力
     "serverRequests":[                        // 我能渲染并回答的反向请求
       "item/commandExecution/requestApproval",
       "item/fileChange/requestApproval",
@@ -45,7 +46,7 @@
   "capabilities":{
     "backends":["claude","codex","external"],
     "steer":true, "fork":true, "leases":true, "externalProviders":true,
-    "maxQueuedTurns":8
+    "maxQueuedTurns":8, "pendingRequests":true
   }
 }}
 ```
@@ -57,6 +58,7 @@
 |---|---|---|
 | `capabilities.engineEvents` | initialize 请求 | 可选 boolean；true 才订阅 thread/engineEvent，新库默认 true |
 | `capabilities.bashInput` | initialize 请求 | 可选 boolean；true 接收 bash 输入变体，否则 item 通知/历史投影为文本，新库默认 true |
+| `capabilities.pendingRequests` | initialize 请求 / 结果 | 可选 boolean；客户端 true 才订阅 thread/pendingRequests，新库默认 true；服务端 true 表示支持只读状态增量与快照 state |
 | `capabilities.engine.engineEvents` | initialize 结果 | 可选 boolean；原生事件通道支持 |
 | `capabilities.engine.engineControl` | initialize 结果 | 可选 boolean；Claude 控制直通 |
 | `capabilities.engine.permissionSet` | initialize 结果 | 可选 boolean；Claude 权限热切 |
@@ -214,6 +216,7 @@ initialize.capabilities.engine 还声明 engineControl / permissionSet / effortS
 |---|---|---|
 | `serverRequest/resolved` | `{threadId, requestId, decidedBy:{clientId,label}, outcome}` | 某个客户端先答了，**其余客户端据此撤卡** |
 | `serverRequest/expired` | `{threadId, requestId, reason}` | 超时 / 引擎消失 / thread 关闭 |
+| `thread/pendingRequests` | `PendingRequestState`（下见类型块） | 每次创建、解决或撤回一个请求时，向所有 attach 且声明 pendingRequests 能力的客户端推送一条状态；不要求 serverRequests 能力 |
 
 ### 4.5 服务级
 
@@ -254,6 +257,27 @@ Claude 不支持的反向 control request 会保守拒绝或取消，并发 `err
 可以 `turn/start` / `turn/steer` / 回答反向请求的连接；其余得到
 `-32012 lease_held`（`data.holder` 带持锁者 label）。租约 TTL 默认 5 min，
 心跳续期，断线即释放。普通输入默认**不启用**；权限提升操作必须先取得 lease，见 §3.4 的权限语义说明。
+
+**只读请求状态（规范性）**：`thread/pendingRequests` 是单请求增量，不携带整个 thread 或审批正文，也不授予答复权限。创建时 status=pending、decidedBy=null；首个合法回答落库后 status=resolved、decidedBy 为答复者的 clientId 与 label。超时、原生撤回、引擎退出或 thread 关闭统一 status=expired、decidedBy=null，reason 保留原因（如 timeout / orphan_timeout / engine_gone）。时间戳为服务端 Unix 毫秒；createdAtMs 固定为请求创建时间，updatedAtMs 为本次状态变更时间。
+
+```ts
+type PendingRequestState = {
+  threadId: string; turnId: string; requestId: string; itemId: string;
+  kind: "commandExecution" | "fileChange" | "permissions" | "userInput";
+  status: "pending" | "resolved" | "expired";
+  decidedBy: { clientId: string; label: string } | null;
+  createdAtMs: number; updatedAtMs: number; reason?: string;
+};
+// 保持原有 method + params；attach 列表里的每条请求新增可选字段。
+type PendingServerRequest = {
+  method: ServerRequestMethod; params: ServerRequestParams;
+  state?: PendingRequestState;
+};
+```
+
+`thread/attach.pendingRequests` 始终是该 thread 的**完整未决列表**，不受 sinceSeq 影响；当前服务端为每条提供 status=pending 的 state。收到快照时替换该 thread 的请求状态，随后按 requestId 应用有序增量。状态通知不走 item seq，也不回放；断线后重新 attach 即可重建当前状态，离线期间已解决的请求不会出现在快照中，不能据此恢复历史 decidedBy。旧客户端可忽略新增 state，不声明能力就不会收到新通知；notifications.optOut 仍可退订。
+
+AgentClient 默认声明 pendingRequests，`onPendingRequests(state => ...)` 在更新 `pendingRequestStates` 只读表后触发（仅增量）；快照经 `onSnapshot` 触发时表已重建。表保留当前连接观察到的终态，直到该 thread 再 attach / detach，断线时清空；用 status=pending 筛出未决项。原 `pendingRequests` 表仍保存可答复的 ServerRequestHandle，签名不变。只读客户端不需要声明 serverRequests；初次 attach 和自动重连的快照均可建立状态。连接旧服务端时 state 可缺省，通过 initialize 结果判断是否支持本功能。
 
 ## 6. item 种类与字段
 
