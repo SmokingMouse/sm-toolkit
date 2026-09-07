@@ -76,7 +76,16 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
   const content = body.flatMap(line => wrap(line, width));
   const card = model.activeCard ? renderCard(model.activeCard).flatMap(line => wrap(line, width)) : [];
   const footer = model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : "Enter 发送/排队 · /steer 插话 · Tab 推理 · PgUp/PgDn 历史 · Ctrl-C 两次退出";
-  const available = height - 4;
+  const input = model.activeCard ? model.activeCard.draft : model.input;
+  const inputLines = input.split("\n").flatMap((line, i) => wrap(`${i ? "  " : "> "}${line}`, width));
+  const inputRows = inputLines.slice(-Math.max(1, Math.min(6, height - 4)));
+  const completion = !model.activeCard && model.completion;
+  const menu = completion ? completion.candidates.slice(Math.max(0, completion.selected - 3), Math.max(0, completion.selected - 3) + 6)
+    .map(c => wrap(`${c === completion.candidates[completion.selected] ? "❯" : " "} ${completion.prefix}${c.name} — ${c.description}`, width)[0]) : [];
+  const attached = !model.activeCard ? model.attachments.map(i => wrap(`[image] ${i.path}`, width)[0]) : [];
+  const extraRows = Math.max(0, height - inputRows.length - 4);
+  const extras = extraRows ? [...attached, ...menu].slice(-extraRows) : [];
+  const available = Math.max(0, height - 3 - inputRows.length - extras.length);
   let middle: string[];
   if (card.length) {
     const cardRows = Math.min(card.length, available);
@@ -87,7 +96,5 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
     middle = content.slice(Math.max(0, end - available), end);
   }
   while (middle.length < available) middle.push("");
-  const input = model.activeCard ? model.activeCard.draft : model.input;
-  const inputTail = wrap(`> ${input}`, width).at(-1) ?? "> ";
-  return [wrap(header, width)[0], ...middle, wrap(model.message, width)[0], wrap(footer, width)[0], inputTail].join("\n");
+  return [wrap(header, width)[0], ...middle, ...extras, wrap(model.message, width)[0], wrap(footer, width)[0], ...inputRows].join("\n");
 }

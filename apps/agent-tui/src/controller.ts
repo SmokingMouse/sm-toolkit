@@ -1,9 +1,11 @@
 import type { AgentClient } from "@smokingmouse/agent-server/client";
 import type { RequestCard, TuiModel } from "./model.js";
 import { imageInput, messageInput, pasteImage, unquote } from "./attachments.js";
+import { CompletionSource } from "./completion.js";
 
-export interface Key { name?: string; ctrl?: boolean; meta?: boolean; sequence?: string }
+export interface Key { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean; paste?: boolean; sequence?: string }
 export class Controller {
+  private completions = new CompletionSource();
   private interruptedAt = -Infinity;
   private submitting = false;
   private submission?: { text: string; threadId: string; turnId?: string; id: string };
@@ -19,12 +21,31 @@ export class Controller {
       }
       this.interruptedAt = -Infinity;
       if (key.name === "pageup" || key.name === "pagedown") { this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? (this.model.activeCard ? -10 : 10) : (this.model.activeCard ? 10 : -10))); return; }
-      if (key.name === "tab") { this.model.expandedReasoning = !this.model.expandedReasoning; return; }
       if (this.model.activeCard) { await this.cardKey(this.model.activeCard, text, key); return; }
+      if (key.paste || (key.ctrl && key.name === "j") || (key.shift && ["return", "enter"].includes(key.name ?? ""))) {
+        this.model.input += key.paste ? (text ?? "") : "\n";
+        this.model.completion = undefined; return;
+      }
+      const completion = this.model.completion;
+      if (completion) {
+        if (key.name === "escape") { this.model.completion = undefined; return; }
+        if (key.name === "up" || key.name === "down") {
+          completion.selected = (completion.selected + (key.name === "up" ? -1 : 1) + completion.candidates.length) % completion.candidates.length; return;
+        }
+        if (["tab", "return", "enter"].includes(key.name ?? "")) {
+          const name = completion.candidates[completion.selected].name;
+          this.model.input = this.model.input.slice(0, completion.start) + completion.prefix + (/\s|["']/.test(name) ? JSON.stringify(name) : name) + " ";
+          this.model.completion = undefined; return;
+        }
+      }
+      if (key.name === "tab") { this.model.expandedReasoning = !this.model.expandedReasoning; return; }
       if (key.name === "return" || key.name === "enter") { await this.submit(); return; }
       if (key.name === "backspace") this.model.input = Array.from(this.model.input).slice(0, -1).join("");
       else if (key.ctrl && key.name === "u") this.model.input = "";
       else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) this.model.input += text;
+      const draft = this.model.input;
+      const next = await this.completions.complete(draft, this.model.thread?.cwd ?? process.cwd());
+      if (draft === this.model.input) this.model.completion = next;
     } catch (error) { this.model.message = error instanceof Error ? error.message : String(error); }
     finally { this.model.changed(); }
   }
@@ -64,6 +85,7 @@ export class Controller {
       }
       // Do not erase text typed while the request was in flight.
       if (this.model.input === text) this.model.input = "";
+      this.model.completion = undefined;
       this.model.attachments = this.model.attachments.filter(i => !attachments.includes(i));
       this.submission = undefined;
       this.model.scroll = 0;
