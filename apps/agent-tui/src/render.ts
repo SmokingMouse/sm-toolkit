@@ -72,14 +72,15 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
   const thread = model.thread, usage = model.usage;
   const status = `${thread ? shortId(thread.id) : "connecting"} | cwd ${thread?.cwd ?? "—"} | model ${thread?.model ?? "unknown"}`;
   const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "unknown"}${canResume(thread) ? "（可恢复 · /resume）" : ""} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection}`);
-  const headers = [...wrap(status, width), ...wrap(header, width)].slice(0, Math.max(1, height - 4));
+  const notices = model.discardNote ? [wrap(model.discardNote, width)[0]] : [];
+  const headers = [...wrap(status, width), ...wrap(header, width)].slice(0, Math.max(1, height - 4 - notices.length));
   const body = [...model.items.values()].sort((a, b) => a.seq - b.seq).flatMap(i => [...renderItem(i, model.expandedReasoning), ""]);
   for (const q of model.queue) body.push(`排队 #${q.position + 1}: ${q.preview}`);
   for (const c of model.cards.values()) if (c !== model.activeCard) body.push(...renderCard(c));
   const content = body.flatMap(line => wrap(line, width));
   const card = model.activeCard ? renderCard(model.activeCard).flatMap(line => wrap(line, width)) : [];
   const footer = model.sessionOperation ? `${model.sessionOperation} 进行中 · 按键将丢弃 · Esc 不取消在途操作` : model.picker ? "会话选择 · ↑/↓ 选择 · Enter 切换 · Esc 取消" : model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : "Ctrl-N 新建 · Ctrl-T 会话 · Enter 发送 · /steer 插话 · Tab 推理 · Ctrl-C 两次退出";
-  const available = height - headers.length - 3;
+  const available = Math.max(0, height - headers.length - 3 - notices.length);
   let middle: string[];
   if (model.picker) {
     const { entries, index } = model.picker;
@@ -103,5 +104,5 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
   while (middle.length < available) middle.push("");
   const input = model.activeCard ? model.activeCard.draft : model.input;
   const inputTail = wrap(`> ${input}`, width).at(-1) ?? "> ";
-  return [...headers, ...middle, wrap(model.message, width)[0], wrap(footer, width)[0], inputTail].join("\n");
+  return [...headers, ...middle, wrap(model.message, width)[0], ...notices, wrap(footer, width)[0], inputTail].slice(-height).join("\n");
 }

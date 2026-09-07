@@ -14,6 +14,7 @@ export class TuiModel {
   usage?: Usage;
   connection: ClientState = "disconnected";
   message = "";
+  discardNote = "";
   input = "";
   expandedReasoning = false;
   scroll = 0;

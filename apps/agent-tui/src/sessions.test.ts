@@ -86,9 +86,9 @@ test("P0-1/P2-2/P2-3: slow start, list and attach discard all in-flight keys wit
     await controller.key(undefined, { name: "return" });
     await controller.key(undefined, { ctrl: true, name: "n" });
     await controller.sessions.run("/new");
-    expect(model.message).toContain("已丢弃"); expect(model.input).toBe("");
+    expect(model.discardNote).toContain("已丢弃"); expect(model.input).toBe("");
     pending.release(); await operation;
-    expect(model.input).toBe(""); expect(model.message).toContain("按键已丢弃");
+    expect(model.input).toBe(""); expect(model.discardNote).toContain("按键已丢弃");
     expect(calls.filter(c => c[0] === "turn/start")).toHaveLength(0);
     expect(calls.filter(c => c[0] === "thread/start")).toHaveLength(command === "/new" ? 1 : 0);
   }
@@ -100,7 +100,7 @@ test("P2-6: Esc during picker attach is explicitly rejected and does not pretend
   const operation = controller.key(undefined, { name: "return" });
   expect(render(model, 120, 20)).toContain("Esc 不取消在途操作");
   await controller.key(undefined, { name: "escape" });
-  expect(model.picker).toBeDefined(); expect(model.thread?.id).toBe("old"); expect(model.message).toContain("Esc 也不取消");
+  expect(model.picker).toBeDefined(); expect(model.thread?.id).toBe("old"); expect(model.discardNote).toContain("已丢弃");
   pending.release(); await operation;
   expect(model.thread?.id).toBe("new"); expect(model.picker).toBeUndefined();
 });
@@ -109,8 +109,19 @@ test("P2-a: threads completion replaces in-flight text with one completion and d
   client.request = async (method, params) => { if (method === "thread/list") await pending.promise; return original(method, params); };
   const operation = controller.sessions.run("/threads");
   await controller.key("x"); pending.release(); await operation;
-  expect(model.message).toBe("已加载 2 个会话 · 操作期间的按键已丢弃，请重新输入");
+  expect(model.message).toBe("已加载 2 个会话");
+  expect(render(model, 120, 20).match(/按键已丢弃/g)).toHaveLength(1);
   expect(model.message).not.toContain("进行中");
+});
+test("P2-b: failed session command preserves both error and discarded-input notice", async () => {
+  const { model, controller, client } = setup(), pending = gate();
+  client.request = async () => { await pending.promise; throw new Error("engine spawn failed"); };
+  model.input = "/new";
+  const operation = controller.key(undefined, { name: "return" });
+  await controller.key("lost keys"); pending.release(); await operation;
+  expect(model.input).toBe("/new"); expect(model.message).toBe("engine spawn failed");
+  const screen = render(model, 80, 24);
+  expect(screen).toContain("engine spawn failed"); expect(screen).toContain("按键已丢弃"); expect(screen.split("\n")).toHaveLength(24);
 });
 test("P2-5: an empty daemon list gives Enter feedback and Esc dismisses it", async () => {
   const { model, controller, client, calls } = setup(), original = client.request.bind(client);
