@@ -9,7 +9,7 @@ import { MockEngine } from "../engines/mock.js";
 import { MethodSchemas, NotificationSchemas } from "../protocol/index.js";
 import { capture, client, input, until } from "../test-helpers.test.js";
 
-function fixture() {
+function childFixture() {
   const child = new EventEmitter() as ChildProcessWithoutNullStreams;
   const stdout = new PassThrough(), stderr = new PassThrough(), written: any[] = [];
   const send = (frame: unknown) => stdout.write(JSON.stringify(frame) + "\n");
@@ -19,9 +19,13 @@ function fixture() {
     callback();
   } });
   Object.assign(child, { stdout, stderr, stdin, exitCode: null, signalCode: null, kill: () => { Object.assign(child, { exitCode: 0 }); queueMicrotask(() => child.emit("close", 0)); return true; } });
+  return { child, send, written };
+}
+function fixture() {
+  let peer = childFixture(), spawned = false;
   let argv: string[] = [];
-  const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], idleTimeoutMs: 0, engineFactory: backend => backend === "claude" ? new ClaudeEngine({ spawnProcess: (_command, args) => { argv = args; return child; } }) : new MockEngine() });
-  return { server, send, written, argv: () => argv };
+  const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], idleTimeoutMs: 0, engineFactory: backend => backend === "claude" ? new ClaudeEngine({ spawnProcess: (_command, args) => { if (spawned) peer = childFixture(); spawned = true; argv = args; return peer.child; } }) : new MockEngine() });
+  return { server, send: (frame: unknown) => peer.send(frame), get written() { return peer.written; }, argv: () => argv };
 }
 
 test("P1-1: escalation requires an owned live lease on every permission entry point", async () => {
@@ -79,6 +83,24 @@ test("P2-3: unnegotiated connections receive permission changes but not engineEv
     expect(frames.some(n => "method" in n && n.method === "thread/permission/changed")).toBe(true);
     expect(frames.some(n => "method" in n && n.method === "thread/engineEvent")).toBe(false);
     expect(old.closed).toBe(false); expect((await old.request("server/health", {})).threads.idle).toBe(1);
+  } finally { await f.server.close(); }
+});
+
+test("P2-4: set_model updates thread and saved options, then respawns with the selected model", async () => {
+  const f = fixture();
+  try {
+    const c = await client(f.server), notices = capture(c);
+    const { thread } = await c.request("thread/start", { backend: "claude", model: "sonnet" });
+    f.send({ type: "system", subtype: "init", session_id: "native-model-session" });
+    await c.request("thread/engineControl", { threadId: thread.id, subtype: "set_model", params: { model: "opus" } });
+    expect(f.server.threads.get(thread.id).model).toBe("opus");
+    expect(f.server.log.options<any>(thread.id).model).toBe("opus");
+    expect(notices.some(n => "method" in n && n.method === "thread/metadata/updated" && n.params.model === "opus")).toBe(true);
+    await c.request("thread/close", { threadId: thread.id });
+    const resumed = await c.request("thread/resume", { threadId: thread.id });
+    expect(resumed.attached).toBe(false); expect(resumed.thread.model).toBe("opus");
+    expect(f.argv()[f.argv().indexOf("--model") + 1]).toBe("opus");
+    expect(f.argv()[f.argv().indexOf("--resume") + 1]).toBe("native-model-session");
   } finally { await f.server.close(); }
 });
 

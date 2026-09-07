@@ -111,6 +111,16 @@ function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => voi
   return { child, written, send };
 }
 describe("Claude native frame exchange (fake child only)", () => {
+  test("P2-4: rejected native model controls do not publish a model change", async () => {
+    const fake = fakeProcess(() => {}, (send, f) => send({ type: "control_response", response: { subtype: "error", request_id: f.request_id, error: "model unavailable" } }));
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th", model: "sonnet" });
+      expect(await engine.engineControl("set_model", { model: "opus" })).toMatchObject({ response: { subtype: "error" } });
+      expect(events.some(e => e.type === "modelChanged")).toBe(false); await engine.attach();
+    } finally { await engine.close("test"); await consuming; }
+  });
   test("P1-1: bypass availability flag requires explicit launch permission", async () => {
     for (const permission of ["readonly", "default", "plan", "acceptEdits", "dontAsk", "full", "bypassPermissions"] as const) {
       const fake = fakeProcess(() => {}); let args: string[] = [];

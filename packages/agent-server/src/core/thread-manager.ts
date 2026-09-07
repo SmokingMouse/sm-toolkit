@@ -155,6 +155,11 @@ export class ThreadManager {
     this.log.publish({ jsonrpc: "2.0", method: "thread/metadata/updated", params: { threadId, engineThreadId } });
   }
   private handle(threadId: string, event: EngineEvent): void {
+    if (event.type === "modelChanged") {
+      const thread = this.get(threadId); thread.model = event.model;
+      this.log.transaction(() => { this.log.saveThread(thread); this.log.saveOptions(threadId, { ...this.log.options<StartThreadParams>(threadId), model: event.model }); });
+      this.log.publish({ jsonrpc: "2.0", method: "thread/metadata/updated", params: { threadId, model: event.model } }); return;
+    }
     if (event.type === "permissionChanged") {
       const thread = this.get(threadId); thread.permission = event.permission;
       this.log.saveThread(thread); this.log.saveOptions(threadId, { ...this.log.options<StartThreadParams>(threadId), permission: event.permission });

@@ -14,7 +14,7 @@ export const NotificationSchemas = {
   "thread/queue/changed": z.object({ threadId: IdSchema, queue: z.array(QueuedTurnSchema) }),
   "thread/closed": z.object({ threadId: IdSchema, reason: z.string() }),
   "thread/tokenUsage/updated": z.object({ threadId: IdSchema, usage: UsageSchema }),
-  "thread/metadata/updated": z.object({ threadId: IdSchema, engineThreadId: IdSchema.nullable().optional(), title: z.string().optional(), meta: JsonObjectSchema.optional() }),
+  "thread/metadata/updated": z.object({ threadId: IdSchema, engineThreadId: IdSchema.nullable().optional(), model: z.string().optional(), title: z.string().optional(), meta: JsonObjectSchema.optional() }),
   "turn/started": z.object({ threadId: IdSchema, turnId: IdSchema, turn: TurnSchema }),
   "turn/completed": z.object({ threadId: IdSchema, turnId: IdSchema, turn: TurnSchema }),
   "turn/plan/updated": z.object({ threadId: IdSchema, turnId: IdSchema, plan: PlanSchema }),

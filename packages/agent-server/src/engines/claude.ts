@@ -130,7 +130,10 @@ export class ClaudeEngine implements EngineSession {
           const mode = PermissionSchema.safeParse(record(record(frame.response).response).mode ?? params.mode);
           if (mode.success) this.permissionChanged(mode.data);
         }
-        if (subtype === "set_model" && this.options && typeof params.model === "string") this.options.model = params.model;
+        if (subtype === "set_model" && this.options && typeof params.model === "string") {
+          this.options.model = params.model;
+          this.events.push({ type: "modelChanged", model: params.model });
+        }
       }
       if (record(frame.response).subtype !== "success" && subtype === "interrupt") this.interrupting = interrupting;
       return frame;
