@@ -3,6 +3,7 @@ import { ErrorCode, ProtocolError, ServerRequestMethodSchema, type StartTurnPara
 import { AsyncQueue, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
 import { CodexEventMapper, codexProtocolError, codexRecord, codexString, codexUserInput, mapCodexDecision, mapCodexRequest } from "./codex-mapper.js";
 import { CODEX_SCHEMA_VERSION } from "./codex-version.js";
+import { codexHistoryInstructions } from "./fork-history.js";
 
 type NativeId = string | number;
 type NativeFrame = Record<string, any>;
@@ -23,7 +24,7 @@ function checkEffort(effort?: string): void {
 }
 export function buildCodexThreadParams(options: SessionOptions): Record<string, unknown> {
   if (options.autocompact !== undefined) throw new ProtocolError(ErrorCode.backend_unsupported, "autocompact requires Claude");
-  if (options.forkSession) throw new ProtocolError(ErrorCode.unsupported_capability, "Codex fork is not implemented");
+  if (options.forkSession && !options.engineThreadId) throw new ProtocolError(ErrorCode.invalid_params, "Codex native fork requires an engine thread id");
   if (options.tools !== undefined && options.tools !== "all") throw new ProtocolError(ErrorCode.unsupported_capability, "Codex app-server does not support an AS tool allowlist");
   checkEffort(options.effort);
   const sandbox = sandboxMode(options), approval = approvalPolicy(options.permission);
@@ -33,6 +34,8 @@ export function buildCodexThreadParams(options: SessionOptions): Record<string, 
     ...(sandbox ? { sandbox } : {}), ...(approval ? { approvalPolicy: approval } : {}),
     approvalsReviewer: "user", serviceTier: "default",
     ...(options.systemPrompt !== undefined ? { baseInstructions: options.systemPrompt } : {}),
+    ...(options.seedHistory?.length ? { developerInstructions: codexHistoryInstructions(options.seedHistory) } : {}),
+    ...(options.forkSession && options.forkPoint ? { lastTurnId: options.forkPoint } : {}),
     ...(options.effort !== undefined ? { config: { model_reasoning_effort: options.effort } } : {}),
     ...(options.engineThreadId ? { threadId: options.engineThreadId, excludeTurns: true } : {}),
   };
@@ -103,10 +106,11 @@ export class CodexEngine implements EngineSession {
       child.on("close", (code, signal) => { if (!this.closed) this.fail(this.unavailable(`Codex app-server exited (${code ?? signal})`)); else this.events.end(); });
       const initialized = await this.request("initialize", { clientInfo: { name: "sm_agent_server", title: "SM Agent Server", version: "0.1.0" }, capabilities: { experimentalApi: true } });
       this.write({ method: "initialized", params: {} });
-      await this.request(options.engineThreadId ? "thread/resume" : "thread/start", params, result => {
+      await this.request(options.forkSession ? "thread/fork" : options.engineThreadId ? "thread/resume" : "thread/start", params, result => {
         const thread = codexRecord(result.thread);
         const id = codexString(thread.id, "thread id");
-        if (options.engineThreadId && id !== options.engineThreadId) throw codexProtocolError("Codex resumed a different thread", result);
+        if (options.engineThreadId && !options.forkSession && id !== options.engineThreadId) throw codexProtocolError("Codex resumed a different thread", result);
+        if (options.forkSession && id === options.engineThreadId) throw codexProtocolError("Codex fork reused the source thread", result);
         // app-server echoes clientInfo.name in userAgent; the thread is authoritative.
         const version = (typeof thread.cliVersion === "string" ? thread.cliVersion.trim() : "")
           || String(initialized.userAgent ?? "").match(/^[^\s/]+\/(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)(?=\s|$)/)?.[1];

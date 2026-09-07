@@ -84,8 +84,10 @@ function handle(frame: any) {
   if (frame.method === "initialized") { acknowledged = true; return; }
   assert.ok(acknowledged, "initialized notification must precede methods");
   const p = frame.params;
-  if (frame.method === "thread/start" || frame.method === "thread/resume") {
+  if (frame.method === "thread/start" || frame.method === "thread/resume" || frame.method === "thread/fork") {
     if (frame.method === "thread/resume") { assert.ok(p.threadId); threadId = p.threadId; }
+    if (frame.method === "thread/fork") { assert.ok(p.threadId); threadId = scenario === "fork-reuses-source" ? p.threadId : `native-fork-${process.pid}`; }
+    if (frame.method === "thread/start" && p.developerInstructions) threadId = `native-seed-${process.pid}`;
     assert.equal(p.serviceTier, "default"); assert.equal(p.approvalsReviewer, "user");
     cwd = p.cwd ?? cwd;
     const thread = { id: threadId, sessionId: threadId, cliVersion: version.cliVersion, cwd, ephemeral: false, createdAt: 1, updatedAt: 1, modelProvider: "fake", preview: "", projectId: null, source: "appServer", status: { type: "idle" }, turns: [] };

@@ -112,6 +112,38 @@ describe("Codex v2 mapper", () => {
 });
 
 describe("Codex stdio process (scripted offline peer)", () => {
+  test("midfork: native fork sends inclusive lastTurnId and returns an independent session", async () => {
+    const f = fake(), events = collect(f.engine);
+    await f.engine.spawn({ backend: "codex", threadId: "fork", cwd: f.directory, engineThreadId: "source-session", forkSession: true, forkPoint: "native-turn-boundary" });
+    const request = f.trace().find(row => row.direction === "in" && row.frame.method === "thread/fork")!.frame;
+    expect(request.params).toMatchObject({ threadId: "source-session", lastTurnId: "native-turn-boundary", excludeTurns: true });
+    expect(f.engine.engineThreadId).not.toBe("source-session");
+    await f.engine.sendTurn("next", input("continue"), { threadId: "fork", input: input("continue") });
+    await until(() => events.some(event => event.type === "turnCompleted"));
+    expect(events.find(event => event.type === "turnCompleted")).toMatchObject({ turnId: "next", status: "completed", forkPoint: expect.stringMatching(/^native-turn-/) });
+  });
+  test("midfork: seed creates a fresh session with role-labelled history and no model turn", async () => {
+    const f = fake(), events = collect(f.engine);
+    const seedHistory = [
+      ItemSchema.parse({ id: "u", turnId: "old", seq: 1, startedAtMs: 0, type: "userMessage", payload: { content: input("old question") } }),
+      ItemSchema.parse({ id: "a", turnId: "old", seq: 3, startedAtMs: 0, type: "agentMessage", payload: { text: "old answer" } }),
+    ];
+    await f.engine.spawn({ backend: "codex", threadId: "fork", cwd: f.directory, seedHistory, systemPrompt: "original system prompt" });
+    const requests = f.trace().filter(row => row.direction === "in").map(row => row.frame);
+    const start = requests.find(frame => frame.method === "thread/start");
+    expect(start.params.baseInstructions).toBe("original system prompt");
+    expect(JSON.parse(start.params.developerInstructions.split("\n")[1])).toEqual([{ role: "user", text: "old question" }, { role: "assistant", text: "old answer" }]);
+    expect(start.params).not.toHaveProperty("threadId");
+    expect(requests.some(frame => frame.method === "turn/start" || frame.method === "thread/fork")).toBe(false);
+    expect(events.some(event => event.type === "itemStarted")).toBe(false);
+    await f.engine.sendTurn("next", input("continue"), { threadId: "fork", input: input("continue") });
+    await until(() => events.some(event => event.type === "turnCompleted"));
+    expect(f.trace().find(row => row.direction === "in" && row.frame.method === "turn/start")!.frame.params.input[0].text).toBe("continue");
+  });
+  test("midfork: native fork rejects a peer that reuses the source identity", async () => {
+    const f = fake("fork-reuses-source"); collect(f.engine);
+    await expect(f.engine.spawn({ backend: "codex", threadId: "fork", cwd: f.directory, engineThreadId: "source", forkSession: true })).rejects.toMatchObject({ code: -32015 });
+  });
   test("foundation Codex events: raw notifications occur once and new Claude inputs reject before dispatch", async () => {
     const f = fake(), events = collect(f.engine);
     await f.engine.spawn({ threadId: "th", backend: "codex", cwd: f.directory });
