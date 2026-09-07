@@ -60,6 +60,26 @@ test("P1-1: escalation requires an owned live lease on every permission entry po
   } finally { await f.server.close(); }
 });
 
+test("review2 foundation P2-1 unsupported permission backend precedes every lease gate", async () => {
+  const f = fixture();
+  try {
+    const c = await client(f.server, "caller"), holder = await client(f.server, "holder");
+    const { thread } = await c.request("thread/start", { backend: "codex" });
+    for (const lease of ["none", "owned", "other"] as const) {
+      if (lease === "owned") await c.request("thread/lease/acquire", { threadId: thread.id });
+      if (lease === "other") {
+        await c.request("thread/lease/release", { threadId: thread.id });
+        await holder.request("thread/lease/acquire", { threadId: thread.id });
+      }
+      for (const permission of ["plan", "full", "bypassPermissions", "dontAsk"] as const) {
+        await expect(c.request("thread/permission/set", { threadId: thread.id, permission })).rejects.toMatchObject({ code: -32016 });
+      }
+    }
+    expect((await c.request("thread/read", { threadId: thread.id })).thread.permission).toBe(thread.permission);
+    expect(f.written).toHaveLength(0);
+  } finally { await f.server.close(); }
+});
+
 test("P2-1: invalid Claude effort rejects start, live resume and turn before native writes", async () => {
   const f = fixture();
   try {

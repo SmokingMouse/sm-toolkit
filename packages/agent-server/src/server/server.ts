@@ -238,7 +238,11 @@ export class AgentServer {
         return this.threads.start({ ...p, cwd: this.cwd(p.cwd) }, thread => this.attach(connection, thread.id));
       }
       case "thread/engineControl": { const p = params(method); permissionInput(p.threadId, p.subtype === "set_permission_mode" ? p.params.mode : undefined, p.subtype === "set_permission_mode" && p.params.ultraplan === true); return this.threads.engineControl(p); }
-      case "thread/permission/set": { const p = params(method); permissionInput(p.threadId, p.permission); return this.threads.setPermission(p); }
+      case "thread/permission/set": {
+        const p = params(method);
+        if (this.threads.get(p.threadId).backend !== "claude") throw new ProtocolError(ErrorCode.backend_unsupported, "permission changes require Claude");
+        permissionInput(p.threadId, p.permission); return this.threads.setPermission(p);
+      }
       case "thread/compact": {
         const p = params(method); this.leases.assertInput(p.threadId, connection.clientId);
         if (this.threads.get(p.threadId).backend !== "claude") throw new ProtocolError(ErrorCode.backend_unsupported, "compact requires Claude");
