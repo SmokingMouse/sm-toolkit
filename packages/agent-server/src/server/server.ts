@@ -222,7 +222,7 @@ export class AgentServer {
         if (existing) this.cwd(p.cwd ?? existing.cwd);
         return this.threads.resume(existing ? p : { ...p, cwd: this.cwd(p.cwd) }, thread => this.attach(connection, thread.id));
       }
-      case "thread/attach": { const p = params(method); this.attach(connection, p.threadId); return this.log.snapshot(p.threadId, p.sinceSeq, p.limit); }
+      case "thread/attach": { const p = params(method); this.attach(connection, p.threadId); return this.log.snapshot(p.threadId, p.sinceSeq); }
       case "thread/detach": {
         const p = params(method); this.threads.get(p.threadId); connection.subscriptions.get(p.threadId)?.(); connection.subscriptions.delete(p.threadId); connection.attached.delete(p.threadId);
         for (const request of this.log.pendingRequests(p.threadId)) connection.delivered.delete(request.params.requestId);

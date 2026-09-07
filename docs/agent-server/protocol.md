@@ -82,7 +82,7 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 | `initialize` | 见 §1 | 见 §1 | 握手 |
 | `thread/start` | `{backend, cwd?, model?, permission?, sandbox?, systemPrompt?, tools?, meta?, clientThreadId?}` | `{thread: Thread}` | 新建 thread 并 spawn 引擎 |
 | `thread/resume` | `{threadId?, engineThreadId?, backend?, cwd?, …同 start 的覆盖字段}` | `{thread: Thread, attached: boolean}` | **命中活进程即 attach**（`attached:true`，不 spawn）；否则按 `engineThreadId` 重启引擎并续接 |
-| `thread/attach` | `{threadId, sinceSeq?, limit?}` | `{thread, items: Item[], nextSeq, queue: QueuedTurn[], pendingRequests: PendingServerRequest[]}` | 拿快照并开始收该 thread 的通知 |
+| `thread/attach` | `{threadId, sinceSeq?}` | `{thread, items: Item[], nextSeq, queue: QueuedTurn[], pendingRequests: PendingServerRequest[]}` | 拿全量后缀快照并开始收该 thread 的通知；翻历史分页用 thread/items/list |
 | `thread/detach` | `{threadId}` | `{}` | 只退订，不影响 thread |
 | `thread/items/list` | `{threadId, cursor?, limit?, turnId?, direction?}` | `{items, nextCursor}` | 翻历史（快照之外的旧日志） |
 | `thread/list` | `{status?, backend?, cwd?, limit?, cursor?}` | `{threads, nextCursor}` | 列 thread |
@@ -94,6 +94,7 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 | `thread/lease/release` | `{threadId}` | `{}` | 释放 |
 
 `thread/start` / `thread/resume` 不接受 `env`（未知字段返回 `-32602`）。
+`thread/attach` 永远返回完整后缀，不接受 `limit`（`-32602`）；有界历史读取用 `thread/items/list`。
 引擎启动环境只来自 daemon 的进程环境与服务端模型路由配置；客户端不能覆盖 PATH、凭证或加载器变量。
 client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
 

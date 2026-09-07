@@ -28,7 +28,7 @@ export const MethodSchemas = {
   },
   "thread/start": { params: StartThreadParamsSchema, result: threadResult },
   "thread/resume": { params: ResumeThreadParamsSchema, result: threadResult.extend({ attached: z.boolean() }) },
-  "thread/attach": { params: threadId.extend({ sinceSeq: z.number().int().nonnegative().optional(), limit }), result: AttachResultSchema },
+  "thread/attach": { params: threadId.extend({ sinceSeq: z.number().int().nonnegative().optional() }).strict(), result: AttachResultSchema },
   "thread/detach": { params: threadId, result: empty },
   "thread/items/list": { params: threadId.extend({ cursor: z.string().optional(), limit, turnId: IdSchema.optional(), direction: z.enum(["asc", "desc"]).optional() }), result: z.object({ items: z.array(ItemSchema), nextCursor: z.string().nullable() }) },
   "thread/list": { params: z.object({ status: ThreadStatusTypeSchema.optional(), backend: BackendSchema.optional(), cwd: AbsolutePathSchema.optional(), limit, cursor: z.string().optional() }), result: z.object({ threads: z.array(ThreadSchema), nextCursor: z.string().nullable() }) },

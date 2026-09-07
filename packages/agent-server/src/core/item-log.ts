@@ -178,13 +178,11 @@ export class ItemLog {
     return { items, nextCursor: more ? String(items.at(-1)!.seq) : null };
   }
   pendingRequests(threadId: string): PendingServerRequest[] { return this.db.query<{ params_json: string }, [string]>("SELECT params_json FROM approvals WHERE thread_id=? AND status='pending' ORDER BY created_at,id").all(threadId).map(r => JSON.parse(r.params_json)); }
-  snapshot(threadId: string, sinceSeq = 0, limit?: number): AttachResult {
+  snapshot(threadId: string, sinceSeq = 0): AttachResult {
     const thread = this.thread(threadId);
     const all = this.readItems(threadId);
     // In-progress items reconcile already-seen identities after a disconnect.
     const items = all.filter(i => Math.max(i.seq, i.completedSeq ?? 0) > sinceSeq || i.status === "inProgress");
-    // AS requires the whole replay suffix. A hint must never silently skip history.
-    void limit;
     const nextSeq = this.db.query<{ next_seq: number }, [string]>("SELECT next_seq FROM threads WHERE id=?").get(threadId)!.next_seq;
     return { thread, items, nextSeq, queue: this.queue(threadId), pendingRequests: this.pendingRequests(threadId) };
   }

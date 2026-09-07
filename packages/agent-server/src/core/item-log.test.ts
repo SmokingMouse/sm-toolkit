@@ -49,7 +49,7 @@ describe("ItemLog", () => {
     expect(log.listItems({ threadId: "th", cursor: "3", limit: 2 }).items.map(i => i.seq)).toEqual([5, 7]);
     expect(log.listItems({ threadId: "th", direction: "desc", limit: 2 }).items.map(i => i.seq)).toEqual([9, 7]);
     expect(log.listItems({ threadId: "th", direction: "desc", cursor: "7" }).items.map(i => i.seq)).toEqual([5, 3, 1]);
-    expect(log.snapshot("th", 4, 1).items.map(i => i.seq)).toEqual([5, 7, 9]);
+    expect(log.snapshot("th", 4).items.map(i => i.seq)).toEqual([5, 7, 9]);
   });
   test("R4 / R3: highest-seen cursor replays offline completions, including interleaved items", () => {
     const log = create(), seen: ServerNotification[] = [];

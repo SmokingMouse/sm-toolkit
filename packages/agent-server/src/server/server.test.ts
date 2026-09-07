@@ -6,6 +6,17 @@ const servers: AgentServer[] = [];
 afterEach(async () => { for (const s of servers.splice(0)) await s.close(); });
 const create = (options = {}) => { const fixture = setup(options); servers.push(fixture.server); return fixture; };
 describe("in-process JSON-RPC server", () => {
+  test("P1: attach rejects limit; complete suffix and bounded history have separate contracts", async () => {
+    const { server } = create({ allowedRoots: [process.cwd()] }); const c = await client(server);
+    const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+    for (let i = 0; i < 5; i++) {
+      await c.request("turn/start", { threadId: thread.id, input: input(String(i)) });
+      await c.request("thread/interrupt", { threadId: thread.id }); await flush();
+    }
+    await expect(c.request("thread/attach", { threadId: thread.id, limit: 2 } as any)).rejects.toMatchObject({ code: -32602 });
+    expect((await c.request("thread/attach", { threadId: thread.id })).items).toHaveLength(5);
+    expect((await c.request("thread/items/list", { threadId: thread.id, limit: 2 })).items).toHaveLength(2);
+  });
   test("S3: clients cannot override PATH or ANTHROPIC_* on start or resume", async () => {
     const { server, engines } = create({ allowedRoots: [process.cwd()] });
     const c = await client(server);
