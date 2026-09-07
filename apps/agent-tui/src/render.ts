@@ -86,7 +86,8 @@ export function renderTimeline(model: TuiModel): string[] {
     } else lines = renderItem(item, model.expandedReasoning);
     return [...lines.map(l => indent + plain(l)), ...(children.get(item.id) ?? []).flatMap(child => visit(child, depth + 1)), ""];
   };
-  return [...items.filter(i => i.type !== "subAgent").flatMap(i => visit(i, 0)), ...items.flatMap(i => visit(i, 0))];
+  const ids = new Set(items.map(i => i.id));
+  return [...items.filter(i => i.type !== "subAgent" || !ids.has(i.payload.parentItemId)).flatMap(i => visit(i, 0)), ...items.flatMap(i => visit(i, 0))];
 }
 
 export function render(model: TuiModel, columns = 100, rows = 30, color = false): string {

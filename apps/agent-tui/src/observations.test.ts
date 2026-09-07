@@ -73,6 +73,15 @@ test("subagents nest beneath parent tools, fold individually and render orphan/c
   model.items.set("loop", sub("loop", "loop", 5));
   expect(renderTimeline(model).filter(l => l.includes("SubAgent loop"))).toHaveLength(1);
 });
+test("P2-3: orphan subagent stays between earlier and later sequence items", () => {
+  const model = new TuiModel();
+  model.items.set("first", tool("first", 1, "FIRST", {}));
+  model.items.set("orphan", { id: "orphan", seq: 2, turnId: "t", startedAtMs: 0, status: "inProgress", type: "subAgent", payload: { kind: "agent", parentItemId: "missing", phase: "working", text: "ORPHAN" } });
+  model.items.set("last", tool("last", 3, "LAST", {}));
+  const timeline = renderTimeline(model).join("\n");
+  expect(timeline.indexOf("FIRST")).toBeLessThan(timeline.indexOf("ORPHAN"));
+  expect(timeline.indexOf("ORPHAN")).toBeLessThan(timeline.indexOf("LAST"));
+});
 test("log reconnect warning survives snapshots; panel viewports preserve size and sanitize terminal input", () => {
   const model = new TuiModel();
   model.thread = { id: "th", backend: "claude", engineThreadId: null, cwd: "/tmp", createdAtMs: 0, status: { type: "idle" } };
