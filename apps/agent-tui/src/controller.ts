@@ -41,9 +41,10 @@ export class Controller {
       if (key.name === "tab") { this.model.expandedReasoning = !this.model.expandedReasoning; return; }
       if (key.name === "return" || key.name === "enter") { await this.submit(); return; }
       if (key.name === "backspace") this.model.input = Array.from(this.model.input).slice(0, -1).join("");
-      else if (key.ctrl && key.name === "u") this.model.input = "";
+      else if (key.ctrl && key.name === "u") { this.model.input = ""; this.model.attachments = []; }
       else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) this.model.input += text;
       const draft = this.model.input;
+      this.model.completion = undefined;
       const next = await this.completions.complete(draft, this.model.thread?.cwd ?? process.cwd());
       if (draft === this.model.input) this.model.completion = next;
     } catch (error) { this.model.message = error instanceof Error ? error.message : String(error); }

@@ -17,13 +17,16 @@ export async function imageInput(path: string, cwd: string): Promise<ImageInput>
 }
 
 export function unquote(path: string): string {
+  if (path.startsWith('"') && path.endsWith('"')) {
+    try { return JSON.parse(path) as string; } catch { /* Also accept literal quoted OS paths. */ }
+  }
   return /^(["']).*\1$/s.test(path) ? path.slice(1, -1) : path;
 }
 
 /** Keep ordinary @ references as text; only image references become attachments. */
 export async function messageInput(text: string, cwd: string, attached: ImageInput[] = []): Promise<UserInput[]> {
   const images = [...attached];
-  const pattern = /(^|\s)@("[^"\n]+"|'[^'\n]+'|[^\s]+)/g;
+  const pattern = /(^|\s)@("(?:\\.|[^"\\\n])+"|'[^'\n]+'|[^\s]+)/g;
   let body = "", end = 0;
   for (const match of text.matchAll(pattern)) {
     const path = unquote(match[2]);
