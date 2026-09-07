@@ -98,6 +98,7 @@ export class ThreadManager {
     let thread = params.threadId ? this.get(params.threadId) : params.engineThreadId ? this.log.findEngine(params.engineThreadId, params.backend) : undefined;
     if (!thread) {
       if (!params.engineThreadId) throw new ProtocolError(ErrorCode.thread_not_found, "thread not found");
+      if (!params.cwd) throw new ProtocolError(ErrorCode.invalid_params, "cwd is required when importing an unknown engineThreadId");
       const { threadId: _, engineThreadId, ...overrides } = params;
       const result = await this.start({ ...overrides, backend: params.backend ?? "claude" }, onAttach, { resume: engineThreadId });
       return { ...result, attached: false };

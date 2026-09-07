@@ -9,6 +9,16 @@ const servers: AgentServer[] = [];
 afterEach(async () => { for (const server of servers.splice(0)) await server.close(); });
 const create = (options = {}) => { const fixture = setup(options); servers.push(fixture.server); return fixture; };
 describe("ThreadManager", () => {
+  test("R1c: importing an unknown native thread requires explicit cwd", async () => {
+    const { server, engines } = create(); const c = await client(server);
+    await expect(c.request("thread/resume", { engineThreadId: "unknown", backend: "claude" })).rejects.toMatchObject({ code: -32602 });
+    expect(engines).toHaveLength(0); expect(server.log.allThreads()).toHaveLength(0);
+    const imported = await c.request("thread/resume", { engineThreadId: "unknown", backend: "claude", cwd: process.cwd() });
+    expect(imported.attached).toBe(false);
+    const resumed = await c.request("thread/resume", { threadId: imported.thread.id });
+    expect(resumed.attached).toBe(true); expect(resumed.thread.cwd).toBe(imported.thread.cwd);
+    expect(engines).toHaveLength(1);
+  });
   test("concurrent resume by engine ID attaches to one live process", async () => {
     const { server, engines } = create(); const c = await client(server); const d = await client(server, "second");
     const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
@@ -18,7 +28,7 @@ describe("ThreadManager", () => {
   });
   test("two simultaneous imports of an unknown engine ID spawn once", async () => {
     const { server, engines } = create(); const a = await client(server), b = await client(server);
-    const [first, second] = await Promise.all([a.request("thread/resume", { engineThreadId: "existing-session" }), b.request("thread/resume", { engineThreadId: "existing-session" })]);
+    const [first, second] = await Promise.all([a.request("thread/resume", { engineThreadId: "existing-session", cwd: process.cwd() }), b.request("thread/resume", { engineThreadId: "existing-session", cwd: process.cwd() })]);
     expect(first.thread.id).toBe(second.thread.id); expect([first.attached, second.attached].sort()).toEqual([false, true]); expect(engines).toHaveLength(1);
   });
   test("close retains history and resume spawns with engine session ID", async () => {

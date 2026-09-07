@@ -95,6 +95,8 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 
 `thread/start` / `thread/resume` 不接受 `env`（未知字段返回 `-32602`）。
 `thread/attach` 永远返回完整后缀，不接受 `limit`（`-32602`）；有界历史读取用 `thread/items/list`。
+`thread/resume` 导入未知 engineThreadId 时必须显式传 cwd（缺失返回 `-32602`）；
+恢复已知 thread 可以省略 cwd，沿用已保存的工作目录。
 引擎启动环境只来自 daemon 的进程环境与服务端模型路由配置；客户端不能覆盖 PATH、凭证或加载器变量。
 client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
 

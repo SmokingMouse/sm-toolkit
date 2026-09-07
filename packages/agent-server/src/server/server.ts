@@ -219,6 +219,7 @@ export class AgentServer {
         if (p.cwd) this.cwd(p.cwd);
         if (p.backend && !this.backends.includes(p.backend)) throw new ProtocolError(ErrorCode.unsupported_capability, "backend is not available");
         const existing = p.threadId ? this.threads.get(p.threadId) : p.engineThreadId ? this.log.findEngine(p.engineThreadId, p.backend) : undefined;
+        if (!existing && !p.cwd) throw new ProtocolError(ErrorCode.invalid_params, "cwd is required when importing an unknown engineThreadId");
         if (existing) this.cwd(p.cwd ?? existing.cwd);
         return this.threads.resume(existing ? p : { ...p, cwd: this.cwd(p.cwd) }, thread => this.attach(connection, thread.id));
       }
