@@ -200,7 +200,7 @@ export class Controller {
               if (p.requestId === handle.params.requestId) finish(new Error(`审批已过期：${p.reason}`));
             }), this.client.onStateChange(state => { if (state !== "connected") finish(new Error("审批连接中断；等待重连快照")); }), this.client.onError((error, id) => { if (id === handle.id) finish(error); }));
             card.state = "sending";
-            try { handle.respond({ permissions: handle.params.permissions, scope: "turn" }); } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+            try { handle.respond({ permissions: handle.params.permissions, scope: decision === "acceptForSession" ? "session" : "turn" }); } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
           });
           await this.setPermission("default");
         });

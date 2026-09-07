@@ -212,23 +212,27 @@ test("compact lost response retries with one queued turn and does not invent a b
   expect(render(a.model)).not.toContain("── Context compacted");
 });
 
-test("ExitPlanMode losing approval during lease acquisition never switches permission", async () => {
+test("P2-1 ExitPlanMode losing approval never switches permission or suggests takeover", async () => {
   const { a, b, command, engine, thread, home } = await setup("plan");
   await command("work"); const turnId = engine.sent[0].turnId;
   engine.emit({ type: "itemStarted", turnId, item: { id: "plan", type: "plan", payload: { text: "Review" } } });
   engine.emit({ type: "approval", request: { method: "item/permissions/requestApproval", params: { requestId: "race-plan", threadId: thread.id, turnId, itemId: "plan", cwd: home, startedAtMs: Date.now(), permissions: { toolName: "ExitPlanMode", input: {} } } }, respond() {} });
   await wait(() => !!a.model.activeCard && !!b.model.activeCard);
-  const request = a.client.request.bind(a.client);
-  a.client.request = async (method, params) => {
-    if (method === "thread/lease/acquire") { await b.controller.key("n"); await wait(() => a.model.cards.get("race-plan")?.state === "resolved"); }
-    return request(method, params);
+  const handle = a.client.pendingRequests.get("race-plan")!, respond = handle.respond.bind(handle);
+  let replay = Promise.resolve();
+  handle.respond = result => {
+    replay = b.controller.key("n").then(async () => {
+      await wait(() => a.model.cards.get("race-plan")?.state === "resolved");
+      respond(result);
+    });
   };
   await a.controller.key("y");
+  await replay; await a.client.request("server/health", {});
   expect(a.model.thread?.permission).toBe("plan"); expect(engine.permissions).toHaveLength(0);
-  expect(a.model.message).toContain("另一客户端处理");
+  expect(a.model.message).not.toContain("/takeover");
 });
 
-test("ExitPlanMode approval changes mode only after winning server confirmation; reject leaves plan", async () => {
+for (const [key, scope] of [["y", "turn"], ["s", "session"]] as const) test(`P2-5 ExitPlanMode ${key} preserves ${scope} scope and reject leaves plan`, async () => {
   const { a, engine, thread, home, command } = await setup("plan");
   await command("work"); await wait(() => engine.sent.length === 1);
   const turnId = engine.sent[0].turnId;
@@ -239,8 +243,8 @@ test("ExitPlanMode approval changes mode only after winning server confirmation;
   expect(render(a.model)).toContain("退出 Plan mode 审批");
   await a.controller.key("n"); await wait(() => !!answer); expect(a.model.thread?.permission).toBe("plan");
   answer = undefined; approval("allow-plan"); await wait(() => a.model.activeCard?.request.params.requestId === "allow-plan");
-  await a.controller.key("y");
-  expect(answer).toMatchObject({ permissions: { toolName: "ExitPlanMode" }, scope: "turn" });
+  await a.controller.key(key);
+  expect(answer).toMatchObject({ permissions: { toolName: "ExitPlanMode" }, scope });
   expect(a.model.thread?.permission).toBe("default"); expect(engine.permissions).toEqual(["default"]);
 });
 
