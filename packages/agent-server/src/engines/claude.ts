@@ -120,7 +120,10 @@ export class ClaudeEngine implements EngineSession {
     this.assertAlive();
     if (!CLAUDE_CONTROL_ALLOWLIST.has(subtype)) throw new ProtocolError(ErrorCode.unsupported_capability, `Claude control is not allowed: ${subtype}`);
     if ("subtype" in params) throw new ProtocolError(ErrorCode.invalid_params, "params must not override subtype");
-    if (subtype === "set_permission_mode" && !["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"].includes(String(params.mode))) throw new ProtocolError(ErrorCode.invalid_params, "unsupported permission mode");
+    if (subtype === "set_permission_mode") {
+      if (typeof params.mode !== "string" || !["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"].includes(params.mode)) throw new ProtocolError(ErrorCode.invalid_params, "unsupported permission mode");
+      if (params.ultraplan !== undefined && typeof params.ultraplan !== "boolean") throw new ProtocolError(ErrorCode.invalid_params, "ultraplan must be boolean");
+    }
     const interrupting = this.interrupting;
     if (subtype === "interrupt" && this.active) this.interrupting = true;
     try {

@@ -45,6 +45,8 @@ test("P1-1: escalation requires an owned live lease on every permission entry po
     const count = f.written.length;
     for (const [method, params] of calls) await expect(stranger.request(method, params)).rejects.toMatchObject({ code: -32005 });
     expect(f.written).toHaveLength(count);
+    for (const ultraplan of [1, "true", []]) await expect(stranger.request("thread/engineControl", { threadId: thread.id, subtype: "set_permission_mode", params: { mode: "plan", ultraplan } })).rejects.toMatchObject({ code: -32602 });
+    expect(f.written).toHaveLength(count);
     await owner.request("thread/lease/acquire", { threadId: thread.id });
     for (const [method, params] of calls) await expect(stranger.request(method, params)).rejects.toMatchObject({ code: -32012 });
     expect((await owner.request("thread/permission/set", { threadId: thread.id, permission: "dontAsk" })).thread.permission).toBe("dontAsk");

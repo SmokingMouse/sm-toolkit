@@ -253,7 +253,7 @@ Claude 不支持的反向 control request 会保守拒绝或取消，并发 `err
 **输入租约（可选）**：持有 `thread/lease/acquire` 的客户端在租约期内是唯一
 可以 `turn/start` / `turn/steer` / 回答反向请求的连接；其余得到
 `-32012 lease_held`（`data.holder` 带持锁者 label）。租约 TTL 默认 5 min，
-心跳续期，断线即释放。普通输入默认**不启用**；权限提升操作必须先取得 lease，见 §4 的权限语义说明。
+心跳续期，断线即释放。普通输入默认**不启用**；权限提升操作必须先取得 lease，见 §3.4 的权限语义说明。
 
 ## 6. item 种类与字段
 
@@ -321,7 +321,7 @@ type Autocompact = "auto" | number; // 整数 token 数，100000–1000000
 | `-32002` | `not_initialized` | 未握手就发方法 | 修客户端 |
 | `-32003` | `unsupported_protocol_version` | 版本不匹配 | 升级，不降级 |
 | `-32004` | `engine_unavailable` | spawn / 握手失败（`data.stderr` 带尾部） | 展示原因，允许重试 |
-| `-32005` | `unauthorized` | token 错 / cwd 不在 `allowed_roots` | 不重试 |
+| `-32005` | `unauthorized` | token 错 / cwd 不在 `allowed_roots` / 提权未持有效 lease | 修认证或先获取 lease |
 | `-32006` | `thread_busy` | 队列满（`maxQueuedTurns`） | 退避重试 |
 | `-32007` | `thread_closed` | thread 已关 | 先 `thread/resume` |
 | `-32008` | `unsupported_capability` | 例如对 external thread 发 `turn/start` | 灰掉入口 |
