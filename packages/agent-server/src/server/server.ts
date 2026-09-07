@@ -24,6 +24,7 @@ export interface InProcessClient {
   /** Transport adapters feed decoded JSON frames here, and consume frames/onFrame. */
   send(frame: unknown): Promise<void>;
   onFrame(listener: (frame: Frame) => void): () => void;
+  onClose(listener: () => void): () => void;
   request<M extends Method>(method: M, params: MethodParams<M>): Promise<MethodResult<M>>;
   notifyInitialized(): Promise<void>;
   respond(id: RpcId, result: unknown): Promise<void>;
@@ -50,6 +51,7 @@ class Connection implements InProcessClient, ApprovalClient {
   private sequence = 0;
   private reverseSequence = 0;
   private listeners = new Set<(frame: Frame) => void>();
+  private closeListeners = new Set<() => void>();
   private calls = new Map<RpcId, { resolve: (result: any) => void; reject: (error: unknown) => void }>();
   private ingress: Promise<void> = Promise.resolve();
   constructor(private readonly server: AgentServer) {}
@@ -75,6 +77,10 @@ class Connection implements InProcessClient, ApprovalClient {
     for (const listener of [...this.listeners]) { try { listener(structuredClone(frame)); } catch { /* Transport consumer isolation. */ } }
   }
   onFrame(listener: (frame: Frame) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+  onClose(listener: () => void): () => void {
+    if (this.closed) listener(); else this.closeListeners.add(listener);
+    return () => this.closeListeners.delete(listener);
+  }
   request<M extends Method>(method: M, params: MethodParams<M>): Promise<MethodResult<M>> {
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
@@ -100,6 +106,8 @@ class Connection implements InProcessClient, ApprovalClient {
     this.server.disconnect(this);
     for (const call of this.calls.values()) call.reject(new Error("connection closed"));
     this.calls.clear(); this.stream?.end(); this.listeners.clear(); this.delivered.clear();
+    for (const listener of this.closeListeners) { try { listener(); } catch { /* Transport isolation. */ } }
+    this.closeListeners.clear();
   }
 }
 
@@ -111,6 +119,7 @@ export class AgentServer {
   private connections = new Set<Connection>();
   private startedAt = Date.now();
   private closed = false;
+  private closing?: Promise<void>;
   private readonly allowedRoots: string[];
   private readonly backends: NonNullable<ServerOptions["backends"]>;
   constructor(private readonly options: ServerOptions = {}) {
@@ -136,7 +145,7 @@ export class AgentServer {
     return cwd;
   }
   private attach(connection: Connection, threadId: string): void {
-    if (connection.attached.has(threadId)) return;
+    if (connection.closed || connection.attached.has(threadId)) return;
     this.threads.get(threadId);
     const detach = this.log.subscribe(threadId, frame => connection.notification(frame));
     connection.attached.add(threadId); connection.subscriptions.set(threadId, detach);
@@ -170,7 +179,10 @@ export class AgentServer {
       const method = MethodSchema.safeParse(frame.method);
       if (!method.success) throw new ProtocolError(ErrorCode.method_not_found, `unknown method ${frame.method}`);
       const params = MethodSchemas[method.data].params.parse(frame.params);
-      const result = await this.dispatch(connection, method.data, params);
+      // A synchronous snapshot and its response share one event-loop turn. Awaiting
+      // an already-resolved promise here lets newer deltas overtake that snapshot.
+      const dispatched = this.dispatch(connection, method.data, params);
+      const result = dispatched instanceof Promise ? await dispatched : dispatched;
       const validated = MethodSchemas[method.data].result.parse(result);
       connection.emit({ jsonrpc: "2.0", id: frame.id, result: validated });
     } catch (error) {
@@ -179,7 +191,7 @@ export class AgentServer {
       if (rpc.code === ErrorCode.unsupported_protocol_version || ("method" in frame && frame.method === "initialize" && rpc.code === ErrorCode.unauthorized)) connection.close();
     }
   }
-  private async dispatch(connection: Connection, method: Method, raw: MethodParams<Method>): Promise<unknown> {
+  private dispatch(connection: Connection, method: Method, raw: MethodParams<Method>): unknown {
     // Narrow at each method using the schema's inferred params type.
     const params = <M extends Method>(_method: M) => raw as MethodParams<M>;
     switch (method) {
@@ -224,11 +236,11 @@ export class AgentServer {
         const more = threads.length > limit; threads = threads.slice(0, limit); return { threads, nextCursor: more ? threads.at(-1)!.id : null };
       }
       case "thread/fork": { const p = params(method); this.cwd(this.threads.get(p.threadId).cwd); return this.threads.fork(p, thread => this.attach(connection, thread.id)); }
-      case "thread/close": { const p = params(method); await this.threads.close(p.threadId, p.reason); this.leases.clear(p.threadId); return {}; }
-      case "thread/interrupt": return { interruptedTurnId: await this.threads.queue(params(method).threadId).interrupt() };
+      case "thread/close": { const p = params(method); return this.threads.close(p.threadId, p.reason).then(() => { this.leases.clear(p.threadId); return {}; }); }
+      case "thread/interrupt": return this.threads.queue(params(method).threadId).interrupt().then(interruptedTurnId => ({ interruptedTurnId }));
       case "turn/start": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); if (p.cwd) this.cwd(p.cwd); return this.threads.queue(p.threadId).enqueue(p); }
-      case "turn/steer": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); await this.threads.queue(p.threadId).steer(p); return {}; }
-      case "turn/interrupt": { const p = params(method); await this.threads.queue(p.threadId).interrupt(p.turnId); return {}; }
+      case "turn/steer": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.queue(p.threadId).steer(p).then(() => ({})); }
+      case "turn/interrupt": { const p = params(method); return this.threads.queue(p.threadId).interrupt(p.turnId).then(() => ({})); }
       case "turn/cancel": { const p = params(method); this.threads.queue(p.threadId).cancel(p.turnId); return {}; }
       case "thread/queue/read": return { queue: this.threads.queue(params(method).threadId).read() };
       case "thread/lease/acquire": { const p = params(method); this.threads.get(p.threadId); return { lease: this.leases.acquire(p.threadId, { clientId: connection.clientId, label: connection.label }, p.ttlMs) }; }
@@ -237,12 +249,21 @@ export class AgentServer {
       case "server/config/read": return { allowed_roots: this.allowedRoots, maxQueuedTurns: this.threads.maxQueuedTurns, orphanTimeoutMs: this.approvals.orphanTimeoutMs, idleTimeoutMs: this.threads.idleTimeoutMs };
     }
   }
-  async close(reason = "server_shutdown"): Promise<void> {
-    if (this.closed) return; this.closed = true;
-    for (const connection of this.connections) if (connection.initialized) connection.emit({ jsonrpc: "2.0", method: "server/shuttingDown", params: { reason, graceMs: 0 } });
-    await this.threads.shutdown(); this.approvals.close();
-    for (const connection of [...this.connections]) connection.close();
-    this.log.close();
+  close(reason = "server_shutdown", graceMs = 0): Promise<void> {
+    if (this.closing) return this.closing;
+    if (!Number.isFinite(graceMs) || graceMs < 0) return Promise.reject(new Error("graceMs must be nonnegative"));
+    this.closed = true;
+    for (const connection of this.connections) if (connection.initialized) connection.emit({ jsonrpc: "2.0", method: "server/shuttingDown", params: { reason, graceMs } });
+    this.closing = (async () => {
+      if (graceMs) await new Promise(resolve => setTimeout(resolve, graceMs));
+      try { await this.threads.shutdown(); }
+      finally {
+        this.approvals.close();
+        for (const connection of [...this.connections]) connection.close();
+        this.log.close();
+      }
+    })();
+    return this.closing;
   }
 }
 export { AgentServer as Server };

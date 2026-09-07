@@ -38,6 +38,9 @@
     "packages/agent-server": {
       "name": "@smokingmouse/agent-server",
       "version": "0.1.0",
+      "bin": {
+        "agent-server": "./bin/agent-server",
+      },
       "dependencies": {
         "@smokingmouse/agent": "workspace:*",
         "zod": "^4.4.3",

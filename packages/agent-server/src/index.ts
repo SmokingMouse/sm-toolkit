@@ -4,3 +4,5 @@ export * from "./protocol/index.js";
 export * from "./engines/index.js";
 export * from "./core/index.js";
 export * from "./server/index.js";
+export * from "./transport/index.js";
+export * from "./client/index.js";
