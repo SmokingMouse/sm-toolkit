@@ -128,7 +128,7 @@ test("mode commands use leases, preserve input/state on rejection, and retry tak
   await a.controller.key("", { name: "tab", shift: true }); expect(a.model.thread?.permission).toBe("default");
   engine.rejectPermission = false;
   await a.controller.key("", { name: "tab", shift: true }); expect(a.model.thread?.permission).toBe("acceptEdits");
-  await wait(() => b.model.thread?.permission === "acceptEdits"); expect(b.model.message).toContain("acceptEdits");
+  await wait(() => b.model.thread?.permission === "acceptEdits"); expect(b.model.message).toBe("");
   await command("/release"); await b.client.request("thread/lease/acquire", { threadId: thread.id });
   expect(engine.sent).toHaveLength(0);
 });
@@ -188,6 +188,14 @@ test("P2-3 model metadata synchronizes peers and fresh attach; unsupported effor
   const c = await connect("reconnected"); await c.client.request("thread/attach", { threadId: thread.id });
   expect(c.model.thread?.model).toBe("opus"); expect(c.model.effort).toBeUndefined();
   expect(c.model.contextWindow).toBe(200_000);
+});
+
+test("P2-4 remote permission notification preserves local queue feedback", async () => {
+  const { a, b, command } = await setup();
+  await command("work"); await command("queued"); expect(a.model.message).toBe("已排队 #1");
+  await b.controller.key("", { name: "tab", shift: true });
+  await wait(() => a.model.thread?.permission === "acceptEdits");
+  expect(a.model.message).toBe("已排队 #1"); expect(b.model.message).toBe("权限模式：acceptEdits");
 });
 
 test("compact lost response retries with one queued turn and does not invent a boundary", async () => {

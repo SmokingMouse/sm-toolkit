@@ -65,7 +65,7 @@ export class TuiModel {
           if (this.contextWindowEstimated) this.contextWindow = estimatedContextWindow(this.thread.model);
         }
         break;
-      case "thread/permission/changed": if (this.thread) { this.thread.permission = n.params.permission; this.message = `权限模式：${nativePermission(n.params.permission)}`; } break;
+      case "thread/permission/changed": if (this.thread) this.thread.permission = n.params.permission; break;
       case "thread/status/changed": if (this.thread) this.thread.status = n.params.status; break;
       case "thread/queue/changed": this.queue = n.params.queue; break;
       case "thread/tokenUsage/updated": this.usage = n.params.usage; break;
