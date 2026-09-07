@@ -42,6 +42,25 @@ async function setup(transport: "unix" | "ws" = "unix") {
   return { home, server, engine, manager, a, b, thread, peers };
 }
 
+test("P2-f: real approval resolves before a delayed thread scan completes", async () => {
+  const { a, engine, thread, home } = await setup();
+  const { turn } = await a.client.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "approve" }] });
+  await until(() => engine.sent.length === 1);
+  engine.emit({ type: "itemStarted", turnId: turn.id, item: { id: "tool", type: "toolCall", payload: { name: "test", input: {} } } });
+  await until(() => a.model.items.has("tool"));
+  let decision: ServerRequestResult | undefined, release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }), request = a.client.request.bind(a.client);
+  a.client.request = async (method, params) => { if (method === "thread/list") await gate; return request(method, params); };
+  const scan = a.controller.sessions.run("/threads");
+  try {
+    engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { threadId: thread.id, turnId: turn.id, itemId: "tool", requestId: "scan-approval", startedAtMs: Date.now(), command: "pwd", cwd: home } }, respond: result => { decision = result; } });
+    await until(() => !!a.model.activeCard);
+    await a.controller.key("y"); await until(() => !!decision);
+    expect(decision).toEqual({ decision: "accept" }); expect(a.controller.sessions.scanning).toBe(true);
+    expect(a.model.discardNote).toBe("");
+  } finally { release(); await scan; }
+});
+
 for (const transport of ["unix", "ws"] as const) describe(`${transport}: real AS transport with MockEngine`, () => {
   test("N1: invalid notifications leave the TUI connected and streaming on the same turn", async () => {
     const { a, engine, thread, peers } = await setup(transport);
@@ -197,7 +216,7 @@ test("real bin in Bun PTY attaches, draws deltas, answers both cards, and restor
     terminal: { cols: 140, rows: 30, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } },
   });
   try {
-    await until(() => screen.includes(thread.id) && screen.includes("Enter"));
+    await until(() => screen.includes(thread.id.slice(0, 11)) && screen.includes("Enter"));
     proc.terminal!.write("pty prompt\r"); await until(() => engine.sent.length === 1);
     const turnId = engine.sent[0].turnId;
     expect(engine.sent[0].input).toEqual([{ type: "text", text: "pty prompt" }]);

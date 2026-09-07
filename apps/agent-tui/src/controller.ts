@@ -1,12 +1,21 @@
 import type { AgentClient } from "@smokingmouse/agent-server/client";
 import type { RequestCard, TuiModel } from "./model.js";
+import { Sessions } from "./sessions.js";
+import { pickerOffset } from "./render.js";
 
 export interface Key { name?: string; ctrl?: boolean; meta?: boolean; sequence?: string }
 export class Controller {
   private interruptedAt = -Infinity;
   private submitting = false;
   private submission?: { text: string; threadId: string; turnId?: string; id: string };
-  constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) {}
+  readonly sessions: Sessions;
+  private columns = 100;
+  private rows = 30;
+  resize(columns = this.columns, rows = this.rows): void {
+    this.columns = columns; this.rows = rows;
+    if (this.model.picker) this.model.picker.offset = pickerOffset(this.model, columns, rows);
+  }
+  constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) { this.sessions = new Sessions(client, model); }
   async key(text: string | undefined, key: Key = {}): Promise<void> {
     try {
       if (key.ctrl && key.name === "c") {
@@ -17,6 +26,45 @@ export class Controller {
         return;
       }
       this.interruptedAt = -Infinity;
+      if (this.sessions.busy) {
+        const card = this.model.activeCard;
+        if (this.sessions.scanning && card) {
+          if (key.name === "pageup" || key.name === "pagedown") {
+            this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? -10 : 10)); return;
+          }
+          if (card.request.method === "item/tool/requestUserInput" || key.name === "escape" || (!key.ctrl && !key.meta && ["y", "s", "n", "a"].includes(text?.toLowerCase() ?? ""))) {
+            await this.cardKey(card, text, key); return;
+          }
+        }
+        this.sessions.rejectInput(); return;
+      }
+      if (this.model.resumeConfirmation) {
+        const threadId = this.model.resumeConfirmation;
+        if (!key.ctrl && !key.meta && text?.toLowerCase() === "y") {
+          this.model.resumeConfirmation = undefined;
+          await this.sessions.run("/resume", threadId, true);
+        } else if (text?.toLowerCase() === "n" || ["return", "enter", "escape"].includes(key.name ?? "")) {
+          this.model.resumeConfirmation = undefined; this.model.message = "已取消恢复关闭的会话";
+        }
+        return;
+      }
+      if (key.ctrl && (key.name === "n" || key.name === "t")) {
+        if (this.submitting) this.model.message = "提交进行中，本次快捷键已丢弃，请稍后重试";
+        else await this.sessions.run(key.name === "n" ? "/new" : "/threads");
+        return;
+      }
+      if (this.model.picker) {
+        const picker = this.model.picker;
+        if (key.name === "escape") this.model.picker = undefined;
+        else if (key.name === "up") picker.index = Math.max(0, picker.index - 1);
+        else if (key.name === "down") picker.index = Math.min(Math.max(0, picker.entries.length - 1), picker.index + 1);
+        else if (key.name === "return" || key.name === "enter") {
+          const entry = picker.entries[picker.index];
+          if (entry) await this.sessions.run("/resume", entry.thread.id);
+          else this.model.message = "没有可选择的会话；按 Esc 退出";
+        }
+        return;
+      }
       if (key.name === "pageup" || key.name === "pagedown") { this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? (this.model.activeCard ? -10 : 10) : (this.model.activeCard ? 10 : -10))); return; }
       if (key.name === "tab") { this.model.expandedReasoning = !this.model.expandedReasoning; return; }
       if (this.model.activeCard) { await this.cardKey(this.model.activeCard, text, key); return; }
@@ -25,12 +73,24 @@ export class Controller {
       else if (key.ctrl && key.name === "u") this.model.input = "";
       else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) this.model.input += text;
     } catch (error) { this.model.message = error instanceof Error ? error.message : String(error); }
-    finally { this.model.changed(); }
+    finally { this.resize(); this.model.changed(); }
   }
   async submit(): Promise<void> {
     const text = this.model.input.trim(), thread = this.model.thread;
-    if (!text || !thread || this.submitting) return;
+    if (this.sessions.busy) { this.sessions.rejectInput(); return; }
+    if (this.submitting) { this.model.message = "提交进行中，本次提交已丢弃，请稍后重试"; this.model.changed(); return; }
+    if (!text || !thread) return;
     if (this.client.state !== "connected") throw new Error("连接尚未恢复，输入已保留");
+    const [command, ...args] = text.split(/\s+/);
+    if (["/new", "/clear", "/threads", "/fork", "/resume"].includes(command)) {
+      if ((command !== "/resume" && args.length) || args.length > 1) throw new Error(`用法：${command}${command === "/resume" ? " [id]" : ""}`);
+      this.submitting = true;
+      this.model.input = "";
+      try { await this.sessions.run(command, args[0]); }
+      catch (error) { this.model.input = text; throw error; }
+      finally { this.submitting = false; this.model.changed(); }
+      return;
+    }
     if (thread.backend === "external") throw new Error("External thread 为只读");
     this.submitting = true;
     try {

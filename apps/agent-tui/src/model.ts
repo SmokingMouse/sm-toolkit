@@ -1,7 +1,11 @@
 import { AgentClient, type ClientState } from "@smokingmouse/agent-server/client";
 import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
+import type { ThreadEntry } from "./sessions.js";
 
 export interface RequestCard { request: PendingServerRequest; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
+export function canResume(thread: Thread | undefined): boolean {
+  return !!thread && thread.backend !== "external" && ["systemError", "closed"].includes(thread.status.type);
+}
 export class TuiModel {
   thread?: Thread;
   items = new Map<string, Item>();
@@ -10,10 +14,20 @@ export class TuiModel {
   usage?: Usage;
   connection: ClientState = "disconnected";
   message = "";
+  discardNote = "";
   input = "";
   expandedReasoning = false;
   scroll = 0;
   activeTurnId?: string;
+  sessionOperation?: string;
+  resumeConfirmation?: string;
+  picker?: { entries: ThreadEntry[]; index: number; offset?: number };
+  select(snapshot: AttachResult): void {
+    this.thread = snapshot.thread;
+    this.items.clear(); this.cards.clear(); this.queue = []; this.usage = undefined;
+    this.activeTurnId = undefined; this.scroll = 0; this.picker = undefined;
+    this.snapshot(snapshot);
+  }
   private listeners = new Set<() => void>();
   onChange(fn: () => void): () => void { this.listeners.add(fn); return () => this.listeners.delete(fn); }
   changed(): void { for (const fn of this.listeners) fn(); }
@@ -67,8 +81,14 @@ export class TuiModel {
 }
 
 export function bindClient(client: AgentClient, model: TuiModel): () => void {
+  let recovering = false;
   const disposers = [client.onSnapshot(s => model.snapshot(s)), client.onStateChange(state => {
     model.connection = state;
+    if (state === "disconnected" && model.thread) recovering = true;
+    if (recovering) model.message = state === "connected" ? canResume(model.thread)
+      ? "已重连并补齐历史；引擎已停止，请用 /resume 选择会话恢复"
+      : `已重连并恢复会话 ${model.thread?.id}（sinceSeq 补齐）` : "连接中断，正在自动重连…";
+    if (state === "connected") recovering = false;
     if (state !== "connected") { model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
     model.changed();
   }), client.onError((error, id) => {
