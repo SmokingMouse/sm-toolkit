@@ -1,7 +1,29 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseOptions, readToken } from "./options.js";
+import { TuiModel } from "./model.js";
+import { publishReady, threadStartParams } from "./handoff.js";
+
+test("fj stable startup options and first-turn gate", () => {
+  const args = ["--new", "--backend", "codex", "--model", "gpt-6-astra", "--permission", "full", "--service-tier", "default", "--client-thread-id", "stable", "--ready-file", "/tmp/ready", "--ready-nonce", "nonce", "--await-first-turn", "--fj-root", "/tmp", "--fj-cid", "fj-test"];
+  expect(parseOptions(args)).toMatchObject({ model: "gpt-6-astra", permission: "full", serviceTier: "default", clientThreadId: "stable", readyNonce: "nonce", awaitFirstTurn: true, fjContext: { root: "/tmp", cid: "fj-test" } });
+  expect(parseOptions(args).clientThreadId).toBe(parseOptions(args).clientThreadId);
+  expect(() => parseOptions(args.map(v => v === "gpt-6-astra" ? "fable" : v))).toThrow();
+  const model = new TuiModel(); model.awaitFirstTurn = true; expect(model.waitingForFirstTurn).toBe(true);
+  model.activeTurnId = "turn"; expect(model.waitingForFirstTurn).toBe(false);
+  const dir = mkdtempSync("/tmp/tui-ready-");
+  try {
+    const options = parseOptions(args); options.readyFile = join(dir, "ready.json");
+    const thread = { id: "th_ready", clientThreadId: options.clientThreadId, backend: "codex" as const, cwd: options.cwd, createdAtMs: 0, engineThreadId: "native", status: { type: "idle" as const } };
+    expect(threadStartParams(options)).toMatchObject({ clientThreadId: "stable", serviceTier: "default", permission: "full" });
+    expect(() => publishReady(options, { ...thread, clientThreadId: "other" })).toThrow("identity");
+    expect(() => publishReady(options, { ...thread, status: { type: "closed" } })).toThrow("resume");
+    publishReady(options, thread);
+    expect(statSync(options.readyFile).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(options.readyFile, "utf8"))).toMatchObject({ nonce: "nonce", threadId: thread.id, clientThreadId: "stable" });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test("CLI accepts attach/new and validates contradictory or incomplete options", () => {
   expect(parseOptions(["--attach", "th"], { HOME: "/home/test" }).endpoint).toEqual({ transport: "unix", path: "/home/test/.sm-toolkit/agent-server.sock" });

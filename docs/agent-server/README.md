@@ -10,6 +10,8 @@
 
 ---
 
+fj dogfood：受限 fjContext、显式启动模型/权限、agent-tui ready/首轮交接已接入；部署模板见 [LaunchAgent](../../scripts/agent-server/README.md)。真实坐席试点与 Trellis 集成仍由各自主控推进。
+
 ## 1. 目标
 
 **一句话**：把「谁来启动和读写 CLI 引擎进程」这件事从每个前端手里收回到一个本机

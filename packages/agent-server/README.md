@@ -3,6 +3,8 @@
 AS v1 的本机会话服务、unix/WS 传输与 TypeScript 客户端。协议见
 [protocol.md](../../docs/agent-server/protocol.md)。运行环境为 Bun。
 
+用户级 LaunchAgent 模板与安装/卸载工具见 [scripts/agent-server](../../scripts/agent-server/README.md)。fj 执行席通过受限 fjContext 传入 root/cid/seat，显式 model、permission 与普通档 serviceTier；不开放任意子进程 env。
+
 Claude 原生能力可通过 `thread/engineEvent` 观察（完整 system 帧、hook、未知子类型与速率限制），通过 `thread/engineControl` 调用白名单控制指令。旧事件照常保留，版本仍为 as/1；新库默认协商 engineEvents 和 bashInput，旧客户端收到兼容的文本输入记录。
 只有 engineEvent 需能力协商；permission/changed 仍发给已订阅线程的旧连接，由旧库静默忽略未知通知。
 

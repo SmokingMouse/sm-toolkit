@@ -26,6 +26,7 @@ export class Controller {
   constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) { this.sessions = new Sessions(client, model); this.lease = new InputLease(client, model); }
   dispose(): void { this.lease.dispose(); }
   async key(text: string | undefined, key: Key = {}): Promise<void> {
+    if (this.model.waitingForFirstTurn && !(key.ctrl && key.name === "c")) { this.model.message = "等待 fj 经 RPC 提交首轮契约"; this.model.changed(); return; }
     try {
       this.lease.touch(this.model.thread?.id);
       if (key.ctrl && key.name === "c") {
@@ -123,6 +124,7 @@ export class Controller {
     finally { this.resize(); this.model.changed(); }
   }
   async submit(): Promise<void> {
+    if (this.model.waitingForFirstTurn) { this.model.message = "等待 fj 经 RPC 提交首轮契约"; this.model.changed(); return; }
     const text = this.model.input, thread = this.model.thread;
     const attachments = [...this.model.attachments];
     if (this.sessions.busy) { this.sessions.rejectInput(); return; }
