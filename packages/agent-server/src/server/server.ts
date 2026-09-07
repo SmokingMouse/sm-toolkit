@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { timingSafeEqual } from "node:crypto";
 import { ApprovalBroker, ItemLog, LeaseManager, ThreadManager, type ApprovalClient } from "../core/index.js";
 import { AsyncQueue, ClaudeEngine, CodexEngine, type EngineFactory } from "../engines/index.js";
+import { validateClaudeEffort } from "../engines/claude.js";
 import { ErrorCode, FrameSchema, MethodSchema, MethodSchemas, ProtocolError, rpcError, type Frame, type Method, type MethodParams, type MethodResult, type PendingServerRequest, type RpcId, type ServerNotification, type ServerRequestMethod } from "../protocol/index.js";
 
 export interface ServerOptions {
@@ -232,6 +233,7 @@ export class AgentServer {
       }
       case "thread/start": {
         const p = params(method);
+        if (p.backend === "claude") validateClaudeEffort(p.effort);
         if (!this.backends.includes(p.backend)) throw new ProtocolError(ErrorCode.unsupported_capability, "backend is not available");
         return this.threads.start({ ...p, cwd: this.cwd(p.cwd) }, thread => this.attach(connection, thread.id));
       }
@@ -250,6 +252,7 @@ export class AgentServer {
         if (p.cwd) this.cwd(p.cwd);
         if (p.backend && !this.backends.includes(p.backend)) throw new ProtocolError(ErrorCode.unsupported_capability, "backend is not available");
         const existing = p.threadId ? this.threads.get(p.threadId) : p.engineThreadId ? this.log.findEngine(p.engineThreadId, p.backend) : undefined;
+        if ((existing?.backend ?? p.backend ?? "claude") === "claude") validateClaudeEffort(p.effort);
         if (existing) permissionInput(existing.id, p.permission);
         if (!existing && !p.cwd) throw new ProtocolError(ErrorCode.invalid_params, "cwd is required when importing an unknown engineThreadId");
         if (existing) this.cwd(p.cwd ?? existing.cwd);

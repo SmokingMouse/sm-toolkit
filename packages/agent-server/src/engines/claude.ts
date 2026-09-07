@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { EventType, resolveClaudeModel, type AgentEvent, type Cost } from "@smokingmouse/agent";
-import { ErrorCode, PermissionSchema, ProtocolError, type JsonObject, type StartTurnParams, type UserInput } from "../protocol/index.js";
+import { ClaudeEffortSchema, ErrorCode, PermissionSchema, ProtocolError, type JsonObject, type StartTurnParams, type UserInput } from "../protocol/index.js";
 import { AsyncQueue, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
 import { ClaudeEventMapper, jsonValue, mapPermissionDecision, mapPermissionRequest, record, type ToolPermissionRequest } from "./claude-mapper.js";
 
@@ -21,6 +21,7 @@ export function claudePermission(permission: SessionOptions["permission"] = "def
 }
 
 export function buildClaudeLaunch(options: SessionOptions): { args: string[]; env: NodeJS.ProcessEnv } {
+  validateClaudeEffort(options.effort);
   if (options.sandbox !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Claude sandbox override is not supported");
   const resolved = resolveClaudeModel(options.model);
   const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--settings", JSON.stringify({ permissions: { ask: ["*"] } })];
@@ -44,6 +45,10 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   // The shared resolver owns endpoint routing; ambient proxy settings cannot override it.
   for (const key of ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"]) delete env[key];
   return { args, env: { ...env, ...resolved.env } };
+}
+
+export function validateClaudeEffort(effort?: string): void {
+  if (effort !== undefined && !ClaudeEffortSchema.safeParse(effort).success) throw new ProtocolError(ErrorCode.invalid_params, "Claude effort must be low, medium, high, xhigh or max");
 }
 
 export function claudeUserMessage(input: UserInput[]): Record<string, unknown> {
@@ -145,6 +150,7 @@ export class ClaudeEngine implements EngineSession {
   }
   private assertAlive(): void { if (!this.process || this.dead || this.closed) throw new ProtocolError(ErrorCode.engine_unavailable, "Claude session is not alive"); }
   validateTurn(options: StartTurnParams): void {
+    validateClaudeEffort(options.effort);
     if (options.permission === "readonly" && this.options?.permission !== "readonly") throw new ProtocolError(ErrorCode.unsupported_capability, "readonly requires a new session; native permission modes support hot switching");
     if (options.input.some(p => p.type === "bash") && (options.input.length !== 1 || options.input[0].type !== "bash")) throw new ProtocolError(ErrorCode.invalid_params, "bash must be a standalone turn input");
     if ((options.cwd !== undefined && options.cwd !== this.options?.cwd) || options.sandbox !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing cwd or sandbox on a live Claude session is not supported");

@@ -54,6 +54,21 @@ test("P1-1: escalation requires an owned live lease on every permission entry po
   } finally { await f.server.close(); }
 });
 
+test("P2-1: invalid Claude effort rejects start, live resume and turn before native writes", async () => {
+  const f = fixture();
+  try {
+    const c = await client(f.server);
+    for (const effort of ["banana", "bogus", "HIGH", " "]) await expect(c.request("thread/start", { backend: "claude", effort })).rejects.toMatchObject({ code: -32602 });
+    expect(f.written).toHaveLength(0);
+    const { thread } = await c.request("thread/start", { backend: "claude", effort: "xhigh" });
+    expect(f.argv()[f.argv().indexOf("--effort") + 1]).toBe("xhigh");
+    const count = f.written.length;
+    await expect(c.request("thread/resume", { threadId: thread.id, effort: "banana" })).rejects.toMatchObject({ code: -32602 });
+    await expect(c.request("turn/start", { threadId: thread.id, effort: "banana", input: input("go") })).rejects.toMatchObject({ code: -32602 });
+    expect(f.written).toHaveLength(count);
+  } finally { await f.server.close(); }
+});
+
 test("foundation RPC: capabilities, hot permission persistence, effort shape, lease and backend refusals", async () => {
   const f = fixture();
   try {

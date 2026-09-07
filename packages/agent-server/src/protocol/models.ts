@@ -7,6 +7,7 @@ export const TimestampSchema = z.number().int().nonnegative().max(Number.MAX_SAF
 export const JsonObjectSchema = z.record(z.string(), z.json());
 export const AbsolutePathSchema = z.string().regex(/^(?:\/|[A-Za-z]:[\\/])/, "absolute local path required");
 export const BackendSchema = z.enum(["claude", "codex", "external"]);
+export const ClaudeEffortSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
 export const PermissionSchema = z.enum(["readonly", "auto-edit", "full", "default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"]);
 export const UserInputSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("bash"), command: z.string().min(1) }),

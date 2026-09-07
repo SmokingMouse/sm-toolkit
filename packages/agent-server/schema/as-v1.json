@@ -2189,6 +2189,17 @@
         "external"
       ]
     },
+    "ClaudeEffortSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
     "ClientIdentitySchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
