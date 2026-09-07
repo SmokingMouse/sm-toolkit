@@ -95,7 +95,10 @@ test("sessions PTY: /new /clear /threads /fork /resume, Ctrl-N Ctrl-T, disconnec
     expect(requests.slice(beforeRestart).filter(r => r.method === "thread/attach").map(r => r.params.threadId)).toEqual([thread.id]);
     expect(requests.slice(beforeRestart).some(r => r.method === "thread/attach" && r.params.sinceSeq > 0)).toBe(true);
     expect(screen).toContain("completed while offline"); expect(engines).toHaveLength(engineCount);
-    write(`/resume ${thread.id}\r`); await attached(thread.id);
+    write(`/resume ${thread.id}\r`);
+    await wait(() => screen.includes("[y/N]"), "gracefully closed thread requires confirmation");
+    expect(engines).toHaveLength(engineCount);
+    write("y"); await attached(thread.id);
     expect(engines).toHaveLength(engineCount + 1);
     write("after restart\r"); await wait(() => engines.at(-1)!.sent.length === 1, "new turn after restart reaches resumed engine");
     const resumed = engines.at(-1)!;
