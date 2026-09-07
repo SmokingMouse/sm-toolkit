@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { EventType, resolveClaudeModel, type AgentEvent, type Cost } from "@smokingmouse/agent";
 import { ClaudeEffortSchema, ErrorCode, PermissionSchema, ProtocolError, type JsonObject, type StartTurnParams, type UserInput } from "../protocol/index.js";
-import { AsyncQueue, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
+import { AsyncQueue, sessionEnvironment, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
 import { ClaudeEventMapper, jsonValue, mapPermissionDecision, mapPermissionRequest, record, type ToolPermissionRequest } from "./claude-mapper.js";
 
 // Local Claude Code 2.1.258 bin/claude.exe: print.ts d.request.subtype dispatch.
@@ -44,7 +44,7 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   delete env.CLAUDECODE;
   // The shared resolver owns endpoint routing; ambient proxy settings cannot override it.
   for (const key of ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"]) delete env[key];
-  return { args, env: { ...env, ...resolved.env } };
+  return { args, env: sessionEnvironment(options, { ...env, ...resolved.env }) };
 }
 
 export function validateClaudeEffort(effort?: string): void {

@@ -75,6 +75,7 @@ export class ThreadManager {
     if (existing) { onCreated?.(existing); await this.opening.get(existing.id); return { thread: this.get(existing.id), deduplicated: true }; }
     const thread: Thread = { id: `th_${crypto.randomUUID()}`, backend: params.backend, engineThreadId: internal?.fork ? null : internal?.resume ?? null, cwd: params.cwd ?? process.cwd(), status: { type: "spawning" }, createdAtMs: this.now(), ...(params.model ? { model: params.model } : {}), ...(params.meta ? { meta: params.meta } : {}), ...(params.clientThreadId ? { clientThreadId: params.clientThreadId } : {}) };
     const options = { ...params, cwd: thread.cwd };
+    if (params.fjContext) thread.meta = { ...thread.meta, fjContext: params.fjContext };
     thread.permission = params.permission ?? "default";
     this.log.insertThread(thread, request, options); onCreated?.(thread);
     this.log.publish({ jsonrpc: "2.0", method: "thread/started", params: { threadId: thread.id, thread } });

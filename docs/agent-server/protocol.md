@@ -94,7 +94,7 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 | 方法 | params | result | 说明 |
 |---|---|---|---|
 | `initialize` | 见 §1 | 见 §1 | 握手 |
-| `thread/start` | `{backend, cwd?, model?, effort?, permission?, autocompact?, sandbox?, systemPrompt?, tools?, meta?, clientThreadId?}` | `{thread: Thread}` | 新建 thread 并 spawn 引擎 |
+| `thread/start` | `{backend, cwd?, model?, effort?, permission?, serviceTier?, fjContext?, autocompact?, sandbox?, systemPrompt?, tools?, meta?, clientThreadId?}` | `{thread: Thread}` | 新建 thread 并 spawn 引擎 |
 | `thread/resume` | `{threadId?, engineThreadId?, backend?, cwd?, …同 start 的覆盖字段}` | `{thread: Thread, attached: boolean}` | **命中活进程即 attach**（`attached:true`，不 spawn）；否则按 `engineThreadId` 重启引擎并续接 |
 | `thread/attach` | `{threadId, sinceSeq?}` | `{thread, items: Item[], nextSeq, queue: QueuedTurn[], pendingRequests: PendingServerRequest[]}` | 拿全量后缀快照并开始收该 thread 的通知；翻历史分页用 thread/items/list |
 | `thread/detach` | `{threadId}` | `{}` | 只退订，不影响 thread |
@@ -112,6 +112,13 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 | `thread/compact` | `{threadId, instructions?: string, clientTurnId?: string}` | `{turn: Turn, deduplicated?: true}` | 入正常 turn 队列发送 /compact |
 
 `thread/start` / `thread/resume` 不接受 `env`（未知字段返回 `-32602`）。
+
+`serviceTier?: "default"` 显式选择普通档；Codex 的 start/resume/turn 始终为 default。
+`fjContext?: {root: absolutePath, cid: string, seat?: string}` 是受限坐席身份，禁止任意键。
+cid 匹配 `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`，seat 另允许点号。root 经 realpath 与 allowed_roots 校验。
+携带 fjContext 时必须显式 model（非空、非 fable）和 permission；Codex 必须 gpt-6-astra + serviceTier default。
+上下文随 thread options 持久化，resume 使用原值，禁止覆盖 fjContext。引擎环境清除继承的 HERDR_* 与 FENJUE_*，仅映射 FENJUE_ROOT、FENJUE_CID、可选 FENJUE_SEAT；不改变 permission 或凭证路由。
+thread.meta.fjContext 返回规范化后的身份（覆盖调用方同名 meta 键），供显示与身份核对。thread/close 尊重输入 lease，他端持有时返回 lease_held。
 `thread/attach` 永远返回完整后缀，不接受 `limit`（`-32602`）；有界历史读取用 `thread/items/list`。
 `thread/resume` 导入未知 engineThreadId 时必须显式传 cwd（缺失返回 `-32602`）；
 恢复已知 thread 可以省略 cwd，沿用已保存的工作目录。

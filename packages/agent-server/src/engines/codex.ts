@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { ErrorCode, ProtocolError, ServerRequestMethodSchema, type StartTurnParams, type UserInput } from "../protocol/index.js";
-import { AsyncQueue, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
+import { AsyncQueue, sessionEnvironment, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
 import { CodexEventMapper, codexProtocolError, codexRecord, codexString, codexUserInput, mapCodexDecision, mapCodexRequest } from "./codex-mapper.js";
 import { CODEX_SCHEMA_VERSION } from "./codex-version.js";
 
@@ -84,7 +84,7 @@ export class CodexEngine implements EngineSession {
     const params = buildCodexThreadParams(options);
     this.options = options; this.mapper = new CodexEventMapper(Boolean(options.engineThreadId));
     try {
-      this.process = (this.config.spawnProcess ?? ((command, args, opts) => spawn(command, args, { ...opts, stdio: "pipe" })))(this.config.executable ?? "codex", ["app-server", "--listen", "stdio://"], { cwd: options.cwd, env: { ...process.env } });
+      this.process = (this.config.spawnProcess ?? ((command, args, opts) => spawn(command, args, { ...opts, stdio: "pipe" })))(this.config.executable ?? "codex", ["app-server", "--listen", "stdio://"], { cwd: options.cwd, env: sessionEnvironment(options) });
       const child = this.process;
       child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => { this.stderr = (this.stderr + chunk).slice(-4000); });
