@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { dirname } from "node:path";
-import { ErrorCode, ItemSchema, ProtocolError, type AttachResult, type Item, type MethodParams, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Turn } from "../protocol/index.js";
+import { ErrorCode, ItemSchema, NotificationSchemas, ProtocolError, type AttachResult, type Item, type MethodParams, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Turn } from "../protocol/index.js";
 import type { DeltaKind, EngineItem } from "../engines/session.js";
 
 export function canonical(value: unknown): string {
@@ -208,7 +208,12 @@ export class ItemLog {
     return { snapshot: this.snapshot(threadId, sinceSeq), detach };
   }
   publish(notification: ServerNotification): void {
-    this.broadcasts.push(structuredClone(notification));
+    const parsed = NotificationSchemas[notification.method].safeParse(notification.params);
+    if (!parsed.success) {
+      console.error(`Dropped invalid ${notification.method} notification: ${parsed.error.message}`);
+      return;
+    }
+    this.broadcasts.push(structuredClone({ ...notification, params: parsed.data } as ServerNotification));
     if (this.broadcasting) return;
     this.broadcasting = true;
     try {

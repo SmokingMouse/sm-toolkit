@@ -141,7 +141,7 @@ export class ThreadManager {
   private handle(threadId: string, event: EngineEvent): void {
     if (event.type === "metadata") { this.metadata(threadId, event.engineThreadId); return; }
     if (event.type === "exit") { this.engineDied(threadId, event.error ?? new ProtocolError(ErrorCode.engine_unavailable, "engine exited", { retryable: true }).toJSON()); return; }
-    if (event.type === "error") { this.log.publish({ jsonrpc: "2.0", method: "error", params: { threadId, turnId: event.turnId, error: event.error, willRetry: event.willRetry } }); return; }
+    if (event.type === "error") { this.log.publish({ jsonrpc: "2.0", method: "error", params: { threadId, ...(event.turnId ? { turnId: event.turnId } : {}), error: event.error, willRetry: event.willRetry } }); return; }
     if (event.type === "usage") { this.log.publish({ jsonrpc: "2.0", method: "thread/tokenUsage/updated", params: { threadId, usage: event.usage } }); return; }
     if (event.type === "status") {
       if (event.status.type === "systemError") { this.engineDied(threadId, event.status.error ?? new ProtocolError(ErrorCode.engine_unavailable, "engine thread entered systemError", { retryable: true }).toJSON()); return; }

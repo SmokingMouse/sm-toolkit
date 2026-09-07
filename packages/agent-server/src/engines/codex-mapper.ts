@@ -127,7 +127,7 @@ export class CodexEventMapper {
   }
   map(method: string, raw: unknown): EngineEvent[] {
     const p = codexRecord(raw);
-    if (p.itemId && this.unknownItems.has(p.itemId)) return [{ type: "error", turnId: this.turnId, error: codexProtocolError(`Notification for unsupported Codex item: ${method}`, raw).toJSON(), willRetry: false }];
+    if (p.itemId && this.unknownItems.has(p.itemId)) return [{ type: "error", ...(this.turnId ? { turnId: this.turnId } : {}), error: codexProtocolError(`Notification for unsupported Codex item: ${method}`, raw).toJSON(), willRetry: false }];
     if (method === "thread/status/changed") {
       const native = codexRecord(p.status).type;
       if (native === "notLoaded") return []; // Loading is owned by spawn/resume.
@@ -153,7 +153,7 @@ export class CodexEventMapper {
         // An additive native variant is observable but must not kill this thread.
         const fallback: EngineItem = { id: codexString(native.id, "item id"), type: "error", status: "failed", payload: { message: error.message, code: error.code, retryable: false } };
         this.unknownItems.add(fallback.id);
-        return [...this.put(fallback, true), { type: "error", turnId: this.turnId, error: error.toJSON(), willRetry: false }];
+        return [...this.put(fallback, true), { type: "error", ...(this.turnId ? { turnId: this.turnId } : {}), error: error.toJSON(), willRetry: false }];
       }
       if (native.type === "collabAgentToolCall") for (const threadId of list(native.receiverThreadIds)) this.parents.set(threadId, item.id);
       if (item.type === "userMessage") {
@@ -195,7 +195,7 @@ export class CodexEventMapper {
     if (method === "error") {
       const error = new ProtocolError(ErrorCode.engine_unavailable, codexString(codexRecord(p.error).message, "error message"), { raw: json(p.error), retryable: p.willRetry === true }).toJSON();
       const item: EngineItem = { id: `it_${crypto.randomUUID()}`, type: "error", status: "completed", payload: { message: error.message, code: error.code, retryable: p.willRetry === true } };
-      return [...(this.turnId ? this.put(item, true) : []), { type: "error", turnId: this.turnId || undefined, error, willRetry: p.willRetry === true }];
+      return [...(this.turnId ? this.put(item, true) : []), { type: "error", ...(this.turnId ? { turnId: this.turnId } : {}), error, willRetry: p.willRetry === true }];
     }
     if (method === "turn/completed") {
       const turn = codexRecord(p.turn);

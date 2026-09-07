@@ -212,6 +212,12 @@ export class ClaudeEngine implements EngineSession {
       return;
     }
     if (t === "user") {
+      if (!this.active) {
+        if ((obj.message?.content ?? []).some((block: Record<string, unknown>) => block.type === "tool_result")) {
+          this.events.push({ type: "error", error: new ProtocolError(ErrorCode.engine_protocol_error, "tool result without active turn").toJSON(), willRetry: false });
+        }
+        return;
+      }
       for (const block of obj.message?.content ?? []) if (block.type === "tool_result") {
         const output = obj.tool_use_result?.stdout || (typeof block.content === "string" ? block.content : (block.content ?? []).map((b: Record<string, unknown>) => b.text ?? "").join("\n"));
         emit(EventType.ToolCallDone, { id: block.tool_use_id, output, stderr: obj.tool_use_result?.stderr, exitCode: obj.tool_use_result?.exitCode ?? obj.tool_use_result?.exit_code, isError: Boolean(block.is_error) });
