@@ -92,7 +92,7 @@ export class Controller {
     }
   }
   private async setPermission(permission: Permission): Promise<void> {
-    if (this.model.thread?.permission === "readonly") {
+    if (this.model.readonlyRestricted) {
       this.model.message = "readonly 为启动限制，当前线程保持 readonly；更改需新建线程";
       return;
     }

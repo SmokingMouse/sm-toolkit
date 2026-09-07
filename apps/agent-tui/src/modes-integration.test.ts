@@ -48,6 +48,7 @@ async function setup(permission: Permission = "default") {
     await client.connect(); return { client, model, controller };
   }
   const a = await connect("terminal"), b = await connect("phone");
+  a.model.launchPermission = permission;
   const { thread } = await a.client.request("thread/start", { backend: "claude", cwd: home, permission });
   for (const client of clients) await client.request("thread/attach", { threadId: thread.id });
   engine.assertLease = () => { if (!server.leases.read(thread.id)) throw new ProtocolError(-32014, "lease required"); };
@@ -65,6 +66,18 @@ test("P1-1 readonly cycle and picker preserve launch restrictions without any RP
   expect(render(a.model)).toContain("> 1. readonly (当前)");
   await a.controller.key("\r", { name: "return" });
   expect(engine.permissions).toHaveLength(0); expect(server.leases.read(thread.id)).toBeUndefined();
+});
+
+test("P1-3 launch permission remains authoritative after remote changes and unknown attach hides bypass", async () => {
+  const { a, b, thread, engine } = await setup("full");
+  engine.emit({ type: "permissionChanged", permission: "default" });
+  await wait(() => a.model.thread?.permission === "default");
+  await a.client.request("thread/attach", { threadId: thread.id });
+  expect(a.model.bypassAvailable).toBe(true); expect(b.model.bypassAvailable).toBe(false);
+  engine.emit({ type: "permissionChanged", permission: "bypassPermissions" });
+  await wait(() => b.model.thread?.permission === "bypassPermissions");
+  expect(b.model.bypassAvailable).toBe(false); expect(render(b.model, 220)).toContain("bypass 上限未知，已隐藏");
+  a.model.launchPermission = "plan"; expect(a.model.bypassAvailable).toBe(false);
 });
 
 test("P1-2 normal controls leave phone input available and escalation releases short lease on success and error", async () => {

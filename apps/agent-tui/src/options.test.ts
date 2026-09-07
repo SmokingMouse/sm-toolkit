@@ -9,6 +9,12 @@ test("CLI accepts attach/new and validates contradictory or incomplete options",
   expect(parseOptions(["--attach", "th", "--socket", "/tmp/sock"]).endpoint).toEqual({ transport: "unix", path: "/tmp/sock" });
   for (const args of [[], ["--new"], ["--new", "--backend", "other"], ["--attach", "th", "--new"], ["--attach", "th", "--socket", "x", "--ws", "ws://localhost"], ["--attach", "th", "--cwd", "/tmp"], ["--attach", "th", "--ws", "https://localhost"], ["--unknown"]]) expect(() => parseOptions(args)).toThrow();
 });
+test("P1-3 --permission is validated and only accepted for new threads", () => {
+  expect(parseOptions(["--new", "--backend", "claude", "--permission", "full"]).permission).toBe("full");
+  expect(parseOptions(["--new", "--backend", "claude"]).permission).toBe("default");
+  expect(() => parseOptions(["--attach", "th", "--permission", "full"])).toThrow();
+  expect(() => parseOptions(["--new", "--backend", "claude", "--permission", "invalid"])).toThrow();
+});
 test("uses daemon XDG resolution without creating or modifying token files", () => {
   expect(parseOptions(["--attach", "th"], { HOME: "/h", XDG_STATE_HOME: "/state", XDG_RUNTIME_DIR: "/run" })).toMatchObject({ endpoint: { path: "/run/sm-toolkit/agent-server.sock" }, tokenPath: "/state/sm-toolkit/agent-server/token" });
   const home = mkdtempSync("/tmp/tui-token-"); const token = join(home, "token");

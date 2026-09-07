@@ -15,9 +15,11 @@ export class TuiModel {
   expandedReasoning = false;
   expandedPlan = true;
   permissionPicker?: number;
-  bypassAvailable = false;
+  launchPermission?: Permission;
+  get bypassAvailable(): boolean { return nativePermission(this.launchPermission) === "bypassPermissions"; }
+  get readonlyRestricted(): boolean { return this.launchPermission === "readonly" || this.thread?.permission === "readonly"; }
   get permissionChoices(): Permission[] {
-    return this.thread?.permission === "readonly" ? ["readonly"] : [...permissionModes(this.bypassAvailable), "dontAsk"];
+    return this.readonlyRestricted ? ["readonly"] : [...permissionModes(this.bypassAvailable), "dontAsk"];
   }
   effort?: Effort;
   liveModel?: string;
@@ -36,7 +38,6 @@ export class TuiModel {
   }
   snapshot(s: AttachResult): void {
     if (this.thread && this.thread.id !== s.thread.id) return;
-    if (!this.thread) this.bypassAvailable = nativePermission(s.thread.permission) === "bypassPermissions";
     this.thread = s.thread; this.queue = s.queue;
     if (this.contextWindowEstimated) this.contextWindow = estimatedContextWindow(this.liveModel ?? s.thread.model);
     for (const item of s.items) this.items.set(item.id, structuredClone(item));

@@ -13,7 +13,8 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     const model = new TuiModel(); bindClient(client, model);
     try { await client.connect(); } catch (error) { throw new Error(`Cannot connect to agent-server (${options.endpoint.transport === "unix" ? options.endpoint.path : options.endpoint.url}). Start it with agent-server start. ${String(error)}`); }
     if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("agent-tui requires an interactive terminal (TTY)");
-    const threadId = options.attach ?? (await client.request("thread/start", { backend: options.backend!, cwd: options.cwd, permission: "default", clientThreadId: crypto.randomUUID() })).thread.id;
+    if (!options.attach) model.launchPermission = options.permission;
+    const threadId = options.attach ?? (await client.request("thread/start", { backend: options.backend!, cwd: options.cwd, permission: options.permission, clientThreadId: crypto.randomUUID() })).thread.id;
     await client.request("thread/attach", { threadId });
     const stopHerdr = startHerdr(model, text => process.stdout.write(text));
     try { await runTerminal(client, model); } finally { await stopHerdr(); }
