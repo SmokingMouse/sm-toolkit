@@ -221,6 +221,7 @@ export class AgentServer {
       }
       case "thread/engineControl": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.engineControl(p); }
       case "thread/permission/set": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.setPermission(p); }
+      case "thread/effort/set": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.engineControl({ threadId: p.threadId, subtype: "set_max_thinking_tokens", params: { max_thinking_tokens: p.maxThinkingTokens, ...(p.thinkingDisplay !== undefined ? { thinking_display: p.thinkingDisplay } : {}) } }); }
       case "thread/resume": {
         const p = params(method);
         if (p.cwd) this.cwd(p.cwd);

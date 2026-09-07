@@ -111,6 +111,19 @@ function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => voi
   return { child, written, send };
 }
 describe("Claude native frame exchange (fake child only)", () => {
+  test("foundation effort: launch label and live thinking budget have distinct native shapes", async () => {
+    let args: string[] = [];
+    const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: (_cmd, argv) => { args = argv; return fake.child; } });
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th", effort: "high" });
+      expect(args[args.indexOf("--effort") + 1]).toBe("high");
+      for (const max_thinking_tokens of [8192, 0, null]) {
+        await engine.engineControl("set_max_thinking_tokens", { max_thinking_tokens, thinking_display: "summarized" });
+        expect(fake.written.at(-1).request).toEqual({ subtype: "set_max_thinking_tokens", max_thinking_tokens, thinking_display: "summarized" });
+      }
+      await engine.sendTurn("tn", input("go"), { threadId: "th", input: input("go"), effort: "high" });
+    } finally { await engine.close("test"); }
+  });
   test("foundation permissions: native argv and acknowledged hot switching preserve the session", async () => {
     const modes = ["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"] as const;
     const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];

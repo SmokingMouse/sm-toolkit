@@ -22,10 +22,10 @@ export function claudePermission(permission: SessionOptions["permission"] = "def
 
 export function buildClaudeLaunch(options: SessionOptions): { args: string[]; env: NodeJS.ProcessEnv } {
   if (options.sandbox !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Claude sandbox override is not supported");
-  if (options.effort !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Claude effort override is not supported");
   const resolved = resolveClaudeModel(options.model);
   const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--settings", JSON.stringify({ permissions: { ask: ["*"] } })];
   if (resolved.model) args.push("--model", resolved.model);
+  if (options.effort !== undefined) args.push("--effort", options.effort);
   args.push("--include-hook-events");
   if (options.engineThreadId) args.push("--resume", options.engineThreadId);
   if (options.forkSession && options.engineThreadId) args.push("--fork-session");
@@ -131,7 +131,8 @@ export class ClaudeEngine implements EngineSession {
   }
   private assertAlive(): void { if (!this.process || this.dead || this.closed) throw new ProtocolError(ErrorCode.engine_unavailable, "Claude session is not alive"); }
   validateTurn(options: StartTurnParams): void {
-    if ((options.cwd !== undefined && options.cwd !== this.options?.cwd) || options.sandbox !== undefined || options.effort !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing cwd, sandbox or effort on a live Claude session is not supported");
+    if ((options.cwd !== undefined && options.cwd !== this.options?.cwd) || options.sandbox !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing cwd or sandbox on a live Claude session is not supported");
+    if (options.effort !== undefined && options.effort !== this.options?.effort) throw new ProtocolError(ErrorCode.unsupported_capability, "Use thread/effort/set with maxThinkingTokens for live Claude thinking budget; effort labels are launch-only");
     if (options.model && options.model !== this.options?.model && resolveClaudeModel(options.model).env) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing endpoint requires a new Claude session");
   }
   async sendTurn(turnId: string, input: UserInput[], options: StartTurnParams): Promise<void> {

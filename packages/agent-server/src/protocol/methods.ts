@@ -30,6 +30,7 @@ export const MethodSchemas = {
   "thread/start": { params: StartThreadParamsSchema, result: threadResult },
   "thread/engineControl": { params: z.strictObject({ threadId: IdSchema, subtype: z.string().min(1), params: JsonObjectSchema }), result: JsonObjectSchema },
   "thread/permission/set": { params: z.strictObject({ threadId: IdSchema, permission: PermissionSchema }), result: threadResult },
+  "thread/effort/set": { params: z.strictObject({ threadId: IdSchema, maxThinkingTokens: z.number().int().nonnegative().nullable(), thinkingDisplay: z.enum(["summarized", "omitted"]).nullable().optional() }), result: JsonObjectSchema },
   "thread/resume": { params: ResumeThreadParamsSchema, result: threadResult.extend({ attached: z.boolean() }) },
   "thread/attach": { params: threadId.extend({ sinceSeq: z.number().int().nonnegative().optional() }).strict(), result: AttachResultSchema },
   "thread/detach": { params: threadId, result: empty },

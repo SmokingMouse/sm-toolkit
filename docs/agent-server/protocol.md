@@ -121,6 +121,8 @@ client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
 
 ### Backend-specific 逃生门
 
+`thread/start` 的 effort 字符串透传 Claude `--effort <level>`。`thread/effort/set` `{threadId,maxThinkingTokens:整数|null,thinkingDisplay?:"summarized"|"omitted"|null}` → 原生 control_response，映射 `set_max_thinking_tokens {max_thinking_tokens,thinking_display?}`（2.1.258 print.ts 分派验证整数/null 与显示枚举）。这控制思考 token 预算，**不等价于** --effort 的模型推理档位；没有捏造 low/high 到 token 的换算。热切也可用 engineControl；turn/start 上不同 effort 标签会提示使用专用方法。热预算为当前 CLI 进程设置，不跨恢复持久化。
+
 `thread/permission/set`：`{threadId, permission}` → `{thread}`。Claude 原生模式 default / acceptEdits / plan / bypassPermissions / dontAsk 映射 --permission-mode，热切发送 set_permission_mode 的 mode 字段；CLI 成功确认后更新 thread.permission、持久化恢复选项，并发送 `thread/permission/changed` `{threadId,permission}`。turn/start.permission 也在发送用户帧前热切。原生拒绝不更新状态，返回 unsupported_capability。CLI 或组织策略仍可拒绝 bypass。
 旧值 full / auto-edit 分别映射 bypassPermissions / acceptEdits。readonly 启动时的 --disallowedTools 属于进程工具限制，切权限模式不会解除它。权限模式热切会清除 daemon 会话审批缓存，避免旧授权跨模式复用。
 
