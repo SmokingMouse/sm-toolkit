@@ -1,6 +1,7 @@
 import { ErrorCode, PendingServerRequestSchema, ProtocolError, ServerRequestSchemas, type ClientIdentity, type PendingServerRequest, type ServerRequestMethod, type ServerRequestResult } from "../protocol/index.js";
 import { ItemLog } from "./item-log.js";
 import { LeaseManager } from "./lease-manager.js";
+import { pendingRequestState } from "../protocol/index.js";
 
 export interface ApprovalClient extends ClientIdentity { serverRequests: ReadonlySet<ServerRequestMethod>; attached: ReadonlySet<string>; sendRequest: (request: PendingServerRequest) => void }
 export interface ApprovalBrokerOptions { orphanTimeoutMs?: number; timeoutMs?: number; now?: () => number; onDeliveryError?: (threadId: string, error: unknown) => void }
@@ -27,10 +28,12 @@ export class ApprovalBroker {
       return;
     }
     this.log.turn(p.turnId, p.threadId); this.log.item(p.threadId, p.itemId);
+    request.state = pendingRequestState(request, this.now());
     this.log.db.query("INSERT INTO approvals(id,thread_id,turn_id,item_id,kind,params_json,status,created_at) VALUES(?,?,?,?,?,?,'pending',?)").run(p.requestId, p.threadId, p.turnId, p.itemId, request.method, JSON.stringify(request), this.now());
     const audience = this.audience(request);
     const pending: Waiting = { request, respond, since: this.now(), orphan: !audience.length };
     this.waiting.set(p.requestId, pending); this.schedule(pending);
+    this.log.publish({ jsonrpc: "2.0", method: "thread/pendingRequests", params: request.state });
     for (const client of audience) client.sendRequest(structuredClone(request));
   }
   clientAttached(client: ApprovalClient, threadId: string): void {
@@ -72,6 +75,7 @@ export class ApprovalBroker {
     const changed = this.log.db.query("UPDATE approvals SET status='decided',decided_by=?,decision_json=?,decided_at=? WHERE id=? AND status='pending'").run(JSON.stringify(decidedBy), JSON.stringify(result), this.now(), requestId);
     if (!changed.changes) throw new ProtocolError(ErrorCode.already_resolved, "server request already resolved");
     this.remove(pending);
+    this.log.publish({ jsonrpc: "2.0", method: "thread/pendingRequests", params: { ...pending.request.state!, status: "resolved", decidedBy, updatedAtMs: this.now() } });
     this.log.publish({ jsonrpc: "2.0", method: "serverRequest/resolved", params: { threadId: row.thread_id, requestId, decidedBy, outcome: "decision" in result ? result.decision : result } });
     this.deliver(pending, result);
   }
@@ -85,6 +89,7 @@ export class ApprovalBroker {
     const result = defaultDecision(pending.request);
     this.log.db.query("UPDATE approvals SET status='expired',decision_json=?,decided_at=? WHERE id=? AND status='pending'").run(JSON.stringify({ reason, result }), this.now(), requestId);
     this.remove(pending);
+    this.log.publish({ jsonrpc: "2.0", method: "thread/pendingRequests", params: { ...pending.request.state!, status: "expired", reason, updatedAtMs: this.now() } });
     this.log.publish({ jsonrpc: "2.0", method: "serverRequest/expired", params: { threadId: pending.request.params.threadId, requestId, reason } });
     this.deliver(pending, result);
   }

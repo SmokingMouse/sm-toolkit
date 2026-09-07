@@ -46,6 +46,7 @@ class Connection implements InProcessClient, ApprovalClient {
   readonly delivered = new Set<string>();
   readonly optOut = new Set<string>();
   engineEvents = false;
+  pendingRequests = false;
   bashInput = false;
   label = "in-process";
   initialized = false;
@@ -109,7 +110,7 @@ class Connection implements InProcessClient, ApprovalClient {
     const id = `srv_${this.clientId}_${++this.reverseSequence}`; this.reverse.set(id, request.params.requestId);
     this.emit({ jsonrpc: "2.0", id, method: request.method, params: request.params });
   }
-  notification(frame: ServerNotification): void { if (frame.method === "thread/engineEvent" && !this.engineEvents) return; if (!this.optOut.has(frame.method)) this.emit(frame); }
+  notification(frame: ServerNotification): void { if (frame.method === "thread/engineEvent" && !this.engineEvents) return; if (frame.method === "thread/pendingRequests" && !this.pendingRequests) return; if (!this.optOut.has(frame.method)) this.emit(frame); }
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -225,11 +226,12 @@ export class AgentServer {
         }
         connection.initializing = true; connection.label = p.client.label;
         connection.engineEvents = p.capabilities?.engineEvents === true;
+        connection.pendingRequests = p.capabilities?.pendingRequests === true;
         connection.bashInput = p.capabilities?.bashInput === true;
         for (const capability of p.capabilities?.serverRequests ?? []) connection.serverRequests.add(capability);
         for (const notification of p.capabilities?.notifications?.optOut ?? []) connection.optOut.add(notification);
         const claude = this.backends.includes("claude");
-        return { protocolVersion: "as/1", server: { name: "agent-server", version: "0.1.0" }, clientId: connection.clientId, capabilities: { backends: this.backends, steer: true, fork: claude, leases: true, externalProviders: false, maxQueuedTurns: this.threads.maxQueuedTurns, engine: { engineEvents: true, engineControl: claude, permissionSet: claude, effortSet: claude, subAgentText: claude, bashInput: claude, compact: claude } } };
+        return { protocolVersion: "as/1", server: { name: "agent-server", version: "0.1.0" }, clientId: connection.clientId, capabilities: { pendingRequests: true, backends: this.backends, steer: true, fork: claude, leases: true, externalProviders: false, maxQueuedTurns: this.threads.maxQueuedTurns, engine: { engineEvents: true, engineControl: claude, permissionSet: claude, effortSet: claude, subAgentText: claude, bashInput: claude, compact: claude } } };
       }
       case "thread/start": {
         const p = params(method);

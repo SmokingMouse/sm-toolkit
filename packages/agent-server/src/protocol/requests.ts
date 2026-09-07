@@ -1,5 +1,13 @@
 import { z } from "zod";
-import { IdSchema, TimestampSchema, FileChangesSchema, JsonObjectSchema } from "./models.js";
+import { ClientIdentitySchema, IdSchema, TimestampSchema, FileChangesSchema, JsonObjectSchema } from "./models.js";
+
+export const PendingRequestStateSchema = z.object({
+  threadId: IdSchema, turnId: IdSchema, requestId: IdSchema, itemId: IdSchema,
+  kind: z.enum(["commandExecution", "fileChange", "permissions", "userInput"]),
+  status: z.enum(["pending", "resolved", "expired"]), decidedBy: ClientIdentitySchema.nullable(),
+  createdAtMs: TimestampSchema, updatedAtMs: TimestampSchema, reason: z.string().optional(),
+});
+export type PendingRequestState = z.infer<typeof PendingRequestStateSchema>;
 
 export const ApprovalDecisionSchema = z.enum(["accept", "acceptForSession", "reject", "abort"]);
 // Permissions remain backend-specific JSON objects in AS v1.
@@ -34,7 +42,7 @@ export const PendingServerRequestSchema = z.discriminatedUnion("method", [
   z.object({ method: z.literal("item/fileChange/requestApproval"), params: ServerRequestSchemas["item/fileChange/requestApproval"].params }),
   z.object({ method: z.literal("item/permissions/requestApproval"), params: ServerRequestSchemas["item/permissions/requestApproval"].params }),
   z.object({ method: z.literal("item/tool/requestUserInput"), params: ServerRequestSchemas["item/tool/requestUserInput"].params }),
-]);
+]).and(z.object({ state: PendingRequestStateSchema.optional() }));
 export type ServerRequestMethod = z.infer<typeof ServerRequestMethodSchema>;
 export type PendingServerRequest = z.infer<typeof PendingServerRequestSchema>;
 export type ServerRequestParams<M extends ServerRequestMethod> = z.infer<(typeof ServerRequestSchemas)[M]["params"]>;
@@ -42,3 +50,9 @@ export type ServerRequestResult<M extends ServerRequestMethod = ServerRequestMet
 export type ApprovalDecision = z.infer<typeof ApprovalDecisionSchema>;
 export type GrantedPermissions = z.infer<typeof GrantedPermissionsSchema>;
 export type Answer = z.infer<typeof AnswerSchema>;
+
+export function pendingRequestState(request: PendingServerRequest, createdAtMs: number): PendingRequestState {
+  const { threadId, turnId, requestId, itemId } = request.params;
+  const kinds = { "item/commandExecution/requestApproval": "commandExecution", "item/fileChange/requestApproval": "fileChange", "item/permissions/requestApproval": "permissions", "item/tool/requestUserInput": "userInput" } as const;
+  return { threadId, turnId, requestId, itemId, kind: kinds[request.method], status: "pending", decidedBy: null, createdAtMs, updatedAtMs: createdAtMs };
+}
