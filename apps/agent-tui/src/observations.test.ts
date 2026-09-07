@@ -56,7 +56,7 @@ test("task replay handles create/update/list/delete, duplicate snapshots and fai
   const items = new Map<string, Item>();
   const create = tool("create", 1, "TaskCreate", { subject: "first" });
   items.set(create.id, create); items.set(create.id, structuredClone(create));
-  expect([...rebuildTasks(items.values()).values()]).toEqual([{ id: "1", title: "first", status: "pending", inferred: true }]);
+  expect([...rebuildTasks(items.values()).values()]).toEqual([{ id: "local:create", title: "first", status: "pending", inferred: true }]);
   items.set("update", tool("update", 2, "TaskUpdate", { taskId: "1", status: "in_progress", subject: "renamed" }));
   expect(rebuildTasks(items.values()).get("1")).toMatchObject({ title: "renamed", status: "in_progress" });
   items.set("list", tool("list", 3, "TaskList", { tasks: [{ id: "8", subject: "from list", status: "pending" }] }));
@@ -67,6 +67,14 @@ test("task replay handles create/update/list/delete, duplicate snapshots and fai
   expect(rebuildTasks([tool("x", 1, "TaskCreate", { subject: "actual" }, { task: { id: "22" } })]).get("22")?.inferred).toBeUndefined();
   expect(rebuildTasks([tool("x", 1, "TaskUpdate", { taskId: "9", status: "completed" })]).get("9")?.title).toBe("标题未知");
   expect(rebuildTasks([tool("x", 1, "TaskCreate", { subject: "x" }), tool("l", 2, "TaskList", {})]).size).toBe(1);
+});
+test("P2-6: inferred task identities cannot be updated or overwritten by real engine ids", () => {
+  const items = [tool("create", 1, "TaskCreate", { subject: "inferred" }), tool("update", 2, "TaskUpdate", { taskId: "1", subject: "engine task #1", status: "in_progress" }), tool("collision", 3, "TaskUpdate", { taskId: "local:create", subject: "engine local id", status: "completed" })];
+  const tasks = rebuildTasks(items);
+  expect(tasks.size).toBe(3);
+  expect([...tasks.values()].find(t => t.inferred)).toMatchObject({ title: "inferred", status: "pending" });
+  expect(tasks.get("1")?.title).toBe("engine task #1"); expect(tasks.get("local:create")?.title).toBe("engine local id");
+  expect([...rebuildTasks([...items, tool("delete", 4, "TaskUpdate", { taskId: "local:create", status: "deleted" })]).values()].some(t => t.inferred)).toBe(true);
 });
 test("subagents nest beneath parent tools, fold individually and render orphan/cycle safely", () => {
   const model = new TuiModel();

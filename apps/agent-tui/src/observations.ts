@@ -37,16 +37,16 @@ export class LogBuffer {
 export interface ObservedTask { id: string; title: string; status: string; inferred?: boolean }
 const idOf = (value: unknown): string | undefined => typeof value === "string" && value.length > 0 || typeof value === "number" ? String(value) : undefined;
 /** Replay the current item map, so started/completed duplicates and reconnect snapshots are idempotent. */
-export function rebuildTasks(items: Iterable<Item>): Map<string, ObservedTask> {
-  const tasks = new Map<string, ObservedTask>(); let next = 1;
+export function rebuildTasks(items: Iterable<Item>): Map<string | symbol, ObservedTask> {
+  const tasks = new Map<string | symbol, ObservedTask>();
   for (const item of [...items].sort((a, b) => a.seq - b.seq)) {
     if (item.type !== "toolCall" || item.payload.isError || item.status === "failed" || item.status === "rejected") continue;
     const name = item.payload.name, input = object(item.payload.input), output = object(item.payload.output);
     if (name === "TaskCreate") {
       const explicit = idOf(input.taskId ?? input.id ?? output.taskId ?? output.id ?? object(output.task).id);
-      while (tasks.has(String(next))) next++;
-      const id = explicit ?? String(next++);
-      tasks.set(id, { id, title: String(input.subject ?? input.title ?? "未命名任务"), status: String(input.status ?? "pending"), ...(!explicit ? { inferred: true } : {}) });
+      const id = explicit ?? `local:${item.id}`;
+      // Symbols isolate inferred identities even if an engine explicitly returns a "local:*" id.
+      tasks.set(explicit ?? Symbol(item.id), { id, title: String(input.subject ?? input.title ?? "未命名任务"), status: String(input.status ?? "pending"), ...(!explicit ? { inferred: true } : {}) });
     } else if (name === "TaskUpdate") {
       const id = idOf(input.taskId ?? input.id); if (!id) continue;
       if (input.status === "deleted") { tasks.delete(id); continue; }
