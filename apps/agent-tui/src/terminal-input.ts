@@ -26,7 +26,7 @@ export class TerminalInput {
       if (marker) {
         this.buffer = this.buffer.slice(marker.length);
         if (marker === pasteStart) this.pasted = "";
-        else if (marker === pasteEnd) { this.onKey(this.pasted, { paste: true }); this.pasted = undefined; }
+        else if (marker === pasteEnd) { this.onKey(this.pasted?.replace(/\r\n?/g, "\n"), { paste: true }); this.pasted = undefined; }
         else this.onKey("\n", { name: "return", shift: true });
       } else if (markers.some(m => m.startsWith(this.buffer))) {
         // An isolated Escape must still reach readline. Paste framing may span chunks.

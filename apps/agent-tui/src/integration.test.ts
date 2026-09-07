@@ -329,10 +329,11 @@ test("PTY input: slash builtin and skill descriptions complete without sending o
 test("PTY input: Ctrl-J, Shift-Enter and bracketed multiline paste stay in one exact message", async () => {
   await inputPty(async ({ engine, write, screen, wait }) => {
     write("first\nsecond\x1b[13;2uthird\x1b[27;2;13~");
-    write("\x1b[200~  中文🙂\n\tlast\n\x1b[201~");
+    write("\x1b[200~  中文🙂\r\tlast\r\n\x1b[201~");
     await wait(() => screen().includes("中文🙂") && screen().includes("last"), "multiline paste rendered without send");
     expect(engine.sent).toHaveLength(0); write("\r"); await wait(() => engine.sent.length === 1, "one multiline message reaches engine");
     expect(engine.sent[0].input).toEqual([{ type: "text", text: "first\nsecond\nthird\n  中文🙂\n\tlast\n" }]);
+    expect(screen()).not.toContain("中文🙂last");
   });
 }, inputPtyTimeout);
 

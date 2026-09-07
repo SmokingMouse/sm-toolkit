@@ -18,7 +18,7 @@ apps/agent-tui/bin/agent-tui --attach th_example --ws ws://127.0.0.1:12345
 
 Enter 发 `turn/start`；运行时同样入队，显示从 1 起的排队位置。`/steer 文本` 显式插话；中途 attach 尚未观测到当前 turn id 时提示使用排队。Tab 切换 reasoning，PageUp/PageDown 浏览历史或长卡片。Ctrl-U 清空输入；Ctrl-C 请求中断，1.5 秒内再次 Ctrl-C 退出。
 
-输入支持多行：Shift+Enter（终端须发送 CSI-u 或 modifyOtherKeys 编码）或 Ctrl+J 换行，Enter 发送整段。终端的 bracketed paste 模式会保留粘贴的换行、缩进和首尾空白；粘贴不会自动发送。未支持 Shift+Enter 的终端请用 Ctrl+J。输入区显示最后六行。
+输入支持多行：Shift+Enter（终端须发送 CSI-u 或 modifyOtherKeys 编码）或 Ctrl+J 换行，Enter 发送整段。终端的 bracketed paste 模式会将 CR/CRLF 统一为 LF，保留换行、缩进和首尾空白；粘贴不会自动发送。未支持 Shift+Enter 的终端请用 Ctrl+J。输入区显示最后六行。
 
 输入 `@` 后显示当前会话 cwd 下的文件候选，优先用 `git ls-files --cached --others --exclude-standard`（仓库内遵守 Git 忽略规则并保留已跟踪文件）；不可用时尝试可选的 `rg --files`，再降级为纯 fs 递归，读取逐层 `.gitignore` 的 glob、目录及否定规则。三条路径均排除 `.git`/`node_modules`，不列出失效文件。无需安装 rg，git 和 rg 均不存在时也可补全。支持不连续字符模糊匹配，最多 50 条。输入 `/` 显示内建命令和 `~/.claude/skills/*/SKILL.md`、`<cwd>/.claude/skills/*/SKILL.md` 的名称及一行描述；支持 symlink，项目同名 skill 优先，内建命令保留优先级。列表缓存五秒。
 
