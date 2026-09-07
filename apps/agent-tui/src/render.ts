@@ -1,19 +1,20 @@
 import type { Item } from "@smokingmouse/agent-server/protocol";
 import { canResume, type RequestCard, type TuiModel } from "./model.js";
 import { shortId } from "./sessions.js";
+import { contextUsage, nativePermission, permissionModes } from "./modes.js";
 
 /** Strip terminal control sequences from untrusted engine/user text before drawing. */
 export function plain(text: string): string {
   return text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "").replace(/\t/g, "  ");
 }
 const json = (v: unknown) => v === undefined ? "" : JSON.stringify(v);
-export function renderItem(item: Item, expanded = false): string[] {
+export function renderItem(item: Item, expanded = false, expandedPlan = true): string[] {
   const state = item.status === "inProgress" ? " …" : item.status === "failed" || item.status === "rejected" ? ` [${item.status}]` : "";
   let body: string;
   switch (item.type) {
     case "userMessage": body = `You: ${item.payload.content.map(c => c.type === "text" ? c.text : c.type === "bash" ? c.command : `[${c.type}] ${c.path}`).join("\n")}`; break;
     case "agentMessage": body = `Agent${state}: ${item.payload.text}`; break;
-    case "reasoning": body = expanded ? `Reasoning${state}: ${[item.payload.summary, item.payload.text].filter(Boolean).join("\n")}` : `Reasoning${state}: [折叠 · Tab 展开]`; break;
+    case "reasoning": body = expanded ? `Reasoning${state}: ${[item.payload.summary, item.payload.text].filter(Boolean).join("\n")}` : `Reasoning${state}: [折叠 · Ctrl-R 展开]`; break;
     case "commandExecution": body = `$ ${item.payload.command}${state}\n  cwd: ${item.payload.cwd}\n${plain(item.payload.aggregatedOutput ?? "").split("\n").slice(-6).join("\n")}${item.payload.exitCode != null ? `\n  exit: ${item.payload.exitCode}` : ""}`; break;
     case "fileChange": body = `Files${state}:\n${item.payload.changes.map(c => `  ${c.kind} ${c.path}`).join("\n")}`; break;
     case "toolCall": body = `Tool ${item.payload.namespace ? item.payload.namespace + "/" : ""}${item.payload.name}${state}${item.payload.isError ? " [error]" : ""}\n  ${json(item.payload.input)}\n  ${json(item.payload.output)}`; break;
@@ -22,8 +23,8 @@ export function renderItem(item: Item, expanded = false): string[] {
     case "error": body = `Error${item.payload.code ? ` (${item.payload.code})` : ""}: ${item.payload.message}`; break;
     case "webSearch": body = `Search: ${item.payload.query}\n${json(item.payload.results)}`; break;
     case "imageOutput": body = `Images: ${item.payload.paths.join(", ")}`; break;
-    case "plan": body = `Plan: ${item.payload.text ?? ""}\n${item.payload.steps?.map(s => `  [${s.status}] ${s.step}`).join("\n") ?? ""}`; break;
-    case "contextCompaction": body = "Context compacted"; break;
+    case "plan": body = expandedPlan ? `Plan: ${item.payload.text ?? ""}\n${item.payload.steps?.map(s => `  [${s.status}] ${s.step}`).join("\n") ?? ""}` : `Plan: [折叠 · ${item.payload.steps?.length ?? 0} steps · Ctrl-P 展开]`; break;
+    case "contextCompaction": body = "── Context compacted · compact_boundary ──"; break;
   }
   return plain(body).split("\n");
 }
@@ -35,7 +36,9 @@ export function renderCard(card: RequestCard): string[] {
   switch (r.method) {
     case "item/commandExecution/requestApproval": lines.push(`Command: ${r.params.command}`, `cwd: ${r.params.cwd}`); break;
     case "item/fileChange/requestApproval": lines.push(...r.params.changes.map(c => `${c.kind} ${c.path}`), ...(r.params.grantRoot ? [`grantRoot: ${r.params.grantRoot}`] : [])); break;
-    case "item/permissions/requestApproval": lines.push(`Permissions: ${json(r.params.permissions)}`, `cwd: ${r.params.cwd}`); break;
+    case "item/permissions/requestApproval":
+      if (r.params.permissions.toolName === "ExitPlanMode") lines.push("退出 Plan mode 审批 · 同意后切换 default");
+      lines.push(`Permissions: ${json(r.params.permissions)}`, `cwd: ${r.params.cwd}`); break;
     case "item/tool/requestUserInput": {
       const q = r.params.questions[card.question];
       if (q) {
@@ -72,8 +75,11 @@ function frameLayout(model: TuiModel, columns: number, rows: number) {
   const thread = model.thread, usage = model.usage;
   const status = `${thread ? shortId(thread.id) : "connecting"} | cwd ${thread?.cwd ?? "—"} | model ${thread?.model ?? "unknown"}`;
   const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "unknown"}${canResume(thread) ? "（可恢复 · /resume）" : ""} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection}`);
+  const context = contextUsage(usage?.contextTokens, model.contextWindow);
+  const modeStatus = wrap(`mode ${nativePermission(thread?.permission)} | effort ${model.effort ? `${model.effort}（本端设置）` : "—"} | model ${thread?.model ?? "—"} | ctx [${context.bar}] ${context.percent ?? "?"}% / ${model.contextWindowEstimated ? "~" : ""}${model.contextWindow}${model.launchPermission === undefined ? " | bypass 上限未知，已隐藏" : ""}`, width).slice(0, height - 4);
+  if (model.leaseExpiresAt > Date.now()) modeStatus.splice(0, modeStatus.length, ...wrap(`${modeStatus.join("")} | 持有控制权至 ${new Date(model.leaseExpiresAt).toLocaleTimeString()} · /release`, width).slice(0, height - 4));
   const notices = model.discardNote ? [wrap(model.discardNote, width)[0]] : [];
-  const headers = [...wrap(status, width), ...wrap(header, width)].slice(0, Math.max(1, height - 4 - notices.length));
+  const headers = [...wrap(status, width), ...wrap(header, width), ...modeStatus.map(line => context.warning ? `\x1b[33m${line}\x1b[0m` : line)].slice(0, Math.max(1, height - 4 - notices.length));
   return { width, height, headers, notices, available: Math.max(0, height - headers.length - 3 - notices.length) };
 }
 function pickerLines(model: TuiModel, width: number): string[][] {
@@ -92,17 +98,18 @@ export function pickerOffset(model: TuiModel, columns: number, rows: number): nu
 }
 export function render(model: TuiModel, columns = 100, rows = 30): string {
   const { width, height, headers, notices, available: baseAvailable } = frameLayout(model, columns, rows);
-  const body = [...model.items.values()].sort((a, b) => a.seq - b.seq).flatMap(i => [...renderItem(i, model.expandedReasoning), ""]);
+  const body = [...model.items.values()].sort((a, b) => a.seq - b.seq).flatMap(i => [...renderItem(i, model.expandedReasoning, model.expandedPlan), ""]);
   for (const q of model.queue) body.push(`排队 #${q.position + 1}: ${q.preview}`);
   for (const c of model.cards.values()) if (c !== model.activeCard) body.push(...renderCard(c));
   const content = body.flatMap(line => wrap(line, width));
-  const card = model.activeCard ? renderCard(model.activeCard).flatMap(line => wrap(line, width)) : [];
+  const picker = model.permissionPicker === undefined ? [] : ["权限模式 · ↑↓/数字选择 · Enter 确认 · Esc 取消", ...model.permissionChoices.map((p, i) => `${i === model.permissionPicker ? ">" : " "} ${i + 1}. ${p}${p === nativePermission(model.thread?.permission) ? " (当前)" : ""}`)];
+  const card = (model.activeCard ? renderCard(model.activeCard) : picker).flatMap(line => wrap(line, width));
   const scanCard = model.sessionOperation === "/threads" && !!model.activeCard;
-  const footer = scanCard ? "/threads 加载中 · 审批/问题卡可操作 · Ctrl-C 中断" : model.sessionOperation ? `${model.sessionOperation} 进行中 · 按键将丢弃 · Esc 不取消在途操作` : model.resumeConfirmation ? "恢复已关闭会话？[y/N] · Enter/n/Esc 取消" : model.picker ? "会话选择 · ↑/↓ 选择 · Enter 切换 · Esc 取消" : model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : model.completion && !model.picker ? "↑↓ 选择 · Tab/Enter 插入 · Esc 关闭补全" : "Ctrl-N 新建 · Ctrl-T 会话 · Enter 发送 · /steer 插话 · Tab 推理 · Ctrl-C 两次退出";
+  const footer = scanCard ? "/threads 加载中 · 审批/问题卡可操作 · Ctrl-C 中断" : model.sessionOperation ? `${model.sessionOperation} 进行中 · 按键将丢弃 · Esc 不取消在途操作` : model.resumeConfirmation ? "恢复已关闭会话？[y/N] · Enter/n/Esc 取消" : model.picker ? "会话选择 · ↑/↓ 选择 · Enter 切换 · Esc 取消" : model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : model.permissionPicker !== undefined ? "权限模式 · ↑↓/数字选择 · Enter 确认 · Esc 取消" : model.completion && !model.picker ? "↑↓ 选择 · Tab/Enter 插入 · Esc 关闭补全" : "Ctrl-N 新建 · Ctrl-T 会话 · Enter 发送 · Tab effort · Shift-Tab 权限 · Ctrl-R 推理 · Ctrl-C 两次退出";
   const input = model.activeCard ? model.activeCard.draft : model.input;
   const inputLines = input.split("\n").flatMap((line, i) => wrap(`${i ? "  " : "> "}${line}`, width));
   const inputRows = inputLines.slice(-Math.max(1, Math.min(6, height - 4)));
-  const completion = !model.activeCard && !model.picker && !model.sessionOperation && model.completion;
+  const completion = !model.activeCard && model.permissionPicker === undefined && !model.picker && !model.sessionOperation && model.completion;
   const menu = completion ? completion.candidates.slice(Math.max(0, completion.selected - 3), Math.max(0, completion.selected - 3) + 6)
     .map(c => wrap(`${c === completion.candidates[completion.selected] ? "❯" : " "} ${completion.prefix}${c.name} — ${c.description}`, width)[0]) : [];
   const attached = !model.activeCard ? model.attachments.map(i => wrap(`[image] ${i.path}`, width)[0]) : [];

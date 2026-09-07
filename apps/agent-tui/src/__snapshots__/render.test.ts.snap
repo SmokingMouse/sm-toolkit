@@ -6,7 +6,7 @@ exports[`all item types render stable text, folded and expanded reasoning 1`] = 
 
 Agent …: Hello 世界
 
-Reasoning: [折叠 · Tab 展开]
+Reasoning: [折叠 · Ctrl-R 展开]
 
 $ pwd
   cwd: /tmp
@@ -44,7 +44,7 @@ Images: /tmp/image.png
 Plan: Build
   [pending] test
 
-Context compacted"
+── Context compacted · compact_boundary ──"
 `;
 
 exports[`approval and question cards show contents and resolutions 1`] = `

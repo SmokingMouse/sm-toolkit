@@ -3,6 +3,7 @@ import { NotificationMethodSchema, type AttachResult, type Item, type PendingSer
 import type { ThreadEntry } from "./sessions.js";
 import type { ImageInput } from "./attachments.js";
 import type { Completion } from "./completion.js";
+import { controlError, estimatedContextWindow, nativePermission, permissionModes, type Effort, type Permission } from "./modes.js";
 
 export interface RequestCard { request: PendingServerRequest; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
 export function canResume(thread: Thread | undefined): boolean {
@@ -21,6 +22,18 @@ export class TuiModel {
   attachments: ImageInput[] = [];
   completion?: Completion;
   expandedReasoning = false;
+  expandedPlan = true;
+  permissionPicker?: number;
+  launchPermission?: Permission;
+  get bypassAvailable(): boolean { return nativePermission(this.launchPermission) === "bypassPermissions"; }
+  get readonlyRestricted(): boolean { return this.launchPermission === "readonly" || this.thread?.permission === "readonly"; }
+  get permissionChoices(): Permission[] {
+    return this.readonlyRestricted ? ["readonly"] : [...permissionModes(this.bypassAvailable), ...(this.bypassAvailable ? ["dontAsk" as const] : [])];
+  }
+  effort?: Effort;
+  leaseExpiresAt = 0;
+  contextWindow = 200_000;
+  contextWindowEstimated = true;
   scroll = 0;
   activeTurnId?: string;
   sessionOperation?: string;
@@ -43,6 +56,8 @@ export class TuiModel {
   snapshot(s: AttachResult): void {
     if (this.thread && this.thread.id !== s.thread.id) return;
     this.thread = s.thread; this.queue = s.queue;
+    this.effort = undefined;
+    if (this.contextWindowEstimated) this.contextWindow = estimatedContextWindow(s.thread.model);
     for (const item of s.items) this.items.set(item.id, structuredClone(item));
     const ids = new Set(s.pendingRequests.map(r => r.params.requestId));
     for (const [id, card] of this.cards) if (!ids.has(id) && ["pending", "sending", "offline"].includes(card.state)) {
@@ -61,6 +76,14 @@ export class TuiModel {
   notification(n: ServerNotification): void {
     if ("threadId" in n.params && this.thread && n.params.threadId && n.params.threadId !== this.thread.id) return;
     switch (n.method) {
+      case "thread/metadata/updated":
+        if (this.thread) {
+          const { threadId: _, ...metadata } = n.params;
+          Object.assign(this.thread, metadata);
+          if (this.contextWindowEstimated) this.contextWindow = estimatedContextWindow(this.thread.model);
+        }
+        break;
+      case "thread/permission/changed": if (this.thread) this.thread.permission = n.params.permission; break;
       case "thread/status/changed": if (this.thread) this.thread.status = n.params.status; break;
       case "thread/queue/changed": this.queue = n.params.queue; break;
       case "thread/tokenUsage/updated": this.usage = n.params.usage; break;
@@ -93,10 +116,10 @@ export function bindClient(client: AgentClient, model: TuiModel): () => void {
       ? "已重连并补齐历史；引擎已停止，请用 /resume 选择会话恢复"
       : `已重连并恢复会话 ${model.thread?.id}（sinceSeq 补齐）` : "连接中断，正在自动重连…";
     if (state === "connected") recovering = false;
-    if (state !== "connected") { model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
+    if (state !== "connected") { model.effort = undefined; model.leaseExpiresAt = 0; model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
     model.changed();
   }), client.onError((error, id) => {
-    model.message = error.message;
+    model.message = controlError(error);
     for (const handle of client.pendingRequests.values()) {
       const card = model.cards.get(handle.params.requestId);
       if (handle.id === id && card?.state === "sending") card.state = "pending";
