@@ -29,10 +29,11 @@ export const ServerRequestSchemas = {
   },
 } as const;
 export const ServerRequestMethodSchema = z.enum(Object.keys(ServerRequestSchemas) as [keyof typeof ServerRequestSchemas, ...(keyof typeof ServerRequestSchemas)[]]);
-function pending<T extends keyof typeof ServerRequestSchemas>(method: T) { return z.object({ method: z.literal(method), params: ServerRequestSchemas[method].params }); }
 export const PendingServerRequestSchema = z.discriminatedUnion("method", [
-  pending("item/commandExecution/requestApproval"), pending("item/fileChange/requestApproval"),
-  pending("item/permissions/requestApproval"), pending("item/tool/requestUserInput"),
+  z.object({ method: z.literal("item/commandExecution/requestApproval"), params: ServerRequestSchemas["item/commandExecution/requestApproval"].params }),
+  z.object({ method: z.literal("item/fileChange/requestApproval"), params: ServerRequestSchemas["item/fileChange/requestApproval"].params }),
+  z.object({ method: z.literal("item/permissions/requestApproval"), params: ServerRequestSchemas["item/permissions/requestApproval"].params }),
+  z.object({ method: z.literal("item/tool/requestUserInput"), params: ServerRequestSchemas["item/tool/requestUserInput"].params }),
 ]);
 export type ServerRequestMethod = z.infer<typeof ServerRequestMethodSchema>;
 export type PendingServerRequest = z.infer<typeof PendingServerRequestSchema>;

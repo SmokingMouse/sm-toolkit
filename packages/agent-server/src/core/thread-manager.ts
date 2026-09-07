@@ -1,0 +1,180 @@
+import { ErrorCode, ProtocolError, rpcError, type MethodParams, type MethodResult, type RpcError, type StartThreadParams, type Thread, type ThreadStatus } from "../protocol/index.js";
+import type { EngineEvent, EngineFactory, EngineSession, SessionOptions } from "../engines/session.js";
+import { ItemLog } from "./item-log.js";
+import { TurnQueue } from "./turn-queue.js";
+import type { ApprovalBroker } from "./approval-broker.js";
+
+export interface ThreadManagerOptions { maxQueuedTurns?: number; idleTimeoutMs?: number; now?: () => number }
+const transitions: Record<ThreadStatus["type"], ThreadStatus["type"][]> = {
+  spawning: ["idle", "systemError", "closed"], idle: ["running", "closed", "systemError"],
+  running: ["idle", "interrupted", "systemError", "closed"], interrupted: ["idle", "systemError", "closed"],
+  systemError: ["spawning", "closed"], closed: ["spawning"],
+};
+export class ThreadManager {
+  readonly live = new Map<string, EngineSession>();
+  readonly engineThreads = new Map<string, string>();
+  private opening = new Map<string, Promise<void>>();
+  private closing = new Map<string, Promise<void>>();
+  private queues = new Map<string, TurnQueue>();
+  private idleSince = new Map<string, number>();
+  private consumers = new Map<string, Promise<void>>();
+  private timer: ReturnType<typeof setInterval>;
+  approvals?: ApprovalBroker;
+  readonly maxQueuedTurns: number;
+  readonly idleTimeoutMs: number;
+  private now: () => number;
+  constructor(readonly log: ItemLog, private readonly factory: EngineFactory, options: ThreadManagerOptions = {}) {
+    this.maxQueuedTurns = options.maxQueuedTurns ?? 8; this.idleTimeoutMs = options.idleTimeoutMs ?? 30 * 60_000; this.now = options.now ?? Date.now;
+    // The database outlives engines. No process survives this owner restarting.
+    for (const thread of log.allThreads()) if (!["closed", "systemError"].includes(thread.status.type)) {
+      const error = new ProtocolError(ErrorCode.engine_unavailable, "server restarted; resume required", { threadId: thread.id, retryable: true }).toJSON();
+      thread.status = { type: "systemError", error }; log.saveThread(thread);
+      for (const turn of log.turns(thread.id)) if (turn.status === "inProgress") {
+        turn.status = "failed"; turn.error = error; turn.completedAtMs = this.now(); log.saveTurn(turn); log.finishOpenItems(thread.id, turn.id, true);
+      }
+    }
+    this.timer = setInterval(() => { void this.sweepIdle(); }, Math.max(10, Math.min(this.idleTimeoutMs || 60_000, 60_000))); this.timer.unref();
+  }
+  get(threadId: string): Thread { return this.log.thread(threadId); }
+  session(threadId: string): EngineSession {
+    const session = this.live.get(threadId);
+    if (!session) throw new ProtocolError(ErrorCode.engine_unavailable, "no live engine", { threadId, retryable: true });
+    return session;
+  }
+  queue(threadId: string): TurnQueue {
+    this.get(threadId);
+    let queue = this.queues.get(threadId);
+    if (!queue) { queue = new TurnQueue(threadId, this.log, () => this.session(threadId), status => this.setStatus(threadId, status), this.maxQueuedTurns); this.queues.set(threadId, queue); }
+    return queue;
+  }
+  setStatus(threadId: string, status: ThreadStatus): void {
+    const thread = this.get(threadId);
+    if (thread.status.type !== status.type && !transitions[thread.status.type].includes(status.type)) throw new ProtocolError(ErrorCode.internal, `invalid thread transition ${thread.status.type} -> ${status.type}`, { threadId });
+    thread.status = status; this.log.saveThread(thread);
+    if (status.type === "idle") this.idleSince.set(threadId, this.now()); else this.idleSince.delete(threadId);
+    this.log.publish({ jsonrpc: "2.0", method: "thread/status/changed", params: { threadId, status } });
+  }
+  async start(params: StartThreadParams, onCreated?: (thread: Thread) => void, internal?: { resume?: string; fork?: boolean; request?: unknown }): Promise<MethodResult<"thread/start">> {
+    const request = internal?.request ?? params;
+    const existing = this.log.deduplicate<Thread>("threads", params.clientThreadId, request);
+    if (existing) { onCreated?.(existing); await this.opening.get(existing.id); return { thread: this.get(existing.id), deduplicated: true }; }
+    const thread: Thread = { id: `th_${crypto.randomUUID()}`, backend: params.backend, engineThreadId: internal?.fork ? null : internal?.resume ?? null, cwd: params.cwd ?? process.cwd(), status: { type: "spawning" }, createdAtMs: this.now(), ...(params.model ? { model: params.model } : {}), ...(params.meta ? { meta: params.meta } : {}), ...(params.clientThreadId ? { clientThreadId: params.clientThreadId } : {}) };
+    const options = { ...params, cwd: thread.cwd };
+    this.log.insertThread(thread, request, options); onCreated?.(thread);
+    this.log.publish({ jsonrpc: "2.0", method: "thread/started", params: { threadId: thread.id, thread } });
+    await this.open(thread, { ...options, threadId: thread.id, engineThreadId: internal?.resume, forkSession: internal?.fork });
+    return { thread: this.get(thread.id) };
+  }
+  private open(thread: Thread, options: SessionOptions): Promise<void> {
+    const pending = this.opening.get(thread.id); if (pending) return pending;
+    const job = Promise.resolve().then(async () => {
+      let session: EngineSession | undefined;
+      try {
+        session = this.factory(thread.backend); this.live.set(thread.id, session);
+        const owned = session;
+        const consumer = (async () => {
+          try {
+            for await (const event of owned.events) {
+              if (this.live.get(thread.id) !== owned) break;
+              this.handle(thread.id, event);
+            }
+            if (this.live.get(thread.id) === owned) this.engineDied(thread.id, new ProtocolError(ErrorCode.engine_unavailable, "engine event stream ended", { retryable: true }).toJSON());
+          } catch (error) { if (this.live.get(thread.id) === owned) this.engineDied(thread.id, rpcError(error)); }
+        })();
+        this.consumers.set(thread.id, consumer);
+        await session.spawn(options);
+        if (this.live.get(thread.id) !== session) throw new ProtocolError(ErrorCode.engine_unavailable, "engine died while spawning");
+        if (session.engineThreadId) this.metadata(thread.id, session.engineThreadId);
+        this.setStatus(thread.id, { type: "idle" }); this.queue(thread.id).resume();
+      } catch (error) {
+        this.engineDied(thread.id, rpcError(error));
+        if (session) await session.close("spawn_failed").catch(() => {});
+        throw error instanceof ProtocolError ? error : new ProtocolError(ErrorCode.engine_unavailable, String(error), { threadId: thread.id, retryable: true });
+      }
+    }).finally(() => { this.opening.delete(thread.id); });
+    this.opening.set(thread.id, job); return job;
+  }
+  async resume(params: MethodParams<"thread/resume">, onAttach?: (thread: Thread) => void): Promise<MethodResult<"thread/resume">> {
+    let thread = params.threadId ? this.get(params.threadId) : params.engineThreadId ? this.log.findEngine(params.engineThreadId, params.backend) : undefined;
+    if (!thread) {
+      if (!params.engineThreadId) throw new ProtocolError(ErrorCode.thread_not_found, "thread not found");
+      const { threadId: _, engineThreadId, ...overrides } = params;
+      const result = await this.start({ ...overrides, backend: params.backend ?? "claude" }, onAttach, { resume: engineThreadId });
+      return { ...result, attached: false };
+    }
+    if ((params.engineThreadId && thread.engineThreadId !== params.engineThreadId) || (params.backend && thread.backend !== params.backend)) throw new ProtocolError(ErrorCode.invalid_params, "thread identity does not match");
+    onAttach?.(thread);
+    await this.closing.get(thread.id);
+    const pending = this.opening.get(thread.id);
+    if (pending || this.live.has(thread.id)) {
+      if (pending) await pending;
+      await this.session(thread.id).attach();
+      return { thread: this.get(thread.id), attached: true };
+    }
+    thread = this.get(thread.id);
+    const { threadId: _, engineThreadId: __, ...overrides } = params;
+    const options = { ...this.log.options(thread.id), ...overrides, backend: thread.backend };
+    this.log.saveOptions(thread.id, options); thread.cwd = options.cwd ?? thread.cwd; thread.model = options.model; delete thread.closedAtMs; this.log.saveThread(thread);
+    this.setStatus(thread.id, { type: "spawning" });
+    await this.open(thread, { ...options, threadId: thread.id, engineThreadId: thread.engineThreadId ?? undefined });
+    return { thread: this.get(thread.id), attached: false };
+  }
+  async fork(params: MethodParams<"thread/fork">, onCreated?: (thread: Thread) => void): Promise<MethodResult<"thread/fork">> {
+    const source = this.get(params.threadId);
+    // TODO: fromItemId on Claude requires a prefix-jsonl transcript fork.
+    if (params.fromItemId !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "fork fromItemId requires prefix-jsonl support", { threadId: source.id });
+    if (source.backend !== "claude" || !source.engineThreadId) throw new ProtocolError(ErrorCode.unsupported_capability, "native Claude fork needs an engine session id", { threadId: source.id });
+    const { clientThreadId: _, ...options } = this.log.options(source.id);
+    return this.start({ ...options, clientThreadId: params.clientThreadId }, onCreated, { resume: source.engineThreadId, fork: true, request: params });
+  }
+  private metadata(threadId: string, engineThreadId: string): void {
+    const owner = this.engineThreads.get(engineThreadId);
+    if (owner && owner !== threadId) throw new ProtocolError(ErrorCode.engine_protocol_error, "engine session already owned by another live thread", { threadId });
+    const thread = this.get(threadId);
+    if (thread.engineThreadId && thread.engineThreadId !== engineThreadId && this.engineThreads.get(thread.engineThreadId) === threadId) this.engineThreads.delete(thread.engineThreadId);
+    this.engineThreads.set(engineThreadId, threadId);
+    if (thread.engineThreadId === engineThreadId) return;
+    thread.engineThreadId = engineThreadId; this.log.saveThread(thread);
+    this.log.publish({ jsonrpc: "2.0", method: "thread/metadata/updated", params: { threadId, engineThreadId } });
+  }
+  private handle(threadId: string, event: EngineEvent): void {
+    if (event.type === "metadata") { this.metadata(threadId, event.engineThreadId); return; }
+    if (event.type === "exit") { this.engineDied(threadId, event.error ?? new ProtocolError(ErrorCode.engine_unavailable, "engine exited", { retryable: true }).toJSON()); return; }
+    const turnId = event.type === "approval" ? event.request.params.turnId : event.turnId;
+    if (this.queue(threadId).runningTurnId !== turnId) return; // stale output from an interrupted/closed generation
+    switch (event.type) {
+      case "itemStarted": this.log.startItem(threadId, turnId, event.item); break;
+      case "itemDelta": this.log.delta(threadId, event.itemId, event.kind, event.text); break;
+      case "itemUpdated": this.log.updateItem(threadId, event.item); break;
+      case "itemCompleted": this.log.updateItem(threadId, event.item, true); break;
+      case "turnCompleted": this.approvals?.expireThread(threadId, "turn_completed", turnId); this.queue(threadId).complete(turnId, event.status, event.usage, event.error); break;
+      case "approval":
+        if (!this.approvals) throw new ProtocolError(ErrorCode.internal, "ApprovalBroker is not configured");
+        this.approvals.create(event.request, event.respond); break;
+    }
+  }
+  engineDied(threadId: string, error: RpcError): void {
+    const session = this.live.get(threadId); this.live.delete(threadId);
+    for (const [id, owner] of this.engineThreads) if (owner === threadId) this.engineThreads.delete(id);
+    if (this.get(threadId).status.type === "closed") return;
+    this.queue(threadId).freeze(error); this.approvals?.expireThread(threadId, "engine_gone");
+    this.log.publish({ jsonrpc: "2.0", method: "error", params: { threadId, error, willRetry: false } });
+    if (session) void session.close("engine_gone").catch(() => {});
+  }
+  async close(threadId: string, reason = "client_request"): Promise<void> {
+    this.get(threadId);
+    const closing = this.closing.get(threadId); if (closing) return closing;
+    const job = (async () => {
+      await this.opening.get(threadId)?.catch(() => {});
+      this.queue(threadId).pause(); this.approvals?.expireThread(threadId, "thread_closed");
+      const session = this.live.get(threadId); this.live.delete(threadId);
+      for (const [id, owner] of this.engineThreads) if (owner === threadId) this.engineThreads.delete(id);
+      await session?.close(reason); await this.consumers.get(threadId); this.consumers.delete(threadId);
+      const thread = this.get(threadId); thread.closedAtMs = this.now(); this.log.saveThread(thread); this.setStatus(threadId, { type: "closed" });
+      this.log.publish({ jsonrpc: "2.0", method: "thread/closed", params: { threadId, reason } });
+    })().finally(() => this.closing.delete(threadId));
+    this.closing.set(threadId, job); return job;
+  }
+  async sweepIdle(): Promise<void> { if (this.idleTimeoutMs <= 0) return; for (const [id, since] of this.idleSince) if (this.now() - since >= this.idleTimeoutMs) await this.close(id, "idle_timeout"); }
+  async shutdown(): Promise<void> { clearInterval(this.timer); for (const id of new Set([...this.live.keys(), ...this.opening.keys()])) await this.close(id, "server_shutdown"); }
+}
