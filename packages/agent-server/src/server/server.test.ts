@@ -120,6 +120,6 @@ describe("in-process JSON-RPC server", () => {
     await a.respond(approvalFrame(af)!.id, { decision: "reject" }); expect(af.at(-1)).toMatchObject({ error: { code: -32014 } });
     a.close(); const reconnect = await client(server); const snapshot = await reconnect.request("thread/attach", { threadId: thread.id });
     expect(snapshot.items.map(i => i.type)).toEqual(["userMessage", "commandExecution", "agentMessage"]); expect(snapshot.items.at(-1)!.payload).toEqual({ text: "done" }); expect(snapshot.pendingRequests).toEqual([]);
-    expect(server.log.turn(turn.id).usage?.usd).toBeNull(); expect(snapshot.nextSeq).toBe(4);
+    expect(server.log.turn(turn.id).usage?.usd).toBeNull(); expect(snapshot.nextSeq).toBe(7);
   });
 });

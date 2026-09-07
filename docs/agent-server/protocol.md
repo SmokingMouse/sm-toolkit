@@ -206,6 +206,7 @@ interface Item {
   type: ItemType;
   status?: "inProgress" | "completed" | "failed" | "rejected";
   seq: number;                // 服务端分配，thread 内单调递增，永不复用
+  completedSeq?: number;       // 完成时从同一个 thread 序列分配，seq 保留用于展示排序
   turnId: string;
   startedAtMs: number;
   completedAtMs?: number;
@@ -282,8 +283,13 @@ type UserInput =
 
 ### 8.2 重放
 
-- 每条 item 有 thread 内单调的 `seq`。`thread/attach{sinceSeq:N}` 返回
-  `seq > N` 的全部 item + 当前 `nextSeq`。
+- 每条 item 开始时分配 `seq`，完成（含失败）时从同一个 thread 序列分配新的
+  `completedSeq`；正文、完成游标与 nextSeq 在同一事务提交后才广播。
+  `item/started.params.seq = item.seq`；`item/completed.params.seq = item.completedSeq`。
+  `thread/attach{sinceSeq:N}` 返回 `max(seq, completedSeq ?? 0) > N` 的全部 item，
+  加上所有 `inProgress` item 与当前 `nextSeq`。快照按 item.seq 排序，客户端按 id upsert。
+  客户端记录已见通知的最大 params.seq，快照后推进到 nextSeq - 1；无需回退游标。
+  item.seq 保持不变，供展示和 items/list 分页；两种游标不能混用。
 - delta **不重放**。断线期间的 delta 由重连后的 `item/completed`（带全量文本）
   补齐；仍在 `inProgress` 的 item 在快照里带**已聚合的 partial 文本**
   （服务端在内存里维护，落库只在 completed）。
@@ -353,7 +359,7 @@ item 的 `type` 取值取 codex `ThreadItem` 的子集，字段名一致（`aggr
 | # | 差异 | codex v2 | AS v1 | 为什么 |
 |---|---|---|---|---|
 | D1 | 多客户端 | 一个 app-server 连接基本等于一个前端 | `thread/attach` / `thread/detach` + `clientId` + 广播 | 本设计的核心诉求就是多前端同看一份日志 |
-| D2 | 快照与重放 | `thread/items/list` 分页游标 | `thread/attach{sinceSeq}` + 全局单调 `seq` | 游标是「翻历史」，`seq` 是「补断线」，两个问题；`seq` 让「不丢不重」可机械验证 |
+| D2 | 快照与重放 | `thread/items/list` 分页游标 | `thread/attach{sinceSeq}` + thread 内单调 `seq` / `completedSeq` | 游标是「翻历史」，完成游标是「补断线」；按 id upsert 让「不丢不重」可机械验证 |
 | D3 | 队列通知 | `thread/queue/changed` 只带 `threadId`，客户端要回查 | 带**全量队列** | 薄前端不该为一个通知再发一次 RPC；队列很小，带上不贵 |
 | D4 | 竞答 | 单客户端，无竞答概念 | `requestId` + 先答生效 + `serverRequest/resolved` 撤卡 + 可选 lease | 手机 / 飞书 / 网页可能同时弹卡 |
 | D5 | 幂等 | `clientUserMessageId` 仅作回显 | `clientTurnId` / `clientThreadId` 是**去重键**，带唯一索引 | 移动网络下重发是常态 |

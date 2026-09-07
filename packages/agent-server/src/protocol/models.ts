@@ -45,7 +45,7 @@ export const PlanStepSchema = z.object({ step: z.string(), status: z.enum(["pend
 export const PlanSchema = z.object({ text: z.string().optional(), steps: z.array(PlanStepSchema).optional() });
 const common = {
   id: IdSchema, status: z.enum(["inProgress", "completed", "failed", "rejected"]).optional(),
-  seq: z.number().int().positive(), turnId: IdSchema, startedAtMs: TimestampSchema, completedAtMs: TimestampSchema.optional(),
+  seq: z.number().int().positive(), completedSeq: z.number().int().positive().optional(), turnId: IdSchema, startedAtMs: TimestampSchema, completedAtMs: TimestampSchema.optional(),
 };
 export const ItemPayloadSchemas = {
   userMessage: z.object({ content: z.array(UserInputSchema), clientTurnId: IdSchema.optional() }),

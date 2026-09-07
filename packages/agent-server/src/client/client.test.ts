@@ -38,14 +38,14 @@ for (const transport of ["unix", "ws"] as const) describe(`client over ${transpo
     await until(() => manager.size === 0); expect(client.state).toBe("closed");
   });
 
-  test("automatic reconnect rewinds unfinished items and emits a replacement snapshot", async () => {
+  test("R4: automatic reconnect uses highest seen cursor and receives offline completion", async () => {
     const { client, directory, engine, manager, server } = await setup();
     const { thread } = await client.request("thread/start", { backend: "claude", cwd: directory });
     const { turn } = await client.request("turn/start", { threadId: thread.id, input: input("go") });
     engine.emit({ type: "itemStarted", turnId: turn.id, item: { id: "answer", type: "agentMessage", payload: { text: "" } } });
     await until(() => server.log.snapshot(thread.id).items.length === 2);
     await client.request("server/health", {});
-    expect(client.sinceSeq(thread.id)).toBe(1);
+    expect(client.sinceSeq(thread.id)).toBe(server.log.item(thread.id, "answer").seq);
     const oldId = client.clientId!;
     manager.disconnect(oldId);
     engine.emit({ type: "itemDelta", turnId: turn.id, itemId: "answer", kind: "text", text: "offline" });
@@ -54,6 +54,6 @@ for (const transport of ["unix", "ws"] as const) describe(`client over ${transpo
     await until(() => client.state === "connected" && client.clientId !== oldId && snapshots.length === 1);
     expect(snapshots[0].items.map(item => item.id)).toEqual(["answer"]);
     expect(snapshots[0].items[0].payload).toEqual({ text: "offline" });
-    expect(client.sinceSeq(thread.id)).toBe(2);
+    expect(client.sinceSeq(thread.id)).toBe(server.log.item(thread.id, "answer").completedSeq!);
   });
 });

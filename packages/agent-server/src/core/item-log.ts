@@ -10,7 +10,7 @@ export function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 type JsonRow = { data_json: string };
-type ItemRow = { id: string; seq: number; turn_id: string; type: string; status: string; payload_json: string; started_at: number; completed_at: number | null };
+type ItemRow = { id: string; seq: number; completed_seq: number | null; turn_id: string; type: string; status: string; payload_json: string; started_at: number; completed_at: number | null };
 export interface ApprovalRow { id: string; thread_id: string; status: string; params_json: string; decided_by: string | null; decision_json: string | null }
 export type NotificationListener = (notification: ServerNotification) => void;
 
@@ -53,6 +53,18 @@ export class ItemLog {
       );
       CREATE INDEX IF NOT EXISTS queue_thread ON queue(thread_id, ordinal);
     `);
+    // Migrate databases created before completion cursors were introduced.
+    const columns = this.db.query<{ name: string }, []>("PRAGMA table_info(items)").all();
+    if (!columns.some(column => column.name === "completed_seq")) this.db.exec("ALTER TABLE items ADD COLUMN completed_seq INTEGER");
+    this.transaction(() => {
+      for (const row of this.db.query<{ thread_id: string; id: string }, []>("SELECT thread_id,id FROM items WHERE status != 'inProgress' AND completed_seq IS NULL ORDER BY thread_id,seq").all()) {
+        const seq = this.allocateSeq(row.thread_id);
+        this.db.query("UPDATE items SET completed_seq=? WHERE thread_id=? AND id=?").run(seq, row.thread_id, row.id);
+      }
+    });
+  }
+  private allocateSeq(threadId: string): number {
+    return this.db.query<{ next_seq: number }, [string]>("UPDATE threads SET next_seq=next_seq+1 WHERE id=? RETURNING next_seq-1 AS next_seq").get(threadId)!.next_seq;
   }
   transaction<T>(work: () => T): T { return this.db.transaction(work).immediate(); }
   thread(threadId: string): Thread {
@@ -99,7 +111,7 @@ export class ItemLog {
   }
   private key(threadId: string, itemId: string): string { return `${threadId}\0${itemId}`; }
   private decodeItem(threadId: string, row: ItemRow): Item {
-    return structuredClone(this.partial.get(this.key(threadId, row.id)) ?? ItemSchema.parse({ id: row.id, seq: row.seq, turnId: row.turn_id, type: row.type, status: row.status, payload: JSON.parse(row.payload_json), startedAtMs: row.started_at, ...(row.completed_at !== null ? { completedAtMs: row.completed_at } : {}) }));
+    return structuredClone(this.partial.get(this.key(threadId, row.id)) ?? ItemSchema.parse({ id: row.id, seq: row.seq, ...(row.completed_seq !== null ? { completedSeq: row.completed_seq } : {}), turnId: row.turn_id, type: row.type, status: row.status, payload: JSON.parse(row.payload_json), startedAtMs: row.started_at, ...(row.completed_at !== null ? { completedAtMs: row.completed_at } : {}) }));
   }
   private readItems(threadId: string): Item[] {
     return this.logRows(threadId).map(row => this.decodeItem(threadId, row));
@@ -138,11 +150,14 @@ export class ItemLog {
   updateItem(threadId: string, draft: EngineItem, completed = false, now = Date.now()): Item {
     const old = this.item(threadId, draft.id);
     if (old.type !== draft.type) throw new ProtocolError(ErrorCode.engine_protocol_error, "item type changed");
-    const item = ItemSchema.parse({ ...old, ...draft, ...(completed ? { status: draft.status === "inProgress" ? "completed" : draft.status ?? "completed", completedAtMs: now } : {}) });
-    this.db.query("UPDATE items SET status=?,payload_json=?,completed_at=? WHERE thread_id=? AND id=?").run(item.status ?? "inProgress", JSON.stringify(item.payload), item.completedAtMs ?? null, threadId, item.id);
+    const item = this.transaction(() => {
+      const item = ItemSchema.parse({ ...old, ...draft, ...(completed ? { status: draft.status === "inProgress" ? "completed" : draft.status ?? "completed", completedAtMs: now, completedSeq: this.allocateSeq(threadId) } : {}) });
+      this.db.query("UPDATE items SET status=?,payload_json=?,completed_at=?,completed_seq=? WHERE thread_id=? AND id=?").run(item.status ?? "inProgress", JSON.stringify(item.payload), item.completedAtMs ?? null, item.completedSeq ?? null, threadId, item.id);
+      return item;
+    });
     if (completed) this.partial.delete(this.key(threadId, item.id)); else this.partial.set(this.key(threadId, item.id), structuredClone(item));
     const base = { threadId, turnId: item.turnId, itemId: item.id };
-    if (completed) this.publish({ jsonrpc: "2.0", method: "item/completed", params: { ...base, item, seq: item.seq, completedAtMs: now } });
+    if (completed) this.publish({ jsonrpc: "2.0", method: "item/completed", params: { ...base, item, seq: item.completedSeq!, completedAtMs: now } });
     else if (item.type === "fileChange") this.publish({ jsonrpc: "2.0", method: "item/fileChange/patchUpdated", params: { ...base, changes: item.payload.changes } });
     else if (item.type === "subAgent") this.publish({ jsonrpc: "2.0", method: "item/subAgent/progress", params: { ...base, phase: item.payload.phase, ...(item.payload.progress !== undefined ? { progress: item.payload.progress } : {}) } });
     return item;
@@ -167,7 +182,7 @@ export class ItemLog {
     const thread = this.thread(threadId);
     const all = this.readItems(threadId);
     // In-progress items reconcile already-seen identities after a disconnect.
-    const items = all.filter(i => i.seq > sinceSeq || i.status === "inProgress");
+    const items = all.filter(i => Math.max(i.seq, i.completedSeq ?? 0) > sinceSeq || i.status === "inProgress");
     // AS requires the whole replay suffix. A hint must never silently skip history.
     void limit;
     const nextSeq = this.db.query<{ next_seq: number }, [string]>("SELECT next_seq FROM threads WHERE id=?").get(threadId)!.next_seq;

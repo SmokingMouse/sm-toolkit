@@ -52,8 +52,8 @@ WS 对应 `connectWebSocket({ url, token, ... })`，其余 API 相同。连接�
 `initialize` 与 `initialized` 后返回；`initializeResult` 提供服务端能力与 clientId。
 构造 `new AgentClient(endpoint, options)` 后可先注册回调再调用 `connect()`。
 
-自动重连默认开启，可设置 `reconnect: false`。重连先握手，再按保守的 sinceSeq
-重新 attach；断线前仍在输出的 item 会被重新查询，以补回离线时完成的正文。
+自动重连默认开启，可设置 `reconnect: false`。重连先握手，再按最高已见事件游标 sinceSeq
+重新 attach；服务端为完成分配 completedSeq，补回离线时完成的正文，无需客户端回退。
 `onSnapshot` 包含补回的 item、队列与 pendingRequests；item 以 id 覆盖，delta 只实时发送。
 审批快照的逻辑 requestId 与本次连接的反向请求 id 关联，旧连接的回答句柄拒绝发送。
 `respond()` 仅表示响应已发送，成功由 `serverRequest/resolved` 确认；迟到答复的

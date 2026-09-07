@@ -208,7 +208,9 @@ describe("Codex through AS core", () => {
     const items = server.log.readItems(thread.id);
     expect(items.filter(i => i.type === "userMessage")).toHaveLength(1);
     expect(items.find(i => i.type === "userMessage")?.payload).toEqual({ content, clientTurnId: "client-turn" });
-    expect(items.map(i => i.seq)).toEqual(items.map((_, i) => i + 1));
+    const cursors = items.flatMap(i => [i.seq, i.completedSeq!]);
+    expect(new Set(cursors).size).toBe(cursors.length);
+    expect(cursors.toSorted((a, b) => a - b)).toEqual(cursors.map((_, i) => i + 1));
     expect(frames.filter(f => "method" in f && f.method === "serverRequest/resolved")).toHaveLength(4);
     for (const method of ["thread/tokenUsage/updated", "item/fileChange/patchUpdated", "turn/plan/updated", "turn/diff/updated"]) expect(frames.some(f => "method" in f && f.method === method)).toBe(true);
     expect(server.log.turn(turn.id).usage).toMatchObject({ inputTokens: 10, contextTokens: 13 });

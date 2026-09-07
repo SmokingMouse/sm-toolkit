@@ -45,11 +45,55 @@ describe("ItemLog", () => {
   test("cursor pagination is stable both directions and limits never create attach gaps", () => {
     const log = create();
     for (let i = 1; i <= 5; i++) { const item = log.startItem("th", "tn_th", { id: `i${i}`, type: "reasoning", payload: { text: "think" } }); log.updateItem("th", { ...item, status: "completed" }, true); }
-    expect(log.listItems({ threadId: "th", limit: 2 }).nextCursor).toBe("2");
-    expect(log.listItems({ threadId: "th", cursor: "2", limit: 2 }).items.map(i => i.seq)).toEqual([3, 4]);
-    expect(log.listItems({ threadId: "th", direction: "desc", limit: 2 }).items.map(i => i.seq)).toEqual([5, 4]);
-    expect(log.listItems({ threadId: "th", direction: "desc", cursor: "4" }).items.map(i => i.seq)).toEqual([3, 2, 1]);
-    expect(log.snapshot("th", 2, 1).items.map(i => i.seq)).toEqual([3, 4, 5]);
+    expect(log.listItems({ threadId: "th", limit: 2 }).nextCursor).toBe("3");
+    expect(log.listItems({ threadId: "th", cursor: "3", limit: 2 }).items.map(i => i.seq)).toEqual([5, 7]);
+    expect(log.listItems({ threadId: "th", direction: "desc", limit: 2 }).items.map(i => i.seq)).toEqual([9, 7]);
+    expect(log.listItems({ threadId: "th", direction: "desc", cursor: "7" }).items.map(i => i.seq)).toEqual([5, 3, 1]);
+    expect(log.snapshot("th", 4, 1).items.map(i => i.seq)).toEqual([5, 7, 9]);
+  });
+  test("R4 / R3: highest-seen cursor replays offline completions, including interleaved items", () => {
+    const log = create(), seen: ServerNotification[] = [];
+    log.subscribe("th", n => seen.push(n));
+    const first = log.startItem("th", "tn_th", { id: "first", type: "agentMessage", payload: { text: "" } });
+    log.delta("th", first.id, "text", "hello ");
+    const second = log.startItem("th", "tn_th", { id: "second", type: "reasoning", payload: {} });
+    const cursor = log.snapshot("th").nextSeq - 1;
+    const done = log.updateItem("th", { ...first, payload: { text: "hello world (final)" } }, true);
+    expect(done.seq).toBe(first.seq);
+    expect(done.completedSeq!).toBeGreaterThan(cursor);
+    expect(log.snapshot("th", cursor).items).toEqual([done, second]);
+    expect(seen.at(-1)).toMatchObject({ method: "item/completed", params: { seq: done.completedSeq } });
+    expect(log.snapshot("th", done.completedSeq).items).toEqual([second]);
+  });
+  test("P2: completed payload and cursor survive reopen; completion is committed before notification", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "as-completed-")), "db");
+    const log = new ItemLog(path); seed(log);
+    const item = log.startItem("th", "tn_th", { id: "answer", type: "agentMessage", payload: { text: "" } });
+    let persisted: unknown;
+    log.subscribe("th", n => {
+      if (n.method === "item/completed") {
+        const reader = new ItemLog(path);
+        try { persisted = reader.snapshot("th", item.seq).items[0]; }
+        finally { reader.close(); }
+      }
+    });
+    const completed = log.updateItem("th", { ...item, payload: { text: "persisted" } }, true);
+    expect(persisted).toEqual(completed);
+    const before = log.snapshot("th"); log.close();
+    const reopened = new ItemLog(path); logs.push(reopened);
+    expect(reopened.snapshot("th")).toEqual(before);
+  });
+  test("legacy completed items receive replay cursors once during migration", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "as-migrate-")), "db");
+    const log = new ItemLog(path); seed(log);
+    const item = log.startItem("th", "tn_th", { id: "answer", type: "agentMessage", payload: { text: "legacy" }, status: "completed" });
+    log.db.exec("ALTER TABLE items DROP COLUMN completed_seq"); log.close();
+    const migrated = new ItemLog(path);
+    const snapshot = migrated.snapshot("th", item.seq);
+    expect(snapshot.items[0]).toMatchObject({ id: "answer", completedSeq: 2, payload: { text: "legacy" } });
+    migrated.close();
+    const reopened = new ItemLog(path); logs.push(reopened);
+    expect(reopened.snapshot("th", item.seq)).toEqual(snapshot);
   });
   test("failed writes neither consume seq nor publish; listener failure cannot undo commits", () => {
     const log = create(); const received: ServerNotification[] = [];

@@ -55,7 +55,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
     await until(() => bf.some(f => f.method === "turn/completed") && af.some(f => f.method === "turn/completed"));
     expect(af).toEqual(bf); expect(uf).toEqual([]);
     const seqs = af.filter(f => f.method === "item/started").map(f => f.params.seq);
-    expect(seqs).toEqual([1, 2, 3, 4]);
+    expect(seqs).toEqual([1, 3, 5, 7]);
     const items = af.filter(f => f.method === "item/completed").map(f => f.params.item);
     expect(items.map(item => item.payload)).toContainEqual({ text: "text-2" });
   });
@@ -105,7 +105,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
     expect(snapshots[0].items.map(item => item.id)).toEqual(["partial", "missing"]);
     expect(snapshots[0].items[0].payload).toEqual({ text: "before offline" });
     expect(snapshots[0].items[1].status).toBe("inProgress"); expect(deltas).toEqual(["before"]);
-    expect(server.log.snapshot(thread.id).items.map(item => item.seq)).toEqual([1, 2, 3]);
+    expect(server.log.snapshot(thread.id).items.map(item => item.seq)).toEqual([1, 3, 5]);
   });
 
   test("approvals created offline reappear in attach snapshots with answerable new wire IDs", async () => {

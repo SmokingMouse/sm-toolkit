@@ -296,6 +296,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -430,6 +435,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -495,6 +505,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -553,6 +568,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -638,6 +658,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -738,6 +763,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -809,6 +839,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -885,6 +920,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -971,6 +1011,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -1036,6 +1081,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -1097,6 +1147,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -1184,6 +1239,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -1235,6 +1295,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -3063,6 +3128,11 @@
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
             },
+            "completedSeq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
             "turnId": {
               "type": "string",
               "minLength": 1
@@ -3197,6 +3267,11 @@
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
             },
+            "completedSeq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
             "turnId": {
               "type": "string",
               "minLength": 1
@@ -3262,6 +3337,11 @@
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
             },
+            "completedSeq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
             "turnId": {
               "type": "string",
               "minLength": 1
@@ -3320,6 +3400,11 @@
               ]
             },
             "seq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "completedSeq": {
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
@@ -3405,6 +3490,11 @@
               ]
             },
             "seq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "completedSeq": {
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
@@ -3505,6 +3595,11 @@
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
             },
+            "completedSeq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
             "turnId": {
               "type": "string",
               "minLength": 1
@@ -3576,6 +3671,11 @@
               ]
             },
             "seq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "completedSeq": {
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
@@ -3652,6 +3752,11 @@
               ]
             },
             "seq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "completedSeq": {
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
@@ -3738,6 +3843,11 @@
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
             },
+            "completedSeq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
             "turnId": {
               "type": "string",
               "minLength": 1
@@ -3803,6 +3913,11 @@
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
             },
+            "completedSeq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
             "turnId": {
               "type": "string",
               "minLength": 1
@@ -3864,6 +3979,11 @@
               ]
             },
             "seq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "completedSeq": {
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
@@ -3951,6 +4071,11 @@
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
             },
+            "completedSeq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
             "turnId": {
               "type": "string",
               "minLength": 1
@@ -4002,6 +4127,11 @@
               ]
             },
             "seq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "completedSeq": {
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
@@ -8386,6 +8516,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -8520,6 +8655,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -8585,6 +8725,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -8643,6 +8788,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -8728,6 +8878,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -8828,6 +8983,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -8899,6 +9059,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -8975,6 +9140,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -9061,6 +9231,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -9126,6 +9301,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -9187,6 +9367,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -9274,6 +9459,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -9325,6 +9515,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -10246,6 +10441,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -10380,6 +10580,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -10445,6 +10650,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -10503,6 +10713,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -10588,6 +10803,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -10688,6 +10908,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -10759,6 +10984,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -10835,6 +11065,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -10921,6 +11156,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -10986,6 +11226,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -11047,6 +11292,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -11134,6 +11384,11 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
                   },
+                  "completedSeq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
                   "turnId": {
                     "type": "string",
                     "minLength": 1
@@ -11185,6 +11440,11 @@
                     ]
                   },
                   "seq": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "completedSeq": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
@@ -15793,6 +16053,11 @@
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
                 },
+                "completedSeq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "turnId": {
                   "type": "string",
                   "minLength": 1
@@ -15927,6 +16192,11 @@
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
                 },
+                "completedSeq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "turnId": {
                   "type": "string",
                   "minLength": 1
@@ -15992,6 +16262,11 @@
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
                 },
+                "completedSeq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "turnId": {
                   "type": "string",
                   "minLength": 1
@@ -16050,6 +16325,11 @@
                   ]
                 },
                 "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "completedSeq": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -16135,6 +16415,11 @@
                   ]
                 },
                 "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "completedSeq": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -16235,6 +16520,11 @@
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
                 },
+                "completedSeq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "turnId": {
                   "type": "string",
                   "minLength": 1
@@ -16306,6 +16596,11 @@
                   ]
                 },
                 "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "completedSeq": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -16382,6 +16677,11 @@
                   ]
                 },
                 "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "completedSeq": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -16468,6 +16768,11 @@
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
                 },
+                "completedSeq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "turnId": {
                   "type": "string",
                   "minLength": 1
@@ -16533,6 +16838,11 @@
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
                 },
+                "completedSeq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "turnId": {
                   "type": "string",
                   "minLength": 1
@@ -16594,6 +16904,11 @@
                   ]
                 },
                 "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "completedSeq": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -16681,6 +16996,11 @@
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
                 },
+                "completedSeq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "turnId": {
                   "type": "string",
                   "minLength": 1
@@ -16732,6 +17052,11 @@
                   ]
                 },
                 "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "completedSeq": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -17103,6 +17428,11 @@
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
                 },
+                "completedSeq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "turnId": {
                   "type": "string",
                   "minLength": 1
@@ -17237,6 +17567,11 @@
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
                 },
+                "completedSeq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "turnId": {
                   "type": "string",
                   "minLength": 1
@@ -17302,6 +17637,11 @@
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
                 },
+                "completedSeq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "turnId": {
                   "type": "string",
                   "minLength": 1
@@ -17360,6 +17700,11 @@
                   ]
                 },
                 "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "completedSeq": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -17445,6 +17790,11 @@
                   ]
                 },
                 "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "completedSeq": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -17545,6 +17895,11 @@
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
                 },
+                "completedSeq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "turnId": {
                   "type": "string",
                   "minLength": 1
@@ -17616,6 +17971,11 @@
                   ]
                 },
                 "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "completedSeq": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -17692,6 +18052,11 @@
                   ]
                 },
                 "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "completedSeq": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -17778,6 +18143,11 @@
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
                 },
+                "completedSeq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "turnId": {
                   "type": "string",
                   "minLength": 1
@@ -17843,6 +18213,11 @@
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
                 },
+                "completedSeq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "turnId": {
                   "type": "string",
                   "minLength": 1
@@ -17904,6 +18279,11 @@
                   ]
                 },
                 "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "completedSeq": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -17991,6 +18371,11 @@
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
                 },
+                "completedSeq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "turnId": {
                   "type": "string",
                   "minLength": 1
@@ -18042,6 +18427,11 @@
                   ]
                 },
                 "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "completedSeq": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991

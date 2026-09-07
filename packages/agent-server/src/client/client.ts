@@ -23,7 +23,7 @@ export type ServerRequestHandle<M extends ServerRequestMethod = ServerRequestMet
     respond(result: ServerRequestResult<K>): void;
   }
 }[M];
-interface Cursor { highest: number; incomplete: Map<string, number> }
+interface Cursor { highest: number }
 interface Call { method: Method; params: MethodParams<Method>; resolve(result: unknown): void; reject(error: unknown): void; timer: ReturnType<typeof setTimeout> }
 type Listener<T> = (value: T) => void;
 
@@ -195,20 +195,15 @@ export class AgentClient {
   }
   private cursor(threadId: string): Cursor {
     let cursor = this.cursors.get(threadId);
-    if (!cursor) { cursor = { highest: 0, incomplete: new Map() }; this.cursors.set(threadId, cursor); }
+    if (!cursor) { cursor = { highest: 0 }; this.cursors.set(threadId, cursor); }
     return cursor;
   }
   private trackItem(threadId: string, item: Item): void {
-    const cursor = this.cursor(threadId); cursor.highest = Math.max(cursor.highest, item.seq);
-    if (item.status === "inProgress") cursor.incomplete.set(item.id, item.seq); else cursor.incomplete.delete(item.id);
+    const cursor = this.cursor(threadId); cursor.highest = Math.max(cursor.highest, item.seq, item.completedSeq ?? 0);
   }
-  /** Rewind before any unfinished identity: it may have completed while disconnected. */
+  /** Server completion cursors reconcile items finished while disconnected. */
   sinceSeq(threadId: string): number {
-    const cursor = this.cursors.get(threadId);
-    if (!cursor) return 0;
-    let seq = cursor.highest;
-    for (const incomplete of cursor.incomplete.values()) seq = Math.min(seq, incomplete - 1);
-    return seq;
+    return this.cursors.get(threadId)?.highest ?? 0;
   }
   private trackResult(method: Method, params: MethodParams<Method>, result: unknown): void {
     if (method === "thread/detach") {
