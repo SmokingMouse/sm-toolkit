@@ -101,6 +101,13 @@ test("P2-4: set_model updates thread and saved options, then respawns with the s
     expect(resumed.attached).toBe(false); expect(resumed.thread.model).toBe("opus");
     expect(f.argv()[f.argv().indexOf("--model") + 1]).toBe("opus");
     expect(f.argv()[f.argv().indexOf("--resume") + 1]).toBe("native-model-session");
+    for (const params of [{ model: null }, {}]) {
+      await c.request("thread/engineControl", { threadId: thread.id, subtype: "set_model", params });
+      expect(f.server.log.options<any>(thread.id).model).toBe("default");
+      await c.request("thread/close", { threadId: thread.id });
+      expect((await c.request("thread/resume", { threadId: thread.id })).thread.model).toBe("default");
+      expect(f.argv()[f.argv().indexOf("--model") + 1]).toBe("default");
+    }
   } finally { await f.server.close(); }
 });
 
