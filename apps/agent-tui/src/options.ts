@@ -9,7 +9,9 @@ export const help = `agent-tui --attach <threadId> [--socket <path> | --ws <url>
 agent-tui --new --backend claude|codex --cwd <dir> [--socket <path> | --ws <url>]
 
 Enter: send / queue; /steer <text>: steer active turn; Ctrl-C: interrupt, twice: exit
-Tab: expand reasoning; PageUp/PageDown: history; approvals: y/s/n/a
+Shift+Tab: permissions; /permissions: picker; Tab: effort; /effort low|medium|high|max
+/model <name>; /compact [instructions]; /takeover; /release; /context <window tokens>
+Ctrl-R: reasoning; Ctrl-P: plan; PageUp/PageDown: history; approvals: y/s/n/a
 Questions: number selects/toggles, Enter advances/submits; type a free answer
 Token and default socket use agent-server HOME/XDG resolution.`;
 

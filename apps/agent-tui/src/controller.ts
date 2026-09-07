@@ -1,10 +1,12 @@
 import type { AgentClient } from "@smokingmouse/agent-server/client";
 import type { RequestCard, TuiModel } from "./model.js";
+import { controlError, controlSuccess, effortBudgets, efforts, estimatedContextWindow, nativePermission, nextEffort, nextPermission, permissionModes, type Effort, type Permission } from "./modes.js";
 
-export interface Key { name?: string; ctrl?: boolean; meta?: boolean; sequence?: string }
+export interface Key { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean; sequence?: string }
 export class Controller {
   private interruptedAt = -Infinity;
   private submitting = false;
+  private controlling = false;
   private submission?: { text: string; threadId: string; turnId?: string; id: string };
   constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) {}
   async key(text: string | undefined, key: Key = {}): Promise<void> {
@@ -18,13 +20,21 @@ export class Controller {
       }
       this.interruptedAt = -Infinity;
       if (key.name === "pageup" || key.name === "pagedown") { this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? (this.model.activeCard ? -10 : 10) : (this.model.activeCard ? 10 : -10))); return; }
-      if (key.name === "tab") { this.model.expandedReasoning = !this.model.expandedReasoning; return; }
       if (this.model.activeCard) { await this.cardKey(this.model.activeCard, text, key); return; }
+      if (this.model.permissionPicker !== undefined) { await this.permissionKey(text, key); return; }
+      if (key.ctrl && key.name === "r") { this.model.expandedReasoning = !this.model.expandedReasoning; return; }
+      if (key.ctrl && key.name === "p") { this.model.expandedPlan = !this.model.expandedPlan; return; }
+      if (key.name === "tab") {
+        await this.control(async () => key.shift || key.sequence === "\x1b[Z"
+          ? this.setPermission(nextPermission(this.model.thread?.permission, this.model.bypassAvailable))
+          : this.setEffort(nextEffort(this.model.effort)));
+        return;
+      }
       if (key.name === "return" || key.name === "enter") { await this.submit(); return; }
       if (key.name === "backspace") this.model.input = Array.from(this.model.input).slice(0, -1).join("");
       else if (key.ctrl && key.name === "u") this.model.input = "";
       else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) this.model.input += text;
-    } catch (error) { this.model.message = error instanceof Error ? error.message : String(error); }
+    } catch (error) { this.model.message = controlError(error); }
     finally { this.model.changed(); }
   }
   async submit(): Promise<void> {
@@ -34,6 +44,10 @@ export class Controller {
     if (thread.backend === "external") throw new Error("External thread 为只读");
     this.submitting = true;
     try {
+      if (await this.command(text)) {
+        if (this.model.input.trim() === text) this.model.input = "";
+        return;
+      }
       const steer = text.startsWith("/steer ");
       const input = [{ type: "text" as const, text: steer ? text.slice(7).trim() : text }];
       if (!input[0].text) return;
@@ -56,6 +70,72 @@ export class Controller {
       this.submission = undefined;
       this.model.scroll = 0;
     } finally { this.submitting = false; this.model.changed(); }
+  }
+  private async control(action: () => Promise<void>): Promise<void> {
+    if (this.controlling) throw new Error("控制请求处理中，请稍后重试");
+    if (this.client.state !== "connected") throw new Error("连接尚未恢复，输入已保留");
+    if (!this.model.thread) throw new Error("尚未连接 thread");
+    this.controlling = true;
+    try { await action(); } catch (error) { throw new Error(controlError(error, true)); } finally { this.controlling = false; }
+  }
+  private async acquire(): Promise<void> {
+    await this.client.request("thread/lease/acquire", { threadId: this.model.thread!.id });
+  }
+  private async setPermission(permission: Permission): Promise<void> {
+    await this.acquire();
+    const { thread } = await this.client.request("thread/permission/set", { threadId: this.model.thread!.id, permission });
+    this.model.thread = thread;
+    this.model.message = `权限模式：${nativePermission(thread.permission)}`;
+  }
+  private async setEffort(effort: Effort): Promise<void> {
+    await this.acquire();
+    controlSuccess(await this.client.request("thread/effort/set", { threadId: this.model.thread!.id, maxThinkingTokens: effortBudgets[effort] }));
+    this.model.effort = effort;
+    this.model.message = `effort ${effort} · thinking budget ${effortBudgets[effort]}`;
+  }
+  private get permissionChoices(): Permission[] { return [...permissionModes(this.model.bypassAvailable), "dontAsk"]; }
+  private async permissionKey(text: string | undefined, key: Key): Promise<void> {
+    const choices = this.permissionChoices;
+    if (key.name === "escape") { this.model.permissionPicker = undefined; return; }
+    if (key.name === "up" || key.name === "down") { this.model.permissionPicker = (this.model.permissionPicker! + (key.name === "up" ? choices.length - 1 : 1)) % choices.length; return; }
+    if (text && /^[1-5]$/.test(text) && Number(text) <= choices.length) this.model.permissionPicker = Number(text) - 1;
+    if (key.name === "return" || key.name === "enter") {
+      await this.control(() => this.setPermission(choices[this.model.permissionPicker!]));
+      this.model.permissionPicker = undefined;
+    }
+  }
+  private async command(text: string): Promise<boolean> {
+    const [command, ...args] = text.split(/\s+/), value = args.join(" ");
+    if (command === "/permissions") {
+      if (value) throw new Error("用法：/permissions");
+      this.model.permissionPicker = Math.max(0, this.permissionChoices.indexOf(nativePermission(this.model.thread?.permission)));
+      return true;
+    }
+    if (command === "/context") {
+      if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) <= 0) throw new Error("用法：/context <窗口 token 数>，当前默认窗口为估算值");
+      this.model.contextWindow = Number(value); this.model.contextWindowEstimated = false; return true;
+    }
+    if (!["/effort", "/model", "/compact", "/takeover", "/release"].includes(command)) return false;
+    if (command === "/effort" && !efforts.includes(value as Effort)) throw new Error("用法：/effort <low|medium|high|max>");
+    if (command === "/model" && (!value || args.length !== 1)) throw new Error("用法：/model <name>");
+    if ((command === "/takeover" || command === "/release") && value) throw new Error(`用法：${command}`);
+    await this.control(async () => {
+      const threadId = this.model.thread!.id;
+      if (command === "/effort") { await this.setEffort(value as Effort); return; }
+      if (command === "/release") { await this.client.request("thread/lease/release", { threadId }); this.model.message = "已释放控制权"; return; }
+      await this.acquire();
+      if (command === "/takeover") { this.model.message = "已接管控制权；请重试原操作 · /release 释放"; return; }
+      if (command === "/model") {
+        controlSuccess(await this.client.request("thread/engineControl", { threadId, subtype: "set_model", params: { model: value } }));
+        this.model.liveModel = value; this.model.message = `模型：${value}`;
+        if (this.model.contextWindowEstimated) this.model.contextWindow = estimatedContextWindow(value);
+      } else {
+        if (!this.submission || this.submission.text !== text || this.submission.threadId !== threadId) this.submission = { text, threadId, id: crypto.randomUUID() };
+        await this.client.request("thread/compact", { threadId, clientTurnId: this.submission.id, ...(value ? { instructions: value } : {}) });
+        this.submission = undefined; this.model.message = "已请求压缩，等待 compact_boundary";
+      }
+    });
+    return true;
   }
   private async cardKey(card: RequestCard, text: string | undefined, key: Key): Promise<void> {
     if (card.state !== "pending") return;
@@ -88,6 +168,27 @@ export class Controller {
     const decision = key.name === "escape" ? "reject" : choices[text?.toLowerCase() as keyof typeof choices];
     if (!decision) return;
     if (handle.method === "item/permissions/requestApproval") {
+      if (handle.params.permissions.toolName === "ExitPlanMode" && (decision === "accept" || decision === "acceptForSession")) {
+        await this.control(async () => {
+          await this.acquire();
+          if (card.state !== "pending" || !this.client.pendingRequests.has(handle.params.requestId)) throw new Error("审批已失效或由另一客户端处理");
+          // Only the winning, server-confirmed approval may change the mode.
+          await new Promise<void>((resolve, reject) => {
+            const disposers: Array<() => void> = [];
+            const finish = (error?: Error) => { clearTimeout(timer); disposers.forEach(fn => fn()); error ? reject(error) : resolve(); };
+            const timer = setTimeout(() => finish(new Error("退出计划审批未确认；请等待状态通知或重连")), 10_000);
+            disposers.push(this.client.onNotification("serverRequest/resolved", p => {
+              if (p.requestId === handle.params.requestId) finish(p.decidedBy.clientId === this.client.clientId ? undefined : new Error("审批已由另一客户端处理"));
+            }), this.client.onNotification("serverRequest/expired", p => {
+              if (p.requestId === handle.params.requestId) finish(new Error(`审批已过期：${p.reason}`));
+            }), this.client.onStateChange(state => { if (state !== "connected") finish(new Error("审批连接中断；等待重连快照")); }), this.client.onError((error, id) => { if (id === handle.id) finish(error); }));
+            card.state = "sending";
+            try { handle.respond({ permissions: handle.params.permissions, scope: "turn" }); } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+          });
+          await this.setPermission("default");
+        });
+        return;
+      }
       handle.respond({ permissions: decision === "accept" || decision === "acceptForSession" ? handle.params.permissions : {}, scope: decision === "acceptForSession" ? "session" : "turn" });
       // Permissions replies have no abort variant in AS v1; deny, then interrupt the turn.
       if (decision === "abort") await this.client.request("turn/interrupt", { threadId: handle.params.threadId, turnId: handle.params.turnId });
