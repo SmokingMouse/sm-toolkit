@@ -235,3 +235,101 @@ test("a lost turn response preserves input and reuses the idempotency key on man
   await a.controller.key("\r", { name: "return" });
   expect(a.model.input).toBe(""); expect(engine.sent).toHaveLength(1); expect(a.model.queue).toHaveLength(0);
 });
+
+async function inputPty(run: (h: Awaited<ReturnType<typeof setup>> & { write: (text: string) => void; screen: () => string; clearScreen: () => void }) => Promise<void>) {
+  const h = await setup();
+  const state = join(h.home, "state"), tokenDir = join(state, "sm-toolkit", "agent-server");
+  mkdirSync(tokenDir, { recursive: true }); writeFileSync(join(tokenDir, "token"), "test\n");
+  mkdirSync(join(h.home, ".claude/skills/global-skill"), { recursive: true });
+  writeFileSync(join(h.home, ".claude/skills/global-skill/SKILL.md"), "---\ndescription: global skill description\n---\n");
+  writeFileSync(join(h.home, "alpha-file.ts"), ""); writeFileSync(join(h.home, "beta-file.ts"), "");
+  writeFileSync(join(h.home, "test.png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9S0AAAAASUVORK5CYII=", "base64"));
+  const binDir = join(h.home, "bin"); mkdirSync(binDir);
+  writeFileSync(join(binDir, "pngpaste"), `#!/bin/sh\nexec cp '${join(h.home, "test.png")}' "$1"\n`, { mode: 0o755 });
+  let screen = ""; const decoder = new TextDecoder();
+  const proc = Bun.spawn([resolve(import.meta.dir, "../bin/agent-tui"), "--attach", h.thread.id, "--socket", join(h.home, "sock")], {
+    env: { ...process.env, HOME: h.home, XDG_STATE_HOME: state, HERDR_PANE_ID: "", TERM: "xterm-256color", PATH: `${binDir}:${process.env.PATH}` },
+    terminal: { cols: 140, rows: 32, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } },
+  });
+  try {
+    await until(() => screen.includes(h.thread.id) && screen.includes("Enter"));
+    await run({ ...h, write: text => proc.terminal!.write(text), screen: () => screen, clearScreen: () => { screen = ""; } });
+    proc.terminal!.write("\x03\x03");
+    expect(await Promise.race([proc.exited, Bun.sleep(3000).then(() => -100)])).toBe(0);
+    await until(() => screen.includes("\x1b[?2004l"));
+  } finally { if (proc.exitCode === null) proc.kill(); await proc.exited; proc.terminal?.close(); }
+}
+
+test("PTY input: image references, /image, clipboard attachment and bubble placeholder", async () => {
+  await inputPty(async ({ home, thread, engine, write, screen, clearScreen }) => {
+    write("look @test.png \r"); await until(() => engine.sent.length === 1);
+    expect(engine.sent[0].input).toEqual([{ type: "text", text: "look  " }, { type: "image", path: join(thread.cwd, "test.png"), mime: "image/png" }]);
+    await until(() => screen().includes(`[image] ${join(thread.cwd, "test.png")}`));
+    engine.emit({ type: "turnCompleted", turnId: engine.sent[0].turnId, status: "completed" });
+    write(`/image ${join(home, "test.png")}\r`); await until(() => engine.sent.length === 2);
+    expect(engine.sent[1].input).toEqual([{ type: "image", path: join(home, "test.png"), mime: "image/png" }]);
+    engine.emit({ type: "turnCompleted", turnId: engine.sent[1].turnId, status: "completed" });
+    clearScreen(); write("/paste-image \r");
+    if (process.platform === "darwin") {
+      await until(() => screen().includes("已附加剪贴板图片"));
+      expect(engine.sent).toHaveLength(2); write("clipboard caption\r");
+      await until(() => engine.sent.length === 3);
+      expect(engine.sent[2].input[0]).toEqual({ type: "text", text: "clipboard caption" });
+      const image = engine.sent[2].input[1]; expect(image).toMatchObject({ type: "image", mime: "image/png" });
+      if (image.type === "image") { expect(await Bun.file(image.path).size).toBeGreaterThan(0); rmSync(resolve(image.path, ".."), { recursive: true, force: true }); }
+    } else await until(() => screen().includes("仅支持 macOS"));
+  });
+});
+
+test("PTY input: @ fuzzy candidates navigate with arrows, Tab and Enter before sending relative paths", async () => {
+  await inputPty(async ({ engine, write, screen, clearScreen }) => {
+    write("@filets"); await until(() => screen().includes("❯ @beta-file.ts") && screen().includes("@alpha-file.ts"));
+    write("\x1b[B"); await until(() => screen().includes("❯ @alpha-file.ts"));
+    write("\x1b[A"); clearScreen(); write("\t"); await until(() => screen().includes("> @beta-file.ts "));
+    expect(engine.sent).toHaveLength(0);
+    write("@alfts"); await until(() => screen().includes("❯ @alpha-file.ts"));
+    clearScreen(); write("\r"); await until(() => screen().includes("> @beta-file.ts @alpha-file.ts "));
+    expect(engine.sent).toHaveLength(0); write("\r"); await until(() => engine.sent.length === 1);
+    expect(engine.sent[0].input).toEqual([{ type: "text", text: "@beta-file.ts @alpha-file.ts " }]);
+  });
+});
+
+test("PTY input: slash builtin and skill descriptions complete without sending on selection", async () => {
+  await inputPty(async ({ engine, write, screen, clearScreen }) => {
+    write("/"); await until(() => screen().includes("/image —") && screen().includes("/steer —") && screen().includes("global skill description"));
+    write("gsk"); await until(() => screen().includes("❯ /global-skill"));
+    clearScreen(); write("\r"); await until(() => screen().includes("> /global-skill "));
+    expect(engine.sent).toHaveLength(0); write("explain\r"); await until(() => engine.sent.length === 1);
+    expect(engine.sent[0].input).toEqual([{ type: "text", text: "/global-skill explain" }]);
+  });
+});
+
+test("PTY input: Ctrl-J, Shift-Enter and bracketed multiline paste stay in one exact message", async () => {
+  await inputPty(async ({ engine, write, screen }) => {
+    write("first\nsecond\x1b[13;2uthird\x1b[27;2;13~");
+    write("\x1b[200~  中文🙂\n\tlast\n\x1b[201~");
+    await until(() => screen().includes("中文🙂") && screen().includes("last"));
+    expect(engine.sent).toHaveLength(0); write("\r"); await until(() => engine.sent.length === 1);
+    expect(engine.sent[0].input).toEqual([{ type: "text", text: "first\nsecond\nthird\n  中文🙂\n\tlast\n" }]);
+  });
+});
+
+test("image validation and lost responses preserve drafts and retry the same attachment exactly once", async () => {
+  const { a, engine, thread } = await setup();
+  a.model.input = "@missing.png"; await a.controller.key("\r", { name: "return" });
+  expect(a.model.input).toBe("@missing.png"); expect(engine.sent).toHaveLength(0);
+  writeFileSync(join(thread.cwd, "valid.png"), "fixture");
+  a.model.attachments = [{ type: "image", path: join(thread.cwd, "valid.png"), mime: "image/png" }];
+  a.model.input = "  caption\n";
+  const request = a.client.request.bind(a.client); let loseResponse = true;
+  a.client.request = async (method, params) => {
+    const result = await request(method, params);
+    if (method === "turn/start" && loseResponse) { loseResponse = false; throw new Error("response lost"); }
+    return result;
+  };
+  await a.controller.key("\r", { name: "return" });
+  expect(a.model.input).toBe("  caption\n"); expect(a.model.attachments).toHaveLength(1);
+  await a.controller.key("\r", { name: "return" });
+  expect(engine.sent).toHaveLength(1); expect(engine.sent[0].input).toHaveLength(2);
+  expect(a.model.input).toBe(""); expect(a.model.attachments).toEqual([]);
+});

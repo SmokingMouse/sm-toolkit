@@ -75,7 +75,7 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
   for (const c of model.cards.values()) if (c !== model.activeCard) body.push(...renderCard(c));
   const content = body.flatMap(line => wrap(line, width));
   const card = model.activeCard ? renderCard(model.activeCard).flatMap(line => wrap(line, width)) : [];
-  const footer = model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : "Enter 发送/排队 · /steer 插话 · Tab 推理 · PgUp/PgDn 历史 · Ctrl-C 两次退出";
+  const footer = model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : model.completion ? "↑↓ 选择 · Tab/Enter 插入 · Esc 关闭补全" : "Enter 发送 · Shift-Enter/Ctrl-J 换行 · @ / 补全 · Tab 推理 · Ctrl-C 两次退出";
   const input = model.activeCard ? model.activeCard.draft : model.input;
   const inputLines = input.split("\n").flatMap((line, i) => wrap(`${i ? "  " : "> "}${line}`, width));
   const inputRows = inputLines.slice(-Math.max(1, Math.min(6, height - 4)));

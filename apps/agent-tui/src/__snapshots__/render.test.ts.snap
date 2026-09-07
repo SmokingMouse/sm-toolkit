@@ -91,7 +91,7 @@ Agent …: Hello 世界
 
 
 
-Enter 发送/排队 · /steer 插话 · Tab 推理 · PgUp/PgDn 历史 · Ctrl-C 两次退出
+Enter 发送 · Shift-Enter/Ctrl-J 换行 · @ / 补全 · Tab 推理 · Ctrl-C 两次退出
 > new input"
 `;
 
