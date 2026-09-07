@@ -1,12 +1,14 @@
 import type { AgentClient } from "@smokingmouse/agent-server/client";
 import type { RequestCard, TuiModel } from "./model.js";
+import { Sessions } from "./sessions.js";
 
 export interface Key { name?: string; ctrl?: boolean; meta?: boolean; sequence?: string }
 export class Controller {
   private interruptedAt = -Infinity;
   private submitting = false;
   private submission?: { text: string; threadId: string; turnId?: string; id: string };
-  constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) {}
+  readonly sessions: Sessions;
+  constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) { this.sessions = new Sessions(client, model); }
   async key(text: string | undefined, key: Key = {}): Promise<void> {
     try {
       if (key.ctrl && key.name === "c") {
@@ -17,6 +19,18 @@ export class Controller {
         return;
       }
       this.interruptedAt = -Infinity;
+      if (key.ctrl && (key.name === "n" || key.name === "t")) { if (!this.submitting) await this.sessions.run(key.name === "n" ? "/new" : "/threads"); return; }
+      if (this.model.picker) {
+        const picker = this.model.picker;
+        if (key.name === "escape") this.model.picker = undefined;
+        else if (key.name === "up") picker.index = Math.max(0, picker.index - 1);
+        else if (key.name === "down") picker.index = Math.min(Math.max(0, picker.entries.length - 1), picker.index + 1);
+        else if (key.name === "return" || key.name === "enter") {
+          const entry = picker.entries[picker.index];
+          if (entry) await this.sessions.run("/resume", entry.thread.id);
+        }
+        return;
+      }
       if (key.name === "pageup" || key.name === "pagedown") { this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? (this.model.activeCard ? -10 : 10) : (this.model.activeCard ? 10 : -10))); return; }
       if (key.name === "tab") { this.model.expandedReasoning = !this.model.expandedReasoning; return; }
       if (this.model.activeCard) { await this.cardKey(this.model.activeCard, text, key); return; }
@@ -29,8 +43,16 @@ export class Controller {
   }
   async submit(): Promise<void> {
     const text = this.model.input.trim(), thread = this.model.thread;
-    if (!text || !thread || this.submitting) return;
+    if (!text || !thread || this.submitting || this.sessions.busy) return;
     if (this.client.state !== "connected") throw new Error("连接尚未恢复，输入已保留");
+    const [command, ...args] = text.split(/\s+/);
+    if (["/new", "/clear", "/threads", "/fork", "/resume"].includes(command)) {
+      if ((command !== "/resume" && args.length) || args.length > 1) throw new Error(`用法：${command}${command === "/resume" ? " [id]" : ""}`);
+      this.submitting = true;
+      try { await this.sessions.run(command, args[0]); if (this.model.input.trim() === text) this.model.input = ""; }
+      finally { this.submitting = false; this.model.changed(); }
+      return;
+    }
     if (thread.backend === "external") throw new Error("External thread 为只读");
     this.submitting = true;
     try {

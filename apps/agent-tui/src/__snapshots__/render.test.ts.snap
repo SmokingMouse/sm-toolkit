@@ -77,7 +77,8 @@ Enter to confirm · Esc to cancel"
 `;
 
 exports[`fixed header, footer, queue and active card viewport snapshots 1`] = `
-"codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected | th_demo
+"th_demo | cwd /tmp | model unknown | permission unknown
+codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected
 You: 你好
 [file] /tmp/a.ts
 
@@ -90,14 +91,13 @@ Agent …: Hello 世界
 
 
 
-
-Enter 发送/排队 · /steer 插话 · Tab 推理 · PgUp/PgDn 历史 · Ctrl-C 两次退出
+Ctrl-N 新建 · Ctrl-T 会话 · Enter 发送 · /steer 插话 · Tab 推理 · Ctrl-C 两次退出
 > new input"
 `;
 
 exports[`fixed header, footer, queue and active card viewport snapshots 2`] = `
-"codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected
-[file] /tmp/a.ts
+"th_demo | cwd /tmp | model unknown | permission unknown
+codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected
 
 Agent …: Hello 世界
 

@@ -46,7 +46,7 @@ test("tui-live: real daemon, WS phone, Unix PTY, fake Herdr, race, reconnect and
       env: { ...env, HERDR_PANE_ID: "pane-test", HERDR_SOCKET_PATH: herdrPath, TERM: "xterm-256color" },
       terminal: { cols: 140, rows: 34, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } },
     });
-    await wait(() => screen.includes(thread.id), "TUI attached");
+    await wait(() => screen.includes(thread.id.slice(0, 11)), "TUI attached");
     proc.terminal!.write("hello from pty\r"); await wait(() => engine.sent.length === 1, "prompt reached engine");
     expect(engine.sent[0].input).toEqual([{ type: "text", text: "hello from pty" }]);
     const turnId = engine.sent[0].turnId;

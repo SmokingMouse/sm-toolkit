@@ -197,7 +197,7 @@ test("real bin in Bun PTY attaches, draws deltas, answers both cards, and restor
     terminal: { cols: 140, rows: 30, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } },
   });
   try {
-    await until(() => screen.includes(thread.id) && screen.includes("Enter"));
+    await until(() => screen.includes(thread.id.slice(0, 11)) && screen.includes("Enter"));
     proc.terminal!.write("pty prompt\r"); await until(() => engine.sent.length === 1);
     const turnId = engine.sent[0].turnId;
     expect(engine.sent[0].input).toEqual([{ type: "text", text: "pty prompt" }]);
