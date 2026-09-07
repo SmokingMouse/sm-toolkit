@@ -23,6 +23,7 @@ export class Controller {
   resize(columns = this.columns, rows = this.rows): void {
     this.columns = columns; this.rows = rows;
     if (this.model.picker) this.model.picker.offset = pickerOffset(this.model, columns, rows);
+    if (this.model.forkPicker) this.model.forkPicker.offset = pickerOffset(this.model, columns, rows);
   }
   constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) { this.sessions = new Sessions(client, model); this.lease = new InputLease(client, model); }
   dispose(): void { this.lease.dispose(); }
@@ -68,6 +69,19 @@ export class Controller {
       if (key.ctrl && (key.name === "n" || key.name === "t")) {
         if (this.submitting || this.controlling) this.model.message = "提交进行中，本次快捷键已丢弃，请稍后重试";
         else await this.sessions.run(key.name === "n" ? "/new" : "/threads");
+        return;
+      }
+      if (this.model.forkPicker) {
+        const picker = this.model.forkPicker;
+        if (this.model.activeCard?.state === "pending" && !this.model.activeCard.replying) { await this.cardKey(this.model.activeCard, text, key); return; }
+        if (key.name === "escape") this.model.forkPicker = undefined;
+        else if (key.name === "up") picker.index = Math.max(0, picker.index - 1);
+        else if (key.name === "down") picker.index = Math.min(picker.entries.length - 1, picker.index + 1);
+        else if (key.name === "return" || key.name === "enter") {
+          if (picker.threadId !== this.model.thread?.id) { this.model.forkPicker = undefined; throw new Error("分叉来源已切换，请重新 /fork"); }
+          const entry = picker.entries[picker.index];
+          if (entry) await this.sessions.run("/fork", entry.itemId, false, !entry.itemId);
+        }
         return;
       }
       if (this.model.picker) {

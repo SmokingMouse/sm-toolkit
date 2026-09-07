@@ -108,7 +108,7 @@ function frameLayout(model: TuiModel, columns: number, rows: number) {
   const input = model.activeCard?.state === "pending" && !model.activeCard.replying && model.activeCard.request.method === "item/tool/requestUserInput" ? model.activeCard.draft : model.input;
   const inputLines = input.split("\n").flatMap((line, i) => wrap(`${i ? "  " : "> "}${line}`, width));
   const inputRows = inputLines.slice(-Math.max(1, Math.min(6, height - 4)));
-  const completion = !model.activeCard && model.permissionPicker === undefined && !model.picker && !model.sessionOperation && model.completion;
+  const completion = !model.activeCard && model.permissionPicker === undefined && !model.picker && !model.forkPicker && !model.sessionOperation && model.completion;
   const menu = completion ? completion.candidates.slice(Math.max(0, completion.selected - 3), Math.max(0, completion.selected - 3) + 6)
     .map(c => wrap(`${c === completion.candidates[completion.selected] ? "❯" : " "} ${completion.prefix}${c.name} — ${c.description}`, width)[0]) : [];
   const attached = !model.activeCard ? model.attachments.map(i => wrap(`[image] ${i.path}`, width)[0]) : [];
@@ -117,15 +117,16 @@ function frameLayout(model: TuiModel, columns: number, rows: number) {
   return { width, height, headers, notices, inputRows, extras, available: Math.max(0, baseAvailable + 1 - inputRows.length - extras.length) };
 }
 function pickerLines(model: TuiModel, width: number): string[][] {
+  if (model.forkPicker) return model.forkPicker.entries.map((e, i) => wrap(`${i === model.forkPicker!.index ? ">" : " "} ${e.seq === undefined ? "" : `#${e.seq} ${shortId(e.itemId!)} | `}${e.type} | ${e.summary}`, width));
   return model.picker?.entries.map((e, i) => wrap(`${i === model.picker!.index ? ">" : " "} ${shortId(e.thread.id)} | ${e.title} | ${e.thread.status.type} | ${e.thread.cwd} | ${new Date(e.updatedAtMs).toISOString()}`, width)) ?? [];
 }
 /** Pure measurement, applied by the controller on input/model/terminal-size changes. */
 export function pickerOffset(model: TuiModel, columns: number, rows: number): number {
   const { width, available } = frameLayout(model, columns, rows), lines = pickerLines(model, width);
-  const index = model.picker?.index ?? 0;
+  const index = (model.forkPicker ?? model.picker)?.index ?? 0;
   const top = lines.slice(0, index).reduce((n, l) => n + l.length, 0);
   const bottom = top + (lines[index]?.length ?? 0), total = lines.reduce((n, l) => n + l.length, 0);
-  let offset = model.picker?.offset ?? 0;
+  let offset = (model.forkPicker ?? model.picker)?.offset ?? 0;
   if (top < offset) offset = top;
   else if (bottom > offset + available) offset = Math.min(top, bottom - available);
   return Math.max(0, Math.min(offset, total - available));
@@ -141,7 +142,7 @@ export function render(model: TuiModel, columns = 100, rows = 30, color = false)
   const scanCard = model.sessionOperation === "/threads" && !!model.activeCard;
   const footer = scanCard ? "/threads 加载中 · 审批/问题卡可操作 · Ctrl-C 中断" : model.sessionOperation ? `${model.sessionOperation} 进行中 · 按键将丢弃 · Esc 不取消在途操作` : model.resumeConfirmation ? "恢复已关闭会话？[y/N] · Enter/n/Esc 取消" : model.picker ? "会话选择 · ↑/↓ 选择 · Enter 切换 · Esc 取消" : model.activeCard?.replying ? "审批确认中 · 可继续输入 · Ctrl-C 中断" : model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : model.permissionPicker !== undefined ? "权限模式 · ↑↓/数字选择 · Enter 确认 · Esc 取消" : model.completion && !model.picker ? "↑↓ 选择 · Tab/Enter 插入 · Esc 关闭补全" : "Ctrl-N 新建 · Ctrl-T 会话 · Enter 发送 · Tab effort · Shift-Tab 权限 · Ctrl-R 推理 · Ctrl-C 两次退出";
   const panels: string[] = [];
-  const budget = model.picker || model.permissionPicker !== undefined || model.sessionOperation ? 0 : Math.max(0, frameAvailable - 1);
+  const budget = model.picker || model.forkPicker || model.permissionPicker !== undefined || model.sessionOperation ? 0 : Math.max(0, frameAvailable - 1);
   const logHeader = `系统日志 ${model.logs.length} 条${model.logs.dropped ? ` · 已丢弃 ${model.logs.dropped} 条` : ""}${model.logsMayBeMissing ? " · 重连后可能缺失" : model.logsStartAtAttach ? " · 仅显示接入后事件" : ""} · ${model.logExpanded ? "展开" : "折叠"} · Ctrl-L /log${model.panelFocus === "log" ? " [焦点]" : ""}`;
   if (budget > 0) panels.push(wrap(logHeader, width)[0]);
   const tail = (lines: string[], count: number, scroll: number) => { const end = Math.max(Math.min(lines.length, count), lines.length - scroll); return lines.slice(Math.max(0, end - count), end); };
@@ -170,8 +171,8 @@ export function render(model: TuiModel, columns = 100, rows = 30, color = false)
   }
   const available = frameAvailable - panels.length;
   let middle: string[];
-  if (model.picker && !scanCard) {
-    const { entries, offset = 0 } = model.picker;
+  if ((model.picker || model.forkPicker) && !scanCard && !(model.forkPicker && model.activeCard)) {
+    const { entries, offset = 0 } = (model.forkPicker ?? model.picker)!;
     middle = entries.length ? pickerLines(model, width).flat().slice(offset, offset + available) : ["（daemon 中没有会话）"].slice(0, available);
   } else if (card.length) {
     const cardRows = Math.min(card.length, available);
@@ -183,5 +184,6 @@ export function render(model: TuiModel, columns = 100, rows = 30, color = false)
   }
   while (middle.length < available) middle.push("");
   const status = [model.message, model.leaseWarning].filter(Boolean).join(" · ");
-  return [...headers, ...middle, ...panels, ...extras, wrap(status, width)[0], ...notices, wrap(footer, width)[0], ...inputRows].slice(-height).join("\n");
+  const forkFooter = model.forkPicker && !model.sessionOperation && !model.activeCard ? "分叉 item 选择 · ↑/↓ 选择 · Enter 分叉 · Esc 取消" : footer;
+  return [...headers, ...middle, ...panels, ...extras, wrap(status, width)[0], ...notices, wrap(forkFooter, width)[0], ...inputRows].slice(-height).join("\n");
 }

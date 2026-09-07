@@ -3,6 +3,7 @@ import { NotificationMethodSchema, type AttachResult, type Item, type PendingReq
 import { classifyEvent, LogBuffer, object, rebuildTasks } from "./observations.js";
 import { errorCode, errorMessage, leaseHolder } from "./errors.js";
 import type { ThreadEntry } from "./sessions.js";
+import type { ForkEntry } from "./fork.js";
 import type { ImageInput } from "./attachments.js";
 import type { Completion } from "./completion.js";
 import { controlError, estimatedContextWindow, nativePermission, permissionModes, type Effort, type Permission } from "./modes.js";
@@ -96,6 +97,7 @@ export class TuiModel {
   sessionOperation?: string;
   resumeConfirmation?: string;
   picker?: { entries: ThreadEntry[]; index: number; offset?: number };
+  forkPicker?: { threadId: string; entries: ForkEntry[]; index: number; offset?: number };
   private sessionModes = new Map<string, { launchPermission?: Permission }>();
   forgetLeases(): void {
     this.leaseExpiresAt = 0;
@@ -113,7 +115,7 @@ export class TuiModel {
     this.permissionPicker = undefined; this.completion = undefined;
     this.thread = snapshot.thread;
     this.items.clear(); this.cards.clear(); this.queue = []; this.usage = undefined;
-    this.activeTurnId = undefined; this.scroll = 0; this.picker = undefined;
+    this.activeTurnId = undefined; this.scroll = 0; this.picker = undefined; this.forkPicker = undefined;
     this.snapshot(snapshot);
   }
   private listeners = new Set<() => void>();

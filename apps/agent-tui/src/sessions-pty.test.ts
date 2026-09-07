@@ -63,7 +63,8 @@ test("sessions PTY: /new /clear /threads /fork /resume, Ctrl-N Ctrl-T, disconnec
     expect(second.engine.sent[0].input).toEqual([{ type: "text", text: "safe next prompt" }]);
     await create("/clear \r");
     const fourth = await create("\x0e");
-    const forked = await create("/fork \r");
+    write("/fork \r"); await wait(() => screen.includes("分叉 item 选择"), "empty fork selector");
+    const forked = await create("\r");
     // Empty tips have no stable native coordinate; a fresh empty seed cannot
     // accidentally include a concurrent source append during native loading.
     expect(forked.engine.options?.forkSession).not.toBe(true);
