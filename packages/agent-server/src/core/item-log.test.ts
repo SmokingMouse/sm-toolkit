@@ -3,6 +3,8 @@ import { chmodSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ItemLog } from "./item-log.js";
+import { ThreadManager } from "./thread-manager.js";
+import { MockEngine } from "../engines/mock.js";
 import type { ServerNotification, Thread, Turn } from "../protocol/index.js";
 
 const logs: ItemLog[] = [];
@@ -15,6 +17,22 @@ export function seed(log: ItemLog, id = "th"): void {
 }
 const create = () => { const log = new ItemLog(); logs.push(log); seed(log); return log; };
 describe("ItemLog", () => {
+  test("P3: process loss discards uncommitted deltas and recovery reports failed items with a fresh cursor", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "as-crash-")), "db");
+    const log = new ItemLog(path); seed(log);
+    const item = log.startItem("th", "tn_th", { id: "answer", type: "agentMessage", payload: { text: "" } });
+    for (const text of ["chapter one ", "chapter two ", "chapter three"]) log.delta("th", item.id, "text", text);
+    expect(log.item("th", item.id).payload).toEqual({ text: "chapter one chapter two chapter three" });
+    log.close(); // Lose the owner's partial map without completing the running turn.
+    const reopened = new ItemLog(path), manager = new ThreadManager(reopened, () => new MockEngine());
+    try {
+      const snapshot = reopened.snapshot("th", item.seq);
+      expect(snapshot.thread.status.type).toBe("systemError");
+      expect(snapshot.items[0]).toMatchObject({ id: item.id, status: "failed", payload: { text: "" } });
+      expect(snapshot.items[0].completedSeq!).toBeGreaterThan(item.seq);
+      expect(reopened.turn("tn_th").error?.message).toContain("server restarted");
+    } finally { await manager.shutdown(); reopened.close(); }
+  });
   test("review #6: database and WAL/SHM are private even with a permissive umask", () => {
     const dir = mkdtempSync(join(tmpdir(), "as-mode-")), path = join(dir, "private", "db");
     const oldMask = process.umask(0);

@@ -297,6 +297,10 @@ type UserInput =
 - delta **不重放**。断线期间的 delta 由重连后的 `item/completed`（带全量文本）
   补齐；仍在 `inProgress` 的 item 在快照里带**已聚合的 partial 文本**
   （服务端在内存里维护，落库只在 completed）。
+- **进程崩溃边界**：服务端进程崩溃会丢失尚未完成 item 的内存 delta，
+  重启后的失败 item 只含最后已持久化的 payload（可能是空正文）。恢复会把在途 turn/item
+  标为 failed，并为 item 分配 completedSeq；这不是正常断线重连的补齐保证。
+  当前不做 delta 检查点，也不会自动从引擎历史重建在途正文。
 - 保留窗：默认永久（sqlite 里躺着）。`-32009 cursor_expired` 是为将来的
   归档 / 裁剪预留的，v1 实现里不会触发。
 - 客户端重连的标准动作：`initialize` → `thread/attach{threadId, sinceSeq}`
