@@ -14,7 +14,7 @@ export class LeaseManager {
   }
   assertHeld(threadId: string, clientId: string): void {
     this.assertInput(threadId, clientId);
-    if (!this.read(threadId)) throw new ProtocolError(ErrorCode.unauthorized, "an active thread lease is required for permission escalation", { threadId });
+    if (!this.read(threadId)) throw new ProtocolError(ErrorCode.unauthorized, "an active thread lease is required for permission escalation", { threadId, reason: "lease_required" });
   }
   acquire(threadId: string, holder: ClientIdentity, ttlMs = 5 * 60_000): Lease {
     this.assertInput(threadId, holder.clientId);

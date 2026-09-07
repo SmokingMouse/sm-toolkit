@@ -60,6 +60,14 @@ describe("AS v1 protocol", () => {
     expect(ServerRequestSchemas["item/commandExecution/requestApproval"].result.safeParse({ decision: "yes" }).success).toBe(false);
     expect(ServerRequestSchemas["item/tool/requestUserInput"].result.parse({ answers: { q: { answers: ["yes"] } } }).answers.q.answers).toEqual(["yes"]);
   });
+  test("review2 P2-6 optional error reason preserves old payload and reader compatibility", () => {
+    const oldData = { threadId: "th", retryable: false };
+    expect(ErrorDataSchema.parse(oldData)).toEqual(oldData);
+    const error = new ProtocolError(-32005, "需要控制权", { threadId: "th", reason: "lease_required" }).toJSON();
+    expect(ErrorDataSchema.parse(error.data).reason).toBe("lease_required");
+    expect(ErrorDataSchema.omit({ reason: true }).parse(error.data)).toEqual(oldData);
+  });
+
   test("generated schema includes methods, notifications, four reverse requests and error enum", () => {
     const schema = JSON.parse(readFileSync(new URL("../../schema/as-v1.json", import.meta.url), "utf8"));
     expect(schema.$defs["method:thread/fork:params"].properties.fromItemId.type).toBe("string");

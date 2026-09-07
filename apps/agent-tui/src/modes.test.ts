@@ -63,5 +63,13 @@ test("native errors are not success and lease messages identify the holder and t
   }
   expect(controlError({ code: -32014 }, true)).toContain("审批已被处理");
   expect(controlError({ code: -32014 }, true)).not.toContain("/takeover");
-  expect(controlError({ code: -32005, message: "an active thread lease is required for permission escalation" }, true)).toContain("有效控制租约");
+  expect(controlError({ code: -32005, message: "需要控制权", data: { reason: "lease_required" } }, true)).toContain("有效控制租约");
+});
+
+test("review2 P2-6 lease reason is independent of prose and other unauthorized errors", () => {
+  for (const reason of [undefined, "auth_failed"]) {
+    const error = Object.assign(new Error("lease token authentication failed"), { code: -32005, data: { reason } });
+    expect(controlError(error, true)).toBe(error.message);
+  }
+  expect(controlError({ code: -32005, data: { reason: "lease_required" } }, true)).toContain("有效控制租约");
 });

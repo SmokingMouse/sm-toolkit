@@ -334,7 +334,8 @@ type Autocompact = "auto" | number; // 整数 token 数，100000–1000000
 | `-32015` | `engine_protocol_error` | 引擎回了不认识的东西（`data.raw` 截断） | 报错，建议看 trace |
 | `-32016` | `backend_unsupported` | 后端不支持所请求原生能力 | 检查 capabilities / backend |
 
-`error.data` 约定：`{threadId?, turnId?, itemId?, retryable: boolean, detail?}`。
+`error.data` 约定：`{threadId?, turnId?, itemId?, retryable: boolean, detail?, reason?: string}`。
+提权缺少有效租约时 `reason` 为 `lease_required`；客户端按此字段区分其他 unauthorized 原因，不解析消息文案。该字段可选，旧客户端可忽略。
 
 ## 8. 幂等与重放
 

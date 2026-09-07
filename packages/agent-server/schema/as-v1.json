@@ -193,6 +193,9 @@
                         "stderr": {
                           "type": "string"
                         },
+                        "reason": {
+                          "type": "string"
+                        },
                         "raw": {
                           "$ref": "#/$defs/AttachResultSchema/$defs/__schema1"
                         },
@@ -2357,6 +2360,9 @@
         "stderr": {
           "type": "string"
         },
+        "reason": {
+          "type": "string"
+        },
         "raw": {
           "$ref": "#/$defs/ErrorDataSchema/$defs/__schema1"
         },
@@ -2586,6 +2592,9 @@
                   "$ref": "#/$defs/ErrorResponseSchema/$defs/__schema0"
                 },
                 "stderr": {
+                  "type": "string"
+                },
+                "reason": {
                   "type": "string"
                 },
                 "raw": {
@@ -2926,6 +2935,9 @@
                       "$ref": "#/$defs/FrameSchema/$defs/__schema2"
                     },
                     "stderr": {
+                      "type": "string"
+                    },
+                    "reason": {
                       "type": "string"
                     },
                     "raw": {
@@ -5803,6 +5815,9 @@
             "stderr": {
               "type": "string"
             },
+            "reason": {
+              "type": "string"
+            },
             "raw": {
               "$ref": "#/$defs/RpcErrorSchema/$defs/__schema1"
             },
@@ -6440,6 +6455,9 @@
                     "stderr": {
                       "type": "string"
                     },
+                    "reason": {
+                      "type": "string"
+                    },
                     "raw": {
                       "$ref": "#/$defs/ThreadSchema/$defs/__schema1"
                     },
@@ -6758,6 +6776,9 @@
                   "$ref": "#/$defs/ThreadStatusSchema/$defs/__schema0"
                 },
                 "stderr": {
+                  "type": "string"
+                },
+                "reason": {
                   "type": "string"
                 },
                 "raw": {
@@ -7105,6 +7126,9 @@
                   "$ref": "#/$defs/TurnSchema/$defs/__schema0"
                 },
                 "stderr": {
+                  "type": "string"
+                },
+                "reason": {
                   "type": "string"
                 },
                 "raw": {
@@ -7828,6 +7852,9 @@
                         "stderr": {
                           "type": "string"
                         },
+                        "reason": {
+                          "type": "string"
+                        },
                         "raw": {
                           "$ref": "#/$defs/method:thread~1start:result/$defs/__schema1"
                         },
@@ -8318,6 +8345,9 @@
                           "$ref": "#/$defs/method:thread~1permission~1set:result/$defs/__schema0"
                         },
                         "stderr": {
+                          "type": "string"
+                        },
+                        "reason": {
                           "type": "string"
                         },
                         "raw": {
@@ -8855,6 +8885,9 @@
                     "stderr": {
                       "type": "string"
                     },
+                    "reason": {
+                      "type": "string"
+                    },
                     "raw": {
                       "$ref": "#/$defs/method:thread~1compact:result/$defs/__schema1"
                     },
@@ -9350,6 +9383,9 @@
                         "stderr": {
                           "type": "string"
                         },
+                        "reason": {
+                          "type": "string"
+                        },
                         "raw": {
                           "$ref": "#/$defs/method:thread~1resume:result/$defs/__schema1"
                         },
@@ -9730,6 +9766,9 @@
                           "$ref": "#/$defs/method:thread~1attach:result/$defs/__schema0"
                         },
                         "stderr": {
+                          "type": "string"
+                        },
+                        "reason": {
                           "type": "string"
                         },
                         "raw": {
@@ -13357,6 +13396,9 @@
                           "stderr": {
                             "type": "string"
                           },
+                          "reason": {
+                            "type": "string"
+                          },
                           "raw": {
                             "$ref": "#/$defs/method:thread~1list:result/$defs/__schema1"
                           },
@@ -13738,6 +13780,9 @@
                         "stderr": {
                           "type": "string"
                         },
+                        "reason": {
+                          "type": "string"
+                        },
                         "raw": {
                           "$ref": "#/$defs/method:thread~1read:result/$defs/__schema1"
                         },
@@ -14113,6 +14158,9 @@
                           "$ref": "#/$defs/method:thread~1fork:result/$defs/__schema0"
                         },
                         "stderr": {
+                          "type": "string"
+                        },
+                        "reason": {
                           "type": "string"
                         },
                         "raw": {
@@ -14822,6 +14870,9 @@
                       "$ref": "#/$defs/method:turn~1start:result/$defs/__schema0"
                     },
                     "stderr": {
+                      "type": "string"
+                    },
+                    "reason": {
                       "type": "string"
                     },
                     "raw": {
@@ -16147,6 +16198,9 @@
                         "stderr": {
                           "type": "string"
                         },
+                        "reason": {
+                          "type": "string"
+                        },
                         "raw": {
                           "$ref": "#/$defs/notification:thread~1started/$defs/__schema1"
                         },
@@ -16479,6 +16533,9 @@
                       "$ref": "#/$defs/notification:thread~1status~1changed/$defs/__schema0"
                     },
                     "stderr": {
+                      "type": "string"
+                    },
+                    "reason": {
                       "type": "string"
                     },
                     "raw": {
@@ -17046,6 +17103,9 @@
                     "stderr": {
                       "type": "string"
                     },
+                    "reason": {
+                      "type": "string"
+                    },
                     "raw": {
                       "$ref": "#/$defs/notification:turn~1started/$defs/__schema1"
                     },
@@ -17396,6 +17456,9 @@
                       "$ref": "#/$defs/notification:turn~1completed/$defs/__schema0"
                     },
                     "stderr": {
+                      "type": "string"
+                    },
+                    "reason": {
                       "type": "string"
                     },
                     "raw": {
@@ -20883,6 +20946,9 @@
                   "$ref": "#/$defs/notification:error/$defs/__schema0"
                 },
                 "stderr": {
+                  "type": "string"
+                },
+                "reason": {
                   "type": "string"
                 },
                 "raw": {
