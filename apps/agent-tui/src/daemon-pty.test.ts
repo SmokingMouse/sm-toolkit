@@ -46,7 +46,14 @@ test("tui-live: real daemon, WS phone, Unix PTY, fake Herdr, race, reconnect and
       env: { ...env, HERDR_PANE_ID: "pane-test", HERDR_SOCKET_PATH: herdrPath, TERM: "xterm-256color" },
       terminal: { cols: 140, rows: 34, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } },
     });
-    await wait(() => screen.includes(thread.id.slice(0, 11)), "TUI attached");
+    // Herdr emits an OSC title with this id before runTerminal installs raw input.
+    // Sending Enter then lets the PTY turn CR into LF (our intentional Ctrl-J newline).
+    // Wait for the actual first draw and its input row, not the early title.
+    await wait(() => {
+      const start = screen.lastIndexOf("\x1b[H");
+      const frame = start < 0 ? "" : screen.slice(start);
+      return frame.includes(thread.id.slice(0, 11)) && frame.endsWith("> \x1b[K");
+    }, "TUI first frame and raw input ready");
     proc.terminal!.write("hello from pty\r"); await wait(() => engine.sent.length === 1, "prompt reached engine");
     expect(engine.sent[0].input).toEqual([{ type: "text", text: "hello from pty" }]);
     const turnId = engine.sent[0].turnId;
