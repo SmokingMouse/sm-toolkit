@@ -18,14 +18,14 @@ class ModeEngine extends MockEngine {
   rejectPermission = false;
   assertLease = () => {};
   async setPermission(permission: Permission): Promise<void> {
-    this.assertLease();
+    if (["full", "bypassPermissions", "dontAsk"].includes(permission)) this.assertLease();
     if (this.rejectPermission) throw new Error("permission policy denied");
     this.permissions.push(permission);
     this.emit({ type: "permissionChanged", permission: nativePermission(permission) });
     await Bun.sleep(0);
   }
   async engineControl(subtype: string, params: JsonObject): Promise<JsonObject> {
-    this.assertLease(); this.controls.push({ subtype, params });
+    this.controls.push({ subtype, params });
     return { type: "control_response", response: this.rejectControl ? { subtype: "error", error: "control policy denied" } : { subtype: "success", response: {} } };
   }
 }
@@ -65,6 +65,22 @@ test("P1-1 readonly cycle and picker preserve launch restrictions without any RP
   expect(render(a.model)).toContain("> 1. readonly (当前)");
   await a.controller.key("\r", { name: "return" });
   expect(engine.permissions).toHaveLength(0); expect(server.leases.read(thread.id)).toBeUndefined();
+});
+
+test("P1-2 normal controls leave phone input available and escalation releases short lease on success and error", async () => {
+  const { a, b, engine, thread, server, command } = await setup("full");
+  for (const text of ["/effort high", "/model opus"]) { await command(text); expect(server.leases.read(thread.id)).toBeUndefined(); }
+  for (const expected of ["default", "acceptEdits", "plan", "bypassPermissions"]) {
+    await a.controller.key("", { name: "tab", shift: true }); expect(a.model.thread?.permission).toBe(expected);
+    expect(server.leases.read(thread.id)).toBeUndefined();
+  }
+  await b.client.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "phone still works" }] });
+  expect(engine.sent).toHaveLength(1);
+  await a.controller.key("", { name: "tab", shift: true });
+  engine.rejectPermission = true;
+  // An escalation failure must release as well.
+  await command("/permissions"); await a.controller.key("4"); await a.controller.key("\r", { name: "return" });
+  expect(server.leases.read(thread.id)).toBeUndefined(); expect(a.model.thread?.permission).toBe("default");
 });
 
 test("mode commands use leases, preserve input/state on rejection, and retry takeover", async () => {

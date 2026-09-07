@@ -21,6 +21,7 @@ export class TuiModel {
   }
   effort?: Effort;
   liveModel?: string;
+  leaseExpiresAt = 0;
   contextWindow = 200_000;
   contextWindowEstimated = true;
   scroll = 0;
@@ -83,7 +84,7 @@ export class TuiModel {
 export function bindClient(client: AgentClient, model: TuiModel): () => void {
   const disposers = [client.onSnapshot(s => model.snapshot(s)), client.onStateChange(state => {
     model.connection = state;
-    if (state !== "connected") { model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
+    if (state !== "connected") { model.leaseExpiresAt = 0; model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
     model.changed();
   }), client.onError((error, id) => {
     model.message = controlError(error);

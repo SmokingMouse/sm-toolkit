@@ -78,21 +78,33 @@ export class Controller {
     this.controlling = true;
     try { await action(); } catch (error) { throw new Error(controlError(error, true)); } finally { this.controlling = false; }
   }
-  private async acquire(): Promise<void> {
-    await this.client.request("thread/lease/acquire", { threadId: this.model.thread!.id });
+  private async acquire(ttlMs: number): Promise<void> {
+    const { lease } = await this.client.request("thread/lease/acquire", { threadId: this.model.thread!.id, ttlMs });
+    this.model.leaseExpiresAt = lease.expiresAtMs;
+  }
+  private async withEscalationLease(action: () => Promise<void>): Promise<void> {
+    if (this.model.leaseExpiresAt > this.now()) { await action(); return; }
+    await this.acquire(5000);
+    try { await action(); }
+    finally {
+      try { await this.client.request("thread/lease/release", { threadId: this.model.thread!.id }); }
+      finally { this.model.leaseExpiresAt = 0; }
+    }
   }
   private async setPermission(permission: Permission): Promise<void> {
     if (this.model.thread?.permission === "readonly") {
       this.model.message = "readonly 为启动限制，当前线程保持 readonly；更改需新建线程";
       return;
     }
-    await this.acquire();
-    const { thread } = await this.client.request("thread/permission/set", { threadId: this.model.thread!.id, permission });
-    this.model.thread = thread;
-    this.model.message = `权限模式：${nativePermission(thread.permission)}`;
+    const change = async () => {
+      const { thread } = await this.client.request("thread/permission/set", { threadId: this.model.thread!.id, permission });
+      this.model.thread = thread;
+      this.model.message = `权限模式：${nativePermission(thread.permission)}`;
+    };
+    if (["full", "bypassPermissions", "dontAsk"].includes(permission)) await this.withEscalationLease(change);
+    else await change();
   }
   private async setEffort(effort: Effort): Promise<void> {
-    await this.acquire();
     controlSuccess(await this.client.request("thread/effort/set", { threadId: this.model.thread!.id, maxThinkingTokens: effortBudgets[effort] }));
     this.model.effort = effort;
     this.model.message = `effort ${effort} · thinking budget ${effortBudgets[effort]}`;
@@ -126,9 +138,8 @@ export class Controller {
     await this.control(async () => {
       const threadId = this.model.thread!.id;
       if (command === "/effort") { await this.setEffort(value as Effort); return; }
-      if (command === "/release") { await this.client.request("thread/lease/release", { threadId }); this.model.message = "已释放控制权"; return; }
-      await this.acquire();
-      if (command === "/takeover") { this.model.message = "已接管控制权；请重试原操作 · /release 释放"; return; }
+      if (command === "/release") { await this.client.request("thread/lease/release", { threadId }); this.model.leaseExpiresAt = 0; this.model.message = "已释放控制权"; return; }
+      if (command === "/takeover") { await this.acquire(30_000); this.model.message = "已接管控制权（独占输入 30 秒）；请重试原操作 · /release 释放"; return; }
       if (command === "/model") {
         controlSuccess(await this.client.request("thread/engineControl", { threadId, subtype: "set_model", params: { model: value } }));
         this.model.liveModel = value; this.model.message = `模型：${value}`;
@@ -174,7 +185,6 @@ export class Controller {
     if (handle.method === "item/permissions/requestApproval") {
       if (handle.params.permissions.toolName === "ExitPlanMode" && (decision === "accept" || decision === "acceptForSession")) {
         await this.control(async () => {
-          await this.acquire();
           if (card.state !== "pending" || !this.client.pendingRequests.has(handle.params.requestId)) throw new Error("审批已失效或由另一客户端处理");
           // Only the winning, server-confirmed approval may change the mode.
           await new Promise<void>((resolve, reject) => {
