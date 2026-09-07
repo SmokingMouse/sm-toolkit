@@ -136,6 +136,7 @@ export class AgentClient {
   engineControl(params: MethodParams<"thread/engineControl">): Promise<MethodResult<"thread/engineControl">> { return this.request("thread/engineControl", params); }
   setPermission(params: MethodParams<"thread/permission/set">): Promise<MethodResult<"thread/permission/set">> { return this.request("thread/permission/set", params); }
   setEffort(params: MethodParams<"thread/effort/set">): Promise<MethodResult<"thread/effort/set">> { return this.request("thread/effort/set", params); }
+  compact(params: MethodParams<"thread/compact">): Promise<MethodResult<"thread/compact">> { return this.request("thread/compact", params); }
   private call<M extends Method>(method: M, params: MethodParams<M>): Promise<MethodResult<M>> {
     const id = `cli_${++this.sequence}`;
     return new Promise((resolve, reject) => {

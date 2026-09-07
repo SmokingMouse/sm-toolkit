@@ -230,6 +230,13 @@ export class AgentServer {
       }
       case "thread/engineControl": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.engineControl(p); }
       case "thread/permission/set": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.setPermission(p); }
+      case "thread/compact": {
+        const p = params(method); this.leases.assertInput(p.threadId, connection.clientId);
+        if (this.threads.get(p.threadId).backend !== "claude") throw new ProtocolError(ErrorCode.backend_unsupported, "compact requires Claude");
+        // 2.1.258 print.ts has no compact control_request subtype. Use the native
+        // slash command through the normal user-turn queue, preserving ordering.
+        return this.threads.queue(p.threadId).enqueue({ threadId: p.threadId, input: [{ type: "text", text: `/compact${p.instructions ? ` ${p.instructions}` : ""}` }], ...(p.clientTurnId ? { clientTurnId: p.clientTurnId } : {}) });
+      }
       case "thread/effort/set": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.engineControl({ threadId: p.threadId, subtype: "set_max_thinking_tokens", params: { max_thinking_tokens: p.maxThinkingTokens, ...(p.thinkingDisplay !== undefined ? { thinking_display: p.thinkingDisplay } : {}) } }); }
       case "thread/resume": {
         const p = params(method);

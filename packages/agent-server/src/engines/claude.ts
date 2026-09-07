@@ -26,6 +26,7 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--settings", JSON.stringify({ permissions: { ask: ["*"] } })];
   if (resolved.model) args.push("--model", resolved.model);
   if (options.effort !== undefined) args.push("--effort", options.effort);
+  if (options.autocompact !== undefined) args.push("--autocompact", String(options.autocompact));
   args.push("--include-hook-events", "--forward-subagent-text");
   if (options.engineThreadId) args.push("--resume", options.engineThreadId);
   if (options.forkSession && options.engineThreadId) args.push("--fork-session");

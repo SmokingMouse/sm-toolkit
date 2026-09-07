@@ -21,6 +21,7 @@ function checkEffort(effort?: string): void {
   if (effort !== undefined && !effort.trim()) throw new ProtocolError(ErrorCode.invalid_params, "Codex effort must not be empty");
 }
 export function buildCodexThreadParams(options: SessionOptions): Record<string, unknown> {
+  if (options.autocompact !== undefined) throw new ProtocolError(ErrorCode.backend_unsupported, "autocompact requires Claude");
   if (options.forkSession) throw new ProtocolError(ErrorCode.unsupported_capability, "Codex fork is not implemented");
   if (options.tools !== undefined && options.tools !== "all") throw new ProtocolError(ErrorCode.unsupported_capability, "Codex app-server does not support an AS tool allowlist");
   checkEffort(options.effort);

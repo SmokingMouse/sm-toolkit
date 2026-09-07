@@ -121,6 +121,9 @@ client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
 
 ### Backend-specific 逃生门
 
+`thread/compact` `{threadId,instructions?,clientTurnId?}` → `{turn,deduplicated?}`，按正常 turn 队列发送用户文本 `/compact`（附 instructions）。本机 2.1.258 print.ts 的 control_request 子类型全集未发现 compact；因此这是 slash command 转发，不是虚构控制指令。沿用 turn 的排队、去重、lease 与完成事件，以及已有 compact_boundary → contextCompaction item。Codex 返回 backend_unsupported。
+thread/start 与 resume 新增 autocompact：`"auto"` 或 100000–1000000 整数 token 数，透传 `--autocompact <auto|tokens>`（bundle CLI option 描述 100k–1M）；省略时保留原生默认值。
+
 UserInput 新增 `{type:"bash",command}`，仅支持 Claude 独立 turn/start（不混排、不 steer）。2.1.258 print.ts 分支 `if(d.type==="bash_command")` 调用 runHeadlessBashCommand；发 `{type:"bash_command",command,cwd,uuid}`，uuid 为原生 UUID。CLI 不发 result，而是 isReplay user 文本：bash-input 回显，以及 bash-stdout / bash-stderr / bash-exit-code 标签输出；daemon 聚合 commandExecution item 并结束 turn。非零退出标记 command item failed，turn 仍表示命令已执行完成；中断等待回放后结束。cwd 固定为 thread cwd。bash 是显式用户 shell 操作，不经过模型的 can_use_tool 审批。
 客户端 initialize.capabilities.bashInput=true 声明可读此输入变体，新库默认声明；旧连接收到的 userMessage（含历史快照）降级为 `!command` 文本，落库仍保留原始 bash 变体。Codex 在入队前返回 backend_unsupported。
 
