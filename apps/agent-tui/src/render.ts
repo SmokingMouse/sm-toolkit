@@ -79,7 +79,7 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
   for (const c of model.cards.values()) if (c !== model.activeCard) body.push(...renderCard(c));
   const content = body.flatMap(line => wrap(line, width));
   const card = model.activeCard ? renderCard(model.activeCard).flatMap(line => wrap(line, width)) : [];
-  const footer = model.picker ? "会话选择 · ↑/↓ 选择 · Enter 切换 · Esc 取消" : model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : "Ctrl-N 新建 · Ctrl-T 会话 · Enter 发送 · /steer 插话 · Tab 推理 · Ctrl-C 两次退出";
+  const footer = model.sessionOperation ? `${model.sessionOperation} 进行中 · 按键将丢弃 · Esc 不取消在途操作` : model.picker ? "会话选择 · ↑/↓ 选择 · Enter 切换 · Esc 取消" : model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : "Ctrl-N 新建 · Ctrl-T 会话 · Enter 发送 · /steer 插话 · Tab 推理 · Ctrl-C 两次退出";
   const available = height - headers.length - 3;
   let middle: string[];
   if (model.picker) {

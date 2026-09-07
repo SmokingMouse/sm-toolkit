@@ -7,6 +7,7 @@ import { sortThreads } from "./sessions.js";
 import { render } from "./render.js";
 
 const thread = (id: string): Thread => ({ id, backend: "claude", cwd: "/tmp", model: "test-model", engineThreadId: null, createdAtMs: 1, status: { type: "idle" } });
+function gate() { let release!: () => void; const promise = new Promise<void>(resolve => { release = resolve; }); return { promise, release }; }
 function setup() {
   const model = new TuiModel(); model.thread = thread("old"); model.connection = "connected";
   const calls: Array<[string, any]> = [];
@@ -51,6 +52,35 @@ test("session commands are consumed locally; failed attach preserves current vie
   client.request = async () => { throw new Error("missing thread"); };
   model.input = "/resume missing"; await controller.key(undefined, { name: "return" });
   expect(model.thread?.id).toBe("old"); expect(model.input).toBe("/resume missing"); expect(model.message).toBe("missing thread");
+});
+test("P0-1/P2-2/P2-3: slow start, list and attach discard all in-flight keys with feedback", async () => {
+  for (const [command, method] of [["/new", "thread/start"], ["/threads", "thread/list"], ["/resume new", "thread/attach"]]) {
+    const { model, controller, client, calls } = setup(), pending = gate(), original = client.request.bind(client);
+    client.request = async (name, params) => { if (name === method) await pending.promise; return original(name, params); };
+    model.input = command;
+    const operation = controller.key(undefined, { name: "return" });
+    expect(model.input).toBe("");
+    for (const c of "hello world/new".repeat(10)) await controller.key(c);
+    await controller.key(undefined, { name: "return" });
+    await controller.key(undefined, { ctrl: true, name: "n" });
+    await controller.sessions.run("/new");
+    expect(model.message).toContain("已丢弃"); expect(model.input).toBe("");
+    pending.release(); await operation;
+    expect(model.input).toBe(""); expect(model.message).toContain("按键已丢弃");
+    expect(calls.filter(c => c[0] === "turn/start")).toHaveLength(0);
+    expect(calls.filter(c => c[0] === "thread/start")).toHaveLength(command === "/new" ? 1 : 0);
+  }
+});
+test("P2-6: Esc during picker attach is explicitly rejected and does not pretend to cancel", async () => {
+  const { model, controller, client } = setup(), pending = gate(), original = client.request.bind(client);
+  await controller.sessions.run("/threads");
+  client.request = async (method, params) => { if (method === "thread/attach") await pending.promise; return original(method, params); };
+  const operation = controller.key(undefined, { name: "return" });
+  expect(render(model, 120, 20)).toContain("Esc 不取消在途操作");
+  await controller.key(undefined, { name: "escape" });
+  expect(model.picker).toBeDefined(); expect(model.thread?.id).toBe("old"); expect(model.message).toContain("Esc 也不取消");
+  pending.release(); await operation;
+  expect(model.thread?.id).toBe("new"); expect(model.picker).toBeUndefined();
 });
 test("status shows permission only when present in thread state; picker escapes titles", () => {
   const { model } = setup();

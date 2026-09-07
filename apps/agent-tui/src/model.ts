@@ -15,6 +15,7 @@ export class TuiModel {
   expandedReasoning = false;
   scroll = 0;
   activeTurnId?: string;
+  sessionOperation?: string;
   picker?: { entries: ThreadEntry[]; index: number };
   select(snapshot: AttachResult): void {
     this.thread = snapshot.thread;

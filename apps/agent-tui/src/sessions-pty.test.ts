@@ -54,7 +54,10 @@ test("sessions PTY: /new /clear /threads /fork /resume, Ctrl-N Ctrl-T, disconnec
     const turnId = first.sent[0].turnId;
     first.emit({ type: "itemStarted", turnId, item: { id: "original-answer", type: "agentMessage", payload: { text: "original history" } } });
     await wait(() => screen.includes("original history"), "original history drawn");
-    const second = await create("/new\r");
+    const second = await create("/new\rhello world" + "/new\r".repeat(9));
+    expect(screen).toContain("按键已丢弃");
+    expect(screen).not.toContain("> /newhello world");
+    expect(second.engine.sent).toHaveLength(0);
     expect(first.closed).toBe(false); expect(first.interrupted).toHaveLength(0); expect(screen).not.toContain("original history");
     await create("/clear\r");
     const fourth = await create("\x0e");

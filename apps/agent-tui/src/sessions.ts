@@ -9,11 +9,20 @@ export function sortThreads(entries: ThreadEntry[]): ThreadEntry[] {
 }
 export class Sessions {
   busy = false;
+  private discarded = false;
+  rejectInput(): void {
+    this.discarded = true;
+    this.model.message = "会话操作进行中，本次按键已丢弃（Esc 也不取消在途操作）；完成后请重试";
+    this.model.changed();
+  }
   constructor(private client: AgentClient, private model: TuiModel) {}
   async run(command: string, argument = ""): Promise<void> {
-    if (this.busy) return;
+    if (this.busy) { this.rejectInput(); return; }
     if (this.client.state !== "connected") throw new Error("连接尚未恢复，输入已保留");
     this.busy = true;
+    this.discarded = false;
+    this.model.sessionOperation = command;
+    this.model.changed();
     try {
       if (command === "/threads" || (command === "/resume" && !argument)) {
         const entries: ThreadEntry[] = [];
@@ -45,7 +54,11 @@ export class Sessions {
           : await this.client.request("thread/start", { backend: current.backend, cwd: current.cwd, model: current.model, clientThreadId: crypto.randomUUID() });
         await this.attach(thread.id);
       }
-    } finally { this.busy = false; this.model.changed(); }
+    } finally {
+      this.busy = false; this.model.sessionOperation = undefined;
+      if (this.discarded) this.model.message += " · 操作期间的按键已丢弃，请重新输入";
+      this.model.changed();
+    }
   }
   private async attach(threadId: string): Promise<void> {
     const previous = this.model.thread?.id;

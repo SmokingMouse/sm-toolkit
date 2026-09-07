@@ -19,7 +19,12 @@ export class Controller {
         return;
       }
       this.interruptedAt = -Infinity;
-      if (key.ctrl && (key.name === "n" || key.name === "t")) { if (!this.submitting) await this.sessions.run(key.name === "n" ? "/new" : "/threads"); return; }
+      if (this.sessions.busy) { this.sessions.rejectInput(); return; }
+      if (key.ctrl && (key.name === "n" || key.name === "t")) {
+        if (this.submitting) this.model.message = "提交进行中，本次快捷键已丢弃，请稍后重试";
+        else await this.sessions.run(key.name === "n" ? "/new" : "/threads");
+        return;
+      }
       if (this.model.picker) {
         const picker = this.model.picker;
         if (key.name === "escape") this.model.picker = undefined;
@@ -43,13 +48,17 @@ export class Controller {
   }
   async submit(): Promise<void> {
     const text = this.model.input.trim(), thread = this.model.thread;
-    if (!text || !thread || this.submitting || this.sessions.busy) return;
+    if (this.sessions.busy) { this.sessions.rejectInput(); return; }
+    if (this.submitting) { this.model.message = "提交进行中，本次提交已丢弃，请稍后重试"; this.model.changed(); return; }
+    if (!text || !thread) return;
     if (this.client.state !== "connected") throw new Error("连接尚未恢复，输入已保留");
     const [command, ...args] = text.split(/\s+/);
     if (["/new", "/clear", "/threads", "/fork", "/resume"].includes(command)) {
       if ((command !== "/resume" && args.length) || args.length > 1) throw new Error(`用法：${command}${command === "/resume" ? " [id]" : ""}`);
       this.submitting = true;
-      try { await this.sessions.run(command, args[0]); if (this.model.input.trim() === text) this.model.input = ""; }
+      this.model.input = "";
+      try { await this.sessions.run(command, args[0]); }
+      catch (error) { this.model.input = text; throw error; }
       finally { this.submitting = false; this.model.changed(); }
       return;
     }
