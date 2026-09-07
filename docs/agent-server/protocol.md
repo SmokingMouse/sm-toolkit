@@ -151,6 +151,9 @@ type Thread = {
 | Codex | `thread/fork {threadId,lastTurnId}` 截至已完成 turn（含）；缺省 item 也使用捕获的精确坐标 | `thread/start` 的 developerInstructions 携带角色标注的 JSON 历史数据；没有消息 history 导入参数。不会生成额外 AS 用户 item 或提前发起 turn |
 
 缺少精确原生坐标时（包括空日志、旧会话和运行中边界）使用播种；不对可并发追加的源会话做无坐标 tip fork，避免原生加载时混入快照之后的新消息。
+原生分支继承前缀内的原生坐标，支持再次原生分叉；播种分支不继承旧 session 坐标。
+播种回退会在新分支的 `thread/started` 后发送 `thread/engineEvent`，subtype 为 `fork/seeded`，
+payload 为 `{reason:"native_checkpoint_unavailable", sourceThreadId, itemId}`（包括尚未成功续聊落盘的 Claude 播种来源）；按 engineEvents 能力及 optOut 过滤。
 
 播种只恢复 AS 可见内容：文字保留，工具调用/结果、reasoning 等序列化为历史文本，
 不执行工具；图片/文件只保留路径与元数据，不重新读取原始字节。隐藏思考、原生压缩状态、

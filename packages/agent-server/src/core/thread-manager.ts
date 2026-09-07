@@ -79,9 +79,13 @@ export class ThreadManager {
     thread.permission = params.permission ?? "default";
     this.log.transaction(() => {
       this.log.insertThread(thread, request, options);
-      if (internal?.prefix && internal.forkedFrom) this.log.copyPrefix(internal.forkedFrom.threadId, thread.id, internal.prefix);
+      if (internal?.prefix && internal.forkedFrom) this.log.copyPrefix(internal.forkedFrom.threadId, thread.id, internal.prefix, internal.fork === true);
     }); onCreated?.(thread);
     this.log.publish({ jsonrpc: "2.0", method: "thread/started", params: { threadId: thread.id, thread } });
+    if (internal?.seedHistory) this.log.publish({ jsonrpc: "2.0", method: "thread/engineEvent", params: {
+      threadId: thread.id, backend: thread.backend, subtype: "fork/seeded",
+      payload: { reason: "native_checkpoint_unavailable", sourceThreadId: internal.forkedFrom!.threadId, itemId: internal.forkedFrom!.itemId },
+    } });
     await this.open(thread, { ...options, threadId: thread.id, engineThreadId: internal?.resume, forkSession: internal?.fork, forkPoint: internal?.forkPoint });
     return { thread: this.get(thread.id) };
   }

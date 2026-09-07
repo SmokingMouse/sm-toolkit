@@ -18,6 +18,36 @@ function fixture(databasePath = ":memory:") {
 const withoutTurn = ({ turnId: _, ...item }: Item) => item;
 
 for (const backend of ["claude", "codex"] as const) describe(`midfork ${backend}`, () => {
+  test("P2-2: nested native forks retain only prefix checkpoints; seeded forks report fallback without copying coordinates", async () => {
+    const { server, engines } = fixture(), c = await client(server);
+    const { thread } = await c.request("thread/start", { backend, cwd: process.cwd() });
+    const first = await c.request("turn/start", { threadId: thread.id, input: input("first") });
+    engines[0].emit({ type: "turnCompleted", turnId: first.turn.id, status: "completed", forkPoint: "point-1" });
+    await until(() => server.threads.get(thread.id).status.type === "idle");
+    const itemId = server.log.snapshot(thread.id).items.at(-1)!.id;
+    const second = await c.request("turn/start", { threadId: thread.id, input: input("second") });
+    engines[0].emit({ type: "turnCompleted", turnId: second.turn.id, status: "completed", forkPoint: "point-2" });
+    await until(() => server.threads.get(thread.id).status.type === "idle");
+    const suffixId = server.log.snapshot(thread.id).items.at(-1)!.id;
+    const branch = await c.request("thread/fork", { threadId: thread.id, fromItemId: itemId });
+    expect(server.log.forkPoint(branch.thread.id, itemId)).toBe("point-1");
+    expect(server.log.forkPoint(branch.thread.id, suffixId)).toBeUndefined();
+    await c.request("thread/fork", { threadId: branch.thread.id, fromItemId: itemId });
+    expect(engines[2].options).toMatchObject({ forkSession: true, forkPoint: "point-1", engineThreadId: branch.thread.engineThreadId });
+    expect(engines[2].options?.seedHistory).toBeUndefined();
+    await c.request("turn/start", { threadId: thread.id, input: input("unmapped") });
+    const events: unknown[] = [];
+    const seeded = await server.threads.fork({ threadId: thread.id }, created => {
+      server.log.subscribe(created.id, event => { if (event.method === "thread/engineEvent") events.push(event.params); });
+    });
+    expect(engines[3].options?.seedHistory).toHaveLength(3);
+    expect(server.log.forkPoint(seeded.thread.id, itemId)).toBeUndefined();
+    expect(server.log.forkPoint(seeded.thread.id, suffixId)).toBeUndefined();
+    expect(events).toContainEqual({ threadId: seeded.thread.id, backend, subtype: "fork/seeded", payload: {
+      reason: "native_checkpoint_unavailable", sourceThreadId: thread.id, itemId: seeded.thread.forkedFrom!.itemId,
+    } });
+  });
+
   test("inclusive middle snapshot preserves source, cursors and independent continuation", async () => {
     const { server, engines } = fixture(), c = await client(server);
     const { thread } = await c.request("thread/start", { backend, cwd: process.cwd() });

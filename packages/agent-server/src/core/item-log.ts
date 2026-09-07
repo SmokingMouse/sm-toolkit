@@ -93,7 +93,7 @@ export class ItemLog {
     return this.db.query<{ native_id: string }, [string, string]>("SELECT native_id FROM fork_points WHERE thread_id=? AND item_id=?").get(threadId, itemId)?.native_id;
   }
   /** Snapshot payloads and cursors; inherited turns get fresh globally unique IDs. */
-  copyPrefix(sourceId: string, targetId: string, items: Item[]): void {
+  copyPrefix(sourceId: string, targetId: string, items: Item[], copyForkPoints = false): void {
     this.transaction(() => {
       const turns = new Map<string, string>();
       let nextSeq = 1;
@@ -107,6 +107,10 @@ export class ItemLog {
         }
         this.db.query("INSERT INTO items(thread_id,id,seq,turn_id,type,status,payload_json,started_at,completed_at,completed_seq) VALUES(?,?,?,?,?,?,?,?,?,?)").run(targetId, item.id, item.seq, turnId, item.type, item.status ?? "inProgress", JSON.stringify(item.payload), item.startedAtMs, item.completedAtMs ?? null, item.completedSeq ?? null);
         nextSeq = Math.max(nextSeq, item.seq + 1, (item.completedSeq ?? 0) + 1);
+        if (copyForkPoints) {
+          const point = this.forkPoint(sourceId, item.id);
+          if (point) this.saveForkPoint(targetId, item.id, point);
+        }
       }
       this.db.query("UPDATE threads SET next_seq=? WHERE id=?").run(nextSeq, targetId);
     });
