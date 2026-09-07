@@ -175,6 +175,21 @@ test("P0-2: resume reopens closed and systemError engines and refreshes snapshot
     expect(render(model, 120, 20)).not.toContain("可恢复");
   }
 });
+test("P2-d: failed resume detaches the hidden target but preserves the visible subscription", async () => {
+  for (const target of ["new", "old"]) {
+    const { client, model, controller, calls } = setup(), original = client.request.bind(client);
+    client.request = async (method, params) => {
+      const result = await original(method, params);
+      if (method === "thread/attach" && "thread" in result) result.thread.status = { type: "systemError" };
+      if (method === "thread/resume") throw new Error("engine spawn failed");
+      return result;
+    };
+    model.input = `/resume ${target}`; await controller.key(undefined, { name: "return" });
+    expect(model.thread?.id).toBe("old"); expect(model.message).toBe("engine spawn failed");
+    expect(calls.filter(c => c[0] === "thread/detach")).toEqual(target === "new" ? [["thread/detach", { threadId: "new" }]] : []);
+    expect(controller.sessions.busy).toBe(false);
+  }
+});
 test("P2-1/P2-4: actual protocol strips private engine options; status does not invent permission", () => {
   const options = { permission: "readonly", effort: "high", sandbox: "restricted", systemPrompt: "private", tools: ["Read"] };
   const parsed = ThreadSchema.parse({ ...thread("old"), ...options });

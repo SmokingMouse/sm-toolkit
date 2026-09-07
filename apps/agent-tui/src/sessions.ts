@@ -62,10 +62,19 @@ export class Sessions {
   private async attach(threadId: string): Promise<void> {
     const previous = this.model.thread?.id;
     let snapshot = await this.client.request("thread/attach", { threadId });
-    if (canResume(snapshot.thread)) {
-      this.model.message = "正在恢复会话引擎…"; this.model.changed();
-      await this.client.request("thread/resume", { threadId });
-      snapshot = await this.client.request("thread/attach", { threadId });
+    try {
+      if (canResume(snapshot.thread)) {
+        this.model.message = "正在恢复会话引擎…"; this.model.changed();
+        await this.client.request("thread/resume", { threadId });
+        snapshot = await this.client.request("thread/attach", { threadId });
+      }
+    } catch (error) {
+      // Keep the visible thread subscribed; only roll back the attempted switch.
+      if (previous !== threadId) {
+        try { await this.client.request("thread/detach", { threadId }); }
+        catch (cleanup) { throw new Error(`${String(error)}；清理目标订阅失败：${String(cleanup)}`); }
+      }
+      throw error;
     }
     this.model.select(snapshot);
     this.model.message = `已切换会话 ${threadId}`;
