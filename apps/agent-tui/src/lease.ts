@@ -24,6 +24,7 @@ export class InputLease {
     try {
       const { lease } = await this.client.request("thread/lease/acquire", { threadId, ttlMs: this.ttlMs });
       this.model.lease = { state: "self", expiresAtMs: lease.expiresAtMs, threadId };
+      this.model.leaseWarning = "";
       this.model.changed();
     } catch (error) { this.model.recordError(error); throw error; }
   }
@@ -42,8 +43,8 @@ export class InputLease {
   private async release(threadId: string): Promise<void> {
     this.clearTimer();
     if (this.model.lease.state !== "self") return;
-    try { await this.client.request("thread/lease/release", { threadId }); this.model.lease = { state: "none" }; this.model.changed(); }
-    catch (error) { this.model.recordError(error); throw error; }
+    try { await this.client.request("thread/lease/release", { threadId }); this.model.lease = { state: "none" }; this.model.leaseWarning = ""; this.model.changed(); }
+    catch (error) { this.model.recordLeaseReleaseError(error); throw error; }
   }
   async run<T>(threadId: string, action: () => Promise<T> | T): Promise<T> {
     const generation = await this.serialize(async () => {
@@ -56,7 +57,7 @@ export class InputLease {
       await this.serialize(async () => {
         if (generation !== this.generation) return;
         this.active--;
-        if (!this.active && !this.manual) await this.release(threadId);
+        if (!this.active && !this.manual) await this.release(threadId).catch(() => {});
       });
     }
   }

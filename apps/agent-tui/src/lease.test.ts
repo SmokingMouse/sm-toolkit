@@ -31,6 +31,19 @@ test("P1-3: short transactions explicitly use 30s TTL and release even on action
     expect(f.calls[0].params.ttlMs).toBe(30_000); expect(f.model.leaseLabel).toBe("未持有");
   } finally { f.lease.dispose(); }
 });
+test("fix2 P2-1: cleanup failure cannot replace either an action value or its error", async () => {
+  const model = new TuiModel();
+  const client = { state: "connected", onStateChange: () => () => {}, async request(method: string) {
+    if (method.endsWith("release")) throw new Error("cleanup failed");
+    return { lease: { expiresAtMs: Date.now() + 30_000 } };
+  } } as unknown as AgentClient;
+  const lease = new InputLease(client, model);
+  try {
+    expect(await lease.run("th", () => "delivered")).toBe("delivered");
+    await expect(lease.run("th", () => { throw new Error("action failed"); })).rejects.toThrow("action failed");
+    expect(model.leaseWarning).toContain("cleanup failed"); expect(model.leaseLabel).toBe("释放未确认（未续期）");
+  } finally { lease.dispose(); }
+});
 test("P1-3: overlapping long actions share renewals and release only after the last action", async () => {
   const f = fixture(80); let entered = 0, finishA!: () => void, finishB!: () => void;
   try {

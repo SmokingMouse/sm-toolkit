@@ -311,6 +311,16 @@ test("observation commands stay local offline; contested sends and approvals ret
   a.model.input = "/release"; await a.controller.submit();
 });
 
+test("fix2 P2-1: failed lease cleanup preserves delivered turn result and reports a separate warning", async () => {
+  for (const failure of [new Error("release lost"), Object.assign(new Error("lease taken"), { code: -32012, data: { holder: { label: "phone" } } })]) {
+    const { a, engine } = await setup(); const request = a.client.request.bind(a.client);
+    a.client.request = async (method, params) => { if (method === "thread/lease/release") throw failure; return request(method, params); };
+    a.model.input = "important"; await a.controller.key("\r", { name: "return" });
+    expect(engine.sent).toHaveLength(1); expect(a.model.input).toBe(""); expect(a.model.message).toBe("已发送");
+    expect(a.model.leaseWarning).toContain("租约释放未确认"); expect(render(a.model, 200)).toContain("已发送 · 租约释放未确认");
+  }
+});
+
 test("fix2 P1-1: a resolved or expired card cannot be revived after delayed lease acquisition", async () => {
   for (const expired of [false, true]) {
     const { a, b, engine, thread } = await setup();

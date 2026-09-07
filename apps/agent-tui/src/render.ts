@@ -136,5 +136,6 @@ export function render(model: TuiModel, columns = 100, rows = 30, color = false)
   while (middle.length < available) middle.push("");
   const input = model.activeCard?.state === "pending" && !model.activeCard.replying ? model.activeCard.draft : model.input;
   const inputTail = wrap(`> ${input}`, width).at(-1) ?? "> ";
-  return [wrap(header, width)[0], ...middle, ...panels, wrap(model.message, width)[0], wrap(footer, width)[0], inputTail].join("\n");
+  const status = [model.message, model.leaseWarning].filter(Boolean).join(" · ");
+  return [wrap(header, width)[0], ...middle, ...panels, wrap(status, width)[0], wrap(footer, width)[0], inputTail].join("\n");
 }

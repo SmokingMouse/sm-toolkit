@@ -12,6 +12,7 @@ export class TuiModel {
   usage?: Usage;
   connection: ClientState = "disconnected";
   message = "";
+  leaseWarning = "";
   input = "";
   expandedReasoning = false;
   scroll = 0;
@@ -26,13 +27,18 @@ export class TuiModel {
   collapsedAgents = new Set<string>();
   lease: { state: "none" } | { state: "self"; expiresAtMs: number; threadId: string } | { state: "other"; holder: string } = { state: "none" };
   get leaseLabel(): string {
-    return this.lease.state === "self" && this.lease.expiresAtMs > Date.now() ? "持有/续期中"
+    return this.lease.state === "self" && this.lease.expiresAtMs > Date.now() ? this.leaseWarning ? "释放未确认（未续期）" : "持有/续期中"
       : this.lease.state === "other" ? `他端持有:${this.lease.holder}（最近拒绝）` : "未持有";
   }
   recordError(error: unknown): void {
     if (errorCode(error) === -32012) this.lease = { state: "other", holder: leaseHolder(error) ?? "未知客户端" };
     else if (errorCode(error) === -32005) this.lease = { state: "none" };
     this.message = errorMessage(error); this.changed();
+  }
+  recordLeaseReleaseError(error: unknown): void {
+    if (errorCode(error) === -32012) this.lease = { state: "other", holder: leaseHolder(error) ?? "未知客户端" };
+    this.leaseWarning = `租约释放未确认：${errorMessage(error)}`;
+    this.changed();
   }
   get tasks() { return rebuildTasks(this.items.values()); }
   setConnection(state: ClientState): void {
