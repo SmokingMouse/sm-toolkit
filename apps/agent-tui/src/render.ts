@@ -10,7 +10,7 @@ export function renderItem(item: Item, expanded = false): string[] {
   const state = item.status === "inProgress" ? " …" : item.status === "failed" || item.status === "rejected" ? ` [${item.status}]` : "";
   let body: string;
   switch (item.type) {
-    case "userMessage": body = `You: ${item.payload.content.map(c => c.type === "text" ? c.text : `[${c.type}] ${c.path}`).join("\n")}`; break;
+    case "userMessage": body = `You: ${item.payload.content.map(c => c.type === "text" ? c.text : c.type === "bash" ? c.command : `[${c.type}] ${c.path}`).join("\n")}`; break;
     case "agentMessage": body = `Agent${state}: ${item.payload.text}`; break;
     case "reasoning": body = expanded ? `Reasoning${state}: ${[item.payload.summary, item.payload.text].filter(Boolean).join("\n")}` : `Reasoning${state}: [折叠 · Tab 展开]`; break;
     case "commandExecution": body = `$ ${item.payload.command}${state}\n  cwd: ${item.payload.cwd}\n${plain(item.payload.aggregatedOutput ?? "").split("\n").slice(-6).join("\n")}${item.payload.exitCode != null ? `\n  exit: ${item.payload.exitCode}` : ""}`; break;

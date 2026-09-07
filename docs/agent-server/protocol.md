@@ -53,6 +53,20 @@
 `protocolVersion` 不匹配时服务端**不降级**，直接 `-32003 unsupported_protocol_version`
 并断开 —— 静默降级是最难查的一类 bug。
 
+| 能力字段 | 方向 | 类型 / 含义 |
+|---|---|---|
+| `capabilities.engineEvents` | initialize 请求 | 可选 boolean；true 才订阅 thread/engineEvent，新库默认 true |
+| `capabilities.bashInput` | initialize 请求 | 可选 boolean；true 接收 bash 输入变体，否则 item 通知/历史投影为文本，新库默认 true |
+| `capabilities.engine.engineEvents` | initialize 结果 | 可选 boolean；原生事件通道支持 |
+| `capabilities.engine.engineControl` | initialize 结果 | 可选 boolean；Claude 控制直通 |
+| `capabilities.engine.permissionSet` | initialize 结果 | 可选 boolean；Claude 权限热切 |
+| `capabilities.engine.effortSet` | initialize 结果 | 可选 boolean；Claude thinking token 预算 |
+| `capabilities.engine.subAgentText` | initialize 结果 | 可选 boolean；Claude 子 agent 正文 |
+| `capabilities.engine.bashInput` | initialize 结果 | 可选 boolean；Claude bash 输入 |
+| `capabilities.engine.compact` | initialize 结果 | 可选 boolean；Claude 主动 compact |
+
+结果的 engine 对象可选；本服务始终提供，除 engineEvents=true 外，其余标记由启用后端是否包含 Claude 决定。
+
 ## 2. 信封
 
 JSON-RPC 2.0，一条消息一行 NDJSON（`\n` 结尾，消息内不得含裸换行）。
@@ -80,7 +94,7 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 | 方法 | params | result | 说明 |
 |---|---|---|---|
 | `initialize` | 见 §1 | 见 §1 | 握手 |
-| `thread/start` | `{backend, cwd?, model?, permission?, sandbox?, systemPrompt?, tools?, meta?, clientThreadId?}` | `{thread: Thread}` | 新建 thread 并 spawn 引擎 |
+| `thread/start` | `{backend, cwd?, model?, effort?, permission?, autocompact?, sandbox?, systemPrompt?, tools?, meta?, clientThreadId?}` | `{thread: Thread}` | 新建 thread 并 spawn 引擎 |
 | `thread/resume` | `{threadId?, engineThreadId?, backend?, cwd?, …同 start 的覆盖字段}` | `{thread: Thread, attached: boolean}` | **命中活进程即 attach**（`attached:true`，不 spawn）；否则按 `engineThreadId` 重启引擎并续接 |
 | `thread/attach` | `{threadId, sinceSeq?}` | `{thread, items: Item[], nextSeq, queue: QueuedTurn[], pendingRequests: PendingServerRequest[]}` | 拿全量后缀快照并开始收该 thread 的通知；翻历史分页用 thread/items/list |
 | `thread/detach` | `{threadId}` | `{}` | 只退订，不影响 thread |
@@ -92,6 +106,10 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 | `thread/interrupt` | `{threadId}` | `{interruptedTurnId \| null}` | `turn/interrupt` 的 thread 级糖 |
 | `thread/lease/acquire` | `{threadId, ttlMs?}` | `{lease: Lease}` | 可选：独占输入权 |
 | `thread/lease/release` | `{threadId}` | `{}` | 释放 |
+| `thread/engineControl` | `{threadId, subtype: string, params: JsonObject}` | `JsonObject`（完整原生 control_response） | Claude 白名单控制；原生错误保留在 response.subtype |
+| `thread/permission/set` | `{threadId, permission: Permission}` | `{thread: Thread}` | Claude 热切；提升类请求必须持 lease |
+| `thread/effort/set` | `{threadId, maxThinkingTokens: number\|null, thinkingDisplay?: "summarized"\|"omitted"\|null}` | `JsonObject`（完整原生 control_response） | 非负整数预算，null 重置 |
+| `thread/compact` | `{threadId, instructions?: string, clientTurnId?: string}` | `{turn: Turn, deduplicated?: true}` | 入正常 turn 队列发送 /compact |
 
 `thread/start` / `thread/resume` 不接受 `env`（未知字段返回 `-32602`）。
 `thread/attach` 永远返回完整后缀，不接受 `limit`（`-32602`）；有界历史读取用 `thread/items/list`。
@@ -117,7 +135,40 @@ client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
 | `server/health` | `{}` → `{uptimeMs, threads:{running,idle,closed}, engines:[…]}` |
 | `server/config/read` | 只读 daemon 配置（`allowed_roots` 等），不含 token |
 
+### 3.4 Backend-specific 逃生门语义
+
+`thread/compact` `{threadId,instructions?,clientTurnId?}` → `{turn,deduplicated?}`，按正常 turn 队列发送用户文本 `/compact`（附 instructions）。本机 2.1.258 print.ts 的 control_request 子类型全集未发现 compact；因此这是 slash command 转发，不是虚构控制指令。沿用 turn 的排队、去重、lease 与完成事件，以及已有 compact_boundary → contextCompaction item。Codex 返回 backend_unsupported。
+thread/start 与 resume 新增 autocompact：`"auto"` 或 100000–1000000 整数 token 数，透传 `--autocompact <auto|tokens>`（bundle CLI option 描述 100k–1M）；省略时保留原生默认值。
+AS 有意只收明确 token 整数，不接受 CLI 的 `"500k"`、`"200"` 等缩写或数值 200/999；客户端须先转换为 500000/200000/999000。缩写、越界、小数均返回 -32602。此处是 AS 收窄的输入契约，不声称覆盖 CLI 所有字面写法。
+
+UserInput 新增 `{type:"bash",command}`，仅支持 Claude 独立 turn/start（不混排、不 steer）。2.1.258 print.ts 分支 `if(d.type==="bash_command")` 调用 runHeadlessBashCommand；发 `{type:"bash_command",command,cwd,uuid}`，uuid 为原生 UUID。CLI 不发 result，而是 isReplay user 文本：bash-input 回显，以及 bash-stdout / bash-stderr / bash-exit-code 标签输出；daemon 聚合 commandExecution item 并结束 turn。非零退出标记 command item failed，turn 仍表示命令已执行完成；中断等待回放后结束。cwd 固定为 thread cwd。bash 是显式用户 shell 操作，不经过模型的 can_use_tool 审批。
+客户端 initialize.capabilities.bashInput=true 声明可读此输入变体，新库默认声明；旧连接收到的 userMessage（含历史快照）降级为 `!command` 文本，落库仍保留原始 bash 变体。Codex 在入队前返回 backend_unsupported。
+
+Claude 启动包含 `--forward-subagent-text`（2.1.258 flag 描述：转发带 parent_tool_use_id 的 assistant/user 帧）。正文和 thinking 按 parent_tool_use_id 聚合到现有 subAgent item 的可选 text/thinking 字段，同时放入 item/subAgent/progress 的 progress，支持快照恢复。各子 agent 与主线程的 partial 去重独立；正文先于 task_started 到达也保持同一 item 身份。
+
+`thread/start` 的 effort 字符串透传 Claude `--effort <level>`。`thread/effort/set` `{threadId,maxThinkingTokens:整数|null,thinkingDisplay?:"summarized"|"omitted"|null}` → 原生 control_response，映射 `set_max_thinking_tokens {max_thinking_tokens,thinking_display?}`（2.1.258 print.ts 分派验证整数/null 与显示枚举）。这控制思考 token 预算，**不等价于** --effort 的模型推理档位；没有捏造 low/high 到 token 的换算。热切也可用 engineControl；turn/start 上不同 effort 标签会提示使用专用方法。热预算为当前 CLI 进程设置，不跨恢复持久化。
+Claude effort 仅允许 low/medium/high/xhigh/max，非法值在 start/resume/turn 返回 -32602；合法但不同的 turn 标签仍返回 -32008。Codex 使用自身 effort 校验，不套 Claude 枚举。
+
+`thread/permission/set`：`{threadId, permission}` → `{thread}`。Claude 原生模式 default / acceptEdits / plan / bypassPermissions / dontAsk 映射 --permission-mode，热切发送 set_permission_mode 的 mode 字段；CLI 成功确认后更新 thread.permission、持久化恢复选项，并发送 `thread/permission/changed` `{threadId,permission}`。turn/start.permission 也在发送用户帧前热切。原生拒绝不更新状态，返回 unsupported_capability。CLI 或组织策略仍可拒绝 bypass。
+热切成功的返回 thread.permission、恢复选项和 permission/changed 均使用原生规范值：auto-edit → acceptEdits，full → bypassPermissions；不是请求别名的原样回显。启动状态仍保留调用方请求值，首次成功热切后归一化。
+旧值 full / auto-edit 分别映射 bypassPermissions / acceptEdits。readonly 仅限启动时工具限制（--disallowedTools），不能通过热切新增此限制；已有进程限制也不会被模式热切解除。仅启动 permission 显式为 full/bypassPermissions 才添加 --allow-dangerously-skip-permissions；其他会话不预先开放 bypass，也没有隐式 daemon 提权策略。CLI/组织策略仍可拒绝切换。权限模式热切会清除 daemon 会话审批缓存，避免旧授权跨模式复用。Codex 保持旧 permission 别名语义，新增 Claude 模式返回 backend_unsupported。
+对已有 thread，请求 full/bypassPermissions/dontAsk（或原生 ultraplan:true）必须由有效 lease 的持有者发起，覆盖 permission/set、engineControl.set_permission_mode、turn/start.permission 和 resume.permission；无 lease/已过期返回 unauthorized (-32005)，他人持有返回 lease_held (-32012)。持有 lease 不绕过原生 bypass availability/组织策略。普通输入和非提升模式继续使用可选 lease。
+
+`thread/engineControl` 请求 `{threadId, subtype, params}`，向 Claude 发送 `{type:"control_request", request_id, request:{...params,subtype}}`，result 是完整原生 control_response 帧（包括原生 error response），不拆解 response；调用方必须检查 response.subtype。params 不得包含 subtype。该方法遵守输入 lease；Codex/external 返回 backend_unsupported，未知或不允许的子类型返回 unsupported_capability。传输超时仍为 RPC 错误。
+set_model 成功时同步 thread.model 与持久化恢复选项，并发 thread/metadata/updated.model；失败不更新，resume 使用最后一次成功设置的模型。按 2.1.258 Tf/Im 契约，model 省略或 null 表示重置为 default，AS 将该规范值持久化。
+
+本机 Claude Code 2.1.258 `bin/claude.exe` 的 print.ts `d.request.subtype` 分派是白名单证据。允许：set_model、set_permission_mode、set_max_thinking_tokens、list_models、file_suggestions、read_file、get_workspace_diff、get_plan、get_context_usage、get_session_cost、get_usage、get_settings、get_binary_version、mcp_status、mcp_reconnect、mcp_toggle、interrupt、rewind_conversation、rewind_files、seed_read_state、background_tasks、stop_task、reload_plugins、reload_skills、side_question。参数语义由对应 Claude 版本定义；rewind_files 会修改工作区。interrupt 的 cancel_queued 只作用于 CLI 队列，AS 队列仍由 turn/cancel 管理。
+
+其余一律明确拒绝，包括登录/OAuth、反馈、initialize、end_session、远程设备、MCP 凭证，以及会绕过 allowed_roots 或使 daemon 状态失配的 set_cwd、add_directory、settings 修改。此口是 backend-specific 能力，不承诺跨后端同义。
+
 ## 4. 通知（server → client）
+
+`thread/engineEvent`：`{threadId, turnId?, backend, subtype, payload}`，payload 保留原始原生帧全部字段。Claude 的全部 system 子类型（包括未知类型）及 rate_limit_event、Codex 的原生通知走此通道；已建模事件仍照常发送。无活动 turn 时省略 turnId。此通知是实时流，不落 item 历史。
+Claude 未知顶层 type 同样通过 engineEvent 原样上抛并继续会话；缺少字符串 type 的帧只发 willRetry:false 的 error 通知。JSON 解析失败及真实引擎 error 仍按原有失败路径处理。
+客户端在 initialize.capabilities 声明 `engineEvents: true` 才接收此流；服务端通过 capabilities.engine.engineEvents 声明支持，新 client 库默认声明。旧客户端继续使用原有事件，协议版本保持 as/1。
+门禁仅针对 thread/engineEvent。thread/permission/changed 仍发送给所有已 attach 且未 optOut 的连接，不要求新增能力；旧 client 按 AS v1 未知通知规则静默忽略，不会断线或报错。不能把此行为描述成“所有新通知默认对旧连接关闭”。
+
+initialize.capabilities.engine 还声明 engineControl / permissionSet / effortSet / subAgentText / bashInput / compact 布尔标记（服务端至少启用 Claude 才为 true）；engineEvents 适用于两种原生后端。请求新增字段与通知信封使用 strictObject，原有宽松响应保持前向兼容。
 
 只发给已 `thread/attach` 该 thread 的连接（除 `server/*` 与无 threadId 的服务级 `error`，
 后者发给所有已完成握手且未 optOut error 的连接）。
@@ -126,12 +177,14 @@ client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
 
 | 通知 | params | 何时 |
 |---|---|---|
+| `thread/engineEvent` | `{threadId, turnId?, backend, subtype: string, payload: JsonObject}` | 原生帧；仅协商 engineEvents=true 的连接，实时不回放 |
+| `thread/permission/changed` | `{threadId, permission: Permission}` | 原生权限切换成功，随持久化状态更新发出 |
 | `thread/started` | `{thread}` | 新 thread 建立（含别的客户端建的） |
 | `thread/status/changed` | `{threadId, status: ThreadStatus}` | `spawning/idle/running/interrupted/systemError/closed` 迁移 |
 | `thread/queue/changed` | `{threadId, queue: QueuedTurn[]}` | 入队 / 出队 / 取消。**带全量队列**（codex 只带 `threadId` 要客户端回查，见 §10.2） |
 | `thread/closed` | `{threadId, reason}` | 进程回收 |
 | `thread/tokenUsage/updated` | `{threadId, usage: Usage}` | 用量刷新 |
-| `thread/metadata/updated` | `{threadId, title?, meta?}` | 元信息改动 |
+| `thread/metadata/updated` | `{threadId, engineThreadId?, model?: string, title?, meta?}` | 元信息改动，包括成功的 set_model |
 
 ### 4.2 turn 级
 
@@ -200,7 +253,7 @@ Claude 不支持的反向 control request 会保守拒绝或取消，并发 `err
 **输入租约（可选）**：持有 `thread/lease/acquire` 的客户端在租约期内是唯一
 可以 `turn/start` / `turn/steer` / 回答反向请求的连接；其余得到
 `-32012 lease_held`（`data.holder` 带持锁者 label）。租约 TTL 默认 5 min，
-心跳续期，断线即释放。默认**不启用**，是给「飞书群里七嘴八舌」准备的旋钮。
+心跳续期，断线即释放。普通输入默认**不启用**；权限提升操作必须先取得 lease，见 §3.4 的权限语义说明。
 
 ## 6. item 种类与字段
 
@@ -229,7 +282,7 @@ interface Item {
 | `fileChange` | `changes: [{path, kind, diff?}]`、`status` | `tool_call(Write/Edit/MultiEdit)` / `file_change` | `fileChange` item |
 | `toolCall` | `name`、`namespace?`、`input`、`output?`、`isError?` | 其余 `tool_call` / `tool_call_done` | `functionCallOutput` / `dynamicToolCall` |
 | `mcpToolCall` | `server`、`tool`、`arguments`、`result?`、`error?` | `tool_call(mcp__*)` | `mcpToolCall` item |
-| `subAgent` | `kind: "agent"\|"bash"\|"workflow"`、`parentItemId`、`phase`、`progress?`、`report?` | `task` 事件（`data.taskType` 区分） | `subAgentActivity` / `collabAgentToolCall` |
+| `subAgent` | `kind: "agent"\|"bash"\|"workflow"`、`parentItemId`、`phase`、`progress?`、`report?`、`text?: string`、`thinking?: string` | `task` 与带 parent_tool_use_id 的正文 | `subAgentActivity` / `collabAgentToolCall` |
 | `webSearch` | `query`、`results?` | `tool_call(WebSearch)` | `webSearch` item |
 | `imageOutput` | `paths: string[]` | `image_output` | `imageGeneration` item |
 | `plan` | `text` / `steps` | `ExitPlanMode` 入参 | `plan` item |
@@ -240,9 +293,16 @@ interface Item {
 
 ```ts
 type UserInput =
+  | { type: "bash"; command: string }                // Claude 独立 turn/start
   | { type: "text"; text: string }
   | { type: "image"; path: string; mime: string }      // 本机绝对路径（见 §10.2）
   | { type: "file"; path: string; mime?: string; name?: string };
+
+type Permission = "readonly" | "auto-edit" | "full" | "default"
+  | "acceptEdits" | "plan" | "bypassPermissions" | "dontAsk";
+type ClaudeEffort = "low" | "medium" | "high" | "xhigh" | "max";
+type Autocompact = "auto" | number; // 整数 token 数，100000–1000000
+// Thread.permission?: Permission；Thread.model?: string。
 ```
 
 **归一原则**：`packages/agent` 的 `EventType`（`text_chunk` / `tool_call` /
@@ -261,7 +321,7 @@ type UserInput =
 | `-32002` | `not_initialized` | 未握手就发方法 | 修客户端 |
 | `-32003` | `unsupported_protocol_version` | 版本不匹配 | 升级，不降级 |
 | `-32004` | `engine_unavailable` | spawn / 握手失败（`data.stderr` 带尾部） | 展示原因，允许重试 |
-| `-32005` | `unauthorized` | token 错 / cwd 不在 `allowed_roots` | 不重试 |
+| `-32005` | `unauthorized` | token 错 / cwd 不在 `allowed_roots` / 提权未持有效 lease | 修认证或先获取 lease |
 | `-32006` | `thread_busy` | 队列满（`maxQueuedTurns`） | 退避重试 |
 | `-32007` | `thread_closed` | thread 已关 | 先 `thread/resume` |
 | `-32008` | `unsupported_capability` | 例如对 external thread 发 `turn/start` | 灰掉入口 |
@@ -272,6 +332,7 @@ type UserInput =
 | `-32013` | `duplicate_client_id` | `clientTurnId` / `clientThreadId` 冲突且 payload 不同 | 换 id |
 | `-32014` | `already_resolved` | 反向请求已被别人答了 | 撤卡 |
 | `-32015` | `engine_protocol_error` | 引擎回了不认识的东西（`data.raw` 截断） | 报错，建议看 trace |
+| `-32016` | `backend_unsupported` | 后端不支持所请求原生能力 | 检查 capabilities / backend |
 
 `error.data` 约定：`{threadId?, turnId?, itemId?, retryable: boolean, detail?}`。
 

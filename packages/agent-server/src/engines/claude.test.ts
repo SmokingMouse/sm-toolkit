@@ -93,21 +93,184 @@ describe("Claude AgentEvent mapping (no real CLI)", () => {
 });
 
 /** In-memory fake child: exercises control frame mapping without spawning any process. */
-function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => void) {
+function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => void, onControl?: (send: (frame: unknown) => void, frame: any) => void) {
   const child = new EventEmitter() as ChildProcessWithoutNullStreams;
   const stdout = new PassThrough(), stderr = new PassThrough(); const written: any[] = [];
   const send = (frame: unknown) => stdout.write(JSON.stringify(frame) + "\n");
   const stdin = new Writable({ write(chunk, _encoding, callback) {
     const frame = JSON.parse(chunk.toString()); written.push(frame);
     queueMicrotask(() => {
-      if (frame.type === "control_request") send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id, response: {} } });
-      else if (frame.type === "user") onUser(send, frame);
+      if (frame.type === "control_request") {
+        if (onControl && frame.request.subtype !== "initialize") onControl(send, frame);
+        else send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id, response: {} } });
+      }
+      else if (frame.type === "user" || frame.type === "bash_command") onUser(send, frame);
     }); callback();
   } });
   Object.assign(child, { stdout, stderr, stdin, exitCode: null, signalCode: null, kill: () => { if (child.exitCode === null) { Object.assign(child, { exitCode: 0 }); queueMicrotask(() => { stdout.end(); stderr.end(); child.emit("close", 0); }); } return true; } });
   return { child, written, send };
 }
 describe("Claude native frame exchange (fake child only)", () => {
+  test("P2-4: rejected native model controls do not publish a model change", async () => {
+    const fake = fakeProcess(() => {}, (send, f) => send({ type: "control_response", response: { subtype: "error", request_id: f.request_id, error: "model unavailable" } }));
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th", model: "sonnet" });
+      expect(await engine.engineControl("set_model", { model: "opus" })).toMatchObject({ response: { subtype: "error" } });
+      expect(events.some(e => e.type === "modelChanged")).toBe(false); await engine.attach();
+    } finally { await engine.close("test"); await consuming; }
+  });
+  test("P1-1: bypass availability flag requires explicit launch permission", async () => {
+    for (const permission of ["readonly", "default", "plan", "acceptEdits", "dontAsk", "full", "bypassPermissions"] as const) {
+      const fake = fakeProcess(() => {}); let args: string[] = [];
+      const engine = new ClaudeEngine({ spawnProcess: (_command, argv) => { args = argv; return fake.child; } });
+      try {
+        await engine.spawn({ backend: "claude", threadId: "th", permission });
+        expect(args.includes("--allow-dangerously-skip-permissions")).toBe(permission === "full" || permission === "bypassPermissions");
+      } finally { await engine.close("test"); }
+    }
+  });
+  test("foundation bash: native replay completes standalone turns, decodes output and leaves next turn usable", async () => {
+    const fake = fakeProcess((send, frame) => {
+      if (frame.type === "bash_command") {
+        send({ type: "user", isReplay: true, message: { role: "user", content: `<bash-input>${frame.command}</bash-input>` } });
+        send({ type: "user", isReplay: true, message: { role: "user", content: "<bash-stdout>&lt;ok&gt;&amp;</bash-stdout><bash-stderr>oops</bash-stderr><bash-exit-code>2</bash-exit-code>" } });
+      } else send({ type: "result", result: "done", usage: {} });
+    }), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th", cwd: "/tmp" });
+      const bash = [{ type: "bash" as const, command: "printf test" }];
+      expect(() => engine.validateTurn({ threadId: "th", input: [...bash, ...input("mixed")] })).toThrow("standalone");
+      await engine.sendTurn("tn1", bash, { threadId: "th", input: bash });
+      await until(() => events.some(e => e.type === "turnCompleted"));
+      expect(fake.written.at(-1)).toEqual({ type: "bash_command", command: "printf test", cwd: "/tmp", uuid: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+      expect(events.find(e => e.type === "itemCompleted")).toMatchObject({ item: { type: "commandExecution", status: "failed", payload: { aggregatedOutput: "<ok>&\noops", exitCode: 2 } } });
+      await engine.sendTurn("tn2", input("next"), { threadId: "th", input: input("next") });
+      await until(() => events.filter(e => e.type === "turnCompleted").length === 2);
+      expect(events.some(e => e.type === "exit")).toBe(false);
+    } finally { await engine.close("test"); await consuming; }
+  });
+  test("foundation bash: steer is rejected and interrupt waits for bash replay completion", async () => {
+    const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th" });
+      const bash = [{ type: "bash" as const, command: "sleep 5" }];
+      await engine.sendTurn("tn", bash, { threadId: "th", input: bash });
+      await expect(engine.steer("tn", input("no"))).rejects.toMatchObject({ code: -32602 });
+      await engine.interrupt("tn"); expect(events.some(e => e.type === "turnCompleted")).toBe(false);
+      fake.send({ type: "user", isReplay: true, message: { role: "user", content: "<bash-stderr>Command failed: aborted</bash-stderr>" } });
+      await until(() => events.some(e => e.type === "turnCompleted"));
+      expect(events.at(-1)).toMatchObject({ type: "turnCompleted", status: "interrupted" });
+    } finally { await engine.close("test"); await consuming; }
+  });
+  test("foundation subagent text: interleaved parents, partial fallback and late task metadata share one item", async () => {
+    const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th" });
+      await engine.sendTurn("tn", input("go"), { threadId: "th", input: input("go") });
+      fake.send({ type: "stream_event", event: { delta: { type: "text_delta", text: "main" } } });
+      fake.send({ type: "assistant", parent_tool_use_id: "parent-a", message: { content: [{ type: "text", text: "child A" }, { type: "thinking", thinking: "think A" }] } });
+      fake.send({ type: "system", subtype: "task_started", task_id: "task-a", tool_use_id: "parent-a" });
+      fake.send({ type: "system", subtype: "task_started", task_id: "task-b", tool_use_id: "parent-b" });
+      fake.send({ type: "stream_event", parent_tool_use_id: "parent-b", event: { delta: { type: "text_delta", text: "child B" } } });
+      fake.send({ type: "assistant", parent_tool_use_id: "parent-b", message: { content: [{ type: "text", text: "child B" }] } });
+      fake.send({ type: "assistant", message: { content: [{ type: "text", text: "main" }] } });
+      fake.send({ type: "system", subtype: "task_notification", task_id: "task-a", summary: "done" });
+      fake.send({ type: "result", result: "main", usage: {} });
+      await until(() => events.some(e => e.type === "turnCompleted"));
+      const subagents = events.filter(e => e.type === "itemCompleted" && e.item.type === "subAgent");
+      expect(subagents).toHaveLength(2);
+      expect(subagents[0]).toMatchObject({ item: { payload: { parentItemId: "parent-a", text: "child A", thinking: "think A", report: "done" } } });
+      expect(subagents[1]).toMatchObject({ item: { payload: { parentItemId: "parent-b", text: "child B" } } });
+      expect(events.filter(e => e.type === "itemCompleted" && e.item.type === "agentMessage")).toMatchObject([{ item: { payload: { text: "main" } } }]);
+      expect(buildClaudeLaunch({ backend: "claude", threadId: "th" }).args).toContain("--forward-subagent-text");
+    } finally { await engine.close("test"); await consuming; }
+  });
+  test("foundation effort: launch label and live thinking budget have distinct native shapes", async () => {
+    let args: string[] = [];
+    const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: (_cmd, argv) => { args = argv; return fake.child; } });
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th", effort: "high" });
+      expect(args[args.indexOf("--effort") + 1]).toBe("high");
+      for (const max_thinking_tokens of [8192, 0, null]) {
+        await engine.engineControl("set_max_thinking_tokens", { max_thinking_tokens, thinking_display: "summarized" });
+        expect(fake.written.at(-1).request).toEqual({ subtype: "set_max_thinking_tokens", max_thinking_tokens, thinking_display: "summarized" });
+      }
+      await engine.sendTurn("tn", input("go"), { threadId: "th", input: input("go"), effort: "high" });
+    } finally { await engine.close("test"); }
+  });
+  test("foundation permissions: native argv and acknowledged hot switching preserve the session", async () => {
+    const modes = ["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"] as const;
+    const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th" });
+      for (const permission of modes) {
+        const args = buildClaudeLaunch({ backend: "claude", threadId: "th", permission }).args;
+        expect(args[args.indexOf("--permission-mode") + 1]).toBe(permission);
+        expect(args.includes("--allow-dangerously-skip-permissions")).toBe(permission === "bypassPermissions");
+        await engine.setPermission(permission);
+        expect(fake.written.at(-1).request).toEqual({ subtype: "set_permission_mode", mode: permission });
+      }
+      await engine.sendTurn("tn", input("go"), { threadId: "th", input: input("go"), permission: "plan" });
+      await engine.setPermission("acceptEdits");
+      fake.send({ type: "result", result: "done", usage: {} });
+      await until(() => events.some(e => e.type === "turnCompleted"));
+      expect(events.filter(e => e.type === "permissionChanged").map(e => e.permission)).toEqual([...modes, "plan", "acceptEdits"]);
+      await engine.attach();
+    } finally { await engine.close("test"); await consuming; }
+  });
+  test("foundation permissions: native rejection leaves current mode unchanged", async () => {
+    const fake = fakeProcess(() => {}, (send, f) => send({ type: "control_response", response: { subtype: "error", request_id: f.request_id, error: "policy denied" } }));
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th" });
+      await expect(engine.setPermission("plan")).rejects.toMatchObject({ code: -32008 });
+      expect(events.filter(e => e.type === "permissionChanged")).toHaveLength(0); await engine.attach();
+    } finally { await engine.close("test"); await consuming; }
+  });
+  test("foundation control: opaque success and error responses, denylist and subtype injection", async () => {
+    const replies: unknown[] = [];
+    const fake = fakeProcess(() => {}, (send, f) => {
+      const reply = { type: "control_response", future: [null, 42], response: { subtype: f.request.fail ? "error" : "success", request_id: f.request_id, response: { nested: f.request }, ...(f.request.fail ? { error: "native refusal" } : {}) } };
+      replies.push(reply); send(reply);
+    });
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th" });
+      for (const fail of [false, true]) expect(await engine.engineControl("file_suggestions", { query: "src", fail })).toEqual(replies.at(-1));
+      expect(fake.written.at(-1).request).toEqual({ subtype: "file_suggestions", query: "src", fail: true });
+      const before = fake.written.length;
+      for (const subtype of ["initialize", "claude_authenticate", "submit_feedback", "set_cwd", "update_settings", "end_session", "future_unknown"]) await expect(engine.engineControl(subtype, {})).rejects.toMatchObject({ code: -32008 });
+      await expect(engine.engineControl("mcp_status", { subtype: "initialize" })).rejects.toMatchObject({ code: -32602 });
+      expect(fake.written).toHaveLength(before); await engine.attach();
+    } finally { await engine.close("test"); }
+  });
+  test("foundation events: all system frames and rate limits survive before, during and after turns", async () => {
+    const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const event of engine.events) events.push(event); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th" });
+      const before = { type: "system", subtype: "hook_started", extra: { future: [1, true, null] } };
+      fake.send(before);
+      await engine.sendTurn("tn", input("go"), { threadId: "th", input: input("go") });
+      for (const subtype of ["init", "compact_boundary", "local_command", "api_retry", "model_refusal_fallback", "memory_saved", "future_unknown"]) fake.send({ type: "system", subtype, untouched: true });
+      fake.send({ type: "rate_limit_event", rate_limit_info: { status: "allowed_warning" } });
+      fake.send({ type: "result", result: "done", usage: {} });
+      fake.send({ type: "system", subtype: "turn_duration", duration: 10 });
+      await until(() => events.filter(e => e.type === "engineEvent").length === 10);
+      const raw = events.filter(e => e.type === "engineEvent");
+      expect(raw[0]).toEqual({ type: "engineEvent", backend: "claude", subtype: "hook_started", payload: before });
+      expect(raw[1].turnId).toBe("tn"); expect(raw.at(-1)).not.toHaveProperty("turnId");
+      expect(events.some(e => e.type === "itemCompleted" && e.item.type === "contextCompaction")).toBe(true);
+      expect(buildClaudeLaunch({ backend: "claude", threadId: "th" }).args).toContain("--include-hook-events");
+    } finally { await engine.close("test"); await consuming; }
+  });
   for (const [subtype, response] of [
     ["request_user_dialog", { behavior: "cancelled" }],
     ["elicitation", { action: "cancel" }],
@@ -264,11 +427,22 @@ describe("Claude native frame exchange (fake child only)", () => {
     fake.send({ type: "result", is_error: true, result: "interrupted" }); await until(() => events.some(e => e.type === "turnCompleted"));
     expect(events.at(-1)).toMatchObject({ type: "turnCompleted", status: "interrupted" }); await engine.close("test"); await consuming;
   });
-  test("unknown native frame emits engine_protocol_error", async () => {
+  test("P1-2: unknown top-level frames survive idle and active turns with original payload", async () => {
     const fake = fakeProcess(() => {}); const engine = new ClaudeEngine({ spawnProcess: () => fake.child }); const events: EngineEvent[] = [];
     const consuming = (async () => { for await (const event of engine.events) events.push(event); })();
-    await engine.spawn({ threadId: "th", backend: "claude", cwd: "/tmp" }); fake.send({ type: "unrecognized" }); await until(() => events.some(e => e.type === "exit"));
-    expect(events.at(-1)).toMatchObject({ type: "exit", error: { code: -32015 } }); await engine.close("test"); await consuming;
+    try {
+      await engine.spawn({ threadId: "th", backend: "claude", cwd: "/tmp" });
+      const raw = { type: "some_future_top_level_frame", hello: { preserved: [1, null] } };
+      fake.send(raw); await until(() => events.some(e => e.type === "engineEvent"));
+      expect(events[0]).toEqual({ type: "engineEvent", backend: "claude", subtype: raw.type, payload: raw });
+      for (const turnId of ["tn1", "tn2"]) {
+        await engine.sendTurn(turnId, input("go"), { threadId: "th", input: input("go") });
+        fake.send(raw); fake.send({ type: "result", result: "survived", usage: {} });
+        await until(() => events.some(e => e.type === "turnCompleted" && e.turnId === turnId));
+        expect(events.some(e => e.type === "engineEvent" && e.turnId === turnId && e.subtype === raw.type)).toBe(true);
+      }
+      expect(events.some(e => e.type === "exit")).toBe(false); await engine.attach();
+    } finally { await engine.close("test"); await consuming; }
   });
   test("assistant text is preserved when partials and result text are absent", async () => {
     const fake = fakeProcess(send => { send({ type: "assistant", message: { content: [{ type: "text", text: "full answer" }, { type: "thinking", thinking: "" }] } }); send({ type: "result", result: "", usage: {} }); });

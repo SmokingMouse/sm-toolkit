@@ -2,6 +2,18 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { ErrorCode, MethodSchemas, NotificationSchemas, ServerRequestSchemas } from "./index.js";
 
+test("P2-2: foundation RPCs, notifications, capabilities and input variants appear in normative tables", () => {
+  const doc = readFileSync(new URL("../../../../docs/agent-server/protocol.md", import.meta.url), "utf8");
+  const methods = doc.split("\n## 3.")[1].split("\n## 4.")[0];
+  const notices = doc.split("### 4.1")[1].split("### 4.2")[0];
+  for (const name of ["thread/engineControl", "thread/permission/set", "thread/effort/set", "thread/compact"]) expect(methods).toContain(`| \`${name}\` |`);
+  for (const name of ["thread/engineEvent", "thread/permission/changed"]) expect(notices).toContain(`| \`${name}\` |`);
+  for (const name of ["engineEvents", "engineControl", "permissionSet", "effortSet", "subAgentText", "bashInput", "compact"]) expect(doc).toContain(`| \`capabilities.engine.${name}\` |`);
+  expect(doc).toContain('{ type: "bash"; command: string }');
+  const subAgent = doc.split("\n").find(line => line.startsWith("| `subAgent`"))!;
+  expect(subAgent).toContain("text?: string"); expect(subAgent).toContain("thinking?: string");
+});
+
 test("asrev-doccheck: protocol names and business error codes match registries in both directions", () => {
   const doc = readFileSync(new URL("../../../../docs/agent-server/protocol.md", import.meta.url), "utf8").replace(/```[\s\S]*?```/g, "");
   const quoted = new Set([...doc.matchAll(/`([^`]+)`/g)].map(m => m[1]));

@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { timingSafeEqual } from "node:crypto";
 import { ApprovalBroker, ItemLog, LeaseManager, ThreadManager, type ApprovalClient } from "../core/index.js";
 import { AsyncQueue, ClaudeEngine, CodexEngine, type EngineFactory } from "../engines/index.js";
+import { validateClaudeEffort } from "../engines/claude.js";
 import { ErrorCode, FrameSchema, MethodSchema, MethodSchemas, ProtocolError, rpcError, type Frame, type Method, type MethodParams, type MethodResult, type PendingServerRequest, type RpcId, type ServerNotification, type ServerRequestMethod } from "../protocol/index.js";
 
 export interface ServerOptions {
@@ -44,6 +45,8 @@ class Connection implements InProcessClient, ApprovalClient {
   readonly reverse = new Map<RpcId, string>();
   readonly delivered = new Set<string>();
   readonly optOut = new Set<string>();
+  engineEvents = false;
+  bashInput = false;
   label = "in-process";
   initialized = false;
   initializing = false;
@@ -65,7 +68,16 @@ class Connection implements InProcessClient, ApprovalClient {
   }
   emit(raw: unknown): void {
     if (this.closed) return;
-    const frame = FrameSchema.parse(JSON.parse(JSON.stringify(raw)));
+    const copy = JSON.parse(JSON.stringify(raw));
+    if (!this.bashInput) {
+      // Project only AS item envelopes/snapshots, never arbitrary engine payloads.
+      const project = (item: any) => {
+        if (item?.type === "userMessage" && Array.isArray(item.payload?.content)) item.payload.content = item.payload.content.map((part: any) => part.type === "bash" ? { type: "text", text: `!${part.command}` } : part);
+      };
+      if (copy.method === "item/started" || copy.method === "item/completed") project(copy.params?.item);
+      if (copy.result?.type !== "control_response" && Array.isArray(copy.result?.items)) copy.result.items.forEach(project);
+    }
+    const frame = FrameSchema.parse(copy);
     if ("id" in frame && ("result" in frame || "error" in frame)) {
       const call = frame.id === null ? undefined : this.calls.get(frame.id);
       if (call) {
@@ -97,7 +109,7 @@ class Connection implements InProcessClient, ApprovalClient {
     const id = `srv_${this.clientId}_${++this.reverseSequence}`; this.reverse.set(id, request.params.requestId);
     this.emit({ jsonrpc: "2.0", id, method: request.method, params: request.params });
   }
-  notification(frame: ServerNotification): void { if (!this.optOut.has(frame.method)) this.emit(frame); }
+  notification(frame: ServerNotification): void { if (frame.method === "thread/engineEvent" && !this.engineEvents) return; if (!this.optOut.has(frame.method)) this.emit(frame); }
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -198,6 +210,10 @@ export class AgentServer {
   private dispatch(connection: Connection, method: Method, raw: MethodParams<Method>): unknown {
     // Narrow at each method using the schema's inferred params type.
     const params = <M extends Method>(_method: M) => raw as MethodParams<M>;
+    const permissionInput = (threadId: string, permission: unknown, ultraplan = false) => {
+      this.leases.assertInput(threadId, connection.clientId);
+      if (["full", "bypassPermissions", "dontAsk"].includes(String(permission)) || ultraplan) this.leases.assertHeld(threadId, connection.clientId);
+    };
     switch (method) {
       case "initialize": {
         const p = params(method);
@@ -208,20 +224,36 @@ export class AgentServer {
           if (expected.length !== provided.length || !timingSafeEqual(expected, provided)) throw new ProtocolError(ErrorCode.unauthorized, "invalid token");
         }
         connection.initializing = true; connection.label = p.client.label;
+        connection.engineEvents = p.capabilities?.engineEvents === true;
+        connection.bashInput = p.capabilities?.bashInput === true;
         for (const capability of p.capabilities?.serverRequests ?? []) connection.serverRequests.add(capability);
         for (const notification of p.capabilities?.notifications?.optOut ?? []) connection.optOut.add(notification);
-        return { protocolVersion: "as/1", server: { name: "agent-server", version: "0.1.0" }, clientId: connection.clientId, capabilities: { backends: this.backends, steer: true, fork: this.backends.includes("claude"), leases: true, externalProviders: false, maxQueuedTurns: this.threads.maxQueuedTurns } };
+        const claude = this.backends.includes("claude");
+        return { protocolVersion: "as/1", server: { name: "agent-server", version: "0.1.0" }, clientId: connection.clientId, capabilities: { backends: this.backends, steer: true, fork: claude, leases: true, externalProviders: false, maxQueuedTurns: this.threads.maxQueuedTurns, engine: { engineEvents: true, engineControl: claude, permissionSet: claude, effortSet: claude, subAgentText: claude, bashInput: claude, compact: claude } } };
       }
       case "thread/start": {
         const p = params(method);
+        if (p.backend === "claude") validateClaudeEffort(p.effort);
         if (!this.backends.includes(p.backend)) throw new ProtocolError(ErrorCode.unsupported_capability, "backend is not available");
         return this.threads.start({ ...p, cwd: this.cwd(p.cwd) }, thread => this.attach(connection, thread.id));
       }
+      case "thread/engineControl": { const p = params(method); permissionInput(p.threadId, p.subtype === "set_permission_mode" ? p.params.mode : undefined, p.subtype === "set_permission_mode" && p.params.ultraplan === true); return this.threads.engineControl(p); }
+      case "thread/permission/set": { const p = params(method); permissionInput(p.threadId, p.permission); return this.threads.setPermission(p); }
+      case "thread/compact": {
+        const p = params(method); this.leases.assertInput(p.threadId, connection.clientId);
+        if (this.threads.get(p.threadId).backend !== "claude") throw new ProtocolError(ErrorCode.backend_unsupported, "compact requires Claude");
+        // 2.1.258 print.ts has no compact control_request subtype. Use the native
+        // slash command through the normal user-turn queue, preserving ordering.
+        return this.threads.queue(p.threadId).enqueue({ threadId: p.threadId, input: [{ type: "text", text: `/compact${p.instructions ? ` ${p.instructions}` : ""}` }], ...(p.clientTurnId ? { clientTurnId: p.clientTurnId } : {}) });
+      }
+      case "thread/effort/set": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.engineControl({ threadId: p.threadId, subtype: "set_max_thinking_tokens", params: { max_thinking_tokens: p.maxThinkingTokens, ...(p.thinkingDisplay !== undefined ? { thinking_display: p.thinkingDisplay } : {}) } }); }
       case "thread/resume": {
         const p = params(method);
         if (p.cwd) this.cwd(p.cwd);
         if (p.backend && !this.backends.includes(p.backend)) throw new ProtocolError(ErrorCode.unsupported_capability, "backend is not available");
         const existing = p.threadId ? this.threads.get(p.threadId) : p.engineThreadId ? this.log.findEngine(p.engineThreadId, p.backend) : undefined;
+        if ((existing?.backend ?? p.backend ?? "claude") === "claude") validateClaudeEffort(p.effort);
+        if (existing) permissionInput(existing.id, p.permission);
         if (!existing && !p.cwd) throw new ProtocolError(ErrorCode.invalid_params, "cwd is required when importing an unknown engineThreadId");
         if (existing) this.cwd(p.cwd ?? existing.cwd);
         return this.threads.resume(existing ? p : { ...p, cwd: this.cwd(p.cwd) }, thread => this.attach(connection, thread.id));
@@ -243,7 +275,7 @@ export class AgentServer {
       case "thread/fork": { const p = params(method); this.cwd(this.threads.get(p.threadId).cwd); return this.threads.fork(p, thread => this.attach(connection, thread.id)); }
       case "thread/close": { const p = params(method); return this.threads.close(p.threadId, p.reason).then(() => { this.leases.clear(p.threadId); return {}; }); }
       case "thread/interrupt": return this.threads.queue(params(method).threadId).interrupt().then(interruptedTurnId => ({ interruptedTurnId }));
-      case "turn/start": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); if (p.cwd) this.cwd(p.cwd); return this.threads.queue(p.threadId).enqueue(p); }
+      case "turn/start": { const p = params(method); permissionInput(p.threadId, p.permission); if (p.cwd) this.cwd(p.cwd); return this.threads.queue(p.threadId).enqueue(p); }
       case "turn/steer": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.queue(p.threadId).steer(p).then(() => ({})); }
       case "turn/interrupt": { const p = params(method); return this.threads.queue(p.threadId).interrupt(p.turnId).then(() => ({})); }
       case "turn/cancel": { const p = params(method); this.threads.queue(p.threadId).cancel(p.turnId); return {}; }

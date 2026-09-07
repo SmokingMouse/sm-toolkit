@@ -97,7 +97,7 @@ export class AgentClient {
       this.initialized = await this.call("initialize", {
         protocolVersion: this.options.protocolVersion ?? "as/1", token: this.options.token,
         client: this.options.client ?? { name: "agent-client", version: "0.1.0", kind: "library", label: "agent-client" },
-        capabilities: this.options.capabilities,
+        capabilities: { engineEvents: true, bashInput: true, ...this.options.capabilities },
       });
       this.send({ jsonrpc: "2.0", method: "initialized", params: {} });
       for (const threadId of [...this.cursors.keys()]) {
@@ -133,6 +133,10 @@ export class AgentClient {
   async request<M extends Method>(method: M, params: MethodParams<M>): Promise<MethodResult<M>> {
     await this.connect(); return this.call(method, params);
   }
+  engineControl(params: MethodParams<"thread/engineControl">): Promise<MethodResult<"thread/engineControl">> { return this.request("thread/engineControl", params); }
+  setPermission(params: MethodParams<"thread/permission/set">): Promise<MethodResult<"thread/permission/set">> { return this.request("thread/permission/set", params); }
+  setEffort(params: MethodParams<"thread/effort/set">): Promise<MethodResult<"thread/effort/set">> { return this.request("thread/effort/set", params); }
+  compact(params: MethodParams<"thread/compact">): Promise<MethodResult<"thread/compact">> { return this.request("thread/compact", params); }
   private call<M extends Method>(method: M, params: MethodParams<M>): Promise<MethodResult<M>> {
     const id = `cli_${++this.sequence}`;
     return new Promise((resolve, reject) => {

@@ -162,6 +162,10 @@
                         {
                           "type": "number",
                           "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
                         }
                       ]
                     },
@@ -246,6 +250,19 @@
                 "$ref": "#/$defs/AttachResultSchema/$defs/__schema2"
               }
             },
+            "permission": {
+              "type": "string",
+              "enum": [
+                "readonly",
+                "auto-edit",
+                "full",
+                "default",
+                "acceptEdits",
+                "plan",
+                "bypassPermissions",
+                "dontAsk"
+              ]
+            },
             "createdAtMs": {
               "type": "integer",
               "minimum": 0,
@@ -326,6 +343,24 @@
                         "type": "array",
                         "items": {
                           "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "const": "bash"
+                                },
+                                "command": {
+                                  "type": "string",
+                                  "minLength": 1
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "command"
+                              ],
+                              "additionalProperties": false
+                            },
                             {
                               "type": "object",
                               "properties": {
@@ -970,6 +1005,12 @@
                       },
                       "report": {
                         "$ref": "#/$defs/AttachResultSchema/$defs/__schema9"
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "thinking": {
+                        "type": "string"
                       }
                     },
                     "required": [
@@ -2148,6 +2189,17 @@
         "external"
       ]
     },
+    "ClaudeEffortSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
     "ClientIdentitySchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -2164,6 +2216,34 @@
         "clientId",
         "label"
       ],
+      "additionalProperties": false
+    },
+    "EngineCapabilitiesSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "engineEvents": {
+          "type": "boolean"
+        },
+        "engineControl": {
+          "type": "boolean"
+        },
+        "permissionSet": {
+          "type": "boolean"
+        },
+        "effortSet": {
+          "type": "boolean"
+        },
+        "subAgentText": {
+          "type": "boolean"
+        },
+        "bashInput": {
+          "type": "boolean"
+        },
+        "compact": {
+          "type": "boolean"
+        }
+      },
       "additionalProperties": false
     },
     "ErrorCodeSchema": {
@@ -2248,6 +2328,10 @@
         {
           "type": "number",
           "const": -32015
+        },
+        {
+          "type": "number",
+          "const": -32016
         }
       ]
     },
@@ -2473,6 +2557,10 @@
                 {
                   "type": "number",
                   "const": -32015
+                },
+                {
+                  "type": "number",
+                  "const": -32016
                 }
               ]
             },
@@ -2809,6 +2897,10 @@
                     {
                       "type": "number",
                       "const": -32015
+                    },
+                    {
+                      "type": "number",
+                      "const": -32016
                     }
                   ]
                 },
@@ -3158,6 +3250,24 @@
                   "type": "array",
                   "items": {
                     "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "const": "bash"
+                          },
+                          "command": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "command"
+                        ],
+                        "additionalProperties": false
+                      },
                       {
                         "type": "object",
                         "properties": {
@@ -3802,6 +3912,12 @@
                 },
                 "report": {
                   "$ref": "#/$defs/ItemSchema/$defs/__schema6"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "thinking": {
+                  "type": "string"
                 }
               },
               "required": [
@@ -4549,6 +4665,10 @@
       "enum": [
         "initialize",
         "thread/start",
+        "thread/engineControl",
+        "thread/permission/set",
+        "thread/effort/set",
+        "thread/compact",
         "thread/resume",
         "thread/attach",
         "thread/detach",
@@ -4573,6 +4693,8 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "string",
       "enum": [
+        "thread/permission/changed",
+        "thread/engineEvent",
         "initialized",
         "thread/started",
         "thread/status/changed",
@@ -5074,7 +5196,11 @@
         "readonly",
         "auto-edit",
         "full",
-        "default"
+        "default",
+        "acceptEdits",
+        "plan",
+        "bypassPermissions",
+        "dontAsk"
       ]
     },
     "PlanSchema": {
@@ -5364,7 +5490,11 @@
                 "readonly",
                 "auto-edit",
                 "full",
-                "default"
+                "default",
+                "acceptEdits",
+                "plan",
+                "bypassPermissions",
+                "dontAsk"
               ]
             },
             "sandbox": {
@@ -5395,6 +5525,19 @@
               "additionalProperties": {
                 "$ref": "#/$defs/ResumeThreadParamsSchema/$defs/__schema0"
               }
+            },
+            "autocompact": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "auto"
+                },
+                {
+                  "type": "integer",
+                  "minimum": 100000,
+                  "maximum": 1000000
+                }
+              ]
             },
             "threadId": {
               "type": "string",
@@ -5438,7 +5581,11 @@
                 "readonly",
                 "auto-edit",
                 "full",
-                "default"
+                "default",
+                "acceptEdits",
+                "plan",
+                "bypassPermissions",
+                "dontAsk"
               ]
             },
             "sandbox": {
@@ -5469,6 +5616,19 @@
               "additionalProperties": {
                 "$ref": "#/$defs/ResumeThreadParamsSchema/$defs/__schema0"
               }
+            },
+            "autocompact": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "auto"
+                },
+                {
+                  "type": "integer",
+                  "minimum": 100000,
+                  "maximum": 1000000
+                }
+              ]
             },
             "threadId": {
               "type": "string",
@@ -5612,6 +5772,10 @@
             {
               "type": "number",
               "const": -32015
+            },
+            {
+              "type": "number",
+              "const": -32016
             }
           ]
         },
@@ -5779,7 +5943,11 @@
             "readonly",
             "auto-edit",
             "full",
-            "default"
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions",
+            "dontAsk"
           ]
         },
         "sandbox": {
@@ -5810,6 +5978,19 @@
           "additionalProperties": {
             "$ref": "#/$defs/StartThreadParamsSchema/$defs/__schema0"
           }
+        },
+        "autocompact": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "auto"
+            },
+            {
+              "type": "integer",
+              "minimum": 100000,
+              "maximum": 1000000
+            }
+          ]
         },
         "backend": {
           "type": "string",
@@ -5875,6 +6056,24 @@
           "type": "array",
           "items": {
             "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "bash"
+                  },
+                  "command": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "additionalProperties": false
+              },
               {
                 "type": "object",
                 "properties": {
@@ -5962,7 +6161,11 @@
             "readonly",
             "auto-edit",
             "full",
-            "default"
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions",
+            "dontAsk"
           ]
         },
         "sandbox": {
@@ -5996,7 +6199,11 @@
             "readonly",
             "auto-edit",
             "full",
-            "default"
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions",
+            "dontAsk"
           ]
         },
         "sandbox": {
@@ -6027,6 +6234,19 @@
           "additionalProperties": {
             "$ref": "#/$defs/ThreadOptionsSchema/$defs/__schema0"
           }
+        },
+        "autocompact": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "auto"
+            },
+            {
+              "type": "integer",
+              "minimum": 100000,
+              "maximum": 1000000
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -6189,6 +6409,10 @@
                     {
                       "type": "number",
                       "const": -32015
+                    },
+                    {
+                      "type": "number",
+                      "const": -32016
                     }
                   ]
                 },
@@ -6272,6 +6496,19 @@
           "additionalProperties": {
             "$ref": "#/$defs/ThreadSchema/$defs/__schema2"
           }
+        },
+        "permission": {
+          "type": "string",
+          "enum": [
+            "readonly",
+            "auto-edit",
+            "full",
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions",
+            "dontAsk"
+          ]
         },
         "createdAtMs": {
           "type": "integer",
@@ -6492,6 +6729,10 @@
                 {
                   "type": "number",
                   "const": -32015
+                },
+                {
+                  "type": "number",
+                  "const": -32016
                 }
               ]
             },
@@ -6835,6 +7076,10 @@
                 {
                   "type": "number",
                   "const": -32015
+                },
+                {
+                  "type": "number",
+                  "const": -32016
                 }
               ]
             },
@@ -7038,6 +7283,24 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "bash"
+            },
+            "command": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "command"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "text"
             },
             "text": {
@@ -7136,6 +7399,12 @@
         "capabilities": {
           "type": "object",
           "properties": {
+            "engineEvents": {
+              "type": "boolean"
+            },
+            "bashInput": {
+              "type": "boolean"
+            },
             "serverRequests": {
               "type": "array",
               "items": {
@@ -7231,6 +7500,33 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 9007199254740991
+            },
+            "engine": {
+              "type": "object",
+              "properties": {
+                "engineEvents": {
+                  "type": "boolean"
+                },
+                "engineControl": {
+                  "type": "boolean"
+                },
+                "permissionSet": {
+                  "type": "boolean"
+                },
+                "effortSet": {
+                  "type": "boolean"
+                },
+                "subAgentText": {
+                  "type": "boolean"
+                },
+                "bashInput": {
+                  "type": "boolean"
+                },
+                "compact": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
             }
           },
           "required": [
@@ -7273,7 +7569,11 @@
             "readonly",
             "auto-edit",
             "full",
-            "default"
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions",
+            "dontAsk"
           ]
         },
         "sandbox": {
@@ -7304,6 +7604,19 @@
           "additionalProperties": {
             "$ref": "#/$defs/method:thread~1start:params/$defs/__schema0"
           }
+        },
+        "autocompact": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "auto"
+            },
+            {
+              "type": "integer",
+              "minimum": 100000,
+              "maximum": 1000000
+            }
+          ]
         },
         "backend": {
           "type": "string",
@@ -7484,6 +7797,10 @@
                         {
                           "type": "number",
                           "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
                         }
                       ]
                     },
@@ -7567,6 +7884,19 @@
               "additionalProperties": {
                 "$ref": "#/$defs/method:thread~1start:result/$defs/__schema2"
               }
+            },
+            "permission": {
+              "type": "string",
+              "enum": [
+                "readonly",
+                "auto-edit",
+                "full",
+                "default",
+                "acceptEdits",
+                "plan",
+                "bypassPermissions",
+                "dontAsk"
+              ]
             },
             "createdAtMs": {
               "type": "integer",
@@ -7698,6 +8028,949 @@
         }
       }
     },
+    "method:thread/engineControl:params": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "subtype": {
+          "type": "string",
+          "minLength": 1
+        },
+        "params": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/method:thread~1engineControl:params/$defs/__schema0"
+          }
+        }
+      },
+      "required": [
+        "threadId",
+        "subtype",
+        "params"
+      ],
+      "additionalProperties": false,
+      "$defs": {
+        "__schema0": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/method:thread~1engineControl:params/$defs/__schema0"
+              }
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/method:thread~1engineControl:params/$defs/__schema0"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "method:thread/engineControl:result": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/method:thread~1engineControl:result/$defs/__schema0"
+      },
+      "$defs": {
+        "__schema0": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/method:thread~1engineControl:result/$defs/__schema0"
+              }
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/method:thread~1engineControl:result/$defs/__schema0"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "method:thread/permission/set:params": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "permission": {
+          "type": "string",
+          "enum": [
+            "readonly",
+            "auto-edit",
+            "full",
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions",
+            "dontAsk"
+          ]
+        }
+      },
+      "required": [
+        "threadId",
+        "permission"
+      ],
+      "additionalProperties": false
+    },
+    "method:thread/permission/set:result": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "thread": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "backend": {
+              "type": "string",
+              "enum": [
+                "claude",
+                "codex",
+                "external"
+              ]
+            },
+            "engineThreadId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "spawning",
+                    "idle",
+                    "running",
+                    "interrupted",
+                    "systemError",
+                    "closed"
+                  ]
+                },
+                "error": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "const": -32700
+                        },
+                        {
+                          "type": "number",
+                          "const": -32600
+                        },
+                        {
+                          "type": "number",
+                          "const": -32601
+                        },
+                        {
+                          "type": "number",
+                          "const": -32602
+                        },
+                        {
+                          "type": "number",
+                          "const": -32603
+                        },
+                        {
+                          "type": "number",
+                          "const": -32001
+                        },
+                        {
+                          "type": "number",
+                          "const": -32002
+                        },
+                        {
+                          "type": "number",
+                          "const": -32003
+                        },
+                        {
+                          "type": "number",
+                          "const": -32004
+                        },
+                        {
+                          "type": "number",
+                          "const": -32005
+                        },
+                        {
+                          "type": "number",
+                          "const": -32006
+                        },
+                        {
+                          "type": "number",
+                          "const": -32007
+                        },
+                        {
+                          "type": "number",
+                          "const": -32008
+                        },
+                        {
+                          "type": "number",
+                          "const": -32009
+                        },
+                        {
+                          "type": "number",
+                          "const": -32010
+                        },
+                        {
+                          "type": "number",
+                          "const": -32011
+                        },
+                        {
+                          "type": "number",
+                          "const": -32012
+                        },
+                        {
+                          "type": "number",
+                          "const": -32013
+                        },
+                        {
+                          "type": "number",
+                          "const": -32014
+                        },
+                        {
+                          "type": "number",
+                          "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "threadId": {
+                          "type": "string"
+                        },
+                        "turnId": {
+                          "type": "string"
+                        },
+                        "itemId": {
+                          "type": "string"
+                        },
+                        "retryable": {
+                          "type": "boolean"
+                        },
+                        "detail": {
+                          "$ref": "#/$defs/method:thread~1permission~1set:result/$defs/__schema0"
+                        },
+                        "stderr": {
+                          "type": "string"
+                        },
+                        "raw": {
+                          "$ref": "#/$defs/method:thread~1permission~1set:result/$defs/__schema1"
+                        },
+                        "holder": {
+                          "type": "object",
+                          "properties": {
+                            "clientId": {
+                              "type": "string"
+                            },
+                            "label": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "clientId",
+                            "label"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "retryable"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "additionalProperties": false
+            },
+            "cwd": {
+              "type": "string",
+              "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
+            },
+            "model": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "meta": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/method:thread~1permission~1set:result/$defs/__schema2"
+              }
+            },
+            "permission": {
+              "type": "string",
+              "enum": [
+                "readonly",
+                "auto-edit",
+                "full",
+                "default",
+                "acceptEdits",
+                "plan",
+                "bypassPermissions",
+                "dontAsk"
+              ]
+            },
+            "createdAtMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "closedAtMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "clientThreadId": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "id",
+            "backend",
+            "engineThreadId",
+            "status",
+            "cwd",
+            "createdAtMs"
+          ],
+          "additionalProperties": false
+        },
+        "deduplicated": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "thread"
+      ],
+      "additionalProperties": false,
+      "$defs": {
+        "__schema0": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/method:thread~1permission~1set:result/$defs/__schema0"
+              }
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/method:thread~1permission~1set:result/$defs/__schema0"
+              }
+            }
+          ]
+        },
+        "__schema1": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/method:thread~1permission~1set:result/$defs/__schema1"
+              }
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/method:thread~1permission~1set:result/$defs/__schema1"
+              }
+            }
+          ]
+        },
+        "__schema2": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/method:thread~1permission~1set:result/$defs/__schema2"
+              }
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/method:thread~1permission~1set:result/$defs/__schema2"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "method:thread/effort/set:params": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "maxThinkingTokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "thinkingDisplay": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "summarized",
+                "omitted"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "threadId",
+        "maxThinkingTokens"
+      ],
+      "additionalProperties": false
+    },
+    "method:thread/effort/set:result": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/method:thread~1effort~1set:result/$defs/__schema0"
+      },
+      "$defs": {
+        "__schema0": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/method:thread~1effort~1set:result/$defs/__schema0"
+              }
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/method:thread~1effort~1set:result/$defs/__schema0"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "method:thread/compact:params": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "clientTurnId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "additionalProperties": false
+    },
+    "method:thread/compact:result": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "turn": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "threadId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "ordinal": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "queued",
+                "inProgress",
+                "completed",
+                "interrupted",
+                "failed",
+                "cancelled"
+              ]
+            },
+            "clientTurnId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "enqueuedAtMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "startedAtMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "completedAtMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "durationMs": {
+              "type": "number",
+              "minimum": 0
+            },
+            "usage": {
+              "type": "object",
+              "properties": {
+                "usd": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "inputTokens": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "outputTokens": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "cachedTokens": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "cacheCreation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "estimated": {
+                  "type": "boolean"
+                },
+                "contextTokens": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "usd",
+                "inputTokens",
+                "outputTokens",
+                "cachedTokens",
+                "cacheCreation",
+                "estimated",
+                "contextTokens"
+              ],
+              "additionalProperties": false
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "const": -32700
+                    },
+                    {
+                      "type": "number",
+                      "const": -32600
+                    },
+                    {
+                      "type": "number",
+                      "const": -32601
+                    },
+                    {
+                      "type": "number",
+                      "const": -32602
+                    },
+                    {
+                      "type": "number",
+                      "const": -32603
+                    },
+                    {
+                      "type": "number",
+                      "const": -32001
+                    },
+                    {
+                      "type": "number",
+                      "const": -32002
+                    },
+                    {
+                      "type": "number",
+                      "const": -32003
+                    },
+                    {
+                      "type": "number",
+                      "const": -32004
+                    },
+                    {
+                      "type": "number",
+                      "const": -32005
+                    },
+                    {
+                      "type": "number",
+                      "const": -32006
+                    },
+                    {
+                      "type": "number",
+                      "const": -32007
+                    },
+                    {
+                      "type": "number",
+                      "const": -32008
+                    },
+                    {
+                      "type": "number",
+                      "const": -32009
+                    },
+                    {
+                      "type": "number",
+                      "const": -32010
+                    },
+                    {
+                      "type": "number",
+                      "const": -32011
+                    },
+                    {
+                      "type": "number",
+                      "const": -32012
+                    },
+                    {
+                      "type": "number",
+                      "const": -32013
+                    },
+                    {
+                      "type": "number",
+                      "const": -32014
+                    },
+                    {
+                      "type": "number",
+                      "const": -32015
+                    },
+                    {
+                      "type": "number",
+                      "const": -32016
+                    }
+                  ]
+                },
+                "message": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "object",
+                  "properties": {
+                    "threadId": {
+                      "type": "string"
+                    },
+                    "turnId": {
+                      "type": "string"
+                    },
+                    "itemId": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "detail": {
+                      "$ref": "#/$defs/method:thread~1compact:result/$defs/__schema0"
+                    },
+                    "stderr": {
+                      "type": "string"
+                    },
+                    "raw": {
+                      "$ref": "#/$defs/method:thread~1compact:result/$defs/__schema1"
+                    },
+                    "holder": {
+                      "type": "object",
+                      "properties": {
+                        "clientId": {
+                          "type": "string"
+                        },
+                        "label": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "clientId",
+                        "label"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "retryable"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "message"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "threadId",
+            "ordinal",
+            "status",
+            "enqueuedAtMs"
+          ],
+          "additionalProperties": false
+        },
+        "deduplicated": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "turn"
+      ],
+      "additionalProperties": false,
+      "$defs": {
+        "__schema0": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/method:thread~1compact:result/$defs/__schema0"
+              }
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/method:thread~1compact:result/$defs/__schema0"
+              }
+            }
+          ]
+        },
+        "__schema1": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/method:thread~1compact:result/$defs/__schema1"
+              }
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/method:thread~1compact:result/$defs/__schema1"
+              }
+            }
+          ]
+        }
+      }
+    },
     "method:thread/resume:params": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "anyOf": [
@@ -7721,7 +8994,11 @@
                 "readonly",
                 "auto-edit",
                 "full",
-                "default"
+                "default",
+                "acceptEdits",
+                "plan",
+                "bypassPermissions",
+                "dontAsk"
               ]
             },
             "sandbox": {
@@ -7752,6 +9029,19 @@
               "additionalProperties": {
                 "$ref": "#/$defs/method:thread~1resume:params/$defs/__schema0"
               }
+            },
+            "autocompact": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "auto"
+                },
+                {
+                  "type": "integer",
+                  "minimum": 100000,
+                  "maximum": 1000000
+                }
+              ]
             },
             "threadId": {
               "type": "string",
@@ -7795,7 +9085,11 @@
                 "readonly",
                 "auto-edit",
                 "full",
-                "default"
+                "default",
+                "acceptEdits",
+                "plan",
+                "bypassPermissions",
+                "dontAsk"
               ]
             },
             "sandbox": {
@@ -7826,6 +9120,19 @@
               "additionalProperties": {
                 "$ref": "#/$defs/method:thread~1resume:params/$defs/__schema0"
               }
+            },
+            "autocompact": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "auto"
+                },
+                {
+                  "type": "integer",
+                  "minimum": 100000,
+                  "maximum": 1000000
+                }
+              ]
             },
             "threadId": {
               "type": "string",
@@ -8012,6 +9319,10 @@
                         {
                           "type": "number",
                           "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
                         }
                       ]
                     },
@@ -8095,6 +9406,19 @@
               "additionalProperties": {
                 "$ref": "#/$defs/method:thread~1resume:result/$defs/__schema2"
               }
+            },
+            "permission": {
+              "type": "string",
+              "enum": [
+                "readonly",
+                "auto-edit",
+                "full",
+                "default",
+                "acceptEdits",
+                "plan",
+                "bypassPermissions",
+                "dontAsk"
+              ]
             },
             "createdAtMs": {
               "type": "integer",
@@ -8377,6 +9701,10 @@
                         {
                           "type": "number",
                           "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
                         }
                       ]
                     },
@@ -8461,6 +9789,19 @@
                 "$ref": "#/$defs/method:thread~1attach:result/$defs/__schema2"
               }
             },
+            "permission": {
+              "type": "string",
+              "enum": [
+                "readonly",
+                "auto-edit",
+                "full",
+                "default",
+                "acceptEdits",
+                "plan",
+                "bypassPermissions",
+                "dontAsk"
+              ]
+            },
             "createdAtMs": {
               "type": "integer",
               "minimum": 0,
@@ -8541,6 +9882,24 @@
                         "type": "array",
                         "items": {
                           "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "const": "bash"
+                                },
+                                "command": {
+                                  "type": "string",
+                                  "minLength": 1
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "command"
+                              ],
+                              "additionalProperties": false
+                            },
                             {
                               "type": "object",
                               "properties": {
@@ -9185,6 +10544,12 @@
                       },
                       "report": {
                         "$ref": "#/$defs/method:thread~1attach:result/$defs/__schema9"
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "thinking": {
+                        "type": "string"
                       }
                     },
                     "required": [
@@ -10471,6 +11836,24 @@
                               "properties": {
                                 "type": {
                                   "type": "string",
+                                  "const": "bash"
+                                },
+                                "command": {
+                                  "type": "string",
+                                  "minLength": 1
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "command"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
                                   "const": "text"
                                 },
                                 "text": {
@@ -11110,6 +12493,12 @@
                       },
                       "report": {
                         "$ref": "#/$defs/method:thread~1items~1list:result/$defs/__schema6"
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "thinking": {
+                        "type": "string"
                       }
                     },
                     "required": [
@@ -11937,6 +13326,10 @@
                           {
                             "type": "number",
                             "const": -32015
+                          },
+                          {
+                            "type": "number",
+                            "const": -32016
                           }
                         ]
                       },
@@ -12020,6 +13413,19 @@
                 "additionalProperties": {
                   "$ref": "#/$defs/method:thread~1list:result/$defs/__schema2"
                 }
+              },
+              "permission": {
+                "type": "string",
+                "enum": [
+                  "readonly",
+                  "auto-edit",
+                  "full",
+                  "default",
+                  "acceptEdits",
+                  "plan",
+                  "bypassPermissions",
+                  "dontAsk"
+                ]
               },
               "createdAtMs": {
                 "type": "integer",
@@ -12301,6 +13707,10 @@
                         {
                           "type": "number",
                           "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
                         }
                       ]
                     },
@@ -12384,6 +13794,19 @@
               "additionalProperties": {
                 "$ref": "#/$defs/method:thread~1read:result/$defs/__schema2"
               }
+            },
+            "permission": {
+              "type": "string",
+              "enum": [
+                "readonly",
+                "auto-edit",
+                "full",
+                "default",
+                "acceptEdits",
+                "plan",
+                "bypassPermissions",
+                "dontAsk"
+              ]
             },
             "createdAtMs": {
               "type": "integer",
@@ -12661,6 +14084,10 @@
                         {
                           "type": "number",
                           "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
                         }
                       ]
                     },
@@ -12744,6 +14171,19 @@
               "additionalProperties": {
                 "$ref": "#/$defs/method:thread~1fork:result/$defs/__schema2"
               }
+            },
+            "permission": {
+              "type": "string",
+              "enum": [
+                "readonly",
+                "auto-edit",
+                "full",
+                "default",
+                "acceptEdits",
+                "plan",
+                "bypassPermissions",
+                "dontAsk"
+              ]
             },
             "createdAtMs": {
               "type": "integer",
@@ -13037,6 +14477,24 @@
                 "properties": {
                   "type": {
                     "type": "string",
+                    "const": "bash"
+                  },
+                  "command": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
                     "const": "text"
                   },
                   "text": {
@@ -13119,7 +14577,11 @@
             "readonly",
             "auto-edit",
             "full",
-            "default"
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions",
+            "dontAsk"
           ]
         },
         "sandbox": {
@@ -13331,6 +14793,10 @@
                     {
                       "type": "number",
                       "const": -32015
+                    },
+                    {
+                      "type": "number",
+                      "const": -32016
                     }
                   ]
                 },
@@ -13491,6 +14957,24 @@
           "type": "array",
           "items": {
             "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "bash"
+                  },
+                  "command": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "additionalProperties": false
+              },
               {
                 "type": "object",
                 "properties": {
@@ -14392,6 +15876,108 @@
       ],
       "additionalProperties": false
     },
+    "notification:thread/permission/changed": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "permission": {
+          "type": "string",
+          "enum": [
+            "readonly",
+            "auto-edit",
+            "full",
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions",
+            "dontAsk"
+          ]
+        }
+      },
+      "required": [
+        "threadId",
+        "permission"
+      ],
+      "additionalProperties": false
+    },
+    "notification:thread/engineEvent": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex",
+            "external"
+          ]
+        },
+        "subtype": {
+          "type": "string"
+        },
+        "payload": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/notification:thread~1engineEvent/$defs/__schema0"
+          }
+        }
+      },
+      "required": [
+        "threadId",
+        "backend",
+        "subtype",
+        "payload"
+      ],
+      "additionalProperties": false,
+      "$defs": {
+        "__schema0": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/notification:thread~1engineEvent/$defs/__schema0"
+              }
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/notification:thread~1engineEvent/$defs/__schema0"
+              }
+            }
+          ]
+        }
+      }
+    },
     "notification:initialized": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -14530,6 +16116,10 @@
                         {
                           "type": "number",
                           "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
                         }
                       ]
                     },
@@ -14613,6 +16203,19 @@
               "additionalProperties": {
                 "$ref": "#/$defs/notification:thread~1started/$defs/__schema2"
               }
+            },
+            "permission": {
+              "type": "string",
+              "enum": [
+                "readonly",
+                "auto-edit",
+                "full",
+                "default",
+                "acceptEdits",
+                "plan",
+                "bypassPermissions",
+                "dontAsk"
+              ]
             },
             "createdAtMs": {
               "type": "integer",
@@ -14847,6 +16450,10 @@
                     {
                       "type": "number",
                       "const": -32015
+                    },
+                    {
+                      "type": "number",
+                      "const": -32016
                     }
                   ]
                 },
@@ -15147,6 +16754,9 @@
             }
           ]
         },
+        "model": {
+          "type": "string"
+        },
         "title": {
           "type": "string"
         },
@@ -15405,6 +17015,10 @@
                     {
                       "type": "number",
                       "const": -32015
+                    },
+                    {
+                      "type": "number",
+                      "const": -32016
                     }
                   ]
                 },
@@ -15753,6 +17367,10 @@
                     {
                       "type": "number",
                       "const": -32015
+                    },
+                    {
+                      "type": "number",
+                      "const": -32016
                     }
                   ]
                 },
@@ -16078,6 +17696,24 @@
                       "type": "array",
                       "items": {
                         "oneOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "const": "bash"
+                              },
+                              "command": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "command"
+                            ],
+                            "additionalProperties": false
+                          },
                           {
                             "type": "object",
                             "properties": {
@@ -16722,6 +18358,12 @@
                     },
                     "report": {
                       "$ref": "#/$defs/notification:item~1started/$defs/__schema6"
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "thinking": {
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -17458,6 +19100,24 @@
                             "properties": {
                               "type": {
                                 "type": "string",
+                                "const": "bash"
+                              },
+                              "command": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "command"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
                                 "const": "text"
                               },
                               "text": {
@@ -18097,6 +19757,12 @@
                     },
                     "report": {
                       "$ref": "#/$defs/notification:item~1completed/$defs/__schema6"
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "thinking": {
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -19188,6 +20854,10 @@
                 {
                   "type": "number",
                   "const": -32015
+                },
+                {
+                  "type": "number",
+                  "const": -32016
                 }
               ]
             },

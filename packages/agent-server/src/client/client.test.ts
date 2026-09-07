@@ -39,6 +39,24 @@ for (const transport of ["unix", "ws"] as const) describe(`client over ${transpo
     expect(manager.size).toBe(1); client.close();
     await until(() => manager.size === 0); expect(client.state).toBe("closed");
   });
+  test("foundation client: typed native notifications and convenience methods round trip", async () => {
+    const { client, engine, directory } = await setup();
+    Object.assign(engine, {
+      engineControl: async (subtype: string, params: object) => ({ type: "control_response", response: { subtype: "success", request_id: "fixture", response: { subtype, ...params } } }),
+      setPermission: async (permission: "plan") => { engine.emit({ type: "permissionChanged", permission }); },
+    });
+    const received: NotificationParams<"thread/engineEvent">[] = [];
+    client.onNotification("thread/engineEvent", params => received.push(params));
+    const { thread } = await client.request("thread/start", { backend: "claude", cwd: directory });
+    engine.emit({ type: "engineEvent", backend: "claude", subtype: "hook_progress", payload: { untouched: [1, null] } });
+    await until(() => received.length === 1);
+    expect(received[0]).toEqual({ threadId: thread.id, backend: "claude", subtype: "hook_progress", payload: { untouched: [1, null] } });
+    expect((await client.setPermission({ threadId: thread.id, permission: "plan" })).thread.permission).toBe("plan");
+    expect(await client.setEffort({ threadId: thread.id, maxThinkingTokens: null })).toMatchObject({ response: { response: { subtype: "set_max_thinking_tokens", max_thinking_tokens: null } } });
+    expect(await client.engineControl({ threadId: thread.id, subtype: "mcp_status", params: {} })).toMatchObject({ response: { response: { subtype: "mcp_status" } } });
+    expect((await client.compact({ threadId: thread.id })).turn.threadId).toBe(thread.id);
+    expect(client.initializeResult?.capabilities.engine).toMatchObject({ engineEvents: true, engineControl: true, permissionSet: true, effortSet: true, subAgentText: true, bashInput: true, compact: true });
+  });
 
   test("N1/probe12: malformed notifications are reported and dropped without losing the socket or pending RPC", async () => {
     const { client, manager, peers } = await setup();

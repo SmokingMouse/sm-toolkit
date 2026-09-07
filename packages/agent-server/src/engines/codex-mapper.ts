@@ -29,6 +29,7 @@ function status(value: unknown, completed: boolean): EngineItem["status"] {
 
 export function codexUserInput(input: UserInput[]): Record<string, unknown>[] {
   return input.map(part => {
+    if (part.type === "bash") throw new ProtocolError(ErrorCode.backend_unsupported, "bash input requires Claude");
     if (part.type === "text") return { type: "text", text: part.text, text_elements: [] };
     if (part.type === "image") return { type: "localImage", path: part.path };
     // v2 has no generic file input. Keep the local path available to file tools.

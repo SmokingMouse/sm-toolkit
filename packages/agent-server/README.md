@@ -3,6 +3,23 @@
 AS v1 的本机会话服务、unix/WS 传输与 TypeScript 客户端。协议见
 [protocol.md](../../docs/agent-server/protocol.md)。运行环境为 Bun。
 
+Claude 原生能力可通过 `thread/engineEvent` 观察（完整 system 帧、hook、未知子类型与速率限制），通过 `thread/engineControl` 调用白名单控制指令。旧事件照常保留，版本仍为 as/1；新库默认协商 engineEvents 和 bashInput，旧客户端收到兼容的文本输入记录。
+只有 engineEvent 需能力协商；permission/changed 仍发给已订阅线程的旧连接，由旧库静默忽略未知通知。
+
+```ts
+const { thread } = await client.request("thread/start", {
+  backend: "claude", permission: "plan", effort: "high", autocompact: "auto",
+});
+client.onNotification("thread/engineEvent", event => observe(event.subtype, event.payload));
+await client.setPermission({ threadId: thread.id, permission: "acceptEdits" });
+await client.setEffort({ threadId: thread.id, maxThinkingTokens: 8192 });
+const status = await client.engineControl({ threadId: thread.id, subtype: "mcp_status", params: {} });
+await client.request("turn/start", { threadId: thread.id, input: [{ type: "bash", command: "pwd" }] });
+await client.compact({ threadId: thread.id, instructions: "保留决策" });
+```
+
+`initializeResult.capabilities.engine` 提供 engineEvents / engineControl / permissionSet / effortSet / subAgentText / bashInput / compact 标记。除事件通道外，这些新增能力目前只适用于 Claude，Codex 调用返回 `backend_unsupported`。effort 启动档位与热切思考 token 预算语义不同；控制响应原样返回，调用方检查 `response.subtype`。子 agent 正文通过现有 subAgent item 与 progress 通知呈现，无需新 item 类型。控制白名单、readonly 启动限制和 bash 完成帧细节见协议。
+
 ```sh
 bun run typecheck
 packages/agent-server/bin/agent-server run --ws-port 0 --grace-ms 1000
