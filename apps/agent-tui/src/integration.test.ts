@@ -201,3 +201,17 @@ test("real bin in Bun PTY attaches, draws deltas, answers both cards, and restor
     expect(a.model.cards.get("pty-approval")?.note).toBe("已由 agent-tui 处理");
   } finally { if (proc.exitCode === null) proc.kill(); await proc.exited; proc.terminal?.close(); }
 }, 10000);
+
+test("a lost turn response preserves input and reuses the idempotency key on manual retry", async () => {
+  const { a, engine } = await setup();
+  const request = a.client.request.bind(a.client); let loseResponse = true;
+  a.client.request = async (method, params) => {
+    const result = await request(method, params);
+    if (method === "turn/start" && loseResponse) { loseResponse = false; throw new Error("response lost; delivery unknown"); }
+    return result;
+  };
+  a.model.input = "exactly once"; await a.controller.key("\r", { name: "return" });
+  expect(a.model.input).toBe("exactly once"); expect(a.model.message).toContain("delivery unknown");
+  await a.controller.key("\r", { name: "return" });
+  expect(a.model.input).toBe(""); expect(engine.sent).toHaveLength(1); expect(a.model.queue).toHaveLength(0);
+});

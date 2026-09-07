@@ -1,0 +1,113 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`all item types render stable text, folded and expanded reasoning 1`] = `
+"You: 你好
+[file] /tmp/a.ts
+
+Agent …: Hello 世界
+
+Reasoning: [折叠 · Tab 展开]
+
+$ pwd
+  cwd: /tmp
+1
+2
+3
+4
+5
+6
+  exit: 0
+
+Files:
+  add a.ts
+  delete b.ts
+
+Tool fs/read
+  {"path":"a.ts"}
+  "content"
+
+MCP local/search [failed]
+  {}
+  "offline"
+
+SubAgent agent: working
+  "50%"
+  "checked"
+
+Error (-1): failed
+
+Search: Bun
+["result"]
+
+Images: /tmp/image.png
+
+Plan: Build
+  [pending] test
+
+Context compacted"
+`;
+
+exports[`approval and question cards show contents and resolutions 1`] = `
+"[request] Action Required
+Command: ls
+cwd: /tmp
+Reason: inspect
+y 允许 · s 本会话允许 · n 拒绝 · a 中止
+Enter to confirm · Esc to cancel
+
+[request] Action Required
+update a.ts
+grantRoot: /tmp
+y 允许 · s 本会话允许 · n 拒绝 · a 中止
+Enter to confirm · Esc to cancel
+
+[request] Action Required
+Permissions: {"network":{"enabled":true}}
+cwd: /tmp
+y 允许 · s 本会话允许 · n 拒绝 · a 中止
+Enter to confirm · Esc to cancel
+
+[request] Action Required
+问题 1/1:  Choose
+1. [ ] One — first
+2. [x] Two
+数字切换多选 · Enter 下一题/提交
+自由回答: 
+Enter to confirm · Esc to cancel"
+`;
+
+exports[`fixed header, footer, queue and active card viewport snapshots 1`] = `
+"codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected | th_demo
+You: 你好
+[file] /tmp/a.ts
+
+Agent …: Hello 世界
+
+排队 #1: next
+
+
+
+
+
+
+
+Enter 发送/排队 · /steer 插话 · Tab 推理 · PgUp/PgDn 历史 · Ctrl-C 两次退出
+> new input"
+`;
+
+exports[`fixed header, footer, queue and active card viewport snapshots 2`] = `
+"codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected
+[file] /tmp/a.ts
+
+Agent …: Hello 世界
+
+排队 #1: next
+[request] Action Required
+Command: ls
+cwd: /tmp
+y 允许 · s 本会话允许 · n 拒绝 · a 中止
+Enter to confirm · Esc to cancel
+
+审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片
+> "
+`;

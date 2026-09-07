@@ -5,6 +5,7 @@ export interface Key { name?: string; ctrl?: boolean; meta?: boolean; sequence?:
 export class Controller {
   private interruptedAt = -Infinity;
   private submitting = false;
+  private submission?: { text: string; threadId: string; turnId?: string; id: string };
   constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) {}
   async key(text: string | undefined, key: Key = {}): Promise<void> {
     try {
@@ -36,17 +37,23 @@ export class Controller {
       const steer = text.startsWith("/steer ");
       const input = [{ type: "text" as const, text: steer ? text.slice(7).trim() : text }];
       if (!input[0].text) return;
+      const turnId = steer ? this.model.activeTurnId : undefined;
+      if (!this.submission || this.submission.text !== text || this.submission.threadId !== thread.id || this.submission.turnId !== turnId) {
+        this.submission = { text, threadId: thread.id, turnId, id: crypto.randomUUID() };
+      }
+      const clientTurnId = this.submission.id;
       if (steer) {
         if (!this.model.activeTurnId) throw new Error("当前 turn id 未知；请用普通输入排队");
-        await this.client.request("turn/steer", { threadId: thread.id, expectedTurnId: this.model.activeTurnId, input, clientTurnId: crypto.randomUUID() });
+        await this.client.request("turn/steer", { threadId: thread.id, expectedTurnId: this.model.activeTurnId, input, clientTurnId });
         this.model.message = "已插话";
       } else {
-        const { turn } = await this.client.request("turn/start", { threadId: thread.id, input, clientTurnId: crypto.randomUUID() });
+        const { turn } = await this.client.request("turn/start", { threadId: thread.id, input, clientTurnId });
         const queued = this.model.queue.find(q => q.turnId === turn.id);
         this.model.message = queued ? `已排队 #${queued.position + 1}` : turn.status === "queued" ? "已入队，等待队列位置" : "已发送";
       }
       // Do not erase text typed while the request was in flight.
       if (this.model.input.trim() === text) this.model.input = "";
+      this.submission = undefined;
       this.model.scroll = 0;
     } finally { this.submitting = false; this.model.changed(); }
   }

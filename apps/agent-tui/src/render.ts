@@ -55,10 +55,11 @@ export function renderCard(card: RequestCard): string[] {
 }
 
 // Bun.stringWidth handles CJK/emoji terminal cell widths; leave the last column unused.
+const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 export function wrap(line: string, width: number): string[] {
   width = Math.max(1, width);
   const lines: string[] = []; let current = "", used = 0;
-  for (const { segment } of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(plain(line))) {
+  for (const { segment } of segmenter.segment(plain(line))) {
     const cells = Bun.stringWidth(segment);
     if (used + cells > width && current) { lines.push(current); current = ""; used = 0; }
     if (cells <= width) { current += segment; used += cells; }
@@ -68,7 +69,7 @@ export function wrap(line: string, width: number): string[] {
 export function render(model: TuiModel, columns = 100, rows = 30): string {
   const width = Math.max(1, columns - 1), height = Math.max(4, rows);
   const thread = model.thread, usage = model.usage;
-  const header = plain(`${thread?.backend ?? "agent"} ${thread?.id ?? "connecting"} | ${thread?.status.type ?? "unknown"} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection}`);
+  const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "unknown"} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection} | ${thread?.id ?? "connecting"}`);
   const body = [...model.items.values()].sort((a, b) => a.seq - b.seq).flatMap(i => [...renderItem(i, model.expandedReasoning), ""]);
   for (const q of model.queue) body.push(`排队 #${q.position + 1}: ${q.preview}`);
   for (const c of model.cards.values()) if (c !== model.activeCard) body.push(...renderCard(c));
@@ -82,7 +83,7 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
     const offset = Math.min(model.scroll, Math.max(0, card.length - cardRows));
     middle = [...content.slice(-Math.max(0, available - cardRows)).slice(0, available - cardRows), ...card.slice(offset, offset + cardRows)];
   } else {
-    const end = Math.max(0, content.length - model.scroll);
+    const end = Math.max(Math.min(content.length, available), content.length - model.scroll);
     middle = content.slice(Math.max(0, end - available), end);
   }
   while (middle.length < available) middle.push("");
