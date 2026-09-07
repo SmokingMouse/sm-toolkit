@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { chmodSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,18 @@ export function seed(log: ItemLog, id = "th"): void {
 }
 const create = () => { const log = new ItemLog(); logs.push(log); seed(log); return log; };
 describe("ItemLog", () => {
+  test("N1: publish rejects malformed params before any subscriber sees them", () => {
+    const log = create(), received: ServerNotification[] = [];
+    log.subscribe("th", n => received.push(n)); log.subscribe("th", n => received.push(n));
+    const diagnostic = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      log.publish({ jsonrpc: "2.0", method: "error", params: { threadId: "th", turnId: "", error: { code: -32015, message: "invalid" }, willRetry: false } });
+      log.publish({ jsonrpc: "2.0", method: "item/agentMessage/delta", params: { threadId: "th", turnId: "tn_th", itemId: "", delta: "bad" } });
+      expect(received).toEqual([]); expect(diagnostic).toHaveBeenCalledTimes(2);
+      log.publish({ jsonrpc: "2.0", method: "error", params: { threadId: "th", error: { code: -32015, message: "valid" }, willRetry: false } });
+      expect(received).toHaveLength(2);
+    } finally { diagnostic.mockRestore(); }
+  });
   test("P3: process loss discards uncommitted deltas and recovery reports failed items with a fresh cursor", async () => {
     const path = join(mkdtempSync(join(tmpdir(), "as-crash-")), "db");
     const log = new ItemLog(path); seed(log);

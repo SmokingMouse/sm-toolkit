@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { AgentServer, MockEngine, type EngineEvent } from "@smokingmouse/agent-server";
 import { AgentClient, type ClientEndpoint } from "@smokingmouse/agent-server/client";
-import { ConnectionManager, listenUnix, listenWebSocket } from "@smokingmouse/agent-server/transport";
+import { ConnectionManager, listenUnix, listenWebSocket, type WirePeer } from "@smokingmouse/agent-server/transport";
 import type { PendingServerRequest, ServerRequestResult } from "@smokingmouse/agent-server/protocol";
 import { bindClient, TuiModel } from "./model.js";
 import { Controller } from "./controller.js";
@@ -21,6 +21,8 @@ async function setup(transport: "unix" | "ws" = "unix") {
   const engine = new MockEngine();
   const server = new AgentServer({ databasePath: join(home, "db"), token: "test", allowedRoots: [home], engineFactory: () => engine, idleTimeoutMs: 0 });
   const manager = new ConnectionManager(server);
+  const peers: WirePeer[] = [], accept = manager.accept.bind(manager);
+  manager.accept = peer => { peers.push(peer); return accept(peer); };
   const listener = transport === "unix" ? listenUnix(manager, { path: join(home, "sock") }) : listenWebSocket(manager);
   const endpoint: ClientEndpoint = "path" in listener ? { transport: "unix", path: listener.path } : { transport: "ws", url: listener.url };
   const clients: AgentClient[] = [];
@@ -37,10 +39,26 @@ async function setup(transport: "unix" | "ws" = "unix") {
   const { thread } = await a.client.request("thread/start", { backend: "claude", cwd: home });
   await a.client.request("thread/attach", { threadId: thread.id });
   await b.client.request("thread/attach", { threadId: thread.id });
-  return { home, server, engine, manager, a, b, thread };
+  return { home, server, engine, manager, a, b, thread, peers };
 }
 
 for (const transport of ["unix", "ws"] as const) describe(`${transport}: real AS transport with MockEngine`, () => {
+  test("N1: invalid notifications leave the TUI connected and streaming on the same turn", async () => {
+    const { a, engine, thread, peers } = await setup(transport);
+    const { turn } = await a.client.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "go" }] });
+    engine.emit({ type: "itemStarted", turnId: turn.id, item: { id: "answer", type: "agentMessage", payload: { text: "" } } });
+    await until(() => a.model.items.has("answer"));
+    const errors: Error[] = [], states: string[] = [], clientId = a.client.clientId;
+    a.client.onError(error => errors.push(error)); a.client.onStateChange(state => states.push(state));
+    peers[0].send(JSON.stringify({ jsonrpc: "2.0", method: "error", params: { threadId: thread.id, turnId: "", error: { code: -32015, message: "malformed" }, willRetry: false } }));
+    await until(() => errors.length > 0);
+    expect(errors).toHaveLength(1); expect(a.model.message).toContain("turnId");
+    expect(a.model.connection).toBe("connected"); expect(a.model.activeTurnId).toBe(turn.id);
+    engine.emit({ type: "itemDelta", turnId: turn.id, itemId: "answer", kind: "text", text: "survived" });
+    await until(() => render(a.model).includes("survived"));
+    expect(a.client.clientId).toBe(clientId); expect(states).toEqual([]);
+    await a.client.request("server/health", {});
+  });
   test("attach, streaming text, queue, steer, usage, interrupt and exit", async () => {
     const { a, b, engine, thread } = await setup(transport);
     expect(a.model.thread?.id).toBe(thread.id);

@@ -5,7 +5,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventType, type AgentEvent } from "@smokingmouse/agent";
 import { ClaudeEngine, buildClaudeLaunch, claudeUserMessage } from "./claude.js";
 import { ClaudeEventMapper, mapPermissionDecision, mapPermissionRequest } from "./claude-mapper.js";
-import { ItemSchema, PendingServerRequestSchema } from "../protocol/index.js";
+import { ItemSchema, NotificationSchemas, PendingServerRequestSchema } from "../protocol/index.js";
 import type { EngineEvent } from "./session.js";
 import { input, until } from "../test-helpers.test.js";
 
@@ -25,6 +25,12 @@ const toolCases = [
   ["WebSearch", { query: "q" }, "webSearch"], ["ExitPlanMode", { plan: "one" }, "plan"],
 ] as const;
 describe("Claude AgentEvent mapping (no real CLI)", () => {
+  test("N1: orphan mapper error before beginTurn omits turnId", () => {
+    const events = new ClaudeEventMapper().map(event(EventType.ToolCallDone, { id: "orphan" }));
+    expect(events).toHaveLength(1); expect(events[0].type).toBe("error");
+    expect(events[0]).not.toHaveProperty("turnId");
+    expect(NotificationSchemas.error.safeParse(events[0]).success).toBe(true);
+  });
   test("reasoning and text aggregate; tool boundaries create a new answer item", () => {
     const m = new ClaudeEventMapper("/tmp"); m.beginTurn("tn"); const events: EngineEvent[] = [];
     for (const e of [event(EventType.Thinking, { text: "think" }), event(EventType.TextChunk, { text: "hello " }), event(EventType.TextChunk, { text: "world" }), event(EventType.ToolCall, { id: "bash", name: "Bash", input: { command: "pwd" } }), event(EventType.ToolCallDone, { id: "bash", output: "/tmp", isError: false, exitCode: 0 }), event(EventType.TextChunk, { text: "final" }), event(EventType.Result, { text: "final", cost })]) events.push(...m.map(e));
@@ -102,6 +108,34 @@ function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => voi
   return { child, written, send };
 }
 describe("Claude native frame exchange (fake child only)", () => {
+  test("N1/probe13: tool_result before and between turns emits only an unscoped error and engine remains usable", async () => {
+    const fake = fakeProcess(send => {
+      send({ type: "assistant", message: { content: [{ type: "tool_use", id: "tool", name: "Read", input: {} }] } });
+      send({ type: "result", result: "done", usage: {} });
+    });
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ threadId: "th", backend: "claude", cwd: "/tmp" });
+      for (const turnId of ["tn1", "tn2"]) {
+        const offset = events.length;
+        fake.send({ type: "user", message: { content: [
+          { type: "tool_result", tool_use_id: "tool", content: "late" },
+          { type: "tool_result", tool_use_id: "orphan", content: "early" },
+        ] } });
+        await until(() => events.length > offset);
+        const orphan = events.slice(offset);
+        expect(orphan).toHaveLength(1);
+        expect(orphan[0]).toMatchObject({ type: "error", error: { code: -32015 }, willRetry: false });
+        expect(orphan[0]).not.toHaveProperty("turnId");
+        expect(NotificationSchemas.error.safeParse(orphan[0]).success).toBe(true);
+        await engine.sendTurn(turnId, input("go"), { threadId: "th", input: input("go") });
+        await until(() => events.some(e => e.type === "turnCompleted" && e.turnId === turnId));
+      }
+      expect(events.some(e => e.type === "exit")).toBe(false);
+      expect(events.filter(e => e.type === "turnCompleted").map(e => e.status)).toEqual(["completed", "completed"]);
+    } finally { await engine.close("test"); await consuming; }
+  });
   test("N2: orphan tool_result reports -32015 and the same engine completes two turns", async () => {
     const fake = fakeProcess(send => {
       send({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "orphan", content: "x" }] } });

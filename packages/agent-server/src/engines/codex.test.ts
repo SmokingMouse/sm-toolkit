@@ -4,13 +4,27 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { AgentServer } from "../server/server.js";
-import { ItemSchema, PendingServerRequestSchema, ServerRequestMethodSchema, ServerRequestSchemas, StartThreadParamsSchema, type Frame, type ServerRequestMethod, type ServerRequestResult } from "../protocol/index.js";
+import { ItemSchema, NotificationSchemas, PendingServerRequestSchema, ServerRequestMethodSchema, ServerRequestSchemas, StartThreadParamsSchema, type Frame, type ServerRequestMethod, type ServerRequestResult } from "../protocol/index.js";
 import { capture, client, input, until } from "../test-helpers.test.js";
 import { CodexEngine, buildCodexThreadParams } from "./codex.js";
 import { CodexEventMapper, codexUserInput, mapCodexDecision, mapCodexItem } from "./codex-mapper.js";
 import type { EngineEvent } from "./session.js";
 
 const fixture = resolve(import.meta.dir, "../../scripts/fixtures/fake-codex-app-server.ts");
+test("N1: all Codex mapper error paths omit turnId before beginTurn", () => {
+  const mapper = new CodexEventMapper();
+  const batches = [
+    mapper.map("item/started", { item: { id: "unknown", type: "futureItem" } }),
+    mapper.map("item/agentMessage/delta", { itemId: "unknown", delta: "ignored" }),
+    mapper.map("error", { error: { message: "early error" }, willRetry: false }),
+  ];
+  for (const batch of batches) {
+    const errors = batch.filter(e => e.type === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).not.toHaveProperty("turnId");
+    expect(NotificationSchemas.error.safeParse(errors[0]).success).toBe(true);
+  }
+});
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 function fake(scenario = "simple", options: { handshakeTimeoutMs?: number } = {}) {
