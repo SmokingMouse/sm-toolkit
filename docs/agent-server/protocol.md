@@ -139,6 +139,7 @@ client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
 
 `thread/compact` `{threadId,instructions?,clientTurnId?}` → `{turn,deduplicated?}`，按正常 turn 队列发送用户文本 `/compact`（附 instructions）。本机 2.1.258 print.ts 的 control_request 子类型全集未发现 compact；因此这是 slash command 转发，不是虚构控制指令。沿用 turn 的排队、去重、lease 与完成事件，以及已有 compact_boundary → contextCompaction item。Codex 返回 backend_unsupported。
 thread/start 与 resume 新增 autocompact：`"auto"` 或 100000–1000000 整数 token 数，透传 `--autocompact <auto|tokens>`（bundle CLI option 描述 100k–1M）；省略时保留原生默认值。
+AS 有意只收明确 token 整数，不接受 CLI 的 `"500k"`、`"200"` 等缩写或数值 200/999；客户端须先转换为 500000/200000/999000。缩写、越界、小数均返回 -32602。此处是 AS 收窄的输入契约，不声称覆盖 CLI 所有字面写法。
 
 UserInput 新增 `{type:"bash",command}`，仅支持 Claude 独立 turn/start（不混排、不 steer）。2.1.258 print.ts 分支 `if(d.type==="bash_command")` 调用 runHeadlessBashCommand；发 `{type:"bash_command",command,cwd,uuid}`，uuid 为原生 UUID。CLI 不发 result，而是 isReplay user 文本：bash-input 回显，以及 bash-stdout / bash-stderr / bash-exit-code 标签输出；daemon 聚合 commandExecution item 并结束 turn。非零退出标记 command item failed，turn 仍表示命令已执行完成；中断等待回放后结束。cwd 固定为 thread cwd。bash 是显式用户 shell 操作，不经过模型的 can_use_tool 审批。
 客户端 initialize.capabilities.bashInput=true 声明可读此输入变体，新库默认声明；旧连接收到的 userMessage（含历史快照）降级为 `!command` 文本，落库仍保留原始 bash 变体。Codex 在入队前返回 backend_unsupported。
@@ -149,6 +150,7 @@ Claude 启动包含 `--forward-subagent-text`（2.1.258 flag 描述：转发带 
 Claude effort 仅允许 low/medium/high/xhigh/max，非法值在 start/resume/turn 返回 -32602；合法但不同的 turn 标签仍返回 -32008。Codex 使用自身 effort 校验，不套 Claude 枚举。
 
 `thread/permission/set`：`{threadId, permission}` → `{thread}`。Claude 原生模式 default / acceptEdits / plan / bypassPermissions / dontAsk 映射 --permission-mode，热切发送 set_permission_mode 的 mode 字段；CLI 成功确认后更新 thread.permission、持久化恢复选项，并发送 `thread/permission/changed` `{threadId,permission}`。turn/start.permission 也在发送用户帧前热切。原生拒绝不更新状态，返回 unsupported_capability。CLI 或组织策略仍可拒绝 bypass。
+热切成功的返回 thread.permission、恢复选项和 permission/changed 均使用原生规范值：auto-edit → acceptEdits，full → bypassPermissions；不是请求别名的原样回显。启动状态仍保留调用方请求值，首次成功热切后归一化。
 旧值 full / auto-edit 分别映射 bypassPermissions / acceptEdits。readonly 仅限启动时工具限制（--disallowedTools），不能通过热切新增此限制；已有进程限制也不会被模式热切解除。仅启动 permission 显式为 full/bypassPermissions 才添加 --allow-dangerously-skip-permissions；其他会话不预先开放 bypass，也没有隐式 daemon 提权策略。CLI/组织策略仍可拒绝切换。权限模式热切会清除 daemon 会话审批缓存，避免旧授权跨模式复用。Codex 保持旧 permission 别名语义，新增 Claude 模式返回 backend_unsupported。
 对已有 thread，请求 full/bypassPermissions/dontAsk（或原生 ultraplan:true）必须由有效 lease 的持有者发起，覆盖 permission/set、engineControl.set_permission_mode、turn/start.permission 和 resume.permission；无 lease/已过期返回 unauthorized (-32005)，他人持有返回 lease_held (-32012)。持有 lease 不绕过原生 bypass availability/组织策略。普通输入和非提升模式继续使用可选 lease。
 

@@ -104,6 +104,35 @@ test("P2-4: set_model updates thread and saved options, then respawns with the s
   } finally { await f.server.close(); }
 });
 
+test("P2-5: permission aliases normalize in results, notifications and saved options", async () => {
+  const f = fixture();
+  try {
+    const c = await client(f.server), notices = capture(c);
+    const { thread } = await c.request("thread/start", { backend: "claude", permission: "full" });
+    await c.request("thread/lease/acquire", { threadId: thread.id });
+    for (const [permission, canonical] of [["auto-edit", "acceptEdits"], ["full", "bypassPermissions"]] as const) {
+      const changed = await c.request("thread/permission/set", { threadId: thread.id, permission });
+      expect(changed.thread.permission).toBe(canonical);
+      expect(f.server.log.options<any>(thread.id).permission).toBe(canonical);
+      expect(notices.some(n => "method" in n && n.method === "thread/permission/changed" && n.params.permission === canonical)).toBe(true);
+      expect(f.written.at(-1).request.mode).toBe(canonical);
+    }
+  } finally { await f.server.close(); }
+});
+
+test("P2-5: AS autocompact rejects CLI shorthand and forwards explicit token counts", async () => {
+  const f = fixture();
+  try {
+    const c = await client(f.server);
+    for (const autocompact of ["500k", "200", 200, 999, 99999, 1000001, 100000.5]) await expect(c.request("thread/start", { backend: "claude", autocompact } as any)).rejects.toMatchObject({ code: -32602 });
+    expect(f.written).toHaveLength(0);
+    for (const autocompact of ["auto", 100000, 1000000] as const) {
+      await c.request("thread/start", { backend: "claude", autocompact });
+      expect(f.argv()[f.argv().indexOf("--autocompact") + 1]).toBe(String(autocompact));
+    }
+  } finally { await f.server.close(); }
+});
+
 test("foundation RPC: capabilities, hot permission persistence, effort shape, lease and backend refusals", async () => {
   const f = fixture();
   try {
