@@ -4,8 +4,9 @@
 
 ## Current Focus
 
-agent-server（分支 feat/agent-server）：daemon 独占引擎、item 日志广播、turn 排队、审批反向请求，多前端 attach，配薄 TUI；设计已定稿，核心包实现中。
+agent-server v1 在 feat/agent-server 实现完成、两轮异源 review 通过（HEAD 85e5b07，未 push）；等用户决定 Trellis 迁移、发布与 fj 起位切换。
 
 ## Goals
 
-- [ ] agent-server v1：协议 + 核心 + 传输/daemon + codex 引擎 + TUI 客户端，可被 Trellis 与手机 attach（设计见 `docs/agent-server/`）
+- [x] agent-server v1：协议 + 核心 + 传输/daemon + codex 引擎 + TUI 客户端（设计见 `docs/agent-server/`）
+- [ ] Trellis 迁移到 agent-server（`docs/agent-server/trellis-migration.md` 三步走，等用户拍板）
