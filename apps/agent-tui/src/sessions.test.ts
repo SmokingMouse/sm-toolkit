@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { AgentClient } from "@smokingmouse/agent-server/client";
-import type { Thread } from "@smokingmouse/agent-server/protocol";
+import { ThreadSchema, MethodSchemas, type Thread } from "@smokingmouse/agent-server/protocol";
 import { Controller } from "./controller.js";
 import { TuiModel } from "./model.js";
 import { sortThreads } from "./sessions.js";
@@ -122,13 +122,19 @@ test("P0-2: resume reopens closed and systemError engines and refreshes snapshot
     expect(render(model, 120, 20)).not.toContain("可恢复");
   }
 });
-test("status shows permission only when present in thread state; picker escapes titles", () => {
+test("P2-1/P2-4: actual protocol strips private engine options; status does not invent permission", () => {
+  const options = { permission: "readonly", effort: "high", sandbox: "restricted", systemPrompt: "private", tools: ["Read"] };
+  const parsed = ThreadSchema.parse({ ...thread("old"), ...options });
+  const config = MethodSchemas["server/config/read"].result.parse({ allowed_roots: ["/tmp"], maxQueuedTurns: 10, orphanTimeoutMs: 0, idleTimeoutMs: 0, ...options });
+  for (const field of Object.keys(options)) { expect(field in parsed).toBe(false); expect(field in config).toBe(false); }
+  const { model } = setup(); model.thread = parsed;
+  expect(render(model, 120, 20)).not.toContain("permission");
+});
+test("picker escapes titles and status includes current cwd and model", () => {
   const { model } = setup();
   model.picker = { index: 0, entries: [{ thread: thread("new"), title: "bad\x1b[2Jtitle", updatedAtMs: 1 }] };
   const screen = render(model, 120, 20);
   for (const value of ["old", "cwd /tmp", "model test-model", "badtitle", "1970-01-01"]) expect(screen).toContain(value);
   expect(screen).not.toContain("permission");
-  Object.assign(model.thread!, { permission: "readonly" });
-  expect(render(model, 120, 20)).toContain("permission readonly");
   expect(screen).not.toContain("\x1b");
 });
