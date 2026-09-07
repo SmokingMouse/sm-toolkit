@@ -75,7 +75,7 @@ export class ThreadManager {
     if (existing) { onCreated?.(existing); await this.opening.get(existing.id); return { thread: this.get(existing.id), deduplicated: true }; }
     const thread: Thread = { id: `th_${crypto.randomUUID()}`, backend: params.backend, engineThreadId: internal?.fork ? null : internal?.resume ?? null, cwd: params.cwd ?? process.cwd(), status: { type: "spawning" }, createdAtMs: this.now(), ...(params.model ? { model: params.model } : {}), ...(params.meta ? { meta: params.meta } : {}), ...(params.clientThreadId ? { clientThreadId: params.clientThreadId } : {}) };
     if (internal?.forkedFrom) thread.forkedFrom = internal.forkedFrom;
-    const options = { ...params, cwd: thread.cwd, ...(internal?.seedHistory ? { seedHistory: internal.seedHistory } : {}) };
+    const options = { ...params, cwd: thread.cwd, ...(internal?.seedHistory ? { seedHistory: internal.seedHistory } : {}), ...(internal?.fork ? { engineThreadId: internal.resume, forkSession: true, forkPoint: internal.forkPoint } : {}) };
     thread.permission = params.permission ?? "default";
     this.log.transaction(() => {
       this.log.insertThread(thread, request, options);
@@ -134,10 +134,14 @@ export class ThreadManager {
     }
     thread = this.get(thread.id);
     const { threadId: _, engineThreadId: __, ...overrides } = params;
-    const options = { ...this.log.options(thread.id), ...overrides, backend: thread.backend };
+    const options = { ...this.log.options<SessionOptions>(thread.id), ...overrides, backend: thread.backend };
     this.log.saveOptions(thread.id, options); thread.cwd = options.cwd ?? thread.cwd; thread.model = options.model; thread.permission = options.permission ?? "default"; delete thread.closedAtMs; this.log.saveThread(thread);
     this.setStatus(thread.id, { type: "spawning" });
-    await this.open(thread, { ...options, threadId: thread.id, engineThreadId: thread.engineThreadId ?? undefined, ...(thread.engineThreadId ? { seedHistory: undefined } : {}) });
+    // Claude replay frames are only durably flushed by a subsequent turn. Before
+    // that, recreate the seeded process instead of resuming an incomplete file.
+    const reseed = thread.backend === "claude" && options.seedHistory !== undefined;
+    if (reseed && thread.engineThreadId) { thread.engineThreadId = null; this.log.saveThread(thread); }
+    await this.open(thread, { ...options, threadId: thread.id, ...(reseed ? { engineThreadId: undefined, forkSession: false } : thread.engineThreadId ? { engineThreadId: thread.engineThreadId, forkSession: false, forkPoint: undefined, seedHistory: undefined } : {}) });
     return { thread: this.get(thread.id), attached: false };
   }
   async fork(params: MethodParams<"thread/fork">, onCreated?: (thread: Thread) => void): Promise<MethodResult<"thread/fork">> {
@@ -149,9 +153,10 @@ export class ThreadManager {
     const prefix = all.slice(0, index + 1), itemId = prefix.at(-1)?.id ?? null;
     const forkPoint = itemId ? this.log.forkPoint(source.id, itemId) : undefined;
     // Unmapped and live boundaries must never silently inherit a later native suffix.
-    const native = !!source.engineThreadId && (!!forkPoint || (params.fromItemId === undefined && source.status.type === "idle"));
+    const unflushedSeed = source.backend === "claude" && this.log.options<SessionOptions>(source.id).seedHistory !== undefined;
+    const native = !unflushedSeed && !!source.engineThreadId && (!!forkPoint || (params.fromItemId === undefined && source.status.type === "idle"));
     const { clientThreadId: _, ...options } = this.log.options(source.id);
-    const { seedHistory: __, ...clean } = options as SessionOptions;
+    const { seedHistory: __, engineThreadId: ___, forkSession: ____, forkPoint: _____, ...clean } = options as SessionOptions;
     return this.start({ ...clean, clientThreadId: params.clientThreadId }, onCreated, { ...(native ? { resume: source.engineThreadId!, fork: true, forkPoint } : { seedHistory: prefix }), prefix, forkedFrom: { threadId: source.id, itemId }, request: params });
   }
   private metadata(threadId: string, engineThreadId: string): void {
@@ -197,6 +202,8 @@ export class ThreadManager {
       case "itemCompleted": this.log.updateItem(threadId, event.item, true); break;
       case "turnCompleted": {
         this.approvals?.expireThread(threadId, "turn_completed", turnId);
+        const { seedHistory: _, engineThreadId: __, forkSession: ___, forkPoint: ____, ...options } = this.log.options<SessionOptions>(threadId);
+        this.log.saveOptions(threadId, options);
         this.queue(threadId).complete(turnId, event.status, event.usage, event.error);
         const last = this.log.snapshot(threadId).items.filter(item => item.turnId === turnId).at(-1);
         if (last && event.status === "completed" && event.forkPoint) this.log.saveForkPoint(threadId, last.id, event.forkPoint);

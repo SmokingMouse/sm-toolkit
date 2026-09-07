@@ -4,6 +4,7 @@ import { EventType, resolveClaudeModel, type AgentEvent, type Cost } from "@smok
 import { ClaudeEffortSchema, ErrorCode, PermissionSchema, ProtocolError, type JsonObject, type StartTurnParams, type UserInput } from "../protocol/index.js";
 import { AsyncQueue, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
 import { ClaudeEventMapper, jsonValue, mapPermissionDecision, mapPermissionRequest, record, type ToolPermissionRequest } from "./claude-mapper.js";
+import { historyMessages } from "./fork-history.js";
 
 // Local Claude Code 2.1.258 bin/claude.exe: print.ts d.request.subtype dispatch.
 // Default deny: auth, initialization, settings, remote plumbing and lifecycle controls
@@ -31,6 +32,7 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   args.push("--include-hook-events", "--forward-subagent-text");
   if (options.engineThreadId) args.push("--resume", options.engineThreadId);
   if (options.forkSession && options.engineThreadId) args.push("--fork-session");
+  if (options.forkPoint && options.forkSession && options.engineThreadId) args.push("--resume-session-at", options.forkPoint);
   if (options.systemPrompt) args.push("--system-prompt", options.systemPrompt);
   if (options.tools && options.tools !== "all") args.push("--tools", options.tools.join(","));
   const permission = options.permission ?? "default";
@@ -89,6 +91,8 @@ export class ClaudeEngine implements EngineSession {
   private sawThinkingDelta = false;
   private partials = new Map<string, { text: boolean; thinking: boolean }>();
   private bash?: { itemId: string };
+  private lastAssistantUuid?: string;
+  private seeding?: { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
   constructor(private readonly config: ClaudeEngineOptions = {}) {}
   async spawn(options: SessionOptions): Promise<void> {
     this.options = options; this.mapper = new ClaudeEventMapper(options.cwd);
@@ -112,7 +116,23 @@ export class ClaudeEngine implements EngineSession {
       if (!this.closed) this.fail(new ProtocolError(ErrorCode.engine_unavailable, `Claude exited (${code})`, { stderr: this.stderr, retryable: true }));
       else this.events.end();
     });
-    try { await this.control({ subtype: "initialize", hooks: {} }); }
+    try {
+      await this.control({ subtype: "initialize", hooks: {} });
+      for (const message of historyMessages(options.seedHistory ?? [])) {
+        const uuid = crypto.randomUUID();
+        if (message.role === "assistant") {
+          this.write({ type: "assistant", uuid, session_id: "", parent_tool_use_id: null, message: { id: uuid, type: "message", role: "assistant", model: "history", content: [{ type: "text", text: message.text }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
+        } else {
+          // Local bundle: shouldQuery=false records the user without inference,
+          // then emits a result. Wait for it before appending the assistant.
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => this.fail(new ProtocolError(ErrorCode.engine_unavailable, "Claude history seed timed out")), this.config.handshakeTimeoutMs ?? 15_000);
+            this.seeding = { resolve, reject, timer };
+            this.write({ type: "user", uuid, message: { role: "user", content: message.text }, shouldQuery: false, client_composed: true });
+          });
+        }
+      }
+    }
     catch (error) { this.fail(error instanceof ProtocolError ? error : new ProtocolError(ErrorCode.engine_unavailable, String(error), { stderr: this.stderr })); throw error; }
   }
   async attach(): Promise<void> { this.assertAlive(); }
@@ -165,6 +185,7 @@ export class ClaudeEngine implements EngineSession {
     if (options.model && options.model !== this.options?.model && resolveClaudeModel(options.model).env) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing endpoint requires a new Claude session");
   }
   async sendTurn(turnId: string, input: UserInput[], options: StartTurnParams): Promise<void> {
+    this.lastAssistantUuid = undefined;
     this.assertAlive(); this.validateTurn(options);
     if (this.active) throw new ProtocolError(ErrorCode.turn_not_active, "Claude already has an active turn");
     const bash = input.length === 1 && input[0].type === "bash" ? input[0] : undefined;
@@ -218,13 +239,21 @@ export class ClaudeEngine implements EngineSession {
   private rejectControls(error: Error): void { for (const p of this.controls.values()) { clearTimeout(p.timer); p.reject(error); } this.controls.clear(); }
   private fail(error: ProtocolError): void {
     if (this.dead || this.closed) return;
-    this.dead = true; this.rejectControls(error); this.events.push({ type: "exit", error: error.toJSON() }); this.events.end();
+    this.dead = true;
+    if (this.seeding) { clearTimeout(this.seeding.timer); this.seeding.reject(error); this.seeding = undefined; }
+    this.rejectControls(error); this.events.push({ type: "exit", error: error.toJSON() }); this.events.end();
     this.process?.kill("SIGKILL");
   }
-  private emit(event: AgentEvent): void { for (const mapped of this.mapper.map(event)) this.events.push(mapped); }
+  private emit(event: AgentEvent): void { for (const mapped of this.mapper.map(event)) this.events.push(mapped.type === "turnCompleted" && this.lastAssistantUuid ? { ...mapped, forkPoint: this.lastAssistantUuid } : mapped); }
   /** Native frame parsing is separated from process creation for offline fixtures. */
   receive(raw: unknown): void {
     const obj = record(raw), t = obj.type;
+    if (t === "result" && this.seeding) {
+      const pending = this.seeding; clearTimeout(pending.timer); this.seeding = undefined;
+      if (obj.is_error || (obj.usage?.output_tokens ?? 0) > 0) pending.reject(new ProtocolError(ErrorCode.engine_protocol_error, "Claude history replay failed or unexpectedly queried the model"));
+      else pending.resolve();
+      return;
+    }
     const emit = (type: AgentEvent["type"], data: Record<string, unknown>) => this.emit({ type, data, backend: "claude", sessionId: this.engineThreadId });
     if (t === "control_response") {
       const response = record(obj.response), pending = this.controls.get(String(response.request_id));
@@ -316,6 +345,7 @@ export class ClaudeEngine implements EngineSession {
         this.partials.delete(parent); return;
       }
       const u = obj.message?.usage;
+      this.lastAssistantUuid = typeof obj.uuid === "string" && !(obj.message?.content ?? []).some((block: { type?: string }) => block.type === "tool_use") ? obj.uuid : undefined;
       if (u) this.context = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
       for (const block of obj.message?.content ?? []) {
         if (block.type === "tool_use") emit(EventType.ToolCall, { id: block.id, name: block.name, input: block.input, parentToolUseId: obj.parent_tool_use_id });

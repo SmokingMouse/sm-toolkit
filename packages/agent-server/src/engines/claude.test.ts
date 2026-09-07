@@ -111,6 +111,48 @@ function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => voi
   return { child, written, send };
 }
 describe("Claude native frame exchange (fake child only)", () => {
+  test("midfork: native inclusive checkpoint uses resume-session-at and fork-session", async () => {
+    const fake = fakeProcess(() => {}); let args: string[] = [];
+    const engine = new ClaudeEngine({ spawnProcess: (_command, argv) => { args = argv; return fake.child; } });
+    try {
+      await engine.spawn({ backend: "claude", threadId: "fork", engineThreadId: "source-session", forkSession: true, forkPoint: "native-message-uuid" });
+      expect(args.slice(args.indexOf("--resume"), args.indexOf("--resume") + 5)).toEqual(["--resume", "source-session", "--fork-session", "--resume-session-at", "native-message-uuid"]);
+      expect(fake.written.filter(frame => frame.type === "user")).toHaveLength(0);
+    } finally { await engine.close("test"); }
+  });
+  test("midfork: ordered no-query user and assistant replay precedes independent continuation", async () => {
+    const fake = fakeProcess((send, frame) => {
+      if (frame.shouldQuery === false) send({ type: "result", usage: { input_tokens: 0, output_tokens: 0 } });
+      else { send({ type: "assistant", uuid: "checkpoint", message: { content: [{ type: "text", text: "continued" }] } }); send({ type: "result", result: "continued" }); }
+    });
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const event of engine.events) events.push(event); })();
+    const seedHistory = [
+      ItemSchema.parse({ id: "u", turnId: "old", seq: 1, startedAtMs: 0, type: "userMessage", payload: { content: input("/historical text") } }),
+      ItemSchema.parse({ id: "a", turnId: "old", seq: 3, startedAtMs: 0, type: "agentMessage", payload: { text: "historical answer" } }),
+      ItemSchema.parse({ id: "u2", turnId: "old2", seq: 5, startedAtMs: 0, type: "userMessage", payload: { content: input("second question") } }),
+    ];
+    try {
+      await engine.spawn({ backend: "claude", threadId: "fork", seedHistory });
+      expect(fake.written.map(frame => frame.type)).toEqual(["control_request", "user", "assistant", "user"]);
+      expect(fake.written[1]).toMatchObject({ shouldQuery: false, client_composed: true, message: { content: "/historical text" } });
+      expect(fake.written[2].message).toMatchObject({ role: "assistant", content: input("historical answer") });
+      expect(events.some(event => event.type === "turnCompleted" || event.type === "itemStarted")).toBe(false);
+      await engine.sendTurn("next", input("new question"), { threadId: "fork", input: input("new question") });
+      await until(() => events.some(event => event.type === "turnCompleted"));
+      expect(events.find(event => event.type === "turnCompleted")).toMatchObject({ turnId: "next", forkPoint: "checkpoint", status: "completed" });
+      expect(fake.written.at(-1)).not.toHaveProperty("shouldQuery");
+    } finally { await engine.close("test"); await consuming; }
+  });
+  test("midfork: seed error and missing acknowledgement reject spawn", async () => {
+    const seedHistory = [ItemSchema.parse({ id: "u", turnId: "old", seq: 1, startedAtMs: 0, type: "userMessage", payload: { content: input("history") } })];
+    for (const scenario of ["error", "timeout", "unexpected inference"]) {
+      const fake = fakeProcess(send => { if (scenario !== "timeout") send({ type: "result", is_error: scenario === "error", usage: { output_tokens: scenario === "unexpected inference" ? 1 : 0 } }); });
+      const engine = new ClaudeEngine({ spawnProcess: () => fake.child, handshakeTimeoutMs: 20 });
+      try { await expect(engine.spawn({ backend: "claude", threadId: "fork", seedHistory })).rejects.toThrow(); }
+      finally { await engine.close("test"); }
+    }
+  });
   test("P2-4: rejected native model controls do not publish a model change", async () => {
     const fake = fakeProcess(() => {}, (send, f) => send({ type: "control_response", response: { subtype: "error", request_id: f.request_id, error: "model unavailable" } }));
     const engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
