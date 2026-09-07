@@ -33,8 +33,10 @@ export class TurnQueue {
     this.log.transaction(() => { this.log.dequeue(turn.id); this.log.saveTurn(turn); });
     this.status({ type: "running" }); this.changed();
     this.log.publish({ jsonrpc: "2.0", method: "turn/started", params: { threadId: this.threadId, turnId: turn.id, turn } });
-    const userItem = this.log.startItem(this.threadId, turn.id, { id: `it_${crypto.randomUUID()}`, type: "userMessage", payload: { content: input.input, ...(input.clientTurnId ? { clientTurnId: input.clientTurnId } : {}) } });
-    this.log.updateItem(this.threadId, { ...userItem, status: "completed" }, true);
+    if (!this.engine().emitsUserMessages) {
+      const userItem = this.log.startItem(this.threadId, turn.id, { id: `it_${crypto.randomUUID()}`, type: "userMessage", payload: { content: input.input, ...(input.clientTurnId ? { clientTurnId: input.clientTurnId } : {}) } });
+      this.log.updateItem(this.threadId, { ...userItem, status: "completed" }, true);
+    }
     // Set up the promise before invoking the engine, including synchronous fakes.
     const sent = Promise.resolve().then(() => this.engine().sendTurn(turn.id, input.input, input));
     this.dispatch.set(turn.id, sent);
@@ -47,9 +49,11 @@ export class TurnQueue {
   async steer(params: MethodParams<"turn/steer">): Promise<void> {
     const turnId = this.assertActive(params.expectedTurnId);
     await this.dispatch.get(turnId); this.assertActive(turnId);
-    await this.engine().steer(turnId, params.input);
-    const item = this.log.startItem(this.threadId, turnId, { id: `it_${crypto.randomUUID()}`, type: "userMessage", payload: { content: params.input, ...(params.clientTurnId ? { clientTurnId: params.clientTurnId } : {}) } });
-    this.log.updateItem(this.threadId, { ...item, status: "completed" }, true);
+    await this.engine().steer(turnId, params.input, params);
+    if (!this.engine().emitsUserMessages) {
+      const item = this.log.startItem(this.threadId, turnId, { id: `it_${crypto.randomUUID()}`, type: "userMessage", payload: { content: params.input, ...(params.clientTurnId ? { clientTurnId: params.clientTurnId } : {}) } });
+      this.log.updateItem(this.threadId, { ...item, status: "completed" }, true);
+    }
   }
   async interrupt(expected?: string): Promise<string | null> {
     if (!this.active && !expected) return null;
@@ -73,7 +77,7 @@ export class TurnQueue {
     this.log.finishOpenItems(this.threadId, turnId, status !== "completed");
     this.log.saveTurn(turn); this.active = null;
     this.log.publish({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: this.threadId, turnId, turn } });
-    if (usage) this.log.publish({ jsonrpc: "2.0", method: "thread/tokenUsage/updated", params: { threadId: this.threadId, usage } });
+    if (usage && !this.engine().emitsTokenUsage) this.log.publish({ jsonrpc: "2.0", method: "thread/tokenUsage/updated", params: { threadId: this.threadId, usage } });
     if (!this.frozen) { if (status === "interrupted") this.status({ type: "interrupted" }); this.status({ type: "idle" }); }
     this.changed(); this.pump();
   }

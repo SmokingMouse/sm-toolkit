@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { timingSafeEqual } from "node:crypto";
 import { ApprovalBroker, ItemLog, LeaseManager, ThreadManager, type ApprovalClient } from "../core/index.js";
-import { AsyncQueue, ClaudeEngine, type EngineFactory } from "../engines/index.js";
+import { AsyncQueue, ClaudeEngine, CodexEngine, type EngineFactory } from "../engines/index.js";
 import { ErrorCode, FrameSchema, MethodSchema, MethodSchemas, ProtocolError, rpcError, type Frame, type Method, type MethodParams, type MethodResult, type PendingServerRequest, type RpcId, type ServerNotification, type ServerRequestMethod } from "../protocol/index.js";
 
 export interface ServerOptions {
@@ -115,9 +115,10 @@ export class AgentServer {
   private readonly backends: NonNullable<ServerOptions["backends"]>;
   constructor(private readonly options: ServerOptions = {}) {
     this.allowedRoots = (options.allowedRoots ?? [homedir()]).map(root => realpathSync(resolve(root)));
-    this.backends = options.backends ?? ["claude"];
+    this.backends = options.backends ?? ["claude", "codex"];
     this.log = new ItemLog(options.databasePath ?? join(homedir(), ".agent-server", "agent-server.db"));
     this.threads = new ThreadManager(this.log, options.engineFactory ?? (backend => {
+      if (backend === "codex") return new CodexEngine();
       if (backend !== "claude") throw new ProtocolError(ErrorCode.unsupported_capability, `backend ${backend} is not installed`);
       return new ClaudeEngine();
     }), options);

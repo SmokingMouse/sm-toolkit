@@ -6,7 +6,7 @@ const empty = z.object({});
 const threadId = z.object({ threadId: IdSchema });
 const limit = z.number().int().positive().max(10000).optional();
 export const ThreadOptionsSchema = z.object({
-  cwd: AbsolutePathSchema.optional(), model: z.string().optional(), permission: PermissionSchema.optional(),
+  cwd: AbsolutePathSchema.optional(), model: z.string().optional(), effort: z.string().min(1).optional(), permission: PermissionSchema.optional(),
   sandbox: z.string().optional(), systemPrompt: z.string().optional(), tools: z.union([z.literal("all"), z.array(z.string())]).optional(),
   env: z.record(z.string(), z.string()).optional(), meta: JsonObjectSchema.optional(),
 });
