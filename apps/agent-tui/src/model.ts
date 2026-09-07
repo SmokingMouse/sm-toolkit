@@ -20,6 +20,7 @@ export class TuiModel {
   scroll = 0;
   activeTurnId?: string;
   sessionOperation?: string;
+  resumeConfirmation?: string;
   picker?: { entries: ThreadEntry[]; index: number; offset?: number };
   select(snapshot: AttachResult): void {
     this.thread = snapshot.thread;

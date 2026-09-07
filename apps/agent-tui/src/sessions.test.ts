@@ -170,10 +170,36 @@ test("P0-2: resume reopens closed and systemError engines and refreshes snapshot
     model.thread!.status = { type: status };
     expect(render(model, 120, 20)).toContain("可恢复 · /resume");
     await controller.sessions.run("/resume", "old");
-    expect(calls.map(c => c[0])).toEqual(["thread/attach", "thread/resume", "thread/attach"]);
+    if (status === "closed") {
+      expect(resumed).toBe(false); await controller.key("y");
+    }
+    expect(calls.map(c => c[0])).toEqual([...(status === "closed" ? ["thread/attach"] : []), "thread/attach", "thread/resume", "thread/attach"]);
     expect(model.thread?.status.type).toBe("idle");
     expect(render(model, 120, 20)).not.toContain("可恢复");
   }
+});
+test("P2-e: closed thread confirmation defaults to no and only y restarts the engine", async () => {
+  const { client, model, controller, calls } = setup(), original = client.request.bind(client);
+  let resumed = false;
+  client.request = async (method, params) => {
+    const result = await original(method, params);
+    if (method === "thread/resume") resumed = true;
+    if (method === "thread/attach" && "thread" in result) result.thread.status = { type: resumed ? "idle" : "closed" };
+    return result;
+  };
+  for (const name of ["return", "escape", "n"]) {
+    await controller.sessions.run("/resume", "new");
+    expect(render(model, 120, 20)).toContain("[y/N]"); expect(model.thread?.id).toBe("old");
+    expect(calls.at(-1)).toEqual(["thread/detach", { threadId: "new" }]);
+    await controller.key(name === "n" ? "n" : undefined, { name });
+    expect(resumed).toBe(false); expect(model.resumeConfirmation).toBeUndefined();
+  }
+  await controller.sessions.run("/threads");
+  await controller.key(undefined, { name: "return" });
+  expect(resumed).toBe(false); expect(model.resumeConfirmation).toBe("new");
+  await controller.key("y");
+  expect(resumed).toBe(true); expect(model.thread?.id).toBe("new");
+  expect(calls.filter(c => c[0] === "thread/resume")).toHaveLength(1);
 });
 test("P2-d: failed resume detaches the hidden target but preserves the visible subscription", async () => {
   for (const target of ["new", "old"]) {

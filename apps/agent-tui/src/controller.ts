@@ -27,6 +27,16 @@ export class Controller {
       }
       this.interruptedAt = -Infinity;
       if (this.sessions.busy) { this.sessions.rejectInput(); return; }
+      if (this.model.resumeConfirmation) {
+        const threadId = this.model.resumeConfirmation;
+        if (!key.ctrl && !key.meta && text?.toLowerCase() === "y") {
+          this.model.resumeConfirmation = undefined;
+          await this.sessions.run("/resume", threadId, true);
+        } else if (text?.toLowerCase() === "n" || ["return", "enter", "escape"].includes(key.name ?? "")) {
+          this.model.resumeConfirmation = undefined; this.model.message = "已取消恢复关闭的会话";
+        }
+        return;
+      }
       if (key.ctrl && (key.name === "n" || key.name === "t")) {
         if (this.submitting) this.model.message = "提交进行中，本次快捷键已丢弃，请稍后重试";
         else await this.sessions.run(key.name === "n" ? "/new" : "/threads");

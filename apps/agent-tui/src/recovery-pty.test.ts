@@ -46,7 +46,11 @@ test("P0-2 PTY: SIGKILL daemon, resume same thread, next answer succeeds; closed
     expect(frame().match(/ANSWER<first>/g)).toHaveLength(1); expect(frame().match(/ANSWER<second>/g)).toHaveLength(1);
     observer = await connect(); await observer.request("thread/close", { threadId: thread.id });
     await wait(() => frame().includes("closed（可恢复"), "closed thread recovery hint");
-    write(`/resume ${thread.id}\r`); await wait(() => frame().includes("已切换会话"), "closed engine resumed");
+    write(`/resume ${thread.id}\r`); await wait(() => frame().includes("[y/N]"), "closed engine confirmation");
+    write("\r"); await wait(() => frame().includes("已取消恢复"), "closed confirmation defaults to no");
+    expect((await observer.request("thread/read", { threadId: thread.id })).thread.status.type).toBe("closed");
+    write(`/resume ${thread.id}\r`); await wait(() => frame().includes("[y/N]"), "confirm closed again");
+    write("y"); await wait(() => frame().includes("已切换会话"), "closed engine resumed");
     write("fourth\r"); await wait(() => frame().includes("ANSWER<fourth>"), "closed thread can answer again");
     tui.terminal!.write("\x03\x03"); expect(await tui.exited).toBe(0);
   } finally {
