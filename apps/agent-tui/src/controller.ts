@@ -97,6 +97,9 @@ export class Controller {
     const handle = this.client.pendingRequests.get(card.request.params.requestId);
     if (!handle || this.client.state !== "connected") throw new Error("请求连接已失效，等待重连快照");
     if (handle.method === "item/tool/requestUserInput") {
+      // TerminalInput already normalizes pasted CR/CRLF for every input surface.
+      // Treat the entire paste as draft text, including digits that select options when typed.
+      if (key.paste) { card.draft += text ?? ""; return; }
       const question = handle.params.questions[card.question];
       if (key.name === "escape") { handle.respond({ answers: {} }); card.state = "sending"; return; }
       const choose = (number: number) => {

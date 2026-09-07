@@ -356,3 +356,25 @@ test("image validation and lost responses preserve drafts and retry the same att
   expect(engine.sent).toHaveLength(1); expect(engine.sent[0].input).toHaveLength(2);
   expect(a.model.input).toBe(""); expect(a.model.attachments).toEqual([]);
 });
+
+test("P2-2 PTY question card accepts normalized multiline paste without selecting or submitting", async () => {
+  await inputPty(async ({ engine, thread, write, screen, wait }) => {
+    write("work\r"); await wait(() => engine.sent.length === 1, "question turn started");
+    const turnId = engine.sent[0].turnId;
+    engine.emit({ type: "itemStarted", turnId, item: { id: "paste-question-tool", type: "toolCall", payload: { name: "ask", input: {} } } });
+    let answer: ServerRequestResult | undefined;
+    engine.emit({ type: "approval", request: { method: "item/tool/requestUserInput", params: {
+      requestId: "paste-question", threadId: thread.id, turnId, itemId: "paste-question-tool", isBlocking: true,
+      questions: [{ id: "q", question: "Paste a multiline answer", options: [{ label: "Option one" }] }],
+    } }, respond(result) { answer = result; } });
+    await wait(() => screen().includes("Paste a multiline answer"), "question card rendered");
+    write("\x1b[200~1\x1b[201~");
+    await wait(() => screen().includes("自由回答: 1"), "pasted digit stays free text");
+    write("\x1b[200~\ralpha\r\nbeta\n\ttail\x1b[201~");
+    await wait(() => screen().includes("alpha") && screen().includes("beta") && screen().includes("tail"), "all pasted answer lines rendered");
+    expect(answer).toBeUndefined();
+    write("\r"); await wait(() => answer !== undefined, "explicit Enter submits answer");
+    expect(answer).toEqual({ answers: { q: { answers: ["1\nalpha\nbeta\n\ttail"] } } });
+    expect(engine.sent).toHaveLength(1);
+  });
+}, inputPtyTimeout);
