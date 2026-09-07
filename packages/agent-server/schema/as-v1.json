@@ -266,6 +266,31 @@
                 "dontAsk"
               ]
             },
+            "forkedFrom": {
+              "type": "object",
+              "properties": {
+                "threadId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "itemId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "threadId",
+                "itemId"
+              ],
+              "additionalProperties": false
+            },
             "createdAtMs": {
               "type": "integer",
               "minimum": 0,
@@ -6811,6 +6836,31 @@
             "dontAsk"
           ]
         },
+        "forkedFrom": {
+          "type": "object",
+          "properties": {
+            "threadId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "itemId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "threadId",
+            "itemId"
+          ],
+          "additionalProperties": false
+        },
         "createdAtMs": {
           "type": "integer",
           "minimum": 0,
@@ -7786,6 +7836,9 @@
             "pendingRequests": {
               "type": "boolean"
             },
+            "midThreadFork": {
+              "type": "boolean"
+            },
             "backends": {
               "type": "array",
               "items": {
@@ -8213,6 +8266,31 @@
                 "bypassPermissions",
                 "dontAsk"
               ]
+            },
+            "forkedFrom": {
+              "type": "object",
+              "properties": {
+                "threadId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "itemId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "threadId",
+                "itemId"
+              ],
+              "additionalProperties": false
             },
             "createdAtMs": {
               "type": "integer",
@@ -8708,6 +8786,31 @@
                 "bypassPermissions",
                 "dontAsk"
               ]
+            },
+            "forkedFrom": {
+              "type": "object",
+              "properties": {
+                "threadId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "itemId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "threadId",
+                "itemId"
+              ],
+              "additionalProperties": false
             },
             "createdAtMs": {
               "type": "integer",
@@ -9745,6 +9848,31 @@
                 "dontAsk"
               ]
             },
+            "forkedFrom": {
+              "type": "object",
+              "properties": {
+                "threadId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "itemId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "threadId",
+                "itemId"
+              ],
+              "additionalProperties": false
+            },
             "createdAtMs": {
               "type": "integer",
               "minimum": 0,
@@ -10129,6 +10257,31 @@
                 "bypassPermissions",
                 "dontAsk"
               ]
+            },
+            "forkedFrom": {
+              "type": "object",
+              "properties": {
+                "threadId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "itemId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "threadId",
+                "itemId"
+              ],
+              "additionalProperties": false
             },
             "createdAtMs": {
               "type": "integer",
@@ -13855,6 +14008,31 @@
                   "dontAsk"
                 ]
               },
+              "forkedFrom": {
+                "type": "object",
+                "properties": {
+                  "threadId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "itemId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "threadId",
+                  "itemId"
+                ],
+                "additionalProperties": false
+              },
               "createdAtMs": {
                 "type": "integer",
                 "minimum": 0,
@@ -14239,6 +14417,31 @@
                 "dontAsk"
               ]
             },
+            "forkedFrom": {
+              "type": "object",
+              "properties": {
+                "threadId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "itemId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "threadId",
+                "itemId"
+              ],
+              "additionalProperties": false
+            },
             "createdAtMs": {
               "type": "integer",
               "minimum": 0,
@@ -14618,6 +14821,31 @@
                 "bypassPermissions",
                 "dontAsk"
               ]
+            },
+            "forkedFrom": {
+              "type": "object",
+              "properties": {
+                "threadId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "itemId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "threadId",
+                "itemId"
+              ],
+              "additionalProperties": false
             },
             "createdAtMs": {
               "type": "integer",
@@ -16744,6 +16972,31 @@
                 "bypassPermissions",
                 "dontAsk"
               ]
+            },
+            "forkedFrom": {
+              "type": "object",
+              "properties": {
+                "threadId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "itemId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "threadId",
+                "itemId"
+              ],
+              "additionalProperties": false
             },
             "createdAtMs": {
               "type": "integer",

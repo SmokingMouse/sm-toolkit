@@ -2,6 +2,15 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { ErrorCode, MethodSchemas, NotificationSchemas, ServerRequestSchemas } from "./index.js";
 
+test("midfork: normative table, Thread type and optional capability stay aligned", () => {
+  const doc = readFileSync(new URL("../../../../docs/agent-server/protocol.md", import.meta.url), "utf8");
+  expect(doc).toContain("| `capabilities.midThreadFork` |");
+  expect(doc).toContain("forkedFrom?: ForkedFrom");
+  for (const name of Object.keys(MethodSchemas["thread/fork"].params.shape)) expect(doc.split("type ForkThreadParams = {")[1].split("};")[0]).toMatch(new RegExp(`\\b${name}\\??:`));
+  expect(doc.split("\n").find(line => line.startsWith("| `thread/fork`"))).toContain("-32602");
+  expect(MethodSchemas.initialize.result.shape.capabilities.shape.midThreadFork.isOptional()).toBe(true);
+});
+
 test("P2-2: foundation RPCs, notifications, capabilities and input variants appear in normative tables", () => {
   const doc = readFileSync(new URL("../../../../docs/agent-server/protocol.md", import.meta.url), "utf8");
   const methods = doc.split("\n## 3.")[1].split("\n## 4.")[0];

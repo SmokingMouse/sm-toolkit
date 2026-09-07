@@ -231,7 +231,7 @@ export class AgentServer {
         for (const capability of p.capabilities?.serverRequests ?? []) connection.serverRequests.add(capability);
         for (const notification of p.capabilities?.notifications?.optOut ?? []) connection.optOut.add(notification);
         const claude = this.backends.includes("claude");
-        return { protocolVersion: "as/1", server: { name: "agent-server", version: "0.1.0" }, clientId: connection.clientId, capabilities: { pendingRequests: true, backends: this.backends, steer: true, fork: claude, leases: true, externalProviders: false, maxQueuedTurns: this.threads.maxQueuedTurns, engine: { engineEvents: true, engineControl: claude, permissionSet: claude, effortSet: claude, subAgentText: claude, bashInput: claude, compact: claude } } };
+        return { protocolVersion: "as/1", server: { name: "agent-server", version: "0.1.0" }, clientId: connection.clientId, capabilities: { pendingRequests: true, midThreadFork: claude || this.backends.includes("codex"), backends: this.backends, steer: true, fork: claude || this.backends.includes("codex"), leases: true, externalProviders: false, maxQueuedTurns: this.threads.maxQueuedTurns, engine: { engineEvents: true, engineControl: claude, permissionSet: claude, effortSet: claude, subAgentText: claude, bashInput: claude, compact: claude } } };
       }
       case "thread/start": {
         const p = params(method);

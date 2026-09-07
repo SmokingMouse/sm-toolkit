@@ -46,7 +46,7 @@
   "capabilities":{
     "backends":["claude","codex","external"],
     "steer":true, "fork":true, "leases":true, "externalProviders":true,
-    "maxQueuedTurns":8, "pendingRequests":true
+    "maxQueuedTurns":8, "pendingRequests":true, "midThreadFork":true
   }
 }}
 ```
@@ -59,6 +59,7 @@
 | `capabilities.engineEvents` | initialize 请求 | 可选 boolean；true 才订阅 thread/engineEvent，新库默认 true |
 | `capabilities.bashInput` | initialize 请求 | 可选 boolean；true 接收 bash 输入变体，否则 item 通知/历史投影为文本，新库默认 true |
 | `capabilities.pendingRequests` | initialize 请求 / 结果 | 可选 boolean；客户端 true 才订阅 thread/pendingRequests，新库默认 true；服务端 true 表示支持只读状态增量与快照 state |
+| `capabilities.midThreadFork` | initialize 结果 | 可选 boolean；true 表示 Claude / Codex 支持任意 `fromItemId`（含尾）分叉；缺省表示服务端未声明支持。旧客户端无需声明新能力 |
 | `capabilities.engine.engineEvents` | initialize 结果 | 可选 boolean；原生事件通道支持 |
 | `capabilities.engine.engineControl` | initialize 结果 | 可选 boolean；Claude 控制直通 |
 | `capabilities.engine.permissionSet` | initialize 结果 | 可选 boolean；Claude 权限热切 |
@@ -103,7 +104,7 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 | `thread/items/list` | `{threadId, cursor?, limit?, turnId?, direction?}` | `{items, nextCursor}` | 翻历史（快照之外的旧日志） |
 | `thread/list` | `{status?, backend?, cwd?, limit?, cursor?}` | `{threads, nextCursor}` | 列 thread |
 | `thread/read` | `{threadId}` | `{thread: Thread}` | 只读元信息 |
-| `thread/fork` | `{threadId, fromItemId?, clientThreadId?}` | `{thread: Thread}` | 从某条 item 之后分叉出新 thread（codex 原生 `thread/fork`；claude 走 `--fork-session` / 前缀 jsonl） |
+| `thread/fork` | `{threadId, fromItemId?, clientThreadId?}` | `{thread: Thread, deduplicated?: true}` | 新 thread 复制源日志至指定 item（含）；缺省取调用时末尾；返回 `forkedFrom`。精确原生坐标用原生 fork，其余播种历史；非法 itemId 报 `-32602` |
 | `thread/close` | `{threadId, reason?}` | `{}` | 回收引擎进程，**保留日志** |
 | `thread/interrupt` | `{threadId}` | `{interruptedTurnId \| null}` | `turn/interrupt` 的 thread 级糖 |
 | `thread/lease/acquire` | `{threadId, ttlMs?}` | `{lease: Lease}` | 可选：独占输入权 |
@@ -119,6 +120,43 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 恢复已知 thread 可以省略 cwd，沿用已保存的工作目录。
 引擎启动环境只来自 daemon 的进程环境与服务端模型路由配置；客户端不能覆盖 PATH、凭证或加载器变量。
 client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
+
+`thread/fork` 的前缀按 item.seq 排序，包含 `fromItemId`；缺省为调用时最后一项。
+源日志、队列、审批和引擎不变。新 thread 在 `thread/started` 前原子写入前缀，
+继承 item ID、payload、时间戳、status、seq、completedSeq；turnId 重映射为新 ID，
+继承 turn 作为已结束的历史容器，不入队、不携带 clientTurnId、usage 或审批。
+运行中 item 的 payload 是调用时冻结快照，不接收源后续 delta；其 inProgress 状态仅属历史记录。
+新 thread 的 nextSeq = 前缀所有 seq/completedSeq 最大值 + 1（空前缀为 1），允许空洞，
+之后只在新 thread 内递增。`thread/attach` / `thread/items/list` 可读完整继承历史，
+不重新广播历史 item 事件。原 thread 后续增加的 item 不进入分支。
+
+```ts
+type ForkThreadParams = { threadId: string; fromItemId?: string; clientThreadId?: string };
+type ForkedFrom = { threadId: string; itemId: string | null }; // 空源日志为 null
+type Thread = {
+  id: string; backend: "claude" | "codex" | "external"; engineThreadId: string | null;
+  status: { type: "spawning" | "idle" | "running" | "interrupted" | "systemError" | "closed"; error?: RpcError };
+  cwd: string; model?: string; title?: string; meta?: JsonObject; permission?: Permission;
+  createdAtMs: number; closedAtMs?: number; clientThreadId?: string;
+  forkedFrom?: ForkedFrom; // 新增可选字段，普通 thread 不变
+};
+// AgentClient.fork(params: ForkThreadParams): Promise<{ thread: Thread; deduplicated?: true }>
+```
+
+恢复路径（本机 bundle / schema 核验；真实引擎续聊复验另单）：
+
+| 引擎 | 原生路径 | 任意 item 的播种路径 |
+|---|---|---|
+| Claude | 成功 turn 的末项记录末个非 tool-use assistant UUID；`--resume <session> --fork-session --resume-session-at <uuid>` 含尾截断。未指定 item 的 idle tip 也可原生 fork | 新进程依序接收 stream-json 用户消息（`shouldQuery:false, client_composed:true`）与助手消息；每条用户等待无推理 result 后再继续。未续聊关闭的分支恢复时重播种 |
+| Codex | `thread/fork {threadId,lastTurnId}` 截至已完成 turn（含）；无坐标的 idle tip 可省略 lastTurnId | `thread/start` 的 developerInstructions 携带角色标注的 JSON 历史数据；没有消息 history 导入参数。不会生成额外 AS 用户 item 或提前发起 turn |
+
+播种只恢复 AS 可见内容：文字保留，工具调用/结果、reasoning 等序列化为历史文本，
+不执行工具；图片/文件只保留路径与元数据，不重新读取原始字节。隐藏思考、原生压缩状态、
+缓存、子进程/工具运行态和文件系统快照不恢复。Codex 的角色是文本标签，不能等价替代原生消息角色；
+历史文本通过 developerInstructions 承载，明示为数据而非新指令，其优先级与压缩行为仍有差异。
+播种本身不请求模型；后续请求会把前缀重新计入输入上下文，成本约随历史长度增长，
+原生 prompt cache 命中不保证；过长历史可能触及模型窗口或引擎输入限制，不自动删减。
+因此 `midThreadFork` 声明的是 AS 日志含尾快照与可续聊能力，不保证原生隐藏状态无损。
 
 ### 3.2 turn 族
 
@@ -582,10 +620,6 @@ item 的 `type` 取值取 codex `ThreadItem` 的子集，字段名一致（`aggr
 
 ## 12. 未定项（v1 冻结前要拍板）
 
-- `thread/fork` 对 claude 的实现选型：原生 `--fork-session`（要求 resume 在场）
-  vs Trellis 已在用的前缀 jsonl 截断。前者简单但语义是「从 tip 分叉」，后者
-  支持「从任意 item 分叉」。倾向：协议保留 `fromItemId`，claude 后端在
-  `fromItemId` 缺省时走原生 fork，给定时走前缀 jsonl。
 - `agentMessage` 的**分层偏移**（Trellis 的 `finalStart`）要不要进协议。倾向
   不进：那是渲染策略，客户端可以按 item 边界自己算（有了 item 模型，
   「最终答复 = 最后一个 agentMessage item」天然成立，`finalStart` 这个补丁可以整个消失）。

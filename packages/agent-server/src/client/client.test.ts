@@ -16,7 +16,8 @@ for (const transport of ["unix", "ws"] as const) describe(`client over ${transpo
   async function setup() {
     const directory = mkdtempSync(join(tmpdir(), "as-client-"));
     const engine = new MockEngine();
-    const server = new AgentServer({ databasePath: ":memory:", token: "test", engineFactory: () => engine, allowedRoots: [directory], idleTimeoutMs: 0 });
+    let spawned = false;
+    const server = new AgentServer({ databasePath: ":memory:", token: "test", engineFactory: () => { if (spawned) return new MockEngine(); spawned = true; return engine; }, allowedRoots: [directory], idleTimeoutMs: 0 });
     const manager = new ConnectionManager(server);
     const peers: WirePeer[] = [], accept = manager.accept.bind(manager);
     manager.accept = peer => { peers.push(peer); return accept(peer); };
@@ -38,6 +39,18 @@ for (const transport of ["unix", "ws"] as const) describe(`client over ${transpo
     expect((await client.request("server/health", {})).engines).toEqual([]);
     expect(manager.size).toBe(1); client.close();
     await until(() => manager.size === 0); expect(client.state).toBe("closed");
+  });
+  test("midfork: typed client exposes capability, lineage and inherited history", async () => {
+    const { client, directory, server } = await setup();
+    expect(client.initializeResult?.capabilities.midThreadFork).toBe(true);
+    const { thread } = await client.request("thread/start", { backend: "claude", cwd: directory });
+    await client.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "prefix" }] });
+    const [item] = server.log.snapshot(thread.id).items;
+    const fork = await client.fork({ threadId: thread.id, fromItemId: item.id, clientThreadId: "fork-key" });
+    expect(fork.thread.forkedFrom).toEqual({ threadId: thread.id, itemId: item.id });
+    expect((await client.request("thread/attach", { threadId: fork.thread.id })).items[0]).toMatchObject({ id: item.id, payload: item.payload, seq: item.seq });
+    expect((await client.fork({ threadId: thread.id, fromItemId: item.id, clientThreadId: "fork-key" })).deduplicated).toBe(true);
+    await expect(client.fork({ threadId: thread.id, fromItemId: "absent" })).rejects.toMatchObject({ code: -32602 });
   });
   test("foundation client: typed native notifications and convenience methods round trip", async () => {
     const { client, engine, directory } = await setup();
