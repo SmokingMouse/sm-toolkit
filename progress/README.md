@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server 已集成 foundation 及 TUI 会话、输入、模式、观测面板，统一租约已按主控裁决接线，正在全量验证与真实引擎复验。
+agent-server 已集成 foundation 及 TUI 会话、输入、模式、观测面板，全量测试与真实引擎复验通过，交主控独立验收；迁移与发布待决定。
 
 ## Goals
 

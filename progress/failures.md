@@ -6,6 +6,13 @@
 
 ## 已结案
 
+### observe 集成：旧 PTY 契约与统一租约测试接口不匹配（resolved）
+
+- 症状：首轮全量 112 pass / 4 fail；观测 PTY 等待完整 thread id 超时，提示文案不匹配；随后发现部分帧到达就断言导致 unknown_future 缺失。定向单测还暴露 session 假 client 缺少租约回调、原审批竞态在持锁后无法发生。
+- 可证伪假设：第一步短 id / 命令补全 / 多行布局与 observe 原测试前提不同；主控裁决后的统一租约禁止获锁后让另一端抢答，需要在 acquire 前制造竞态。
+- 判定命令：`cd apps/agent-tui && bun test`；原始失败见 fj-as-integrate2b-ff47/out/tui-tests-first.log、integration-fixed.log。
+- 修复：PTY 等待短 id、首帧及必要的完整帧末尾；无参命令加空格遵循补全规则；补齐假 client 的租约回调和审批确认；竞态移到 acquire 前且保留不误切模式断言。产品漏合的审批确认 footer 恢复，普通输入与 Ctrl-C 不等待在途审批。完整普通与 clean-env 均 116 pass / 0 fail，未减少用例或降低断言、性能阈值。
+
 ### D3：Herdr 标题被误判为 TUI 输入就绪（resolved）
 
 - 症状：`apps/agent-tui/src/daemon-pty.test.ts` 偶发 `prompt reached engine` 超时；修前完整测试第 3 次复跑 exit 1（86 pass / 1 fail）。日志先出现 OSC thread id 和终端回显，后出现首帧，输入最终多出换行而未发送。
