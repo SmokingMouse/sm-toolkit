@@ -14,7 +14,7 @@ export class Controller {
         if (this.now() - this.interruptedAt < 1500) { this.exit(); return; }
         this.interruptedAt = this.now(); this.model.message = "已请求中断；1.5 秒内再按 Ctrl-C 退出";
         this.model.changed();
-        if (this.model.thread && this.client.state === "connected") await this.withLease(this.model.thread.id, () => this.client.request("turn/interrupt", { threadId: this.model.thread!.id }));
+        if (this.model.thread && this.client.state === "connected") await this.client.request("turn/interrupt", { threadId: this.model.thread.id });
         return;
       }
       this.interruptedAt = -Infinity;

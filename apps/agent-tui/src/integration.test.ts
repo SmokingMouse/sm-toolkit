@@ -236,6 +236,15 @@ test("a lost turn response preserves input and reuses the idempotency key on man
   expect(a.model.input).toBe(""); expect(engine.sent).toHaveLength(1); expect(a.model.queue).toHaveLength(0);
 });
 
+test("P0-1: Ctrl-C interrupts under another client's lease before the second press exits", async () => {
+  const { a, b, engine } = await setup();
+  a.model.input = "running"; await a.controller.submit();
+  b.model.input = "/takeover"; await b.controller.submit();
+  await a.controller.key("\x03", { ctrl: true, name: "c" });
+  expect(engine.interrupted).toEqual([engine.sent[0].turnId]); expect(a.exited).toBe(false);
+  await a.controller.key("\x03", { ctrl: true, name: "c" }); expect(a.exited).toBe(true);
+});
+
 test("observation commands stay local offline; contested sends and approvals retain input and name lease holder", async () => {
   const { a, b, engine, thread } = await setup();
   a.model.connection = "disconnected";
