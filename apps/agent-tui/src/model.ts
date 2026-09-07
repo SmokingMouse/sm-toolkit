@@ -1,6 +1,6 @@
 import { AgentClient, type ClientState } from "@smokingmouse/agent-server/client";
 import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
-import { classifyEvent, rebuildTasks, type LogEntry } from "./observations.js";
+import { classifyEvent, object, rebuildTasks, type LogEntry } from "./observations.js";
 
 export interface RequestCard { request: PendingServerRequest; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
 export class TuiModel {
@@ -72,7 +72,15 @@ export class TuiModel {
       }
       case "item/commandExecution/outputDelta": { const i = this.items.get(n.params.itemId); if (i?.type === "commandExecution") i.payload.aggregatedOutput = (i.payload.aggregatedOutput ?? "") + n.params.chunk; break; }
       case "item/fileChange/patchUpdated": { const i = this.items.get(n.params.itemId); if (i?.type === "fileChange") i.payload.changes = n.params.changes; break; }
-      case "item/subAgent/progress": { const i = this.items.get(n.params.itemId); if (i?.type === "subAgent") Object.assign(i.payload, { phase: n.params.phase, progress: n.params.progress }); break; }
+      case "item/subAgent/progress": {
+        const i = this.items.get(n.params.itemId);
+        if (i?.type === "subAgent") {
+          Object.assign(i.payload, { phase: n.params.phase, progress: n.params.progress });
+          const progress = object(n.params.progress);
+          for (const key of ["text", "thinking"] as const) if (typeof progress[key] === "string") i.payload[key] = progress[key];
+        }
+        break;
+      }
       case "serverRequest/resolved": { const c = this.cards.get(n.params.requestId); if (c) { c.state = "resolved"; c.note = `已由 ${n.params.decidedBy.label || n.params.decidedBy.clientId} 处理`; } break; }
       case "serverRequest/expired": { const c = this.cards.get(n.params.requestId); if (c) { c.state = "expired"; c.note = `已过期：${n.params.reason}`; } break; }
       case "error": this.message = n.params.error.message; break;

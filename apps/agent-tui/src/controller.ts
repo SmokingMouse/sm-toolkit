@@ -5,6 +5,7 @@ export interface Key { name?: string; ctrl?: boolean; meta?: boolean; sequence?:
 export class Controller {
   private interruptedAt = -Infinity;
   private submitting = false;
+  private manualLeaseClientId?: string;
   private submission?: { text: string; threadId: string; turnId?: string; id: string };
   constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) {}
   async key(text: string | undefined, key: Key = {}): Promise<void> {
@@ -13,10 +14,19 @@ export class Controller {
         if (this.now() - this.interruptedAt < 1500) { this.exit(); return; }
         this.interruptedAt = this.now(); this.model.message = "已请求中断；1.5 秒内再按 Ctrl-C 退出";
         this.model.changed();
-        if (this.model.thread && this.client.state === "connected") await this.client.request("turn/interrupt", { threadId: this.model.thread.id });
+        if (this.model.thread && this.client.state === "connected") await this.withLease(this.model.thread.id, () => this.client.request("turn/interrupt", { threadId: this.model.thread!.id }));
         return;
       }
       this.interruptedAt = -Infinity;
+      if (key.ctrl && key.name === "l") { this.toggleLog(); return; }
+      if (key.name === "f6") {
+        const focus = ["history", ...(this.model.logExpanded ? ["log"] : []), ...(this.model.tasksVisible ? ["tasks"] : [])] as const;
+        this.model.panelFocus = focus[(focus.indexOf(this.model.panelFocus) + 1) % focus.length] as typeof this.model.panelFocus; return;
+      }
+      if (!this.model.activeCard && (key.name === "pageup" || key.name === "pagedown") && this.model.panelFocus !== "history") {
+        const field = this.model.panelFocus === "log" ? "logScroll" : "taskScroll";
+        this.model[field] = Math.max(0, this.model[field] + (key.name === "pageup" ? 5 : -5)); return;
+      }
       if (key.name === "pageup" || key.name === "pagedown") { this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? (this.model.activeCard ? -10 : 10) : (this.model.activeCard ? 10 : -10))); return; }
       if (key.name === "tab") { this.model.expandedReasoning = !this.model.expandedReasoning; return; }
       if (this.model.activeCard) { await this.cardKey(this.model.activeCard, text, key); return; }
@@ -24,16 +34,30 @@ export class Controller {
       if (key.name === "backspace") this.model.input = Array.from(this.model.input).slice(0, -1).join("");
       else if (key.ctrl && key.name === "u") this.model.input = "";
       else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) this.model.input += text;
-    } catch (error) { this.model.message = error instanceof Error ? error.message : String(error); }
+    } catch (error) { this.model.message = this.errorMessage(error); }
     finally { this.model.changed(); }
   }
   async submit(): Promise<void> {
     const text = this.model.input.trim(), thread = this.model.thread;
+    if (text === "/log") { this.toggleLog(); this.model.input = ""; this.model.changed(); return; }
+    if (text === "/tasks") { this.model.tasksVisible = !this.model.tasksVisible; this.model.panelFocus = this.model.tasksVisible ? "tasks" : "history"; this.model.input = ""; this.model.changed(); return; }
+    if (text === "/agents" || text.startsWith("/agents ")) {
+      const id = text.slice(7).trim(), agents = [...this.model.items.values()].filter(i => i.type === "subAgent" && (!id || i.id === id || i.payload.parentItemId === id));
+      const collapse = agents.some(i => !this.model.collapsedAgents.has(i.id));
+      for (const i of agents) { if (collapse) this.model.collapsedAgents.add(i.id); else this.model.collapsedAgents.delete(i.id); }
+      this.model.input = ""; this.model.changed(); return;
+    }
     if (!text || !thread || this.submitting) return;
     if (this.client.state !== "connected") throw new Error("连接尚未恢复，输入已保留");
     if (thread.backend === "external") throw new Error("External thread 为只读");
     this.submitting = true;
     try {
+      if (text === "/takeover") {
+        await this.client.request("thread/lease/acquire", { threadId: thread.id });
+        this.manualLeaseClientId = this.client.clientId;
+        this.model.message = "已取得控制权；/release 释放"; this.model.input = ""; return;
+      }
+      if (text === "/release") { await this.client.request("thread/lease/release", { threadId: thread.id }); this.manualLeaseClientId = undefined; this.model.message = "已释放控制权"; this.model.input = ""; return; }
       const steer = text.startsWith("/steer ");
       const input = [{ type: "text" as const, text: steer ? text.slice(7).trim() : text }];
       if (!input[0].text) return;
@@ -44,10 +68,10 @@ export class Controller {
       const clientTurnId = this.submission.id;
       if (steer) {
         if (!this.model.activeTurnId) throw new Error("当前 turn id 未知；请用普通输入排队");
-        await this.client.request("turn/steer", { threadId: thread.id, expectedTurnId: this.model.activeTurnId, input, clientTurnId });
+        await this.withLease(thread.id, () => this.client.request("turn/steer", { threadId: thread.id, expectedTurnId: turnId!, input, clientTurnId }));
         this.model.message = "已插话";
       } else {
-        const { turn } = await this.client.request("turn/start", { threadId: thread.id, input, clientTurnId });
+        const { turn } = await this.withLease(thread.id, () => this.client.request("turn/start", { threadId: thread.id, input, clientTurnId }));
         const queued = this.model.queue.find(q => q.turnId === turn.id);
         this.model.message = queued ? `已排队 #${queued.position + 1}` : turn.status === "queued" ? "已入队，等待队列位置" : "已发送";
       }
@@ -55,7 +79,23 @@ export class Controller {
       if (this.model.input.trim() === text) this.model.input = "";
       this.submission = undefined;
       this.model.scroll = 0;
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && (error.code === -32012 || error.code === -32014)) throw new Error(this.errorMessage(error));
+      throw error;
     } finally { this.submitting = false; this.model.changed(); }
+  }
+  private toggleLog(): void { this.model.logExpanded = !this.model.logExpanded; this.model.panelFocus = this.model.logExpanded ? "log" : "history"; }
+  private errorMessage(error: unknown): string {
+    if (error && typeof error === "object" && "code" in error && (error.code === -32012 || error.code === -32014)) {
+      const holder = (error as { data?: { holder?: { label?: string; clientId?: string } } }).data?.holder;
+      return `另一客户端持有控制权${holder ? `：${holder.label || holder.clientId}` : ""}；请其释放或等待租约到期，再 /takeover 重试`;
+    }
+    return error instanceof Error ? error.message : String(error);
+  }
+  private async withLease<T>(threadId: string, action: () => Promise<T> | T): Promise<T> {
+    await this.client.request("thread/lease/acquire", { threadId });
+    try { return await action(); }
+    finally { if (this.manualLeaseClientId !== this.client.clientId && this.client.state === "connected") await this.client.request("thread/lease/release", { threadId }).catch(() => {}); }
   }
   private async cardKey(card: RequestCard, text: string | undefined, key: Key): Promise<void> {
     if (card.state !== "pending") return;
@@ -63,7 +103,7 @@ export class Controller {
     if (!handle || this.client.state !== "connected") throw new Error("请求连接已失效，等待重连快照");
     if (handle.method === "item/tool/requestUserInput") {
       const question = handle.params.questions[card.question];
-      if (key.name === "escape") { handle.respond({ answers: {} }); card.state = "sending"; return; }
+      if (key.name === "escape") { await this.withLease(handle.params.threadId, () => { handle.respond({ answers: {} }); card.state = "sending"; }); return; }
       const choose = (number: number) => {
         const option = question?.options?.[number - 1]; if (!option || !question) return;
         const selected = card.answers[question.id]?.answers ?? [];
@@ -78,7 +118,7 @@ export class Controller {
         }
         card.draft = "";
         if (card.question + 1 < handle.params.questions.length) { card.question++; this.model.scroll = 0; return; }
-        handle.respond({ answers: card.answers }); card.state = "sending"; return;
+        await this.withLease(handle.params.threadId, () => { handle.respond({ answers: card.answers }); card.state = "sending"; }); return;
       }
       if (key.name === "backspace") card.draft = Array.from(card.draft).slice(0, -1).join("");
       else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) card.draft += text;
@@ -87,11 +127,13 @@ export class Controller {
     const choices = { y: "accept", s: "acceptForSession", n: "reject", a: "abort" } as const;
     const decision = key.name === "escape" ? "reject" : choices[text?.toLowerCase() as keyof typeof choices];
     if (!decision) return;
-    if (handle.method === "item/permissions/requestApproval") {
-      handle.respond({ permissions: decision === "accept" || decision === "acceptForSession" ? handle.params.permissions : {}, scope: decision === "acceptForSession" ? "session" : "turn" });
-      // Permissions replies have no abort variant in AS v1; deny, then interrupt the turn.
-      if (decision === "abort") await this.client.request("turn/interrupt", { threadId: handle.params.threadId, turnId: handle.params.turnId });
-    } else handle.respond({ decision });
-    if (card.state === "pending") card.state = "sending";
+    await this.withLease(handle.params.threadId, async () => {
+      if (handle.method === "item/permissions/requestApproval") {
+        handle.respond({ permissions: decision === "accept" || decision === "acceptForSession" ? handle.params.permissions : {}, scope: decision === "acceptForSession" ? "session" : "turn" });
+        // Permissions replies have no abort variant in AS v1; deny, then interrupt the turn.
+        if (decision === "abort") await this.client.request("turn/interrupt", { threadId: handle.params.threadId, turnId: handle.params.turnId });
+      } else handle.respond({ decision });
+      if (card.state === "pending") card.state = "sending";
+    });
   }
 }

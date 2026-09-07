@@ -28,3 +28,19 @@ cd apps/agent-tui && bun test
 ```
 
 测试只用临时 Unix/WS 服务与 MockEngine，不启动真实 Claude/Codex。
+
+## 观测面板
+
+系统日志订阅 `thread/engineEvent`，默认只占一行计数。`Ctrl-L` 或 `/log` 展开/折叠，按本地收到时间（UTC）显示 hook 摘要、`local_command` 斜杠命令回显、`api_retry`、`rate_limit`、`model_refusal_fallback`、memory、away_summary。未知 subtype 保留单行 JSON，终端宽度不足时软换行；错误/重试/限流用红色和 `[!]` 标记。引擎文字在绘制前过滤终端控制符。
+
+子 agent 按 `parentItemId`（引擎的 `parent_tool_use_id`）嵌套到父工具下面，显示状态、phase 和持续更新的正文；父工具尚未出现时保留带 parent 标识的独立项。`/agents` 折叠/展开全部，`/agents <item-id 或 parent-id>` 切换指定项；Tab 同时控制子 agent thinking 的显示。
+
+`/tasks` 切换底栏。根据 `TaskCreate`、`TaskUpdate`、`TaskList` 工具输入及结构化输出按 item 顺序重建 id、标题、状态；调用开始即乐观刷新，失败/拒绝后撤销，删除状态移除任务，重复快照不重复创建。没有明确 id 的 TaskCreate 用观测序号推断并标 `?`，TaskList 无结构化任务数据时保留当前列表；该面板是已观测任务的重建，不保证覆盖引擎侧未出现在历史中的任务。
+
+展开面板自动获得滚动焦点，F6 在历史、日志、任务之间切换；PgUp/PgDn 滚动当前焦点，任务和日志各保留自己的位置。审批卡优先占用屏幕和按键。面板命令只在本地执行，断线也能切换，不发送给模型。
+
+AS/1 的 engineEvent 不在 item 日志中，断线后系统日志永久标「重连后可能缺失」，已有日志保留；重连快照恢复子 agent 和任务，不伪造离线日志。重新启动 TUI 仅有新收到的系统日志。
+
+观测不取 lease。发送、插话、中断和审批回复先获取短租约，操作后释放；被拒保留输入/待审批卡并显示「另一客户端持有控制权」及协议返回的持有方。`/takeover` 仅重试 `thread/lease/acquire`，成功后保持租约至 `/release`、到期或断线，不强制抢占；被拒时请持有方释放或到期后重试。手动租约不自动续期。
+
+新增验证：`observations.test.ts` 覆盖事件归类、任务重建、嵌套、重连标识、视口与控制符过滤；`integration.test.ts` 的 `observe PTY` 使用真实 bin + MockEngine 覆盖日志折叠/展开/滚动、子 agent 正文更新/嵌套/折叠、任务刷新和重连，租约测试覆盖双客户端拒绝与恢复。

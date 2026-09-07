@@ -28,7 +28,7 @@ async function setup(transport: "unix" | "ws" = "unix") {
   const clients: AgentClient[] = [];
   cleanup.push(async () => { clients.forEach(c => c.close()); listener.close(); await server.close(); rmSync(home, { recursive: true, force: true }); });
   async function connect(label: string) {
-    const client = new AgentClient(endpoint, { token: "test", client: { name: label, label, kind: "test", version: "1" }, reconnect: { minDelayMs: 150, maxDelayMs: 150 }, capabilities: { serverRequests: ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput"] } });
+    const client = new AgentClient(endpoint, { token: "test", client: { name: label, label, kind: "test", version: "1" }, reconnect: { minDelayMs: 150, maxDelayMs: 150 }, capabilities: { engineEvents: true, serverRequests: ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput"] } });
     clients.push(client); const model = new TuiModel(); bindClient(client, model);
     let exited = false;
     const controller = new Controller(client, model, () => { exited = true; });
@@ -235,3 +235,84 @@ test("a lost turn response preserves input and reuses the idempotency key on man
   await a.controller.key("\r", { name: "return" });
   expect(a.model.input).toBe(""); expect(engine.sent).toHaveLength(1); expect(a.model.queue).toHaveLength(0);
 });
+
+test("observation commands stay local offline; contested sends and approvals retain input and name lease holder", async () => {
+  const { a, b, engine, thread } = await setup();
+  a.model.connection = "disconnected";
+  for (const command of ["/log", "/tasks", "/agents"]) { a.model.input = command; await a.controller.submit(); expect(a.model.input).toBe(""); }
+  expect(a.model.logExpanded).toBe(true); expect(a.model.tasksVisible).toBe(true); expect(engine.sent).toHaveLength(0);
+  a.model.connection = "connected";
+  b.model.input = "/takeover"; await b.controller.submit();
+  a.model.input = "preserved"; await a.controller.key("\r", { name: "return" });
+  expect(a.model.input).toBe("preserved"); expect(a.model.message).toContain("另一客户端持有控制权：phone"); expect(engine.sent).toHaveLength(0);
+  b.model.input = "/release"; await b.controller.submit();
+  await a.controller.key("\r", { name: "return" }); expect(engine.sent).toHaveLength(1);
+  // Ordinary sends release their short lease, allowing another client to acquire it.
+  b.model.input = "/takeover"; await b.controller.submit();
+  let decided = false;
+  engine.emit({ type: "itemStarted", turnId: engine.sent[0].turnId, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: thread.cwd } } });
+  engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { requestId: "leased", threadId: thread.id, turnId: engine.sent[0].turnId, itemId: "cmd", command: "pwd", cwd: thread.cwd, startedAtMs: Date.now() } }, respond() { decided = true; } });
+  await until(() => !!a.model.activeCard);
+  await a.controller.key("y"); expect(decided).toBe(false); expect(a.model.activeCard?.state).toBe("pending"); expect(a.model.message).toContain("phone");
+  b.model.input = "/release"; await b.controller.submit(); await a.controller.key("y"); await until(() => decided);
+  a.model.input = "/takeover"; await a.controller.submit(); expect(a.model.message).toContain("已取得控制权");
+  a.model.input = "/release"; await a.controller.submit();
+});
+
+test("observe PTY: engine event folding/scrolling, nested agents, task refresh and reconnect gap", async () => {
+  const { home, engine, thread, manager } = await setup();
+  const state = join(home, "state"), tokenDir = join(state, "sm-toolkit", "agent-server");
+  mkdirSync(tokenDir, { recursive: true }); writeFileSync(join(tokenDir, "token"), "test\n");
+  let screen = ""; const decoder = new TextDecoder();
+  const current = () => screen.slice(screen.lastIndexOf("\x1b[H")).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\r/g, "");
+  const proc = Bun.spawn([resolve(import.meta.dir, "../bin/agent-tui"), "--attach", thread.id, "--socket", join(home, "sock")], {
+    env: { ...process.env, HOME: home, XDG_STATE_HOME: state, XDG_RUNTIME_DIR: "", HERDR_PANE_ID: "", TERM: "xterm-256color" },
+    terminal: { cols: 160, rows: 60, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } },
+  });
+  try {
+    await until(() => current().includes(thread.id));
+    proc.terminal!.write("observe\r"); await until(() => engine.sent.length === 1);
+    const turnId = engine.sent[0].turnId;
+    const subtypes = ["stop_hook_summary", "local_command", "api_retry", "rate_limit", "model_refusal_fallback", "memory", "away_summary", "unknown_future"];
+    for (const subtype of subtypes) engine.emit({ type: "engineEvent", backend: "claude", turnId, subtype, payload: { message: `echo-${subtype}`, extra: { retained: true } } });
+    await until(() => current().includes("系统日志 8 条")); expect(current()).not.toContain("echo-local_command");
+    proc.terminal!.write("\x0c"); await until(() => current().includes("echo-local_command"));
+    for (const subtype of subtypes) expect(current()).toContain(subtype);
+    expect(current()).toContain('"extra":{"retained":true}'); expect(screen).toContain("\x1b[31m");
+    proc.terminal!.write("/log\r"); await until(() => current().includes("折叠 · Ctrl-L")); expect(current()).not.toContain("echo-local_command");
+    engine.emit({ type: "itemStarted", turnId, item: { id: "parent", type: "toolCall", payload: { name: "Agent", input: { prompt: "inspect" } } } });
+    engine.emit({ type: "itemStarted", turnId, item: { id: "child", type: "subAgent", payload: { kind: "agent", parentItemId: "parent", phase: "working", text: "CHILD TEXT" } } });
+    engine.emit({ type: "itemStarted", turnId, item: { id: "nested", type: "subAgent", payload: { kind: "agent", parentItemId: "child", phase: "working", text: "NESTED TEXT" } } });
+    await until(() => current().includes("NESTED TEXT"));
+    expect(current()).toContain("      NESTED TEXT"); expect(current()).toContain("[inProgress] working · parent parent");
+    engine.emit({ type: "itemUpdated", turnId, item: { id: "child", type: "subAgent", payload: { kind: "agent", parentItemId: "parent", phase: "working", text: "CHILD STREAMED", progress: { text: "CHILD STREAMED" } } } });
+    await until(() => current().includes("CHILD STREAMED")); expect(current()).not.toContain("CHILD TEXT");
+    proc.terminal!.write("/agents child\r"); await until(() => current().includes("▸ SubAgent child")); expect(current()).not.toContain("NESTED TEXT");
+    proc.terminal!.write("/agents child\r"); await until(() => current().includes("NESTED TEXT"));
+    engine.emit({ type: "itemCompleted", turnId, item: { id: "child", type: "subAgent", payload: { kind: "agent", parentItemId: "parent", phase: "done", text: "CHILD FINAL" } } });
+    await until(() => current().includes("[completed] done") && current().includes("CHILD FINAL"));
+    proc.terminal!.write("/tasks\r"); await until(() => current().includes("Tasks 0"));
+    engine.emit({ type: "itemStarted", turnId, item: { id: "create", type: "toolCall", payload: { name: "TaskCreate", input: { id: "42", subject: "PTY TASK" } } } });
+    await until(() => current().includes("[pending] #42 PTY TASK"));
+    engine.emit({ type: "itemStarted", turnId, item: { id: "update", type: "toolCall", payload: { name: "TaskUpdate", input: { taskId: "42", status: "completed" } } } });
+    await until(() => current().includes("[completed] #42 PTY TASK"));
+    engine.emit({ type: "itemStarted", turnId, item: { id: "list", type: "toolCall", payload: { name: "TaskList", input: { tasks: [{ id: "99", subject: "LIST TASK", status: "in_progress" }] } } } });
+    await until(() => current().includes("[in_progress] #99 LIST TASK")); expect(current()).not.toContain("[completed] #42");
+    proc.terminal!.write("/tasks\r"); await until(() => !current().includes("Tasks 1"));
+    for (let i = 0; i < 40; i++) engine.emit({ type: "engineEvent", backend: "claude", turnId, subtype: "memory", payload: { message: `scroll-event-${i}` } });
+    await until(() => current().includes("系统日志 48 条"));
+    proc.terminal!.write("/log\r"); await until(() => current().includes("scroll-event-39"));
+    proc.terminal!.write("\x1b[5~"); await until(() => !current().includes("scroll-event-39") && current().includes("scroll-event-34"));
+    proc.terminal!.write("\x1b[6~"); await until(() => current().includes("scroll-event-39"));
+    manager.close();
+    engine.emit({ type: "engineEvent", backend: "claude", turnId, subtype: "local_command", payload: { message: "OFFLINE LOST" } });
+    await until(() => current().includes("重连后可能缺失") && current().includes("| connected |"));
+    expect(current()).not.toContain("OFFLINE LOST"); expect(engine.spawnCount).toBe(1);
+    proc.terminal!.write("/log\r"); await until(() => current().includes("折叠 · Ctrl-L"));
+    proc.terminal!.write("/tasks\r");
+    try { await until(() => current().includes("[in_progress] #99 LIST TASK")); }
+    catch (error) { throw new Error(`${String(error)}\n${current()}`); }
+    proc.terminal!.write("\x03"); await until(() => engine.interrupted.length === 1); proc.terminal!.write("\x03");
+    expect(await Promise.race([proc.exited, Bun.sleep(3000).then(() => -100)])).toBe(0);
+  } finally { if (proc.exitCode === null) proc.kill(); await proc.exited; proc.terminal?.close(); }
+}, 15000);
