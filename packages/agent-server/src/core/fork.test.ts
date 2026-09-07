@@ -142,6 +142,30 @@ test("midfork: every item kind is a valid boundary and live payload is frozen", 
   await expect(c.request("thread/fork", { threadId: other.thread.id, fromItemId: "a" })).rejects.toMatchObject({ code: -32602 });
 });
 
+for (const status of ["failed", "interrupted"] as const) test(`P2-1: seeded Claude ${status} first turn preserves replay guard until completed`, async () => {
+  const { server, engines } = fixture(), c = await client(server);
+  const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+  await c.request("turn/start", { threadId: thread.id, input: input("prefix") });
+  const { thread: fork } = await c.request("thread/fork", { threadId: thread.id });
+  const { turn } = await c.request("turn/start", { threadId: fork.id, input: input("unsuccessful") });
+  engines[1].emit({ type: "turnCompleted", turnId: turn.id, status });
+  await until(() => server.log.turn(turn.id, fork.id).status === status);
+  expect(server.log.options(fork.id)).toHaveProperty("seedHistory");
+  await c.request("thread/close", { threadId: fork.id });
+  await c.request("thread/resume", { threadId: fork.id });
+  expect(engines[2].options?.seedHistory?.length).toBe(1);
+  expect(engines[2].options?.engineThreadId).toBeUndefined();
+  const next = await c.request("turn/start", { threadId: fork.id, input: input("successful") });
+  engines[2].emit({ type: "turnCompleted", turnId: next.turn.id, status: "completed" });
+  await until(() => server.log.turn(next.turn.id, fork.id).status === "completed");
+  expect(server.log.options(fork.id)).not.toHaveProperty("seedHistory");
+  const native = server.threads.get(fork.id).engineThreadId;
+  await c.request("thread/close", { threadId: fork.id });
+  await c.request("thread/resume", { threadId: fork.id });
+  expect(engines[3].options?.seedHistory).toBeUndefined();
+  expect(engines[3].options?.engineThreadId).toBe(native);
+});
+
 test("midfork: seeded Claude close/resume before first turn recreates seed, after turn resumes native", async () => {
   const { server, engines } = fixture(), c = await client(server);
   const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });

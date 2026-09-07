@@ -202,8 +202,10 @@ export class ThreadManager {
       case "itemCompleted": this.log.updateItem(threadId, event.item, true); break;
       case "turnCompleted": {
         this.approvals?.expireThread(threadId, "turn_completed", turnId);
-        const { seedHistory: _, engineThreadId: __, forkSession: ___, forkPoint: ____, ...options } = this.log.options<SessionOptions>(threadId);
-        this.log.saveOptions(threadId, options);
+        if (event.status === "completed") {
+          const { seedHistory: _, engineThreadId: __, forkSession: ___, forkPoint: ____, ...options } = this.log.options<SessionOptions>(threadId);
+          this.log.saveOptions(threadId, options);
+        }
         this.queue(threadId).complete(turnId, event.status, event.usage, event.error);
         const last = this.log.snapshot(threadId).items.filter(item => item.turnId === turnId).at(-1);
         if (last && event.status === "completed" && event.forkPoint) this.log.saveForkPoint(threadId, last.id, event.forkPoint);
