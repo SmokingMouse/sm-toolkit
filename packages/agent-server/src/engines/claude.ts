@@ -7,6 +7,7 @@ import { ClaudeEventMapper, jsonValue, mapPermissionDecision, mapPermissionReque
 
 export function buildClaudeLaunch(options: SessionOptions): { args: string[]; env: NodeJS.ProcessEnv } {
   if (options.sandbox !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Claude sandbox override is not supported");
+  if (options.effort !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Claude effort override is not supported");
   const resolved = resolveClaudeModel(options.model);
   const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--settings", JSON.stringify({ permissions: { ask: ["*"] } })];
   if (resolved.model) args.push("--model", resolved.model);

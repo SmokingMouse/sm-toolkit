@@ -9,7 +9,7 @@ export const QuestionSchema = z.object({
   options: z.array(z.object({ label: z.string(), description: z.string().optional() })).optional(),
 });
 export const AnswerSchema = z.object({ answers: z.array(z.string()) });
-const base = { requestId: IdSchema, threadId: IdSchema, turnId: IdSchema, itemId: IdSchema };
+const base = { requestId: IdSchema, threadId: IdSchema, turnId: IdSchema, itemId: IdSchema, data: z.object({ raw: z.json() }).optional() };
 const approval = { ...base, reason: z.string().optional(), startedAtMs: TimestampSchema };
 const decision = z.object({ decision: ApprovalDecisionSchema });
 export const ServerRequestSchemas = {

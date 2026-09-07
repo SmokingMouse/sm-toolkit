@@ -140,6 +140,16 @@ export class ThreadManager {
   private handle(threadId: string, event: EngineEvent): void {
     if (event.type === "metadata") { this.metadata(threadId, event.engineThreadId); return; }
     if (event.type === "exit") { this.engineDied(threadId, event.error ?? new ProtocolError(ErrorCode.engine_unavailable, "engine exited", { retryable: true }).toJSON()); return; }
+    if (event.type === "error") { this.log.publish({ jsonrpc: "2.0", method: "error", params: { threadId, turnId: event.turnId, error: event.error, willRetry: event.willRetry } }); return; }
+    if (event.type === "usage") { this.log.publish({ jsonrpc: "2.0", method: "thread/tokenUsage/updated", params: { threadId, usage: event.usage } }); return; }
+    if (event.type === "status") {
+      if (event.status.type === "systemError") { this.engineDied(threadId, event.status.error ?? new ProtocolError(ErrorCode.engine_unavailable, "engine thread entered systemError", { retryable: true }).toJSON()); return; }
+      // The queue owns running/idle transitions. Native idle can trail completion
+      // after the next queued turn has already started, and must not release it.
+      if (this.get(threadId).status.type === "spawning" || this.queue(threadId).runningTurnId) return;
+      if (event.status.type === "idle" && this.get(threadId).status.type !== "idle") this.setStatus(threadId, event.status);
+      return;
+    }
     const turnId = event.type === "approval" ? event.request.params.turnId : event.turnId;
     if (this.queue(threadId).runningTurnId !== turnId) return; // stale output from an interrupted/closed generation
     switch (event.type) {
@@ -152,6 +162,8 @@ export class ThreadManager {
         if (!this.approvals) throw new ProtocolError(ErrorCode.internal, "ApprovalBroker is not configured");
         this.approvals.create(event.request, event.respond); break;
       case "approvalExpired": this.approvals?.expire(event.requestId, event.reason); break;
+      case "plan": this.log.publish({ jsonrpc: "2.0", method: "turn/plan/updated", params: { threadId, turnId, plan: event.plan } }); break;
+      case "diff": this.log.publish({ jsonrpc: "2.0", method: "turn/diff/updated", params: { threadId, turnId, diffStat: { diff: event.diff } } }); break;
     }
   }
   engineDied(threadId: string, error: RpcError): void {
