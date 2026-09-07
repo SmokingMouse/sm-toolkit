@@ -15,7 +15,7 @@ export async function until(predicate: () => boolean, description = "condition")
 export function capture(c: InProcessClient): Frame[] { const frames: Frame[] = []; c.onFrame(frame => frames.push(frame)); return frames; }
 export function setup(options: ServerOptions = {}) {
   const engines: MockEngine[] = [];
-  const server = new AgentServer({ databasePath: ":memory:", engineFactory: () => { const engine = new MockEngine(); engines.push(engine); return engine; }, idleTimeoutMs: 0, ...options });
+  const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => { const engine = new MockEngine(); engines.push(engine); return engine; }, idleTimeoutMs: 0, ...options });
   return { server, engines };
 }
 export function expectCode(fn: () => unknown, code: number): void { try { fn(); throw new Error("expected failure"); } catch (error) { expect((error as { code: number }).code).toBe(code); } }
