@@ -63,8 +63,9 @@ describe("Claude AgentEvent mapping (no real CLI)", () => {
     const m = new ClaudeEventMapper(); m.beginTurn("tn"); const call = event(EventType.ToolCall, { id: "tool", name: "Bash", input: { command: "pwd" } });
     expect(m.map(call)).toHaveLength(1); expect(m.map(call)).toHaveLength(0);
   });
-  test("unknown tool result fails explicitly with protocol error", () => {
-    const m = new ClaudeEventMapper(); m.beginTurn("tn"); expect(() => m.map(event(EventType.ToolCallDone, { id: "missing" }))).toThrow("tool result without tool call");
+  test("unknown tool result emits a scoped protocol error", () => {
+    const m = new ClaudeEventMapper(); m.beginTurn("tn");
+    expect(m.map(event(EventType.ToolCallDone, { id: "missing" }))).toMatchObject([{ type: "error", turnId: "tn", error: { code: -32015, message: "tool result without tool call" }, willRetry: false }]);
   });
   test("four permission request shapes and native decisions round trip", () => {
     const names = ["Bash", "Write", "Read", "AskUserQuestion"];
