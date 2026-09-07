@@ -7,6 +7,7 @@ bun install
 bun run typecheck
 agent-server start
 apps/agent-tui/bin/agent-tui --new --backend codex --cwd "$PWD"
+apps/agent-tui/bin/agent-tui --new --backend claude --permission full --cwd "$PWD"
 apps/agent-tui/bin/agent-tui --attach th_example
 apps/agent-tui/bin/agent-tui --attach th_example --socket /path/agent-server.sock
 apps/agent-tui/bin/agent-tui --attach th_example --ws ws://127.0.0.1:12345
@@ -20,18 +21,24 @@ Enter 发 `turn/start`；运行时同样入队，显示从 1 起的排队位置�
 
 | 操作 | 行为 |
 | --- | --- |
-| Shift+Tab | `default → acceptEdits → plan → default`；初次 attach 为 `bypassPermissions`（含旧别名 `full`）时，循环末尾加入 bypass |
-| `/permissions` | ↑↓ 或数字选模式，Enter 确认，Esc 取消；`dontAsk` 仅在此显式选择 |
+| Shift+Tab | `default → acceptEdits → plan → default`；本端以 `bypassPermissions` / `full` 启动时循环末尾加入 bypass；readonly 不切换 |
+| `/permissions` | ↑↓ 或数字选模式，Enter 确认，Esc 取消；`dontAsk` 仅在 bypass 资格已知时出现；readonly 线程只展示并选中 readonly |
 | Tab、`/effort low\|medium\|high\|max` | 统一调用 `thread/effort/set`；四档为 TUI thinking budget 预设：1024 / 8192 / 32768 / 65536 token，服务端确认后才更新标签 |
-| `/model <name>` | `thread/engineControl set_model`，检查原生 success 后显示模型 |
+| `/model <name>` | `thread/engineControl set_model`，检查原生 success 后读取 thread.model；他端和重连通过 metadata 通知及快照同步 |
 | `/compact [instructions]` | `thread/compact`，正常排队；收到持久化的 `contextCompaction` item 时显示 compact_boundary 分隔，重试复用去重键 |
 | Ctrl-P、Ctrl-R | 分别折叠/展开 plan（默认展开）和 reasoning（默认折叠）；plan 保留正文和每一步状态 |
-| `/takeover`、`/release` | 重试获取 / 释放 thread lease |
+| `/takeover`、`/release` | 显式获取 30 秒独占输入 lease / 释放；状态栏显示持有截止时间 |
 | `/context <窗口 token 数>` | 覆盖当前 TUI 的上下文窗口估算 |
 
-模式通知以 `thread.permission`、`thread/permission/changed` 为准，其他客户端热切也会更新状态栏。ExitPlanMode 权限请求显示退出计划审批卡；y/s 同意使用 turn 范围授权，收到本客户端获胜的 `serverRequest/resolved` 后再切换 default；拒绝不切模式。控制请求先 acquire lease；被拒显示「另一客户端持有控制权」、持有方及 `/takeover` 入口。当前协议不支持强制抢占，需等待对方释放、断线或租约到期；接管成功后重试原操作。每次控制操作续租，退出断线释放，不额外常驻续租。
+模式以 `thread.permission`、`thread/permission/changed` 为准；他端通知只更新状态栏，不覆盖本端发送/排队等消息。readonly 是 CLI 启动工具限制，不能安全热切来回：当前或本端记录的启动模式为 readonly 时，快捷键和面板都保持该限制，不发 permission/set；更改需新建线程。
 
-协议尚未提供启动权限独立字段，因此新建显式使用 default，attach 用首次快照判断 bypass 循环资格，同一 TUI 重连不重新扩大资格。effort/model 热切标签保存在当前 TUI，协议没有跨客户端通知或持久化保证；effort 预算预设不等同于 CLI 原生 `--effort` 的内部映射。live 控制目前仅 Claude backend 支持，其他 backend 的协议拒绝会保留输入和显示值。
+仅目标为 full/bypassPermissions/dontAsk 的提权切换需 lease：TUI 临时获取 5 秒租约，在成功或失败后立即 release；default/acceptEdits/plan、effort/model/compact、ExitPlanMode 审批不主动拿租约。用户先显式 `/takeover` 获取的租约会保留至释放、断线或 30 秒到期，普通操作不偷偷续租。打底门禁的缺租约错误为 `-32005 unauthorized`，他人持有为 `-32012 lease_held`；`-32014 already_resolved` 表示审批已被处理，不引导接管。协议没有强制抢占或持有方剩余 TTL 查询：他人仍持有时 `/takeover` 会拒绝，需等其释放、断线或到期后重新执行；不是轮询命令，也不会擅自持续抢锁。
+
+ExitPlanMode 显示专用审批卡，y 使用 turn 授权、s 使用 session 授权；收到本客户端获胜的 `serverRequest/resolved` 后切换 default。拒绝、审批已处理和他端先答不切模式。
+
+`thread/start.permission` 已存在，`--new --permission <mode>` 会原样传入并记录（默认 default，旧别名 full/auto-edit 同样接受）。当前打底 **没有只读的启动权限上限字段**，恢复 options 也会随当前权限更新。因此仅信本端 thread/start 的启动记录判断 bypass 资格；普通 `--attach` 无法证明资格，保守隐藏 bypass/dontAsk 并显示「bypass 上限未知，已隐藏」，不会拿当前模式冒充启动上限。重连保留本端启动记录。CLI/组织策略仍可拒绝提权。
+
+model 已由打底持久化，状态栏只显示 thread.model，并消费 `thread/metadata/updated`；失败不伪造新模型。effort 的热切预算仍没有 thread 状态字段或跨端通知，因此标注「本端设置」，收到快照或断线后清空；不声称已实现 effort 权威跨端同步。预算预设不等同于 CLI 原生 `--effort` 的内部映射。live 控制目前仅 Claude backend 支持，其他 backend 的协议拒绝会保留输入和显示值。
 
 上下文条使用 `usage.contextTokens`，窗口默认按模型名查内置估算表：`[1m]` 后缀 1M、`gpt-5` / `gpt-5-*` 400k、Claude 名称及未知模型 200k；`~` 明示估算，不保证等于当前账号/引擎配置。`/context` 可填写已知窗口，`/model` 成功时仅自动更新估算窗口；未知 usage 显示 `?`，占比超过 80% 变黄，超过 100% 保留真实百分比并将条形限制在满格。窄终端状态栏会换行。
 

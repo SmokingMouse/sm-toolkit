@@ -261,8 +261,9 @@ test("PTY modes: Shift+Tab three-state cycle, permissions, effort, model, compac
   try {
     await wait(() => screen.includes(thread.id));
     for (const mode of ["acceptEdits", "plan", "default"]) { key("\x1b[Z"); await wait(() => screen.includes(`mode ${mode} |`)); expect(engine.permissions.at(-1)).toBe(mode); }
-    key("/permissions\r"); await wait(() => screen.includes("4. dontAsk"));
-    key("4\r"); await wait(() => screen.includes("mode dontAsk |"));
+    key("/permissions\r"); await wait(() => screen.includes("3. plan"));
+    expect(screen).not.toContain("4. dontAsk");
+    key("3\r"); await wait(() => screen.includes("mode plan |"));
     key("\x1b[Z"); await wait(() => screen.includes("mode default |"));
     key("/effort high\r"); await wait(() => screen.includes("effort high（本端设置） |"));
     key("\t"); await wait(() => screen.includes("effort max（本端设置） |"));

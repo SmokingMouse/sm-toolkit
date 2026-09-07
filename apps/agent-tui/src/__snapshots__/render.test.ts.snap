@@ -78,7 +78,7 @@ Enter to confirm · Esc to cancel"
 
 exports[`fixed header, footer, queue and active card viewport snapshots 1`] = `
 "codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected | th_demo
-mode default | effort — | model — | ctx [??????????] ?% / ~200000
+mode default | effort — | model — | ctx [??????????] ?% / ~200000 | bypass 上限未知，已隐藏
 You: 你好
 [file] /tmp/a.ts
 
@@ -97,8 +97,8 @@ Enter 发送 · Shift+Tab 权限 · Tab effort · Ctrl-P 计划 · Ctrl-R 推理
 
 exports[`fixed header, footer, queue and active card viewport snapshots 2`] = `
 "codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected
-mode default | effort — | model — | ctx [??????????] ?% / ~200000
-
+mode default | effort — | model — | ctx [??????????] ?% / ~200000 | b
+ypass 上限未知，已隐藏
 Agent …: Hello 世界
 
 排队 #1: next
