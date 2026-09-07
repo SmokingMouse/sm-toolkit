@@ -1,6 +1,7 @@
 import { AgentClient, type ClientState } from "@smokingmouse/agent-server/client";
 import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
 import { classifyEvent, LogBuffer, object, rebuildTasks } from "./observations.js";
+import { errorCode, errorMessage, leaseHolder } from "./errors.js";
 
 export interface RequestCard { request: PendingServerRequest; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
 export class TuiModel {
@@ -22,6 +23,16 @@ export class TuiModel {
   taskScroll = 0;
   panelFocus: "history" | "log" | "tasks" = "history";
   collapsedAgents = new Set<string>();
+  lease: { state: "none" } | { state: "self"; expiresAtMs: number; threadId: string } | { state: "other"; holder: string } = { state: "none" };
+  get leaseLabel(): string {
+    return this.lease.state === "self" && this.lease.expiresAtMs > Date.now() ? "持有/续期中"
+      : this.lease.state === "other" ? `他端持有:${this.lease.holder}（最近拒绝）` : "未持有";
+  }
+  recordError(error: unknown): void {
+    if (errorCode(error) === -32012) this.lease = { state: "other", holder: leaseHolder(error) ?? "未知客户端" };
+    else if (errorCode(error) === -32005) this.lease = { state: "none" };
+    this.message = errorMessage(error); this.changed();
+  }
   get tasks() { return rebuildTasks(this.items.values()); }
   setConnection(state: ClientState): void {
     // engineEvent is live-only in AS/1: no item sequence exists to replay this interval.
@@ -96,10 +107,13 @@ export function bindClient(client: AgentClient, model: TuiModel): () => void {
     if (state !== "connected") { model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
     model.changed();
   }), client.onError((error, id) => {
-    model.message = error.message;
+    model.recordError(error);
     for (const handle of client.pendingRequests.values()) {
       const card = model.cards.get(handle.params.requestId);
-      if (handle.id === id && card?.state === "sending") card.state = "pending";
+      if (handle.id === id && card) {
+        if (errorCode(error) === -32014) { card.state = "resolved"; card.note = errorMessage(error); }
+        else if (card.state === "sending") card.state = "pending";
+      }
     }
     model.changed();
   })];

@@ -21,7 +21,7 @@ export async function runTerminal(client: AgentClient, model: TuiModel): Promise
   process.on("SIGTERM", stop); process.on("SIGHUP", stop);
   try { draw(); await done; }
   finally {
-    clearTimeout(timer); dispose(); input.off("keypress", keypress); input.off("end", stop); output.off("resize", schedule);
+    clearTimeout(timer); dispose(); controller.dispose(); input.off("keypress", keypress); input.off("end", stop); output.off("resize", schedule);
     process.off("SIGTERM", stop); process.off("SIGHUP", stop);
     input.setRawMode(wasRaw); input.pause(); output.write("\x1b[?25h\x1b[?1049l");
   }

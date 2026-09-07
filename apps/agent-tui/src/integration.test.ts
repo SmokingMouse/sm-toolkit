@@ -245,6 +245,18 @@ test("P0-1: Ctrl-C interrupts under another client's lease before the second pre
   await a.controller.key("\x03", { ctrl: true, name: "c" }); expect(a.exited).toBe(true);
 });
 
+test("P2-1: asynchronous already_resolved response withdraws the matching approval card", async () => {
+  const { a, engine, thread, peers } = await setup();
+  a.model.input = "work"; await a.controller.submit(); const turnId = engine.sent[0].turnId;
+  engine.emit({ type: "itemStarted", turnId, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: thread.cwd } } });
+  engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { requestId: "stale", threadId: thread.id, turnId, itemId: "cmd", command: "pwd", cwd: thread.cwd, startedAtMs: Date.now() } }, respond() {} });
+  await until(() => !!a.model.activeCard);
+  a.model.activeCard!.state = "sending";
+  peers[0].send(JSON.stringify({ jsonrpc: "2.0", id: a.client.pendingRequests.get("stale")!.id, error: { code: -32014, message: "server request already resolved" } }));
+  await until(() => a.model.cards.get("stale")?.state === "resolved");
+  expect(a.model.activeCard).toBeUndefined(); expect(a.model.message).toBe("该请求已由其他客户端处理"); expect(a.model.leaseLabel).toBe("未持有");
+});
+
 test("observation commands stay local offline; contested sends and approvals retain input and name lease holder", async () => {
   const { a, b, engine, thread } = await setup();
   a.model.connection = "disconnected";

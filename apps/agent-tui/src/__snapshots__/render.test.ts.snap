@@ -77,7 +77,7 @@ Enter to confirm · Esc to cancel"
 `;
 
 exports[`fixed header, footer, queue and active card viewport snapshots 1`] = `
-"codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected | th_demo
+"codex running | 租约:未持有 | queue 1 | tokens 10 in / 4 out / 3 cached | connected | th_demo
 You: 你好
 [file] /tmp/a.ts
 
@@ -96,7 +96,7 @@ Enter 发送 · Ctrl-L 日志 · /tasks · /agents · F6 焦点 · PgUp/PgDn 滚
 `;
 
 exports[`fixed header, footer, queue and active card viewport snapshots 2`] = `
-"codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected
+"codex running | 租约:未持有 | queue 1 | tokens 10 in / 4 out / 3 cach
 
 Agent …: Hello 世界
 

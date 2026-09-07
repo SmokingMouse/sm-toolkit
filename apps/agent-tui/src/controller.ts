@@ -1,13 +1,15 @@
 import type { AgentClient } from "@smokingmouse/agent-server/client";
 import type { RequestCard, TuiModel } from "./model.js";
+import { InputLease } from "./lease.js";
 
 export interface Key { name?: string; ctrl?: boolean; meta?: boolean; sequence?: string }
 export class Controller {
   private interruptedAt = -Infinity;
   private submitting = false;
-  private manualLeaseClientId?: string;
+  readonly lease: InputLease;
   private submission?: { text: string; threadId: string; turnId?: string; id: string };
-  constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) {}
+  constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) { this.lease = new InputLease(client, model); }
+  dispose(): void { this.lease.dispose(); }
   async key(text: string | undefined, key: Key = {}): Promise<void> {
     try {
       if (key.ctrl && key.name === "c") {
@@ -34,7 +36,7 @@ export class Controller {
       if (key.name === "backspace") this.model.input = Array.from(this.model.input).slice(0, -1).join("");
       else if (key.ctrl && key.name === "u") this.model.input = "";
       else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) this.model.input += text;
-    } catch (error) { this.model.message = this.errorMessage(error); }
+    } catch (error) { this.model.recordError(error); }
     finally { this.model.changed(); }
   }
   async submit(): Promise<void> {
@@ -53,11 +55,10 @@ export class Controller {
     this.submitting = true;
     try {
       if (text === "/takeover") {
-        await this.client.request("thread/lease/acquire", { threadId: thread.id });
-        this.manualLeaseClientId = this.client.clientId;
+        await this.lease.takeover(thread.id);
         this.model.message = "已取得控制权；/release 释放"; this.model.input = ""; return;
       }
-      if (text === "/release") { await this.client.request("thread/lease/release", { threadId: thread.id }); this.manualLeaseClientId = undefined; this.model.message = "已释放控制权"; this.model.input = ""; return; }
+      if (text === "/release") { await this.lease.relinquish(thread.id); this.model.message = "已请求释放控制权"; this.model.input = ""; return; }
       const steer = text.startsWith("/steer ");
       const input = [{ type: "text" as const, text: steer ? text.slice(7).trim() : text }];
       if (!input[0].text) return;
@@ -79,23 +80,24 @@ export class Controller {
       if (this.model.input.trim() === text) this.model.input = "";
       this.submission = undefined;
       this.model.scroll = 0;
-    } catch (error) {
-      if (error && typeof error === "object" && "code" in error && (error.code === -32012 || error.code === -32014)) throw new Error(this.errorMessage(error));
-      throw error;
     } finally { this.submitting = false; this.model.changed(); }
   }
   private toggleLog(): void { this.model.logExpanded = !this.model.logExpanded; this.model.panelFocus = this.model.logExpanded ? "log" : "history"; }
-  private errorMessage(error: unknown): string {
-    if (error && typeof error === "object" && "code" in error && (error.code === -32012 || error.code === -32014)) {
-      const holder = (error as { data?: { holder?: { label?: string; clientId?: string } } }).data?.holder;
-      return `另一客户端持有控制权${holder ? `：${holder.label || holder.clientId}` : ""}；请其释放或等待租约到期，再 /takeover 重试`;
-    }
-    return error instanceof Error ? error.message : String(error);
-  }
   private async withLease<T>(threadId: string, action: () => Promise<T> | T): Promise<T> {
-    await this.client.request("thread/lease/acquire", { threadId });
-    try { return await action(); }
-    finally { if (this.manualLeaseClientId !== this.client.clientId && this.client.state === "connected") await this.client.request("thread/lease/release", { threadId }).catch(() => {}); }
+    return this.lease.run(threadId, action);
+  }
+  private reply(card: RequestCard, send: () => void): Promise<void> {
+    return this.withLease(card.request.params.threadId, () => new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error) => { clearTimeout(timer); unsubscribe(); error ? reject(error) : resolve(); };
+      const check = () => {
+        if (card.state === "resolved" || card.state === "expired") finish();
+        else if (card.state === "pending" || card.state === "offline") finish(new Error(this.model.message || "审批回复尚未确认"));
+      };
+      const unsubscribe = this.model.onChange(check);
+      const timer = setTimeout(() => { card.state = "pending"; finish(new Error("审批回复超时，等待服务器确认或重试")); }, 30_000);
+      timer.unref(); card.state = "sending";
+      try { send(); this.model.changed(); } catch (error) { card.state = "pending"; finish(error instanceof Error ? error : new Error(String(error))); }
+    }));
   }
   private async cardKey(card: RequestCard, text: string | undefined, key: Key): Promise<void> {
     if (card.state !== "pending") return;
@@ -103,7 +105,7 @@ export class Controller {
     if (!handle || this.client.state !== "connected") throw new Error("请求连接已失效，等待重连快照");
     if (handle.method === "item/tool/requestUserInput") {
       const question = handle.params.questions[card.question];
-      if (key.name === "escape") { await this.withLease(handle.params.threadId, () => { handle.respond({ answers: {} }); card.state = "sending"; }); return; }
+      if (key.name === "escape") { await this.reply(card, () => handle.respond({ answers: {} })); return; }
       const choose = (number: number) => {
         const option = question?.options?.[number - 1]; if (!option || !question) return;
         const selected = card.answers[question.id]?.answers ?? [];
@@ -118,7 +120,7 @@ export class Controller {
         }
         card.draft = "";
         if (card.question + 1 < handle.params.questions.length) { card.question++; this.model.scroll = 0; return; }
-        await this.withLease(handle.params.threadId, () => { handle.respond({ answers: card.answers }); card.state = "sending"; }); return;
+        await this.reply(card, () => handle.respond({ answers: card.answers })); return;
       }
       if (key.name === "backspace") card.draft = Array.from(card.draft).slice(0, -1).join("");
       else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) card.draft += text;
@@ -127,13 +129,16 @@ export class Controller {
     const choices = { y: "accept", s: "acceptForSession", n: "reject", a: "abort" } as const;
     const decision = key.name === "escape" ? "reject" : choices[text?.toLowerCase() as keyof typeof choices];
     if (!decision) return;
-    await this.withLease(handle.params.threadId, async () => {
-      if (handle.method === "item/permissions/requestApproval") {
-        handle.respond({ permissions: decision === "accept" || decision === "acceptForSession" ? handle.params.permissions : {}, scope: decision === "acceptForSession" ? "session" : "turn" });
-        // Permissions replies have no abort variant in AS v1; deny, then interrupt the turn.
-        if (decision === "abort") await this.client.request("turn/interrupt", { threadId: handle.params.threadId, turnId: handle.params.turnId });
-      } else handle.respond({ decision });
-      if (card.state === "pending") card.state = "sending";
-    });
+    let replied = false;
+    try {
+      await this.reply(card, () => {
+        if (handle.method === "item/permissions/requestApproval") handle.respond({ permissions: decision === "accept" || decision === "acceptForSession" ? handle.params.permissions : {}, scope: decision === "acceptForSession" ? "session" : "turn" });
+        else handle.respond({ decision });
+      });
+      replied = true;
+    } finally {
+      // Even a denied approval lease must never disable the emergency stop.
+      if (decision === "abort" && (!replied || handle.method === "item/permissions/requestApproval")) await this.client.request("turn/interrupt", { threadId: handle.params.threadId, turnId: handle.params.turnId });
+    }
   }
 }
