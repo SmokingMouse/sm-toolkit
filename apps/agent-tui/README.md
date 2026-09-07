@@ -21,10 +21,10 @@ Enter 发 `turn/start`；运行时同样入队，显示从 1 起的排队位置�
 
 | 操作 | 行为 |
 | --- | --- |
-| Shift+Tab | `default → acceptEdits → plan → default`；本端以 `bypassPermissions` / `full` 启动时循环末尾加入 bypass；readonly 不切换 |
-| `/permissions` | ↑↓ 或数字选模式，Enter 确认，Esc 取消；`dontAsk` 仅在 bypass 资格已知时出现；readonly 线程只展示并选中 readonly |
+| Shift+Tab | `default → acceptEdits → plan → default`；本端以 `bypassPermissions` / `full` 启动时循环末尾加入 bypass；readonly 不切换；在途连按丢弃并单独保留计数提示 |
+| `/permissions` | ↑↓ 或数字选模式，Enter 确认，Esc 取消；`dontAsk` 在 bypass 资格已知或本端以 dontAsk 启动时出现；readonly 线程只展示并选中 readonly |
 | Tab、`/effort low\|medium\|high\|max` | 统一调用 `thread/effort/set`；四档为 TUI thinking budget 预设：1024 / 8192 / 32768 / 65536 token，服务端确认后才更新标签 |
-| `/model <name>` | `thread/engineControl set_model`，检查原生 success 后读取 thread.model；他端和重连通过 metadata 通知及快照同步 |
+| `/model <name>` | `thread/engineControl set_model`，原生 success 加匹配模型的 metadata 通知才确认成功；响应后 2 秒未收到通知则提示未确认并保留命令；他端和重连通过 metadata 通知及快照同步 |
 | `/compact [instructions]` | `thread/compact`，正常排队；收到持久化的 `contextCompaction` item 时显示 compact_boundary 分隔，重试复用去重键 |
 | Ctrl-P、Ctrl-R | 分别折叠/展开 plan（默认展开）和 reasoning（默认折叠）；plan 保留正文和每一步状态 |
 | `/takeover`、`/release` | 手动获取独占输入 lease / 释放；活跃时续期，空闲后到期 |
@@ -77,7 +77,7 @@ model 已由打底持久化，状态栏只显示 thread.model，并消费 `threa
 
 审批：y 允许、s 本会话允许、n 拒绝、a 中止；permissions 的协议没有 abort 枚举，因此 a 先回空授权再中断该 turn。问题卡用数字选择/切换，Enter 下一题或提交，支持自由文本；超过 9 个选项时输入编号后 Space 切换。Esc 拒绝审批或交空答案取消问题。提交后等待服务端 resolved；他端先答显示「已由 X 处理」。断线期间禁用卡片，重连用快照恢复；离线期间已解决的卡片会标注处理者未知。
 
-问题卡自由回答支持多行粘贴，与主输入共用 CR/CRLF → LF 归一。粘贴只写入草稿，不会触发数字选项或自动提交；按 Enter 后才发送回答，内部换行与缩进保留。
+审批卡下 bracketed paste 一律写入主输入框，即使内容恰为 y/s/n/a 也不触发决策；这些快捷键只接受按键。问题卡自由回答支持多行粘贴，与主输入共用 CR/CRLF → LF 归一。粘贴只写入回答草稿，不会触发数字选项或自动提交；按 Enter 后才发送回答，内部换行与缩进保留。
 
 Herdr：存在 `HERDR_PANE_ID` 时通过 `HERDR_SOCKET_PATH` → `$XDG_CONFIG_HOME/herdr/herdr.sock` → `~/.config/herdr/herdr.sock` 注册 backend 与 AS thread id。接口按本机 `herdr api schema --json` protocol 19 校验：`pane.report_agent` + `pane.report_agent_session`，source=`agent-tui`。状态：未决卡片/断线/systemError 为 blocked，running/spawning 为 working，其余 idle。OSC 标题使用本机 agent-detection 的 Braille working、Claude `✳` idle、Codex `Action Required` blocked；Claude blocked 同时由卡片 `Enter to confirm · Esc to cancel` 与 socket 报告支持。Herdr 不可用仅提示，10 秒后重试，不影响 AS 会话。
 
