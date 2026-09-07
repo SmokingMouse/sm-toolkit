@@ -132,7 +132,8 @@ Claude 启动包含 `--forward-subagent-text`（2.1.258 flag 描述：转发带 
 `thread/start` 的 effort 字符串透传 Claude `--effort <level>`。`thread/effort/set` `{threadId,maxThinkingTokens:整数|null,thinkingDisplay?:"summarized"|"omitted"|null}` → 原生 control_response，映射 `set_max_thinking_tokens {max_thinking_tokens,thinking_display?}`（2.1.258 print.ts 分派验证整数/null 与显示枚举）。这控制思考 token 预算，**不等价于** --effort 的模型推理档位；没有捏造 low/high 到 token 的换算。热切也可用 engineControl；turn/start 上不同 effort 标签会提示使用专用方法。热预算为当前 CLI 进程设置，不跨恢复持久化。
 
 `thread/permission/set`：`{threadId, permission}` → `{thread}`。Claude 原生模式 default / acceptEdits / plan / bypassPermissions / dontAsk 映射 --permission-mode，热切发送 set_permission_mode 的 mode 字段；CLI 成功确认后更新 thread.permission、持久化恢复选项，并发送 `thread/permission/changed` `{threadId,permission}`。turn/start.permission 也在发送用户帧前热切。原生拒绝不更新状态，返回 unsupported_capability。CLI 或组织策略仍可拒绝 bypass。
-旧值 full / auto-edit 分别映射 bypassPermissions / acceptEdits。readonly 仅限启动时工具限制（--disallowedTools），不能通过热切新增此限制；已有进程限制也不会被模式热切解除。启动添加 --allow-dangerously-skip-permissions 使原生 PLe 的 isBypassPermissionsModeAvailable 检查允许后续切 bypass，不改变启动时所选模式；组织策略仍可拒绝。权限模式热切会清除 daemon 会话审批缓存，避免旧授权跨模式复用。Codex 保持旧 permission 别名语义，新增 Claude 模式返回 backend_unsupported。
+旧值 full / auto-edit 分别映射 bypassPermissions / acceptEdits。readonly 仅限启动时工具限制（--disallowedTools），不能通过热切新增此限制；已有进程限制也不会被模式热切解除。仅启动 permission 显式为 full/bypassPermissions 才添加 --allow-dangerously-skip-permissions；其他会话不预先开放 bypass，也没有隐式 daemon 提权策略。CLI/组织策略仍可拒绝切换。权限模式热切会清除 daemon 会话审批缓存，避免旧授权跨模式复用。Codex 保持旧 permission 别名语义，新增 Claude 模式返回 backend_unsupported。
+对已有 thread，请求 full/bypassPermissions/dontAsk（或原生 ultraplan:true）必须由有效 lease 的持有者发起，覆盖 permission/set、engineControl.set_permission_mode、turn/start.permission 和 resume.permission；无 lease/已过期返回 unauthorized (-32005)，他人持有返回 lease_held (-32012)。持有 lease 不绕过原生 bypass availability/组织策略。普通输入和非提升模式继续使用可选 lease。
 
 `thread/engineControl` 请求 `{threadId, subtype, params}`，向 Claude 发送 `{type:"control_request", request_id, request:{...params,subtype}}`，result 是完整原生 control_response 帧（包括原生 error response），不拆解 response；调用方必须检查 response.subtype。params 不得包含 subtype。该方法遵守输入 lease；Codex/external 返回 backend_unsupported，未知或不允许的子类型返回 unsupported_capability。传输超时仍为 RPC 错误。
 
@@ -230,7 +231,7 @@ Claude 不支持的反向 control request 会保守拒绝或取消，并发 `err
 **输入租约（可选）**：持有 `thread/lease/acquire` 的客户端在租约期内是唯一
 可以 `turn/start` / `turn/steer` / 回答反向请求的连接；其余得到
 `-32012 lease_held`（`data.holder` 带持锁者 label）。租约 TTL 默认 5 min，
-心跳续期，断线即释放。默认**不启用**，是给「飞书群里七嘴八舌」准备的旋钮。
+心跳续期，断线即释放。普通输入默认**不启用**；权限提升操作必须先取得 lease，见 §4 的权限语义说明。
 
 ## 6. item 种类与字段
 

@@ -111,6 +111,16 @@ function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => voi
   return { child, written, send };
 }
 describe("Claude native frame exchange (fake child only)", () => {
+  test("P1-1: bypass availability flag requires explicit launch permission", async () => {
+    for (const permission of ["readonly", "default", "plan", "acceptEdits", "dontAsk", "full", "bypassPermissions"] as const) {
+      const fake = fakeProcess(() => {}); let args: string[] = [];
+      const engine = new ClaudeEngine({ spawnProcess: (_command, argv) => { args = argv; return fake.child; } });
+      try {
+        await engine.spawn({ backend: "claude", threadId: "th", permission });
+        expect(args.includes("--allow-dangerously-skip-permissions")).toBe(permission === "full" || permission === "bypassPermissions");
+      } finally { await engine.close("test"); }
+    }
+  });
   test("foundation bash: native replay completes standalone turns, decodes output and leaves next turn usable", async () => {
     const fake = fakeProcess((send, frame) => {
       if (frame.type === "bash_command") {
@@ -192,7 +202,7 @@ describe("Claude native frame exchange (fake child only)", () => {
       for (const permission of modes) {
         const args = buildClaudeLaunch({ backend: "claude", threadId: "th", permission }).args;
         expect(args[args.indexOf("--permission-mode") + 1]).toBe(permission);
-        expect(args).toContain("--allow-dangerously-skip-permissions");
+        expect(args.includes("--allow-dangerously-skip-permissions")).toBe(permission === "bypassPermissions");
         await engine.setPermission(permission);
         expect(fake.written.at(-1).request).toEqual({ subtype: "set_permission_mode", mode: permission });
       }

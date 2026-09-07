@@ -209,6 +209,10 @@ export class AgentServer {
   private dispatch(connection: Connection, method: Method, raw: MethodParams<Method>): unknown {
     // Narrow at each method using the schema's inferred params type.
     const params = <M extends Method>(_method: M) => raw as MethodParams<M>;
+    const permissionInput = (threadId: string, permission: unknown, ultraplan = false) => {
+      this.leases.assertInput(threadId, connection.clientId);
+      if (["full", "bypassPermissions", "dontAsk"].includes(String(permission)) || ultraplan) this.leases.assertHeld(threadId, connection.clientId);
+    };
     switch (method) {
       case "initialize": {
         const p = params(method);
@@ -231,8 +235,8 @@ export class AgentServer {
         if (!this.backends.includes(p.backend)) throw new ProtocolError(ErrorCode.unsupported_capability, "backend is not available");
         return this.threads.start({ ...p, cwd: this.cwd(p.cwd) }, thread => this.attach(connection, thread.id));
       }
-      case "thread/engineControl": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.engineControl(p); }
-      case "thread/permission/set": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.setPermission(p); }
+      case "thread/engineControl": { const p = params(method); permissionInput(p.threadId, p.subtype === "set_permission_mode" ? p.params.mode : undefined, p.subtype === "set_permission_mode" && p.params.ultraplan === true); return this.threads.engineControl(p); }
+      case "thread/permission/set": { const p = params(method); permissionInput(p.threadId, p.permission); return this.threads.setPermission(p); }
       case "thread/compact": {
         const p = params(method); this.leases.assertInput(p.threadId, connection.clientId);
         if (this.threads.get(p.threadId).backend !== "claude") throw new ProtocolError(ErrorCode.backend_unsupported, "compact requires Claude");
@@ -246,6 +250,7 @@ export class AgentServer {
         if (p.cwd) this.cwd(p.cwd);
         if (p.backend && !this.backends.includes(p.backend)) throw new ProtocolError(ErrorCode.unsupported_capability, "backend is not available");
         const existing = p.threadId ? this.threads.get(p.threadId) : p.engineThreadId ? this.log.findEngine(p.engineThreadId, p.backend) : undefined;
+        if (existing) permissionInput(existing.id, p.permission);
         if (!existing && !p.cwd) throw new ProtocolError(ErrorCode.invalid_params, "cwd is required when importing an unknown engineThreadId");
         if (existing) this.cwd(p.cwd ?? existing.cwd);
         return this.threads.resume(existing ? p : { ...p, cwd: this.cwd(p.cwd) }, thread => this.attach(connection, thread.id));
@@ -267,7 +272,7 @@ export class AgentServer {
       case "thread/fork": { const p = params(method); this.cwd(this.threads.get(p.threadId).cwd); return this.threads.fork(p, thread => this.attach(connection, thread.id)); }
       case "thread/close": { const p = params(method); return this.threads.close(p.threadId, p.reason).then(() => { this.leases.clear(p.threadId); return {}; }); }
       case "thread/interrupt": return this.threads.queue(params(method).threadId).interrupt().then(interruptedTurnId => ({ interruptedTurnId }));
-      case "turn/start": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); if (p.cwd) this.cwd(p.cwd); return this.threads.queue(p.threadId).enqueue(p); }
+      case "turn/start": { const p = params(method); permissionInput(p.threadId, p.permission); if (p.cwd) this.cwd(p.cwd); return this.threads.queue(p.threadId).enqueue(p); }
       case "turn/steer": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.queue(p.threadId).steer(p).then(() => ({})); }
       case "turn/interrupt": { const p = params(method); return this.threads.queue(p.threadId).interrupt(p.turnId).then(() => ({})); }
       case "turn/cancel": { const p = params(method); this.threads.queue(p.threadId).cancel(p.turnId); return {}; }

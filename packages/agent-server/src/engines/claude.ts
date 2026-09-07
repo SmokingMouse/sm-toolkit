@@ -37,7 +37,7 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   args.push("--permission-mode", claudePermission(permission));
   // 2.1.258 PLe checks isBypassPermissionsModeAvailable on a live switch.
   // This flag permits switching later; it does not select bypass at launch.
-  args.push("--allow-dangerously-skip-permissions");
+  if (permission === "full" || permission === "bypassPermissions") args.push("--allow-dangerously-skip-permissions");
   if (permission === "readonly") args.push("--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit");
   const env = { ...process.env };
   delete env.CLAUDECODE;

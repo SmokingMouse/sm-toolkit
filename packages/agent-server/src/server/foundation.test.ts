@@ -24,12 +24,43 @@ function fixture() {
   return { server, send, written, argv: () => argv };
 }
 
+test("P1-1: escalation requires an owned live lease on every permission entry point", async () => {
+  const f = fixture();
+  try {
+    const owner = await client(f.server, "owner"), stranger = await client(f.server, "stranger");
+    const { thread } = await owner.request("thread/start", { backend: "claude", permission: "plan" });
+    expect(f.argv()).not.toContain("--allow-dangerously-skip-permissions");
+    const calls = [
+      ["thread/permission/set", { threadId: thread.id, permission: "bypassPermissions" }],
+      ["thread/permission/set", { threadId: thread.id, permission: "full" }],
+      ["thread/engineControl", { threadId: thread.id, subtype: "set_permission_mode", params: { mode: "dontAsk" } }],
+      ["thread/engineControl", { threadId: thread.id, subtype: "set_permission_mode", params: { mode: "plan", ultraplan: true } }],
+      ["turn/start", { threadId: thread.id, input: input("go"), permission: "bypassPermissions" }],
+      ["thread/resume", { threadId: thread.id, permission: "bypassPermissions" }],
+    ] as const;
+    const count = f.written.length;
+    for (const [method, params] of calls) await expect(stranger.request(method, params)).rejects.toMatchObject({ code: -32005 });
+    expect(f.written).toHaveLength(count);
+    await owner.request("thread/lease/acquire", { threadId: thread.id });
+    for (const [method, params] of calls) await expect(stranger.request(method, params)).rejects.toMatchObject({ code: -32012 });
+    expect((await owner.request("thread/permission/set", { threadId: thread.id, permission: "dontAsk" })).thread.permission).toBe("dontAsk");
+    await owner.request("thread/engineControl", { threadId: thread.id, subtype: "set_permission_mode", params: { mode: "bypassPermissions" } });
+    expect(f.written.at(-1).request).toEqual({ subtype: "set_permission_mode", mode: "bypassPermissions" });
+    await owner.request("thread/lease/release", { threadId: thread.id });
+    await expect(owner.request("thread/permission/set", { threadId: thread.id, permission: "dontAsk" })).rejects.toMatchObject({ code: -32005 });
+    await owner.request("thread/lease/acquire", { threadId: thread.id, ttlMs: 1 });
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await expect(owner.request("thread/permission/set", { threadId: thread.id, permission: "dontAsk" })).rejects.toMatchObject({ code: -32005 });
+  } finally { await f.server.close(); }
+});
+
 test("foundation RPC: capabilities, hot permission persistence, effort shape, lease and backend refusals", async () => {
   const f = fixture();
   try {
     const c = await client(f.server), notices = capture(c);
     const { thread } = await c.request("thread/start", { backend: "claude", permission: "plan", effort: "high" });
     expect(thread.permission).toBe("plan");
+    await c.request("thread/lease/acquire", { threadId: thread.id });
     const changed = await c.request("thread/permission/set", { threadId: thread.id, permission: "dontAsk" });
     expect(changed.thread.permission).toBe("dontAsk");
     expect(f.server.log.options<any>(thread.id).permission).toBe("dontAsk");
@@ -39,6 +70,7 @@ test("foundation RPC: capabilities, hot permission persistence, effort shape, le
     await c.request("thread/engineControl", { threadId: thread.id, subtype: "set_permission_mode", params: { mode: "acceptEdits" } });
     expect((await c.request("thread/read", { threadId: thread.id })).thread.permission).toBe("acceptEdits");
     const holder = await client(f.server, "holder");
+    await c.request("thread/lease/release", { threadId: thread.id });
     await holder.request("thread/lease/acquire", { threadId: thread.id });
     for (const [method, params] of [
       ["thread/permission/set", { threadId: thread.id, permission: "plan" }],
