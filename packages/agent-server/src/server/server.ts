@@ -126,6 +126,9 @@ export class AgentServer {
     this.allowedRoots = (options.allowedRoots ?? [homedir()]).map(root => realpathSync(resolve(root)));
     this.backends = options.backends ?? ["claude", "codex"];
     this.log = new ItemLog(options.databasePath ?? join(homedir(), ".agent-server", "agent-server.db"));
+    this.log.subscribeServer(notification => {
+      for (const connection of this.connections) if (connection.initialized && !connection.optOut.has(notification.method)) connection.emit(notification);
+    });
     this.threads = new ThreadManager(this.log, options.engineFactory ?? (backend => {
       if (backend === "codex") return new CodexEngine();
       if (backend !== "claude") throw new ProtocolError(ErrorCode.unsupported_capability, `backend ${backend} is not installed`);

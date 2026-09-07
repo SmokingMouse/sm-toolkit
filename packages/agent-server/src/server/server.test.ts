@@ -6,6 +6,16 @@ const servers: AgentServer[] = [];
 afterEach(async () => { for (const s of servers.splice(0)) await s.close(); });
 const create = (options = {}) => { const fixture = setup(options); servers.push(fixture.server); return fixture; };
 describe("in-process JSON-RPC server", () => {
+  test("N1: service errors reach initialized clients once without requiring a thread", async () => {
+    const { server } = create(); const a = await client(server), b = await client(server), uninitialized = server.connectInProcess();
+    const muted = server.connectInProcess();
+    await muted.request("initialize", { protocolVersion: "as/1", client: { name: "muted", version: "1", kind: "test", label: "muted" }, capabilities: { notifications: { optOut: ["error"] } } }); await muted.notifyInitialized();
+    const af = capture(a), bf = capture(b), uf = capture(uninitialized), mf = capture(muted);
+    const notification = { jsonrpc: "2.0" as const, method: "error" as const, params: { error: { code: -32603, message: "service failure", data: { retryable: false } }, willRetry: false } };
+    server.log.publish(notification);
+    expect(af).toEqual([notification]); expect(bf).toEqual([notification]); expect(uf).toEqual([]); expect(mf).toEqual([]);
+    b.close(); server.log.publish(notification); expect(bf).toHaveLength(1); expect(af).toHaveLength(2);
+  });
   test("K1: reused requestId rejects only the duplicate callback and keeps the thread alive", async () => {
     const { server, engines } = create(); const c = await client(server), frames = capture(c);
     const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });

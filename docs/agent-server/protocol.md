@@ -119,7 +119,8 @@ client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
 
 ## 4. 通知（server → client）
 
-只发给已 `thread/attach` 该 thread 的连接（除 `server/*`）。
+只发给已 `thread/attach` 该 thread 的连接（除 `server/*` 与无 threadId 的服务级 `error`，
+后者发给所有已完成握手且未 optOut error 的连接）。
 
 ### 4.1 thread 级
 

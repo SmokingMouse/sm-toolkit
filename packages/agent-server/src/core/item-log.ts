@@ -18,6 +18,7 @@ export class ItemLog {
   readonly db: Database;
   private partial = new Map<string, Item>();
   private listeners = new Map<string, Set<NotificationListener>>();
+  private serverListeners = new Set<NotificationListener>();
   private broadcasts: ServerNotification[] = [];
   private broadcasting = false;
   constructor(path = ":memory:") {
@@ -197,6 +198,10 @@ export class ItemLog {
     group.add(listener);
     return () => { group!.delete(listener); if (!group!.size) this.listeners.delete(threadId); };
   }
+  subscribeServer(listener: NotificationListener): () => void {
+    this.serverListeners.add(listener);
+    return () => { this.serverListeners.delete(listener); };
+  }
   attach(threadId: string, listener: NotificationListener, sinceSeq = 0): { snapshot: AttachResult; detach: () => void } {
     const detach = this.subscribe(threadId, listener);
     // No await between subscription and snapshot: JS and sqlite run in one owner.
@@ -209,13 +214,12 @@ export class ItemLog {
     try {
       for (let next = this.broadcasts.shift(); next; next = this.broadcasts.shift()) {
         const threadId = "threadId" in next.params ? next.params.threadId : undefined;
-        if (!threadId) continue;
-        for (const listener of [...(this.listeners.get(threadId) ?? [])]) {
+        for (const listener of [...(threadId ? this.listeners.get(threadId) ?? [] : this.serverListeners)]) {
           try { listener(structuredClone(next)); } catch { /* A disconnected consumer cannot roll back a committed event. */ }
         }
       }
     } finally { this.broadcasting = false; }
   }
   approval(id: string): ApprovalRow | null { return this.db.query<ApprovalRow, [string]>("SELECT * FROM approvals WHERE id=?").get(id); }
-  close(): void { this.listeners.clear(); this.partial.clear(); this.db.close(); }
+  close(): void { this.listeners.clear(); this.serverListeners.clear(); this.partial.clear(); this.db.close(); }
 }
