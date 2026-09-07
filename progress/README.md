@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server 与 agent-tui 已接入 fj 受限上下文和首轮交接，正在完成 fake 预验收；生产试点与 Trellis 集成仍待主控推进。
+agent-server 与 agent-tui 已修复 fj 复核的认证路径、nonce、serviceTier 和卸载幂等问题，正在完成回归；生产试点与 Trellis 集成仍待主控推进。
 
 ## Goals
 

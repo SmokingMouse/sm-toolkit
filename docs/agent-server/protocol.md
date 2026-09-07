@@ -113,7 +113,7 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 
 `thread/start` / `thread/resume` 不接受 `env`（未知字段返回 `-32602`）。
 
-`serviceTier?: "default"` 显式选择普通档；Codex 的 start/resume/turn 始终为 default。
+`serviceTier?: "default"` 仅用于 Codex，持久化并传入引擎的 start/resume 与后续 turn；缺省仍选择 default 普通档。Claude start/resume 显式传该参数会返回 unsupported_capability，不能静默忽略。
 `fjContext?: {root: absolutePath, cid: string, seat?: string}` 是受限坐席身份，禁止任意键。
 cid 匹配 `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`，seat 另允许点号。root 经 realpath 与 allowed_roots 校验。
 携带 fjContext 时必须显式 model（非空、非 fable）和 permission；Codex 必须 gpt-6-astra + serviceTier default。
