@@ -1,6 +1,7 @@
 import { AgentClient } from "@smokingmouse/agent-server/client";
 import { help, parseOptions, readToken } from "./options.js";
 import { bindClient, TuiModel } from "./model.js";
+import { runTerminal } from "./terminal.js";
 
 export async function main(args = process.argv.slice(2)): Promise<number> {
   let client: AgentClient | undefined;
@@ -12,7 +13,7 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     try { await client.connect(); } catch (error) { throw new Error(`Cannot connect to agent-server (${options.endpoint.transport === "unix" ? options.endpoint.path : options.endpoint.url}). Start it with agent-server start. ${String(error)}`); }
     const threadId = options.attach ?? (await client.request("thread/start", { backend: options.backend!, cwd: options.cwd, clientThreadId: crypto.randomUUID() })).thread.id;
     await client.request("thread/attach", { threadId });
-    console.log(`${model.thread?.backend} ${threadId} ${model.thread?.status.type}`);
+    await runTerminal(client, model);
     return 0;
   } catch (error) { console.error(`agent-tui: ${error instanceof Error ? error.message : String(error)}`); return 1; }
   finally { client?.close(); }
