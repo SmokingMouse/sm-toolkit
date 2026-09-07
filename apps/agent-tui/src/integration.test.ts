@@ -114,7 +114,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport}: real AS
     expect(abort.answer).toEqual({ permissions: {}, scope: "turn" }); expect(engine.interrupted).toContain(turnId);
   });
 
-  test("disconnect rewinds incomplete items, restores pending requests and removes offline-resolved cards", async () => {
+  test("R4: disconnect uses completion cursors, restores pending requests and removes offline-resolved cards", async () => {
     const { a, b, engine, manager, thread, home } = await setup(transport);
     a.model.input = "stream"; await a.controller.submit(); await until(() => engine.sent.length === 1);
     const turnId = engine.sent[0].turnId;
@@ -123,6 +123,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport}: real AS
     const pending: PendingServerRequest = { method: "item/commandExecution/requestApproval", params: { requestId: "offline-approval", threadId: thread.id, turnId, itemId: "answer", command: "pwd", cwd: home, startedAtMs: Date.now() } };
     engine.emit({ type: "approval", request: pending, respond() {} });
     await until(() => !!a.model.activeCard && renderItem(a.model.items.get("answer")!).join().includes("before"));
+    expect(a.client.sinceSeq(thread.id)).toBe(a.model.items.get("answer")!.seq);
     const oldClient = a.client.clientId!; manager.disconnect(oldClient);
     await until(() => a.model.connection !== "connected");
     expect(a.model.activeCard).toBeUndefined(); expect(a.model.cards.get("offline-approval")?.state).toBe("offline");
@@ -137,6 +138,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport}: real AS
     expect(renderItem(a.model.items.get("answer")!).join()).toContain("before during done");
     expect(renderItem(a.model.items.get("live")!).join()).toContain("partial offline");
     expect([...a.model.items.keys()].filter(id => id === "answer")).toHaveLength(1);
+    expect(a.model.items.get("answer")!.completedSeq!).toBeGreaterThan(a.model.items.get("answer")!.seq);
     expect(a.model.cards.get("offline-approval")?.note).toContain("处理者未知");
     await a.controller.key("1"); await a.controller.key("\r", { name: "return" }); await until(() => answered);
     expect(engine.spawnCount).toBe(1);
