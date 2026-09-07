@@ -44,6 +44,7 @@ export class Sessions {
           cursor = page.nextCursor ?? undefined;
         } while (cursor);
         this.model.picker = { entries: sortThreads(entries), index: 0 };
+        this.model.message = `已加载 ${entries.length} 个会话`;
       } else if (command === "/resume") await this.attach(argument);
       else {
         const current = this.model.thread;

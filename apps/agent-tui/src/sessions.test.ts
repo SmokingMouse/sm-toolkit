@@ -104,6 +104,14 @@ test("P2-6: Esc during picker attach is explicitly rejected and does not pretend
   pending.release(); await operation;
   expect(model.thread?.id).toBe("new"); expect(model.picker).toBeUndefined();
 });
+test("P2-a: threads completion replaces in-flight text with one completion and discard notice", async () => {
+  const { model, controller, client } = setup(), pending = gate(), original = client.request.bind(client);
+  client.request = async (method, params) => { if (method === "thread/list") await pending.promise; return original(method, params); };
+  const operation = controller.sessions.run("/threads");
+  await controller.key("x"); pending.release(); await operation;
+  expect(model.message).toBe("已加载 2 个会话 · 操作期间的按键已丢弃，请重新输入");
+  expect(model.message).not.toContain("进行中");
+});
 test("P2-5: an empty daemon list gives Enter feedback and Esc dismisses it", async () => {
   const { model, controller, client, calls } = setup(), original = client.request.bind(client);
   client.request = async (method, params) => {
