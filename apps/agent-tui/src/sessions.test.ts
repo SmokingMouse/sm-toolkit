@@ -26,6 +26,15 @@ test("selector sorts recent activity first with stable id tie break without muta
   expect(sortThreads(entries).map(e => e.thread.id)).toEqual(["c", "a", "b"]);
   expect(entries.map(e => e.thread.id)).toEqual(["b", "a", "c"]);
 });
+test("thread picker shows forkedFrom parent and item short ids, including an empty origin", () => {
+  const { model } = setup();
+  for (const itemId of ["item-123456789012345", null]) {
+    model.picker = { index: 0, entries: [{ thread: { ...thread("branch"), forkedFrom: { threadId: "parent-123456789012345", itemId } }, title: "branch", updatedAtMs: 1 }] };
+    const screen = render(model, 160, 20);
+    expect(screen).toContain(`forkedFrom parent-1234 / ${itemId ? "item-123456" : "空起点"}`);
+    expect(screen).not.toContain("parent-123456789012345");
+  }
+});
 test("integration: switching threads isolates launch eligibility and lease display while preserving drafts", async () => {
   const { model, controller } = setup();
   model.launchPermission = "bypassPermissions"; model.leaseExpiresAt = Date.now() + 30000;

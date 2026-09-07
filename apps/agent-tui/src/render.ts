@@ -118,7 +118,7 @@ function frameLayout(model: TuiModel, columns: number, rows: number) {
 }
 function pickerLines(model: TuiModel, width: number): string[][] {
   if (model.forkPicker) return model.forkPicker.entries.map((e, i) => wrap(`${i === model.forkPicker!.index ? ">" : " "} ${e.seq === undefined ? "" : `#${e.seq} ${shortId(e.itemId!)} | `}${e.type} | ${e.summary}`, width));
-  return model.picker?.entries.map((e, i) => wrap(`${i === model.picker!.index ? ">" : " "} ${shortId(e.thread.id)} | ${e.title} | ${e.thread.status.type} | ${e.thread.cwd} | ${new Date(e.updatedAtMs).toISOString()}`, width)) ?? [];
+  return model.picker?.entries.map((e, i) => wrap(`${i === model.picker!.index ? ">" : " "} ${shortId(e.thread.id)} | ${e.title} | ${e.thread.status.type}${e.thread.forkedFrom ? ` | forkedFrom ${shortId(e.thread.forkedFrom.threadId)} / ${e.thread.forkedFrom.itemId ? shortId(e.thread.forkedFrom.itemId) : "空起点"}` : ""} | ${e.thread.cwd} | ${new Date(e.updatedAtMs).toISOString()}`, width)) ?? [];
 }
 /** Pure measurement, applied by the controller on input/model/terminal-size changes. */
 export function pickerOffset(model: TuiModel, columns: number, rows: number): number {
