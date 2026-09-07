@@ -118,7 +118,7 @@ export class CodexEngine implements EngineSession {
     }
   }
   async attach(): Promise<void> { this.assertReady(); }
-  validateTurn(options: StartTurnParams): void { turnOverrides(options); }
+  validateTurn(options: StartTurnParams): void { turnOverrides(options); codexUserInput(options.input); }
   async sendTurn(turnId: string, input: UserInput[], options: StartTurnParams): Promise<void> {
     this.assertReady(); this.validateTurn(options);
     if (this.active) throw new ProtocolError(ErrorCode.turn_not_active, "Codex already has an active turn");

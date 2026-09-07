@@ -44,6 +44,7 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
 
 export function claudeUserMessage(input: UserInput[]): Record<string, unknown> {
   const content = input.map(part => {
+    if (part.type === "bash") throw new ProtocolError(ErrorCode.invalid_params, "bash must be a standalone turn input");
     if (part.type === "text") return part;
     if (part.type === "image") return { type: "image", source: { type: "base64", media_type: part.mime, data: readFileSync(part.path).toString("base64") } };
     // File references are local paths, as required by AS v1; CLI file tools read them.
@@ -78,6 +79,7 @@ export class ClaudeEngine implements EngineSession {
   private sawTextDelta = false;
   private sawThinkingDelta = false;
   private partials = new Map<string, { text: boolean; thinking: boolean }>();
+  private bash?: { itemId: string };
   constructor(private readonly config: ClaudeEngineOptions = {}) {}
   async spawn(options: SessionOptions): Promise<void> {
     this.options = options; this.mapper = new ClaudeEventMapper(options.cwd);
@@ -132,6 +134,7 @@ export class ClaudeEngine implements EngineSession {
   }
   private assertAlive(): void { if (!this.process || this.dead || this.closed) throw new ProtocolError(ErrorCode.engine_unavailable, "Claude session is not alive"); }
   validateTurn(options: StartTurnParams): void {
+    if (options.input.some(p => p.type === "bash") && (options.input.length !== 1 || options.input[0].type !== "bash")) throw new ProtocolError(ErrorCode.invalid_params, "bash must be a standalone turn input");
     if ((options.cwd !== undefined && options.cwd !== this.options?.cwd) || options.sandbox !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing cwd or sandbox on a live Claude session is not supported");
     if (options.effort !== undefined && options.effort !== this.options?.effort) throw new ProtocolError(ErrorCode.unsupported_capability, "Use thread/effort/set with maxThinkingTokens for live Claude thinking budget; effort labels are launch-only");
     if (options.model && options.model !== this.options?.model && resolveClaudeModel(options.model).env) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing endpoint requires a new Claude session");
@@ -139,16 +142,23 @@ export class ClaudeEngine implements EngineSession {
   async sendTurn(turnId: string, input: UserInput[], options: StartTurnParams): Promise<void> {
     this.assertAlive(); this.validateTurn(options);
     if (this.active) throw new ProtocolError(ErrorCode.turn_not_active, "Claude already has an active turn");
-    const message = claudeUserMessage(input);
+    const bash = input.length === 1 && input[0].type === "bash" ? input[0] : undefined;
+    // Local 2.1.258 print.ts: if(d.type==="bash_command") invokes
+    // runHeadlessBashCommand({command:d.command,cwd:d.cwd,...}), then emits user
+    // isReplay frames containing bash-input followed by bash-stdout/stderr/exit-code.
+    // It does NOT emit result. uuid is a native UUID (not an AS turn id).
+    const message = bash ? { type: "bash_command", command: bash.command, cwd: this.options?.cwd ?? process.cwd(), uuid: crypto.randomUUID() } : claudeUserMessage(input);
     if (options.permission && claudePermission(options.permission) !== claudePermission(this.options?.permission)) await this.setPermission(options.permission);
     const model = options.model ?? this.options?.model;
     if (model) await this.control({ subtype: "set_model", model: resolveClaudeModel(model).model });
     this.active = turnId; this.interrupting = false; this.context = null; this.sawTextDelta = false; this.sawThinkingDelta = false; this.mapper.beginTurn(turnId);
     this.partials.clear(); this.taskParents.clear();
+    if (bash) { this.bash = { itemId: `bash_${crypto.randomUUID()}` }; this.emit({ type: EventType.ToolCall, data: { id: this.bash.itemId, name: "Bash", input: { command: bash.command } }, backend: "claude", sessionId: this.engineThreadId }); }
     this.write(message);
   }
   async steer(turnId: string, input: UserInput[]): Promise<void> {
     this.assertAlive(); if (this.active !== turnId || this.interrupting) throw new ProtocolError(ErrorCode.turn_not_active, "turn changed before steer");
+    if (this.bash || input.some(p => p.type === "bash")) throw new ProtocolError(ErrorCode.invalid_params, "bash is only supported as a standalone turn/start");
     this.write(claudeUserMessage(input));
   }
   async interrupt(turnId: string): Promise<void> {
@@ -292,6 +302,20 @@ export class ClaudeEngine implements EngineSession {
       return;
     }
     if (t === "user") {
+      if (this.bash && this.active && !obj.parent_tool_use_id && obj.isReplay === true && typeof obj.message?.content === "string") {
+        const content = obj.message.content as string;
+        const field = (tag: string) => content.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`))?.[1];
+        const decode = (text: string) => text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#(?:39|x27);/g, "'").replace(/&amp;/g, "&");
+        const code = field("bash-exit-code"), stderr = field("bash-stderr");
+        if (code !== undefined || stderr?.startsWith("Command failed:")) {
+          const exitCode = code !== undefined && /^-?\d+$/.test(code) ? Number(code) : 1;
+          emit(EventType.ToolCallDone, { id: this.bash.itemId, output: decode(field("bash-stdout") ?? ""), stderr: decode(stderr ?? ""), exitCode, isError: exitCode !== 0 });
+          this.bash = undefined; this.active = null;
+          for (const event of this.mapper.finish(this.interrupting ? "interrupted" : "completed")) this.events.push(event);
+        }
+        return;
+      }
+      if (typeof obj.message?.content === "string") return; // Native replay text, not tool_result blocks.
       if (!this.active) {
         if ((obj.message?.content ?? []).some((block: Record<string, unknown>) => block.type === "tool_result")) {
           this.events.push({ type: "error", error: new ProtocolError(ErrorCode.engine_protocol_error, "tool result without active turn").toJSON(), willRetry: false });

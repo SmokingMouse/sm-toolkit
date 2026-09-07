@@ -348,6 +348,24 @@
                               "properties": {
                                 "type": {
                                   "type": "string",
+                                  "const": "bash"
+                                },
+                                "command": {
+                                  "type": "string",
+                                  "minLength": 1
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "command"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
                                   "const": "text"
                                 },
                                 "text": {
@@ -3226,6 +3244,24 @@
                         "properties": {
                           "type": {
                             "type": "string",
+                            "const": "bash"
+                          },
+                          "command": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "command"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
                             "const": "text"
                           },
                           "text": {
@@ -5974,6 +6010,24 @@
                 "properties": {
                   "type": {
                     "type": "string",
+                    "const": "bash"
+                  },
+                  "command": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
                     "const": "text"
                   },
                   "text": {
@@ -7165,6 +7219,24 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "bash"
+            },
+            "command": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "command"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "text"
             },
             "text": {
@@ -7264,6 +7336,9 @@
           "type": "object",
           "properties": {
             "engineEvents": {
+              "type": "boolean"
+            },
+            "bashInput": {
               "type": "boolean"
             },
             "serverRequests": {
@@ -9342,6 +9417,24 @@
                               "properties": {
                                 "type": {
                                   "type": "string",
+                                  "const": "bash"
+                                },
+                                "command": {
+                                  "type": "string",
+                                  "minLength": 1
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "command"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
                                   "const": "text"
                                 },
                                 "text": {
@@ -11268,6 +11361,24 @@
                         "type": "array",
                         "items": {
                           "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "const": "bash"
+                                },
+                                "command": {
+                                  "type": "string",
+                                  "minLength": 1
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "command"
+                              ],
+                              "additionalProperties": false
+                            },
                             {
                               "type": "object",
                               "properties": {
@@ -13896,6 +14007,24 @@
                 "properties": {
                   "type": {
                     "type": "string",
+                    "const": "bash"
+                  },
+                  "command": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
                     "const": "text"
                   },
                   "text": {
@@ -14358,6 +14487,24 @@
           "type": "array",
           "items": {
             "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "bash"
+                  },
+                  "command": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "additionalProperties": false
+              },
               {
                 "type": "object",
                 "properties": {
@@ -17081,6 +17228,24 @@
                             "properties": {
                               "type": {
                                 "type": "string",
+                                "const": "bash"
+                              },
+                              "command": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "command"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
                                 "const": "text"
                               },
                               "text": {
@@ -18457,6 +18622,24 @@
                       "type": "array",
                       "items": {
                         "oneOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string",
+                                "const": "bash"
+                              },
+                              "command": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "command"
+                            ],
+                            "additionalProperties": false
+                          },
                           {
                             "type": "object",
                             "properties": {

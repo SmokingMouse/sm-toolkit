@@ -97,7 +97,7 @@ export class AgentClient {
       this.initialized = await this.call("initialize", {
         protocolVersion: this.options.protocolVersion ?? "as/1", token: this.options.token,
         client: this.options.client ?? { name: "agent-client", version: "0.1.0", kind: "library", label: "agent-client" },
-        capabilities: { engineEvents: true, ...this.options.capabilities },
+        capabilities: { engineEvents: true, bashInput: true, ...this.options.capabilities },
       });
       this.send({ jsonrpc: "2.0", method: "initialized", params: {} });
       for (const threadId of [...this.cursors.keys()]) {

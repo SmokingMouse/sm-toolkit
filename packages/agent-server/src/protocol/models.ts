@@ -9,6 +9,7 @@ export const AbsolutePathSchema = z.string().regex(/^(?:\/|[A-Za-z]:[\\/])/, "ab
 export const BackendSchema = z.enum(["claude", "codex", "external"]);
 export const PermissionSchema = z.enum(["readonly", "auto-edit", "full", "default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"]);
 export const UserInputSchema = z.discriminatedUnion("type", [
+  z.strictObject({ type: z.literal("bash"), command: z.string().min(1) }),
   z.object({ type: z.literal("text"), text: z.string() }),
   z.object({ type: z.literal("image"), path: AbsolutePathSchema, mime: z.string().min(1) }),
   z.object({ type: z.literal("file"), path: AbsolutePathSchema, mime: z.string().optional(), name: z.string().optional() }),

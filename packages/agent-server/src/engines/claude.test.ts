@@ -104,13 +104,48 @@ function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => voi
         if (onControl && frame.request.subtype !== "initialize") onControl(send, frame);
         else send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id, response: {} } });
       }
-      else if (frame.type === "user") onUser(send, frame);
+      else if (frame.type === "user" || frame.type === "bash_command") onUser(send, frame);
     }); callback();
   } });
   Object.assign(child, { stdout, stderr, stdin, exitCode: null, signalCode: null, kill: () => { if (child.exitCode === null) { Object.assign(child, { exitCode: 0 }); queueMicrotask(() => { stdout.end(); stderr.end(); child.emit("close", 0); }); } return true; } });
   return { child, written, send };
 }
 describe("Claude native frame exchange (fake child only)", () => {
+  test("foundation bash: native replay completes standalone turns, decodes output and leaves next turn usable", async () => {
+    const fake = fakeProcess((send, frame) => {
+      if (frame.type === "bash_command") {
+        send({ type: "user", isReplay: true, message: { role: "user", content: `<bash-input>${frame.command}</bash-input>` } });
+        send({ type: "user", isReplay: true, message: { role: "user", content: "<bash-stdout>&lt;ok&gt;&amp;</bash-stdout><bash-stderr>oops</bash-stderr><bash-exit-code>2</bash-exit-code>" } });
+      } else send({ type: "result", result: "done", usage: {} });
+    }), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th", cwd: "/tmp" });
+      const bash = [{ type: "bash" as const, command: "printf test" }];
+      expect(() => engine.validateTurn({ threadId: "th", input: [...bash, ...input("mixed")] })).toThrow("standalone");
+      await engine.sendTurn("tn1", bash, { threadId: "th", input: bash });
+      await until(() => events.some(e => e.type === "turnCompleted"));
+      expect(fake.written.at(-1)).toEqual({ type: "bash_command", command: "printf test", cwd: "/tmp", uuid: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+      expect(events.find(e => e.type === "itemCompleted")).toMatchObject({ item: { type: "commandExecution", status: "failed", payload: { aggregatedOutput: "<ok>&\noops", exitCode: 2 } } });
+      await engine.sendTurn("tn2", input("next"), { threadId: "th", input: input("next") });
+      await until(() => events.filter(e => e.type === "turnCompleted").length === 2);
+      expect(events.some(e => e.type === "exit")).toBe(false);
+    } finally { await engine.close("test"); await consuming; }
+  });
+  test("foundation bash: steer is rejected and interrupt waits for bash replay completion", async () => {
+    const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th" });
+      const bash = [{ type: "bash" as const, command: "sleep 5" }];
+      await engine.sendTurn("tn", bash, { threadId: "th", input: bash });
+      await expect(engine.steer("tn", input("no"))).rejects.toMatchObject({ code: -32602 });
+      await engine.interrupt("tn"); expect(events.some(e => e.type === "turnCompleted")).toBe(false);
+      fake.send({ type: "user", isReplay: true, message: { role: "user", content: "<bash-stderr>Command failed: aborted</bash-stderr>" } });
+      await until(() => events.some(e => e.type === "turnCompleted"));
+      expect(events.at(-1)).toMatchObject({ type: "turnCompleted", status: "interrupted" });
+    } finally { await engine.close("test"); await consuming; }
+  });
   test("foundation subagent text: interleaved parents, partial fallback and late task metadata share one item", async () => {
     const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
     const consuming = (async () => { for await (const e of engine.events) events.push(e); })();

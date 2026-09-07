@@ -45,6 +45,7 @@ class Connection implements InProcessClient, ApprovalClient {
   readonly delivered = new Set<string>();
   readonly optOut = new Set<string>();
   engineEvents = false;
+  bashInput = false;
   label = "in-process";
   initialized = false;
   initializing = false;
@@ -66,7 +67,14 @@ class Connection implements InProcessClient, ApprovalClient {
   }
   emit(raw: unknown): void {
     if (this.closed) return;
-    const frame = FrameSchema.parse(JSON.parse(JSON.stringify(raw)));
+    const frame = FrameSchema.parse(JSON.parse(JSON.stringify(raw), this.bashInput ? undefined : (_key, value) => {
+      // Old AS clients do not know the additive bash UserInput variant. Only
+      // project userMessage items, including snapshots; opaque engine payloads stay intact.
+      if (value?.type === "userMessage" && Array.isArray(value.payload?.content)) {
+        value.payload.content = value.payload.content.map((part: { type: string; command?: string }) => part.type === "bash" ? { type: "text", text: `!${part.command}` } : part);
+      }
+      return value;
+    }));
     if ("id" in frame && ("result" in frame || "error" in frame)) {
       const call = frame.id === null ? undefined : this.calls.get(frame.id);
       if (call) {
@@ -210,6 +218,7 @@ export class AgentServer {
         }
         connection.initializing = true; connection.label = p.client.label;
         connection.engineEvents = p.capabilities?.engineEvents === true;
+        connection.bashInput = p.capabilities?.bashInput === true;
         for (const capability of p.capabilities?.serverRequests ?? []) connection.serverRequests.add(capability);
         for (const notification of p.capabilities?.notifications?.optOut ?? []) connection.optOut.add(notification);
         return { protocolVersion: "as/1", server: { name: "agent-server", version: "0.1.0" }, clientId: connection.clientId, capabilities: { backends: this.backends, steer: true, fork: this.backends.includes("claude"), leases: true, externalProviders: false, maxQueuedTurns: this.threads.maxQueuedTurns, engine: { engineEvents: true } } };
