@@ -26,7 +26,18 @@ export class Controller {
         return;
       }
       this.interruptedAt = -Infinity;
-      if (this.sessions.busy) { this.sessions.rejectInput(); return; }
+      if (this.sessions.busy) {
+        const card = this.model.activeCard;
+        if (this.sessions.scanning && card) {
+          if (key.name === "pageup" || key.name === "pagedown") {
+            this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? -10 : 10)); return;
+          }
+          if (card.request.method === "item/tool/requestUserInput" || key.name === "escape" || (!key.ctrl && !key.meta && ["y", "s", "n", "a"].includes(text?.toLowerCase() ?? ""))) {
+            await this.cardKey(card, text, key); return;
+          }
+        }
+        this.sessions.rejectInput(); return;
+      }
       if (this.model.resumeConfirmation) {
         const threadId = this.model.resumeConfirmation;
         if (!key.ctrl && !key.meta && text?.toLowerCase() === "y") {

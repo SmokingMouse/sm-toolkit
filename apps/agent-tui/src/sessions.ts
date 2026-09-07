@@ -9,6 +9,7 @@ export function sortThreads(entries: ThreadEntry[]): ThreadEntry[] {
 }
 export class Sessions {
   busy = false;
+  get scanning(): boolean { return this.busy && this.model.sessionOperation === "/threads"; }
   rejectInput(): void {
     this.model.discardNote = "操作期间的按键已丢弃，请重新输入";
     this.model.changed();
@@ -20,7 +21,7 @@ export class Sessions {
     this.busy = true;
     this.model.discardNote = "";
     this.model.message = `正在执行 ${command}…`;
-    this.model.sessionOperation = command;
+    this.model.sessionOperation = command === "/resume" && !argument ? "/threads" : command;
     this.model.changed();
     try {
       if (command === "/threads" || (command === "/resume" && !argument)) {

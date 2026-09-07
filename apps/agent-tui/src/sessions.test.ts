@@ -216,6 +216,35 @@ test("P2-d: failed resume detaches the hidden target but preserves the visible s
     expect(controller.sessions.busy).toBe(false);
   }
 });
+test("P2-f: approval decisions remain usable while thread listing is delayed", async () => {
+  for (const [text, name, expected] of [["y", "y", "accept"], ["s", "s", "acceptForSession"], ["n", "n", "reject"], ["a", "a", "abort"], [undefined, "escape", "reject"]]) {
+    const { client, model, controller, calls } = setup(), pending = gate(), original = client.request.bind(client);
+    client.request = async (method, params) => { if (method === "thread/list") await pending.promise; return original(method, params); };
+    const request = { method: "item/commandExecution/requestApproval" as const, params: { threadId: "old", turnId: "turn", itemId: "item", requestId: "approval", startedAtMs: 0, command: "pwd", cwd: "/tmp" } };
+    let decision: unknown;
+    Object.defineProperty(client, "pendingRequests", { value: new Map([["approval", { ...request, respond: (value: unknown) => { decision = value; } }]]) });
+    model.request(request); model.input = "existing draft";
+    const operation = controller.sessions.run("/threads");
+    expect(render(model, 120, 20)).toContain("审批/问题卡可操作");
+    await controller.key(text, { name });
+    expect(decision).toEqual({ decision: expected }); expect(model.discardNote).toBe(""); expect(model.input).toBe("existing draft");
+    expect(calls.some(c => c[0] === "turn/start")).toBe(false);
+    pending.release(); await operation;
+  }
+});
+test("P2-f: user question drafts and Enter work during the no-argument resume scan", async () => {
+  const { client, model, controller } = setup(), pending = gate(), original = client.request.bind(client);
+  client.request = async (method, params) => { if (method === "thread/list") await pending.promise; return original(method, params); };
+  const request = { method: "item/tool/requestUserInput" as const, params: { threadId: "old", turnId: "turn", itemId: "item", requestId: "question", startedAtMs: 0, isBlocking: true, questions: [{ id: "q", question: "Continue?" }] } };
+  let answer: unknown;
+  Object.defineProperty(client, "pendingRequests", { value: new Map([["question", { ...request, respond: (value: unknown) => { answer = value; } }]]) });
+  model.request(request);
+  const operation = controller.sessions.run("/resume");
+  await controller.key("yes"); await controller.key(undefined, { name: "return" });
+  expect(answer).toEqual({ answers: { q: { answers: ["yes"] } } });
+  expect(model.input).toBe(""); expect(model.discardNote).toBe("");
+  pending.release(); await operation;
+});
 test("P2-1/P2-4: actual protocol strips private engine options; status does not invent permission", () => {
   const options = { permission: "readonly", effort: "high", sandbox: "restricted", systemPrompt: "private", tools: ["Read"] };
   const parsed = ThreadSchema.parse({ ...thread("old"), ...options });
