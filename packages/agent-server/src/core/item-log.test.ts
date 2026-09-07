@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { chmodSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ItemLog } from "./item-log.js";
@@ -15,6 +15,21 @@ export function seed(log: ItemLog, id = "th"): void {
 }
 const create = () => { const log = new ItemLog(); logs.push(log); seed(log); return log; };
 describe("ItemLog", () => {
+  test("review #6: database and WAL/SHM are private even with a permissive umask", () => {
+    const dir = mkdtempSync(join(tmpdir(), "as-mode-")), path = join(dir, "private", "db");
+    const oldMask = process.umask(0);
+    let log: ItemLog | undefined;
+    try {
+      log = new ItemLog(path); seed(log);
+      expect(statSync(join(dir, "private")).mode & 0o777).toBe(0o700);
+      for (const file of [path, `${path}-wal`, `${path}-shm`]) expect(statSync(file).mode & 0o777).toBe(0o600);
+      // Reopening an old database also tightens pre-existing sidecar permissions.
+      for (const file of [path, `${path}-wal`, `${path}-shm`]) chmodSync(file, 0o644);
+      const second = new ItemLog(path);
+      try { for (const file of [path, `${path}-wal`, `${path}-shm`]) expect(statSync(file).mode & 0o777).toBe(0o600); }
+      finally { second.close(); }
+    } finally { log?.close(); process.umask(oldMask); }
+  });
   test("seq is monotonic per thread and survives reopen", () => {
     const path = join(mkdtempSync(join(tmpdir(), "as-log-")), "test.db");
     const log = new ItemLog(path); seed(log); seed(log, "other");

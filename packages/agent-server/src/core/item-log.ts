@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { dirname } from "node:path";
 import { ErrorCode, ItemSchema, ProtocolError, type AttachResult, type Item, type MethodParams, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Turn } from "../protocol/index.js";
 import type { DeltaKind, EngineItem } from "../engines/session.js";
@@ -21,7 +21,12 @@ export class ItemLog {
   private broadcasts: ServerNotification[] = [];
   private broadcasting = false;
   constructor(path = ":memory:") {
-    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+    if (path !== ":memory:") {
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      // Secure the database before SQLite creates WAL/SHM with its file mode.
+      closeSync(openSync(path, "a", 0o600));
+      for (const file of [path, `${path}-wal`, `${path}-shm`]) if (existsSync(file)) chmodSync(file, 0o600);
+    }
     this.db = new Database(path, { create: true, strict: true });
     this.db.exec(`PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;
       CREATE TABLE IF NOT EXISTS threads (
