@@ -9,6 +9,8 @@ export interface UnixTransport { readonly path: string; close(): void }
 export function listenUnix(manager: ConnectionManager, options: { path: string }): UnixTransport {
   const { path } = options;
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  try { lstatSync(path); throw new Error(`socket path already exists: ${path}`); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const sockets = new Set<Bun.Socket<SocketData>>();
   const disconnect = (socket: Bun.Socket<SocketData>) => {
     sockets.delete(socket); socket.data?.writer.dispose(); socket.data?.connection.close(); socket.end();

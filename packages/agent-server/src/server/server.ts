@@ -119,6 +119,7 @@ export class AgentServer {
   private connections = new Set<Connection>();
   private startedAt = Date.now();
   private closed = false;
+  private closing?: Promise<void>;
   private readonly allowedRoots: string[];
   private readonly backends: NonNullable<ServerOptions["backends"]>;
   constructor(private readonly options: ServerOptions = {}) {
@@ -245,12 +246,21 @@ export class AgentServer {
       case "server/config/read": return { allowed_roots: this.allowedRoots, maxQueuedTurns: this.threads.maxQueuedTurns, orphanTimeoutMs: this.approvals.orphanTimeoutMs, idleTimeoutMs: this.threads.idleTimeoutMs };
     }
   }
-  async close(reason = "server_shutdown"): Promise<void> {
-    if (this.closed) return; this.closed = true;
-    for (const connection of this.connections) if (connection.initialized) connection.emit({ jsonrpc: "2.0", method: "server/shuttingDown", params: { reason, graceMs: 0 } });
-    await this.threads.shutdown(); this.approvals.close();
-    for (const connection of [...this.connections]) connection.close();
-    this.log.close();
+  close(reason = "server_shutdown", graceMs = 0): Promise<void> {
+    if (this.closing) return this.closing;
+    if (!Number.isFinite(graceMs) || graceMs < 0) return Promise.reject(new Error("graceMs must be nonnegative"));
+    this.closed = true;
+    for (const connection of this.connections) if (connection.initialized) connection.emit({ jsonrpc: "2.0", method: "server/shuttingDown", params: { reason, graceMs } });
+    this.closing = (async () => {
+      if (graceMs) await new Promise(resolve => setTimeout(resolve, graceMs));
+      try { await this.threads.shutdown(); }
+      finally {
+        this.approvals.close();
+        for (const connection of [...this.connections]) connection.close();
+        this.log.close();
+      }
+    })();
+    return this.closing;
   }
 }
 export { AgentServer as Server };
