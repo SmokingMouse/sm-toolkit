@@ -245,6 +245,15 @@ test("P0-1: Ctrl-C interrupts under another client's lease before the second pre
   await a.controller.key("\x03", { ctrl: true, name: "c" }); expect(a.exited).toBe(true);
 });
 
+test("P2-4: first attach marks the live-only log gap even when no events were replayed", async () => {
+  const { a, b, engine, thread } = await setup();
+  await b.client.request("thread/detach", { threadId: thread.id });
+  engine.emit({ type: "engineEvent", backend: "claude", subtype: "memory", payload: { message: "before attach" } });
+  await until(() => a.model.logs.length === 1);
+  await b.client.request("thread/attach", { threadId: thread.id });
+  expect(b.model.logs.length).toBe(0); expect(render(b.model)).toContain("仅显示接入后事件");
+});
+
 test("P2-1: asynchronous already_resolved response withdraws the matching approval card", async () => {
   const { a, engine, thread, peers } = await setup();
   a.model.input = "work"; await a.controller.submit(); const turnId = engine.sent[0].turnId;

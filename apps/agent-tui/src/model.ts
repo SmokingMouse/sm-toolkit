@@ -19,6 +19,7 @@ export class TuiModel {
   logExpanded = false;
   logScroll = 0;
   logsMayBeMissing = false;
+  logsStartAtAttach = false;
   tasksVisible = false;
   taskScroll = 0;
   panelFocus: "history" | "log" | "tasks" = "history";
@@ -50,6 +51,7 @@ export class TuiModel {
   }
   snapshot(s: AttachResult): void {
     if (this.thread && this.thread.id !== s.thread.id) return;
+    this.logsStartAtAttach = true;
     this.thread = s.thread; this.queue = s.queue;
     for (const item of s.items) this.items.set(item.id, structuredClone(item));
     const ids = new Set(s.pendingRequests.map(r => r.params.requestId));
