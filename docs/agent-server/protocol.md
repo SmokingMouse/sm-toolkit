@@ -80,7 +80,7 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 | 方法 | params | result | 说明 |
 |---|---|---|---|
 | `initialize` | 见 §1 | 见 §1 | 握手 |
-| `thread/start` | `{backend, cwd?, model?, permission?, sandbox?, systemPrompt?, tools?, env?, meta?, clientThreadId?}` | `{thread: Thread}` | 新建 thread 并 spawn 引擎 |
+| `thread/start` | `{backend, cwd?, model?, permission?, sandbox?, systemPrompt?, tools?, meta?, clientThreadId?}` | `{thread: Thread}` | 新建 thread 并 spawn 引擎 |
 | `thread/resume` | `{threadId?, engineThreadId?, backend?, cwd?, …同 start 的覆盖字段}` | `{thread: Thread, attached: boolean}` | **命中活进程即 attach**（`attached:true`，不 spawn）；否则按 `engineThreadId` 重启引擎并续接 |
 | `thread/attach` | `{threadId, sinceSeq?, limit?}` | `{thread, items: Item[], nextSeq, queue: QueuedTurn[], pendingRequests: PendingServerRequest[]}` | 拿快照并开始收该 thread 的通知 |
 | `thread/detach` | `{threadId}` | `{}` | 只退订，不影响 thread |
@@ -92,6 +92,10 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 | `thread/interrupt` | `{threadId}` | `{interruptedTurnId \| null}` | `turn/interrupt` 的 thread 级糖 |
 | `thread/lease/acquire` | `{threadId, ttlMs?}` | `{lease: Lease}` | 可选：独占输入权 |
 | `thread/lease/release` | `{threadId}` | `{}` | 释放 |
+
+`thread/start` / `thread/resume` 不接受 `env`（未知字段返回 `-32602`）。
+引擎启动环境只来自 daemon 的进程环境与服务端模型路由配置；客户端不能覆盖 PATH、凭证或加载器变量。
+client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
 
 ### 3.2 turn 族
 

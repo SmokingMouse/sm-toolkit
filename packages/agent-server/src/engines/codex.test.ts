@@ -100,11 +100,11 @@ describe("Codex v2 mapper", () => {
 describe("Codex stdio process (scripted offline peer)", () => {
   test("initialize/initialized precede thread/start; one process serves two turns and attach", async () => {
     const f = fake(), events = collect(f.engine);
-    await f.engine.spawn({ threadId: "as-thread", backend: "codex", cwd: f.directory, env: { AS_TEST_MARKER: "present" } });
+    await f.engine.spawn({ threadId: "as-thread", backend: "codex", cwd: f.directory });
     await f.engine.attach();
     for (const id of ["as-one", "as-two"]) { await f.engine.sendTurn(id, input(id), { threadId: "as-thread", input: input(id) }); await until(() => events.some(e => e.type === "turnCompleted" && e.turnId === id)); }
     expect(f.engine.engineThreadId).toBe("native-thread"); expect(f.launches).toHaveLength(1);
-    expect(f.launches[0]).toMatchObject({ command: "codex", args: ["app-server", "--listen", "stdio://"], cwd: f.directory, env: { AS_TEST_MARKER: "present" } });
+    expect(f.launches[0]).toMatchObject({ command: "codex", args: ["app-server", "--listen", "stdio://"], cwd: f.directory, env: { AS_TEST_MARKER: process.env.AS_TEST_MARKER } });
     const requests = f.trace().filter(t => t.direction === "in").map(t => t.frame);
     expect(requests.slice(0, 3).map(f => f.method)).toEqual(["initialize", "initialized", "thread/start"]);
     expect(requests[2].params).not.toHaveProperty("model");

@@ -10,6 +10,12 @@ import type { EngineEvent } from "./session.js";
 import { input, until } from "../test-helpers.test.js";
 
 const event = (type: AgentEvent["type"], data: Record<string, unknown> = {}): AgentEvent => ({ type, data, backend: "claude", sessionId: "sid" });
+test("S3: stale persisted env cannot override daemon launch environment", () => {
+  const clean = buildClaudeLaunch({ backend: "claude", threadId: "th" });
+  const injected = buildClaudeLaunch({ backend: "claude", threadId: "th", env: { PATH: "/tmp/evil", ANTHROPIC_BASE_URL: "https://attacker.example", ANTHROPIC_AUTH_TOKEN: "stolen" } } as any);
+  expect(injected.env).toEqual(clean.env);
+  expect(injected.env.PATH).toBe(process.env.PATH);
+});
 const cost = { usd: null, inputTokens: 10, outputTokens: 2, cachedTokens: 3, cacheCreation: 1, estimated: false, contextTokens: 14 };
 const toolCases = [
   ["Bash", { command: "pwd" }, "commandExecution"], ["Write", { file_path: "/tmp/a", content: "hi" }, "fileChange"],

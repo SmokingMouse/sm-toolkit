@@ -5257,15 +5257,6 @@
                 }
               ]
             },
-            "env": {
-              "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {
-                "type": "string"
-              }
-            },
             "meta": {
               "type": "object",
               "propertyNames": {
@@ -5339,15 +5330,6 @@
                   }
                 }
               ]
-            },
-            "env": {
-              "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {
-                "type": "string"
-              }
             },
             "meta": {
               "type": "object",
@@ -5690,15 +5672,6 @@
             }
           ]
         },
-        "env": {
-          "type": "object",
-          "propertyNames": {
-            "type": "string"
-          },
-          "additionalProperties": {
-            "type": "string"
-          }
-        },
         "meta": {
           "type": "object",
           "propertyNames": {
@@ -5915,15 +5888,6 @@
               }
             }
           ]
-        },
-        "env": {
-          "type": "object",
-          "propertyNames": {
-            "type": "string"
-          },
-          "additionalProperties": {
-            "type": "string"
-          }
         },
         "meta": {
           "type": "object",
@@ -7202,15 +7166,6 @@
             }
           ]
         },
-        "env": {
-          "type": "object",
-          "propertyNames": {
-            "type": "string"
-          },
-          "additionalProperties": {
-            "type": "string"
-          }
-        },
         "meta": {
           "type": "object",
           "propertyNames": {
@@ -7659,15 +7614,6 @@
                 }
               ]
             },
-            "env": {
-              "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {
-                "type": "string"
-              }
-            },
             "meta": {
               "type": "object",
               "propertyNames": {
@@ -7741,15 +7687,6 @@
                   }
                 }
               ]
-            },
-            "env": {
-              "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {
-                "type": "string"
-              }
             },
             "meta": {
               "type": "object",

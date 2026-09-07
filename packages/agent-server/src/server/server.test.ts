@@ -6,6 +6,19 @@ const servers: AgentServer[] = [];
 afterEach(async () => { for (const s of servers.splice(0)) await s.close(); });
 const create = (options = {}) => { const fixture = setup(options); servers.push(fixture.server); return fixture; };
 describe("in-process JSON-RPC server", () => {
+  test("S3: clients cannot override PATH or ANTHROPIC_* on start or resume", async () => {
+    const { server, engines } = create({ allowedRoots: [process.cwd()] });
+    const c = await client(server);
+    for (const backend of ["claude", "codex"] as const) {
+      const { thread } = await c.request("thread/start", { backend, cwd: process.cwd() });
+      for (const key of ["PATH", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "NODE_OPTIONS", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD"]) {
+        await expect(c.request("thread/start", { backend, env: { [key]: "attacker" } } as any)).rejects.toMatchObject({ code: -32602 });
+        await expect(c.request("thread/resume", { threadId: thread.id, env: { [key]: "attacker" } } as any)).rejects.toMatchObject({ code: -32602 });
+      }
+    }
+    expect(engines).toHaveLength(2);
+    expect(engines.every(e => !("env" in e.options!))).toBe(true);
+  });
   test("two-step handshake, unknown methods and malformed frames", async () => {
     const { server } = create(); const c = server.connectInProcess(); const frames = capture(c);
     await expect(c.request("thread/list", {})).rejects.toMatchObject({ code: -32002 });

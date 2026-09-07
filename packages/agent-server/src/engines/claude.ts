@@ -23,7 +23,7 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   delete env.CLAUDECODE;
   // The shared resolver owns endpoint routing; ambient proxy settings cannot override it.
   for (const key of ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"]) delete env[key];
-  return { args, env: { ...env, ...resolved.env, ...options.env } };
+  return { args, env: { ...env, ...resolved.env } };
 }
 
 export function claudeUserMessage(input: UserInput[]): Record<string, unknown> {

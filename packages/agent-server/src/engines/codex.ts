@@ -81,7 +81,7 @@ export class CodexEngine implements EngineSession {
     const params = buildCodexThreadParams(options);
     this.options = options; this.mapper = new CodexEventMapper(Boolean(options.engineThreadId));
     try {
-      this.process = (this.config.spawnProcess ?? ((command, args, opts) => spawn(command, args, { ...opts, stdio: "pipe" })))(this.config.executable ?? "codex", ["app-server", "--listen", "stdio://"], { cwd: options.cwd, env: { ...process.env, ...options.env } });
+      this.process = (this.config.spawnProcess ?? ((command, args, opts) => spawn(command, args, { ...opts, stdio: "pipe" })))(this.config.executable ?? "codex", ["app-server", "--listen", "stdio://"], { cwd: options.cwd, env: { ...process.env } });
       const child = this.process;
       child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => { this.stderr = (this.stderr + chunk).slice(-4000); });
