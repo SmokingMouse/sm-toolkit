@@ -3,8 +3,9 @@
 > 本机 daemon：独占每个 thread 的引擎子进程，把引擎事件落成持久化的 item 日志，
 > 让任意数量的薄前端（网页 / 手机 / 飞书 / TUI）attach 同一份会话。
 >
-> 状态：设计稿，**未实现**。代码落点未来在 `packages/agent-server`（服务）+
-> `packages/agent`（引擎后端，已存在）+ `apps/agent-tui`（TUI 客户端）。
+> 状态：AS v1 已实现，代码位于 `packages/agent-server`（协议、引擎、服务、client）+
+> `apps/agent-tui`（TUI 客户端）；复用 `packages/agent` 的模型路由。
+> 协议以 [protocol.md](protocol.md) 为准，运行说明见 [包 README](../../packages/agent-server/README.md)。
 > 相关历史决策见 `progress/decisions.md`（2026-08-04 推迟 app-server、2026-08-18 解除推迟）。
 
 ---
@@ -202,12 +203,13 @@ sqlite 单库，默认 `~/.agent-server/agent-server.db`（WAL）。
 
 | 表 | 关键列 | 说明 |
 |---|---|---|
-| `threads` | `id` PK、`backend`、`engine_thread_id`、`cwd`、`model`、`status`、`title`、`created_at`、`closed_at`、`meta_json` | `engine_thread_id` = claude session uuid / codex thread id，是重启后 resume 的钥匙 |
-| `turns` | `id` PK、`thread_id`、`ordinal`、`status`、`client_turn_id`、`started_at`、`ended_at`、`error_json`、`usage_json` | `client_turn_id` 唯一索引 → 幂等 |
-| `items` | `seq` PK（全局单调）、`id`、`thread_id`、`turn_id`、`type`、`status`、`payload_json`、`started_at`、`completed_at` | `(thread_id, seq)` 索引供快照与重放 |
+| `threads` | `id` PK、`backend`、`engine_thread_id`、`cwd`、`status`、`created_at`、`client_thread_id`、`request_json`、`options_json`、`data_json`、`next_seq` | model/title/meta 等存在 data_json；engine_thread_id 是 resume 的钥匙 |
+| `turns` | `id` PK、`thread_id`、`ordinal`、`status`、`client_turn_id`、`request_json`、`data_json` | client_turn_id 唯一索引用于幂等；usage/时间/error 在 data_json |
+| `items` | `(thread_id, id)` PK、`seq`、`completed_seq`、`turn_id`、`type`、`status`、`payload_json`、`started_at`、`completed_at` | seq 与 completed_seq 共用 thread 内单调序列；UNIQUE(thread_id, seq)，正文完成游标用于断线补齐 |
 | `approvals` | `id` PK、`thread_id`、`turn_id`、`item_id`、`kind`、`params_json`、`status`、`decided_by`、`decision_json`、`created_at`、`decided_at` | 竞答的仲裁点；重启后 pending 一律标 `expired` |
-| `clients` | `id`、`kind`、`label`、`last_seen_at` | 只为可观测性，不做鉴权 |
-| `leases` | `thread_id` PK、`client_id`、`expires_at` | 可选输入租约 |
+| `queue` | `turn_id` PK、`thread_id`、`ordinal`、`enqueued_at`、`preview` | 持久化 FIFO，重启后保留排队轮次 |
+
+clients 与 leases 只在内存中维护，不建 sqlite 表；连接退出释放租约。
 
 **不存**：delta 流水、引擎原始 stdout（要排查用 `--trace-dir` 单独落文件，默认关）。
 
@@ -218,8 +220,10 @@ ExternalSession 的尾随同步补上）。
 
 ## 6. 安全
 
-- **监听面**：默认只有 unix socket `~/.agent-server/sock`（mode 0600）。WebSocket
-  监听 `127.0.0.1:<port>`，端口写进 `~/.agent-server/endpoint.json`（0600）。
+- **监听面**：默认只有 unix socket `~/.sm-toolkit/agent-server.sock`（mode 0600）。
+  `AGENT_SERVER_SOCKET_PATH` 可覆盖；否则优先使用 XDG_RUNTIME_DIR / XDG_STATE_HOME
+  下的 `sm-toolkit/agent-server.sock`。WebSocket 监听 `127.0.0.1:<port>`，
+  endpoint 写进 `<socket>.endpoint.json`（0600）。数据库及 WAL/SHM 也是 0600。
   不绑 `0.0.0.0`，没有 TLS —— 要走公网请套 Trellis 的网关。
 - **鉴权**：单个 bearer token，随机 32 字节，落 `~/.agent-server/token`（0600），
   daemon 首次启动生成。WebSocket 在 `initialize` 的 params 里带（浏览器不能设
@@ -304,8 +308,9 @@ Claude 的长会话改造是真正的新代码，放在骨架稳定之后。
    message、拿到第二个 result」这条路径必须在 P2 开工前先做一次真机验证，失败
    则退化为「进程复用只在 codex 上做，claude 仍每轮 spawn + `--resume`」——协议
    不变，只是 claude 的成本收益少一块。
-2. **codex app-server 协议无兼容承诺**。缓解同 2026-08-18 决策：锁 schema 版本
-   （`codex app-server generate-json-schema`）+ 启动时核对 + exec 路径兜底。
+2. **codex app-server 协议无兼容承诺**。锁 schema 版本 + check-codex-alignment
+   检查协议名字和必填字段差异；启动时核对版本，未知 item/request 发 -32015 并保留 thread。
+   当前没有 exec 路径自动兜底。
 3. **两个真源**（item 日志 vs 引擎 jsonl/rollout）的漂移。缓解：日志只做镜像，
    任何「历史内容」的权威读取走引擎侧；ExternalSession 负责把外部写入补回来。
 4. **审批广播的安全含义**：任何 attach 的客户端都能批准危险命令。缓解：
