@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server v1 在 feat/agent-server 实现完成、两轮异源 review 通过（HEAD 85e5b07，未 push）；等用户决定 Trellis 迁移、发布与 fj 起位切换。
+agent-server 已集成 foundation、TUI 会话、输入与模式，测试及真实引擎冒烟通过，待主控独立验收；observe 另单，迁移与发布仍待决定。
 
 ## Goals
 

@@ -54,28 +54,28 @@ test("sessions PTY: /new /clear /threads /fork /resume, Ctrl-N Ctrl-T, disconnec
     const turnId = first.sent[0].turnId;
     first.emit({ type: "itemStarted", turnId, item: { id: "original-answer", type: "agentMessage", payload: { text: "original history" } } });
     await wait(() => screen.includes("original history"), "original history drawn");
-    const second = await create("/new\rhello world" + "/new\r".repeat(9));
+    const second = await create("/new \rhello world" + "/new \r".repeat(9));
     expect(screen).toContain("按键已丢弃");
     expect(screen).not.toContain("> /newhello world");
     expect(second.engine.sent).toHaveLength(0);
     expect(first.closed).toBe(false); expect(first.interrupted).toHaveLength(0); expect(screen).not.toContain("original history");
     write("safe next prompt\r"); await wait(() => second.engine.sent.length === 1, "clean prompt after rapid session commands");
     expect(second.engine.sent[0].input).toEqual([{ type: "text", text: "safe next prompt" }]);
-    await create("/clear\r");
+    await create("/clear \r");
     const fourth = await create("\x0e");
-    const forked = await create("/fork\r");
+    const forked = await create("/fork \r");
     expect(forked.engine.options?.forkSession).toBe(true);
     expect(forked.engine.options?.engineThreadId).toBe(fourth.engine.engineThreadId!);
     expect(engines.slice(0, -1).every(e => !e.closed)).toBe(true);
 
     write(`/resume ${thread.id}\r`); await attached(thread.id);
     expect(screen).toContain("original history");
-    write("/threads\r"); await wait(() => screen.includes("会话选择") && screen.includes("original prompt"), "threads selector with first prompt");
+    write("/threads \r"); await wait(() => screen.includes("会话选择") && screen.includes("original prompt"), "threads selector with first prompt");
     expect(screen).toContain("running"); expect(screen).toContain(home); expect(screen).toMatch(/\d{4}-\d{2}-\d{2}T/);
     const countBeforeCancel = requests.filter(r => r.method === "thread/attach").length;
     write("\x1b"); await wait(() => screen.includes("Ctrl-N 新建"), "Esc cancels picker");
     expect(requests.filter(r => r.method === "thread/attach")).toHaveLength(countBeforeCancel);
-    for (const keys of ["/resume\r", "\x14"]) {
+    for (const keys of ["/resume \r", "\x14"]) {
       write(keys); await wait(() => screen.includes("会话选择"), "resume/Ctrl-T picker");
       const selection = screen.match(/> (th_[a-z0-9-]+)/)?.[1]; expect(selection).toBeDefined();
       write("\x1b[B"); await wait(() => screen.includes("会话选择"), "down");

@@ -54,7 +54,7 @@ export class Controller {
         return;
       }
       if (key.ctrl && (key.name === "n" || key.name === "t")) {
-        if (this.submitting) this.model.message = "提交进行中，本次快捷键已丢弃，请稍后重试";
+        if (this.submitting || this.controlling) this.model.message = "提交进行中，本次快捷键已丢弃，请稍后重试";
         else await this.sessions.run(key.name === "n" ? "/new" : "/threads");
         return;
       }
@@ -112,7 +112,7 @@ export class Controller {
     const text = this.model.input, thread = this.model.thread;
     const attachments = [...this.model.attachments];
     if (this.sessions.busy) { this.sessions.rejectInput(); return; }
-    if (this.submitting) { this.model.message = "提交进行中，本次提交已丢弃，请稍后重试"; this.model.changed(); return; }
+    if (this.submitting || this.controlling) { this.model.message = "提交进行中，本次提交已丢弃，请稍后重试"; this.model.changed(); return; }
     if ((!text.trim() && !attachments.length) || !thread) return;
     if (this.client.state !== "connected") throw new Error("连接尚未恢复，输入已保留");
     const [command, ...args] = text.trim().split(/\s+/);

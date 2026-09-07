@@ -5,6 +5,18 @@ import { homedir } from "node:os";
 export interface Candidate { name: string; description: string }
 export interface Completion { start: number; prefix: "@" | "/"; candidates: Candidate[]; selected: number }
 export const commands: Candidate[] = [
+  { name: "new", description: "新建会话" },
+  { name: "clear", description: "新建空会话" },
+  { name: "threads", description: "选择 daemon 会话" },
+  { name: "resume", description: "恢复会话：/resume [id]" },
+  { name: "fork", description: "分叉当前 Claude 会话" },
+  { name: "permissions", description: "选择权限模式" },
+  { name: "effort", description: "thinking budget：low/medium/high/max" },
+  { name: "model", description: "切换模型：/model <name>" },
+  { name: "compact", description: "压缩上下文：/compact [instructions]" },
+  { name: "takeover", description: "获取 30 秒控制租约" },
+  { name: "release", description: "释放控制租约" },
+  { name: "context", description: "指定上下文窗口 token 数" },
   { name: "image", description: "发送图片：/image <path>" },
   { name: "paste-image", description: "附加 macOS 剪贴板图片（pngpaste）" },
   { name: "steer", description: "向当前 turn 插话：/steer <text>" },

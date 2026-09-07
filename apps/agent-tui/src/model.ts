@@ -39,7 +39,19 @@ export class TuiModel {
   sessionOperation?: string;
   resumeConfirmation?: string;
   picker?: { entries: ThreadEntry[]; index: number; offset?: number };
+  private sessionModes = new Map<string, { launchPermission?: Permission; leaseExpiresAt: number }>();
+  forgetLeases(): void {
+    this.leaseExpiresAt = 0;
+    for (const modes of this.sessionModes.values()) modes.leaseExpiresAt = 0;
+  }
   select(snapshot: AttachResult): void {
+    if (this.thread?.id !== snapshot.thread.id) {
+      if (this.thread) this.sessionModes.set(this.thread.id, { launchPermission: this.launchPermission, leaseExpiresAt: this.leaseExpiresAt });
+      const modes = this.sessionModes.get(snapshot.thread.id);
+      this.launchPermission = modes?.launchPermission;
+      this.leaseExpiresAt = modes?.leaseExpiresAt ?? 0;
+    }
+    this.permissionPicker = undefined; this.completion = undefined;
     this.thread = snapshot.thread;
     this.items.clear(); this.cards.clear(); this.queue = []; this.usage = undefined;
     this.activeTurnId = undefined; this.scroll = 0; this.picker = undefined;
@@ -116,7 +128,7 @@ export function bindClient(client: AgentClient, model: TuiModel): () => void {
       ? "已重连并补齐历史；引擎已停止，请用 /resume 选择会话恢复"
       : `已重连并恢复会话 ${model.thread?.id}（sinceSeq 补齐）` : "连接中断，正在自动重连…";
     if (state === "connected") recovering = false;
-    if (state !== "connected") { model.effort = undefined; model.leaseExpiresAt = 0; model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
+    if (state !== "connected") { model.effort = undefined; model.forgetLeases(); model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
     model.changed();
   }), client.onError((error, id) => {
     model.message = controlError(error);

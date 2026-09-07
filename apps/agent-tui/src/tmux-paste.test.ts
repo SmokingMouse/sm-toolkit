@@ -66,7 +66,7 @@ test("P0-1 real tmux paste renders separate lines and sends only LF to daemon", 
       const { thread } = await client.request("thread/start", { backend: "claude", cwd: home });
       const command = [process.execPath, resolve(import.meta.dir, "../bin/agent-tui"), "--attach", thread.id, "--socket", paths.socketPath].map(quote).join(" ");
       await tmux(["new-session", "-d", "-x", "140", "-y", "32", command]);
-      await waitFor(async () => (await tmux(["capture-pane", "-p"])).includes(thread.id), "TUI attached");
+      await waitFor(async () => (await tmux(["capture-pane", "-p"])).includes(thread.id.slice(0, 11)), "TUI attached");
       const text = "def hello():\n    print(1)\n    return 2";
       await tmux(["load-buffer", "-"], Buffer.from(text)); await tmux(["paste-buffer", "-p"]);
       let screen = "";

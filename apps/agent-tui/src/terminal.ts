@@ -15,7 +15,15 @@ export async function runTerminal(client: AgentClient, model: TuiModel): Promise
   const schedule = () => { controller.resize(output.columns, output.rows); if (!timer) timer = setTimeout(draw, 32); };
   // Complete each async edit before applying the next key in the same PTY chunk.
   let edits = Promise.resolve();
-  const keyboard = new TerminalInput((text: string | undefined, key: Key) => { if (controller.sessions.busy || (key.ctrl && ["c", "n", "t"].includes(key.name ?? ""))) void controller.key(text, key); else edits = edits.then(() => controller.key(text, key)); });
+  const keyboard = new TerminalInput((text: string | undefined, key: Key) => {
+    if (controller.sessions.busy || (key.ctrl && key.name === "c")) { void controller.key(text, key); return; }
+    edits = edits.then(() => {
+      const pending = controller.key(text, key);
+      // Session RPCs stay in flight so subsequent keys are rejected (or answer a scan-time card).
+      if (!controller.sessions.busy) return pending;
+      void pending;
+    });
+  });
   const data = (chunk: Buffer) => keyboard.write(chunk);
   const dispose = model.onChange(schedule);
   input.setRawMode(true); input.resume();

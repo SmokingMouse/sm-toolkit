@@ -79,6 +79,7 @@ Enter to confirm · Esc to cancel"
 exports[`fixed header, footer, queue and active card viewport snapshots 1`] = `
 "th_demo | cwd /tmp | model unknown
 codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected
+mode default | effort — | model — | ctx [??????????] ?% / ~200000 | bypass 上限未知，已隐藏
 You: 你好
 [file] /tmp/a.ts
 
@@ -90,16 +91,15 @@ Agent …: Hello 世界
 
 
 
-
-Ctrl-N 新建 · Ctrl-T 会话 · Enter 发送 · /steer 插话 · Tab 推理 · Ctrl-C 两次退出
+Ctrl-N 新建 · Ctrl-T 会话 · Enter 发送 · Tab effort · Shift-Tab 权限 · Ctrl-R 推理 · Ctrl-C 两次退出
 > new input"
 `;
 
 exports[`fixed header, footer, queue and active card viewport snapshots 2`] = `
 "th_demo | cwd /tmp | model unknown
 codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected
-
-Agent …: Hello 世界
+mode default | effort — | model — | ctx [??????????] ?% / ~200000 | b
+ypass 上限未知，已隐藏
 
 排队 #1: next
 [request] Action Required

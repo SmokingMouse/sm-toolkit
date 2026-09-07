@@ -25,6 +25,46 @@ test("selector sorts recent activity first with stable id tie break without muta
   expect(sortThreads(entries).map(e => e.thread.id)).toEqual(["c", "a", "b"]);
   expect(entries.map(e => e.thread.id)).toEqual(["b", "a", "c"]);
 });
+test("integration: switching threads isolates launch eligibility and lease display while preserving drafts", async () => {
+  const { model, controller } = setup();
+  model.launchPermission = "bypassPermissions"; model.leaseExpiresAt = Date.now() + 30000;
+  const expiry = model.leaseExpiresAt;
+  model.effort = "high"; model.permissionPicker = 2;
+  model.input = "draft\nsecond line"; model.attachments = [{ type: "image", path: "/tmp/test.png", mime: "image/png" }];
+  await controller.sessions.run("/resume", "new");
+  expect(model.bypassAvailable).toBe(false); expect(model.leaseExpiresAt).toBe(0);
+  expect(model.permissionPicker).toBeUndefined(); expect(model.effort).toBeUndefined();
+  expect(model.input).toBe("draft\nsecond line"); expect(model.attachments).toHaveLength(1);
+  await controller.sessions.run("/resume", "old");
+  expect(model.bypassAvailable).toBe(true); expect(model.leaseExpiresAt).toBe(expiry);
+  await controller.sessions.run("/resume", "new");
+  model.forgetLeases();
+  await controller.sessions.run("/resume", "old");
+  expect(model.bypassAvailable).toBe(true); expect(model.leaseExpiresAt).toBe(0);
+});
+test("integration: completion Tab inserts, Ctrl-R toggles reasoning, Shift-Tab keeps permission control", async () => {
+  const { model, controller, calls } = setup();
+  model.input = "/thr";
+  model.completion = { start: 0, prefix: "/", selected: 0, candidates: [{ name: "threads", description: "sessions" }] };
+  await controller.key(undefined, { name: "tab" });
+  expect(model.input).toBe("/threads "); expect(calls).toHaveLength(0);
+  await controller.key(undefined, { ctrl: true, name: "r" });
+  expect(model.expandedReasoning).toBe(true);
+  model.completion = { start: 0, prefix: "/", selected: 0, candidates: [{ name: "threads", description: "sessions" }] };
+  await controller.key(undefined, { name: "tab", shift: true });
+  expect(calls.at(-1)?.[0]).toBe("thread/permission/set");
+  expect(model.input).toBe("/threads ");
+});
+test("integration: session viewport accounts for multiline draft and pending image rows", () => {
+  const { model, controller } = setup();
+  model.input = "first\nsecond\nthird";
+  model.attachments = [{ type: "image", path: "/tmp/image.png", mime: "image/png" }];
+  model.picker = { entries: Array.from({ length: 15 }, (_, i) => ({ thread: thread(`t${i}`), title: `entry${i}`, updatedAtMs: 0 })), index: 10 };
+  controller.resize(120, 15);
+  const screen = render(model, 120, 15);
+  expect(screen).toContain("> t10 |"); expect(screen).toContain("[image] /tmp/image.png");
+  expect(screen.split("\n")).toHaveLength(15);
+});
 test("P1-1: picker retains all short lists and scrolls only past the viewport, including wrapped entries", () => {
   const { model, controller } = setup();
   const draw = (_model: TuiModel, columns: number, rows: number) => { controller.resize(columns, rows); return render(model, columns, rows); };
@@ -245,13 +285,13 @@ test("P2-f: user question drafts and Enter work during the no-argument resume sc
   expect(model.input).toBe(""); expect(model.discardNote).toBe("");
   pending.release(); await operation;
 });
-test("P2-1/P2-4: actual protocol strips private engine options; status does not invent permission", () => {
+test("P2-1/P2-4: actual protocol strips private engine options; status uses foundation permission but strips private engine options", () => {
   const options = { permission: "readonly", effort: "high", sandbox: "restricted", systemPrompt: "private", tools: ["Read"] };
   const parsed = ThreadSchema.parse({ ...thread("old"), ...options });
   const config = MethodSchemas["server/config/read"].result.parse({ allowed_roots: ["/tmp"], maxQueuedTurns: 10, orphanTimeoutMs: 0, idleTimeoutMs: 0, ...options });
-  for (const field of Object.keys(options)) { expect(field in parsed).toBe(false); expect(field in config).toBe(false); }
+  for (const field of Object.keys(options)) { expect(field in parsed).toBe(field === "permission"); expect(field in config).toBe(false); }
   const { model } = setup(); model.thread = parsed;
-  expect(render(model, 120, 20)).not.toContain("permission");
+  expect(render(model, 120, 20)).toContain("mode readonly");
 });
 test("picker escapes titles and status includes current cwd and model", () => {
   const { model } = setup();

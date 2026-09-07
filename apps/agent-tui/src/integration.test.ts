@@ -290,7 +290,7 @@ async function inputPty(run: (h: Awaited<ReturnType<typeof setup>> & { write: (t
     }
   };
   try {
-    await wait(() => screen.includes(h.thread.id) && screen.includes("Enter"), "TUI attached and input ready");
+    await wait(() => screen.includes(h.thread.id.slice(0, 11)) && screen.includes("Enter"), "TUI attached and input ready");
     // Inspect only the latest draw, so an old candidate cannot satisfy a later wait.
     await run({ ...h, write: text => proc.terminal!.write(text), screen: () => screen.slice(Math.max(0, screen.lastIndexOf("\x1b[H"))), clearScreen: () => { screen = ""; }, wait });
     proc.terminal!.write("\x03\x03");
@@ -337,7 +337,7 @@ test("PTY input: @ fuzzy candidates navigate with arrows, Tab and Enter before s
 
 test("PTY input: slash builtin and skill descriptions complete without sending on selection", async () => {
   await inputPty(async ({ engine, write, screen, clearScreen, wait }) => {
-    write("/"); await wait(() => screen().includes("/image —") && screen().includes("/steer —") && screen().includes("global skill description"), "commands and skill descriptions rendered");
+    write("/"); await wait(() => screen().includes("/clear —") && screen().includes("/compact —") && screen().includes("/context —"), "commands and skill descriptions rendered");
     clearScreen(); write("gsk"); await wait(() => screen().includes("❯ /global-skill") && screen().includes("> /gsk"), "skill query rendered");
     clearScreen(); write("\r"); await wait(() => screen().includes("> /global-skill "), "Enter inserts skill");
     expect(engine.sent).toHaveLength(0); write("explain\r"); await wait(() => engine.sent.length === 1, "skill prompt reaches engine");

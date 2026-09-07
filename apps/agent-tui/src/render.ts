@@ -80,7 +80,17 @@ function frameLayout(model: TuiModel, columns: number, rows: number) {
   if (model.leaseExpiresAt > Date.now()) modeStatus.splice(0, modeStatus.length, ...wrap(`${modeStatus.join("")} | 持有控制权至 ${new Date(model.leaseExpiresAt).toLocaleTimeString()} · /release`, width).slice(0, height - 4));
   const notices = model.discardNote ? [wrap(model.discardNote, width)[0]] : [];
   const headers = [...wrap(status, width), ...wrap(header, width), ...modeStatus.map(line => context.warning ? `\x1b[33m${line}\x1b[0m` : line)].slice(0, Math.max(1, height - 4 - notices.length));
-  return { width, height, headers, notices, available: Math.max(0, height - headers.length - 3 - notices.length) };
+  const baseAvailable = Math.max(0, height - headers.length - 3 - notices.length);
+  const input = model.activeCard ? model.activeCard.draft : model.input;
+  const inputLines = input.split("\n").flatMap((line, i) => wrap(`${i ? "  " : "> "}${line}`, width));
+  const inputRows = inputLines.slice(-Math.max(1, Math.min(6, height - 4)));
+  const completion = !model.activeCard && model.permissionPicker === undefined && !model.picker && !model.sessionOperation && model.completion;
+  const menu = completion ? completion.candidates.slice(Math.max(0, completion.selected - 3), Math.max(0, completion.selected - 3) + 6)
+    .map(c => wrap(`${c === completion.candidates[completion.selected] ? "❯" : " "} ${completion.prefix}${c.name} — ${c.description}`, width)[0]) : [];
+  const attached = !model.activeCard ? model.attachments.map(i => wrap(`[image] ${i.path}`, width)[0]) : [];
+  const extraRows = Math.max(0, baseAvailable - inputRows.length + 1);
+  const extras = extraRows ? [...attached, ...menu].slice(-extraRows) : [];
+  return { width, height, headers, notices, inputRows, extras, available: Math.max(0, baseAvailable + 1 - inputRows.length - extras.length) };
 }
 function pickerLines(model: TuiModel, width: number): string[][] {
   return model.picker?.entries.map((e, i) => wrap(`${i === model.picker!.index ? ">" : " "} ${shortId(e.thread.id)} | ${e.title} | ${e.thread.status.type} | ${e.thread.cwd} | ${new Date(e.updatedAtMs).toISOString()}`, width)) ?? [];
@@ -97,7 +107,7 @@ export function pickerOffset(model: TuiModel, columns: number, rows: number): nu
   return Math.max(0, Math.min(offset, total - available));
 }
 export function render(model: TuiModel, columns = 100, rows = 30): string {
-  const { width, height, headers, notices, available: baseAvailable } = frameLayout(model, columns, rows);
+  const { width, height, headers, notices, inputRows, extras, available } = frameLayout(model, columns, rows);
   const body = [...model.items.values()].sort((a, b) => a.seq - b.seq).flatMap(i => [...renderItem(i, model.expandedReasoning, model.expandedPlan), ""]);
   for (const q of model.queue) body.push(`排队 #${q.position + 1}: ${q.preview}`);
   for (const c of model.cards.values()) if (c !== model.activeCard) body.push(...renderCard(c));
@@ -106,16 +116,6 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
   const card = (model.activeCard ? renderCard(model.activeCard) : picker).flatMap(line => wrap(line, width));
   const scanCard = model.sessionOperation === "/threads" && !!model.activeCard;
   const footer = scanCard ? "/threads 加载中 · 审批/问题卡可操作 · Ctrl-C 中断" : model.sessionOperation ? `${model.sessionOperation} 进行中 · 按键将丢弃 · Esc 不取消在途操作` : model.resumeConfirmation ? "恢复已关闭会话？[y/N] · Enter/n/Esc 取消" : model.picker ? "会话选择 · ↑/↓ 选择 · Enter 切换 · Esc 取消" : model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : model.permissionPicker !== undefined ? "权限模式 · ↑↓/数字选择 · Enter 确认 · Esc 取消" : model.completion && !model.picker ? "↑↓ 选择 · Tab/Enter 插入 · Esc 关闭补全" : "Ctrl-N 新建 · Ctrl-T 会话 · Enter 发送 · Tab effort · Shift-Tab 权限 · Ctrl-R 推理 · Ctrl-C 两次退出";
-  const input = model.activeCard ? model.activeCard.draft : model.input;
-  const inputLines = input.split("\n").flatMap((line, i) => wrap(`${i ? "  " : "> "}${line}`, width));
-  const inputRows = inputLines.slice(-Math.max(1, Math.min(6, height - 4)));
-  const completion = !model.activeCard && model.permissionPicker === undefined && !model.picker && !model.sessionOperation && model.completion;
-  const menu = completion ? completion.candidates.slice(Math.max(0, completion.selected - 3), Math.max(0, completion.selected - 3) + 6)
-    .map(c => wrap(`${c === completion.candidates[completion.selected] ? "❯" : " "} ${completion.prefix}${c.name} — ${c.description}`, width)[0]) : [];
-  const attached = !model.activeCard ? model.attachments.map(i => wrap(`[image] ${i.path}`, width)[0]) : [];
-  const extraRows = Math.max(0, baseAvailable - inputRows.length + 1);
-  const extras = extraRows ? [...attached, ...menu].slice(-extraRows) : [];
-  const available = Math.max(0, baseAvailable + 1 - inputRows.length - extras.length);
   let middle: string[];
   if (model.picker && !scanCard) {
     const { entries, offset = 0 } = model.picker;

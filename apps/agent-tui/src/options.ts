@@ -11,6 +11,7 @@ export const help = `agent-tui --attach <threadId> [--socket <path> | --ws <url>
 agent-tui --new --backend claude|codex --cwd <dir> [--permission <mode>] [--socket <path> | --ws <url>]
 
 Enter: send / queue; /steer <text>: steer active turn; Ctrl-C: interrupt, twice: exit
+Ctrl-N /new /clear: new thread; Ctrl-T /threads /resume [id]: sessions; /fork: fork
 Shift-Enter / Ctrl-J: newline; bracketed paste: preserve multiline text
 @path: file completion / image attachment; /: commands and local skills
 Up/Down: select completion; Tab/Enter: insert; Esc: dismiss

@@ -259,9 +259,9 @@ test("PTY modes: Shift+Tab three-state cycle, permissions, effort, model, compac
   });
   const key = (text: string) => { screen = ""; proc.terminal!.write(text); };
   try {
-    await wait(() => screen.includes(thread.id));
+    await wait(() => screen.includes(thread.id.slice(0, 11)));
     for (const mode of ["acceptEdits", "plan", "default"]) { key("\x1b[Z"); await wait(() => screen.includes(`mode ${mode} |`)); expect(engine.permissions.at(-1)).toBe(mode); }
-    key("/permissions\r"); await wait(() => screen.includes("3. plan"));
+    key("/permissions \r"); await wait(() => screen.includes("3. plan"));
     expect(screen).not.toContain("4. dontAsk");
     key("3\r"); await wait(() => screen.includes("mode plan |"));
     key("\x1b[Z"); await wait(() => screen.includes("mode default |"));
@@ -269,18 +269,18 @@ test("PTY modes: Shift+Tab three-state cycle, permissions, effort, model, compac
     key("\t"); await wait(() => screen.includes("effort max（本端设置） |"));
     expect(engine.controls.at(-1)).toEqual({ subtype: "set_max_thinking_tokens", params: { max_thinking_tokens: 65536 } });
     key("/model gpt-5\r"); await wait(() => screen.includes("model gpt-5 |")); expect(screen).toContain("~400000");
-    key("/compact\r"); await wait(() => engine.sent.length === 1);
+    key("/compact \r"); await wait(() => engine.sent.length === 1);
     expect(engine.sent[0].input).toEqual([{ type: "text", text: "/compact" }]);
     const turnId = engine.sent[0].turnId;
     engine.emit({ type: "itemStarted", turnId, item: { id: "compact", type: "contextCompaction", payload: {} } });
     engine.emit({ type: "itemCompleted", turnId, item: { id: "compact", type: "contextCompaction", payload: {} } });
     engine.emit({ type: "turnCompleted", turnId, status: "completed" });
     await wait(() => screen.includes("── Context compacted · compact_boundary ──"));
-    key("/release\r"); await wait(() => screen.includes("已释放控制权"));
+    key("/release \r"); await wait(() => screen.includes("已释放控制权"));
     await b.client.request("thread/lease/acquire", { threadId: thread.id });
     key("\x1b[Z"); await wait(() => screen.includes("另一客户端持有控制权（phone）")); expect(screen).toContain("/takeover");
     await b.client.request("thread/lease/release", { threadId: thread.id });
-    key("/takeover\r"); await wait(() => screen.includes("已接管控制权"));
+    key("/takeover \r"); await wait(() => screen.includes("已接管控制权"));
     key("\x1b[Z"); await wait(() => screen.includes("mode acceptEdits |"));
     key("\x03\x03"); expect(await Promise.race([proc.exited, Bun.sleep(3000).then(() => -100)])).toBe(0);
     expect(a.model.thread?.permission).toBe("acceptEdits");
