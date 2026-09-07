@@ -96,6 +96,7 @@ export class Controller {
       this.model.message = "readonly 为启动限制，当前线程保持 readonly；更改需新建线程";
       return;
     }
+    if (!this.permissionChoices.includes(permission)) throw new Error("启动权限不允许此模式，或启动上限未知");
     const change = async () => {
       const { thread } = await this.client.request("thread/permission/set", { threadId: this.model.thread!.id, permission });
       this.model.thread = thread;
@@ -116,6 +117,7 @@ export class Controller {
     if (key.name === "up" || key.name === "down") { this.model.permissionPicker = (this.model.permissionPicker! + (key.name === "up" ? choices.length - 1 : 1)) % choices.length; return; }
     if (text && /^[1-5]$/.test(text) && Number(text) <= choices.length) this.model.permissionPicker = Number(text) - 1;
     if (key.name === "return" || key.name === "enter") {
+      if (this.model.permissionPicker! < 0) throw new Error("当前模式不在允许集合，请显式选择模式或 Esc 取消");
       await this.control(() => this.setPermission(choices[this.model.permissionPicker!]));
       this.model.permissionPicker = undefined;
     }
@@ -124,7 +126,7 @@ export class Controller {
     const [command, ...args] = text.split(/\s+/), value = args.join(" ");
     if (command === "/permissions") {
       if (value) throw new Error("用法：/permissions");
-      this.model.permissionPicker = Math.max(0, this.permissionChoices.indexOf(nativePermission(this.model.thread?.permission)));
+      this.model.permissionPicker = this.permissionChoices.indexOf(nativePermission(this.model.thread?.permission));
       return true;
     }
     if (command === "/context") {

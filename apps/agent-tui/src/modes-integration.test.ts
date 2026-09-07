@@ -80,6 +80,19 @@ test("P1-3 launch permission remains authoritative after remote changes and unkn
   a.model.launchPermission = "plan"; expect(a.model.bypassAvailable).toBe(false);
 });
 
+test("P1-4 dontAsk is gated by launch eligibility and uses a released escalation lease", async () => {
+  const { a, b, server, thread, command } = await setup("full");
+  expect(b.model.permissionChoices).not.toContain("dontAsk");
+  a.model.launchPermission = "default";
+  await command("/permissions"); expect(a.model.permissionChoices).not.toContain("dontAsk");
+  expect(a.model.permissionPicker).toBe(-1);
+  await a.controller.key("\r", { name: "return" }); expect(a.model.message).toContain("显式选择");
+  await a.controller.key("", { name: "escape" });
+  a.model.launchPermission = "full";
+  await command("/permissions"); await a.controller.key("5"); await a.controller.key("\r", { name: "return" });
+  expect(a.model.thread?.permission).toBe("dontAsk"); expect(server.leases.read(thread.id)).toBeUndefined();
+});
+
 test("P1-2 normal controls leave phone input available and escalation releases short lease on success and error", async () => {
   const { a, b, engine, thread, server, command } = await setup("full");
   for (const text of ["/effort high", "/model opus"]) { await command(text); expect(server.leases.read(thread.id)).toBeUndefined(); }
