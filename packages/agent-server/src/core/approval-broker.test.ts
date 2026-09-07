@@ -37,7 +37,7 @@ describe("ApprovalBroker", () => {
     f.leases.acquire("th", { clientId: "b", label: "b" }); expectCode(() => f.broker.answer("ar", "a", { decision: "accept" }), -32012);
     expect(f.log.approval("ar")?.status).toBe("pending"); f.broker.answer("ar", "b", { decision: "reject" }); expect(f.decisions).toHaveLength(1);
   });
-  test("non-blocking default timeout rejects after 120 seconds", () => {
+  test("K2: non-blocking default timeout rejects after 120 seconds", () => {
     const f = fixture(); f.addClient("a"); f.start(); f.advance(119_999); expect(f.decisions).toHaveLength(0); f.advance(1);
     expect(f.decisions).toEqual([{ decision: "reject" }]); expect(f.notifications.at(-1)).toMatchObject({ method: "serverRequest/expired", params: { reason: "timeout" } });
   });
@@ -48,6 +48,15 @@ describe("ApprovalBroker", () => {
   test("reattach receives pending card and switches orphan timer to normal timeout", () => {
     const f = fixture({ orphanTimeoutMs: 1000, timeoutMs: 20 }); f.start(); f.advance(900); const a = f.addClient("a"); f.broker.clientAttached(a, "th");
     expect(f.requests).toHaveLength(1); expect(f.log.snapshot("th").pendingRequests).toHaveLength(1); f.advance(19); expect(f.decisions).toHaveLength(0); f.advance(1); expect(f.decisions).toHaveLength(1);
+  });
+  test("K3: ten minutes offline preserves the card; reattach resets the normal 120s deadline", () => {
+    const f = fixture(); f.start(); f.advance(10 * 60_000);
+    expect(f.decisions).toEqual([]); expect(f.log.snapshot("th").pendingRequests.map(r => r.params.requestId)).toEqual(["ar"]);
+    const c = f.addClient("phone"); f.broker.clientAttached(c, "th");
+    expect(f.requests).toHaveLength(1);
+    f.advance(119_999); expect(f.decisions).toEqual([]);
+    f.advance(1); expect(f.decisions).toEqual([{ decision: "reject" }]);
+    expect(f.log.snapshot("th").pendingRequests).toEqual([]);
   });
   test("disconnect starts orphan timeout instead of rejecting immediately", () => {
     const f = fixture({ orphanTimeoutMs: 1000, timeoutMs: 20 }); f.addClient("a"); f.start(); f.advance(10); f.clients.splice(0); f.broker.audienceChanged();
