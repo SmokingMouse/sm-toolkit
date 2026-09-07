@@ -28,6 +28,7 @@ export const MethodSchemas = {
     result: z.object({ protocolVersion: z.literal("as/1"), server: z.object({ name: z.string(), version: z.string() }), clientId: IdSchema, capabilities: z.object({ backends: z.array(BackendSchema), steer: z.boolean(), fork: z.boolean(), leases: z.boolean(), externalProviders: z.boolean(), maxQueuedTurns: z.number().int().nonnegative(), engine: EngineCapabilitiesSchema.optional() }) }),
   },
   "thread/start": { params: StartThreadParamsSchema, result: threadResult },
+  "thread/engineControl": { params: z.strictObject({ threadId: IdSchema, subtype: z.string().min(1), params: JsonObjectSchema }), result: JsonObjectSchema },
   "thread/resume": { params: ResumeThreadParamsSchema, result: threadResult.extend({ attached: z.boolean() }) },
   "thread/attach": { params: threadId.extend({ sinceSeq: z.number().int().nonnegative().optional() }).strict(), result: AttachResultSchema },
   "thread/detach": { params: threadId, result: empty },

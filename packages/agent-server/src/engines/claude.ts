@@ -1,9 +1,21 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { EventType, resolveClaudeModel, type AgentEvent, type Cost } from "@smokingmouse/agent";
-import { ErrorCode, ProtocolError, type StartTurnParams, type UserInput } from "../protocol/index.js";
+import { ErrorCode, ProtocolError, type JsonObject, type StartTurnParams, type UserInput } from "../protocol/index.js";
 import { AsyncQueue, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
 import { ClaudeEventMapper, jsonValue, mapPermissionDecision, mapPermissionRequest, record, type ToolPermissionRequest } from "./claude-mapper.js";
+
+// Local Claude Code 2.1.258 bin/claude.exe: print.ts d.request.subtype dispatch.
+// Default deny: auth, initialization, settings, remote plumbing and lifecycle controls
+// either need a native UI or would desynchronize the daemon's ownership/allowed_roots.
+export const CLAUDE_CONTROL_ALLOWLIST = new Set([
+  "set_model", "set_permission_mode", "set_max_thinking_tokens", "list_models",
+  "file_suggestions", "read_file", "get_workspace_diff", "get_plan",
+  "get_context_usage", "get_session_cost", "get_usage", "get_settings", "get_binary_version",
+  "mcp_status", "mcp_reconnect", "mcp_toggle", "interrupt",
+  "rewind_conversation", "rewind_files", "seed_read_state", "background_tasks", "stop_task",
+  "reload_plugins", "reload_skills", "side_question",
+]);
 
 export function buildClaudeLaunch(options: SessionOptions): { args: string[]; env: NodeJS.ProcessEnv } {
   if (options.sandbox !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Claude sandbox override is not supported");
@@ -56,7 +68,7 @@ export class ClaudeEngine implements EngineSession {
   private stderr = "";
   private buffer = "";
   private context: number | null = null;
-  private controls = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  private controls = new Map<string, { resolve: (frame: JsonObject) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; raw: boolean }>();
   private taskParents = new Map<string, string>();
   private sessionGrants = new Set<string>();
   private nativeRequests = new Map<string, { requestId: string; turnId: string; cancel: () => void }>();
@@ -89,6 +101,18 @@ export class ClaudeEngine implements EngineSession {
     catch (error) { this.fail(error instanceof ProtocolError ? error : new ProtocolError(ErrorCode.engine_unavailable, String(error), { stderr: this.stderr })); throw error; }
   }
   async attach(): Promise<void> { this.assertAlive(); }
+  async engineControl(subtype: string, params: JsonObject): Promise<JsonObject> {
+    this.assertAlive();
+    if (!CLAUDE_CONTROL_ALLOWLIST.has(subtype)) throw new ProtocolError(ErrorCode.unsupported_capability, `Claude control is not allowed: ${subtype}`);
+    if ("subtype" in params) throw new ProtocolError(ErrorCode.invalid_params, "params must not override subtype");
+    const interrupting = this.interrupting;
+    if (subtype === "interrupt" && this.active) this.interrupting = true;
+    try {
+      const frame = await this.control({ ...params, subtype }, true);
+      if (record(frame.response).subtype !== "success" && subtype === "interrupt") this.interrupting = interrupting;
+      return frame;
+    } catch (error) { if (subtype === "interrupt") this.interrupting = interrupting; throw error; }
+  }
   private assertAlive(): void { if (!this.process || this.dead || this.closed) throw new ProtocolError(ErrorCode.engine_unavailable, "Claude session is not alive"); }
   validateTurn(options: StartTurnParams): void {
     if ((options.cwd !== undefined && options.cwd !== this.options?.cwd) || options.sandbox !== undefined || options.effort !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing cwd, sandbox or effort on a live Claude session is not supported");
@@ -129,11 +153,11 @@ export class ClaudeEngine implements EngineSession {
     this.events.end();
   }
   private write(message: unknown): void { this.assertAlive(); this.process!.stdin.write(JSON.stringify(message) + "\n"); }
-  private control(request: Record<string, unknown>): Promise<void> {
+  private control(request: Record<string, unknown>, raw = false): Promise<JsonObject> {
     const request_id = `as_control_${crypto.randomUUID()}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.controls.delete(request_id); reject(new ProtocolError(ErrorCode.engine_unavailable, `Claude ${request.subtype} timed out`, { stderr: this.stderr })); }, this.config.handshakeTimeoutMs ?? 15000);
-      this.controls.set(request_id, { resolve, reject, timer });
+      this.controls.set(request_id, { resolve, reject, timer, raw });
       try { this.write({ type: "control_request", request_id, request }); } catch (error) { clearTimeout(timer); this.controls.delete(request_id); reject(error); }
     });
   }
@@ -150,7 +174,7 @@ export class ClaudeEngine implements EngineSession {
     const emit = (type: AgentEvent["type"], data: Record<string, unknown>) => this.emit({ type, data, backend: "claude", sessionId: this.engineThreadId });
     if (t === "control_response") {
       const response = record(obj.response), pending = this.controls.get(String(response.request_id));
-      if (pending) { clearTimeout(pending.timer); this.controls.delete(String(response.request_id)); if (response.subtype === "success") pending.resolve(); else pending.reject(new ProtocolError(ErrorCode.engine_unavailable, String(response.error ?? "Claude control failed"), { stderr: this.stderr })); }
+      if (pending) { clearTimeout(pending.timer); this.controls.delete(String(response.request_id)); if (pending.raw || response.subtype === "success") pending.resolve(jsonValue(obj)); else pending.reject(new ProtocolError(ErrorCode.engine_unavailable, String(response.error ?? "Claude control failed"), { stderr: this.stderr })); }
       return;
     }
     if (t === "control_request") {

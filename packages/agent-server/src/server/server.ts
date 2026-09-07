@@ -219,6 +219,7 @@ export class AgentServer {
         if (!this.backends.includes(p.backend)) throw new ProtocolError(ErrorCode.unsupported_capability, "backend is not available");
         return this.threads.start({ ...p, cwd: this.cwd(p.cwd) }, thread => this.attach(connection, thread.id));
       }
+      case "thread/engineControl": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.engineControl(p); }
       case "thread/resume": {
         const p = params(method);
         if (p.cwd) this.cwd(p.cwd);

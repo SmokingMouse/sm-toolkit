@@ -93,14 +93,17 @@ describe("Claude AgentEvent mapping (no real CLI)", () => {
 });
 
 /** In-memory fake child: exercises control frame mapping without spawning any process. */
-function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => void) {
+function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => void, onControl?: (send: (frame: unknown) => void, frame: any) => void) {
   const child = new EventEmitter() as ChildProcessWithoutNullStreams;
   const stdout = new PassThrough(), stderr = new PassThrough(); const written: any[] = [];
   const send = (frame: unknown) => stdout.write(JSON.stringify(frame) + "\n");
   const stdin = new Writable({ write(chunk, _encoding, callback) {
     const frame = JSON.parse(chunk.toString()); written.push(frame);
     queueMicrotask(() => {
-      if (frame.type === "control_request") send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id, response: {} } });
+      if (frame.type === "control_request") {
+        if (onControl && frame.request.subtype !== "initialize") onControl(send, frame);
+        else send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id, response: {} } });
+      }
       else if (frame.type === "user") onUser(send, frame);
     }); callback();
   } });
@@ -108,6 +111,23 @@ function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => voi
   return { child, written, send };
 }
 describe("Claude native frame exchange (fake child only)", () => {
+  test("foundation control: opaque success and error responses, denylist and subtype injection", async () => {
+    const replies: unknown[] = [];
+    const fake = fakeProcess(() => {}, (send, f) => {
+      const reply = { type: "control_response", future: [null, 42], response: { subtype: f.request.fail ? "error" : "success", request_id: f.request_id, response: { nested: f.request }, ...(f.request.fail ? { error: "native refusal" } : {}) } };
+      replies.push(reply); send(reply);
+    });
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th" });
+      for (const fail of [false, true]) expect(await engine.engineControl("file_suggestions", { query: "src", fail })).toEqual(replies.at(-1));
+      expect(fake.written.at(-1).request).toEqual({ subtype: "file_suggestions", query: "src", fail: true });
+      const before = fake.written.length;
+      for (const subtype of ["initialize", "claude_authenticate", "submit_feedback", "set_cwd", "update_settings", "end_session", "future_unknown"]) await expect(engine.engineControl(subtype, {})).rejects.toMatchObject({ code: -32008 });
+      await expect(engine.engineControl("mcp_status", { subtype: "initialize" })).rejects.toMatchObject({ code: -32602 });
+      expect(fake.written).toHaveLength(before); await engine.attach();
+    } finally { await engine.close("test"); }
+  });
   test("foundation events: all system frames and rate limits survive before, during and after turns", async () => {
     const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
     const consuming = (async () => { for await (const event of engine.events) events.push(event); })();

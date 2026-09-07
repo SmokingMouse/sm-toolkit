@@ -36,6 +36,13 @@ export class ThreadManager {
     this.timer = setInterval(() => { void this.sweepIdle(); }, Math.max(10, Math.min(this.idleTimeoutMs || 60_000, 60_000))); this.timer.unref();
   }
   get(threadId: string): Thread { return this.log.thread(threadId); }
+  engineControl(params: MethodParams<"thread/engineControl">): Promise<MethodResult<"thread/engineControl">> {
+    const thread = this.get(params.threadId);
+    if (thread.backend !== "claude") throw new ProtocolError(ErrorCode.backend_unsupported, `${thread.backend} does not support Claude engine controls`);
+    const engine = this.session(thread.id);
+    if (!engine.engineControl) throw new ProtocolError(ErrorCode.backend_unsupported, "engine controls unavailable");
+    return engine.engineControl(params.subtype, params.params);
+  }
   session(threadId: string): EngineSession {
     const session = this.live.get(threadId);
     if (!session) throw new ProtocolError(ErrorCode.engine_unavailable, "no live engine", { threadId, retryable: true });

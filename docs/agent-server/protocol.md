@@ -119,6 +119,18 @@ client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
 
 ## 4. 通知（server → client）
 
+### Backend-specific 逃生门
+
+`thread/engineControl` 请求 `{threadId, subtype, params}`，向 Claude 发送 `{type:"control_request", request_id, request:{...params,subtype}}`，result 是完整原生 control_response 帧（包括原生 error response），不拆解 response；调用方必须检查 response.subtype。params 不得包含 subtype。该方法遵守输入 lease；Codex/external 返回 backend_unsupported，未知或不允许的子类型返回 unsupported_capability。传输超时仍为 RPC 错误。
+
+本机 Claude Code 2.1.258 `bin/claude.exe` 的 print.ts `d.request.subtype` 分派是白名单证据。允许：set_model、set_permission_mode、set_max_thinking_tokens、list_models、file_suggestions、read_file、get_workspace_diff、get_plan、get_context_usage、get_session_cost、get_usage、get_settings、get_binary_version、mcp_status、mcp_reconnect、mcp_toggle、interrupt、rewind_conversation、rewind_files、seed_read_state、background_tasks、stop_task、reload_plugins、reload_skills、side_question。参数语义由对应 Claude 版本定义；rewind_files 会修改工作区。interrupt 的 cancel_queued 只作用于 CLI 队列，AS 队列仍由 turn/cancel 管理。
+
+其余一律明确拒绝，包括登录/OAuth、反馈、initialize、end_session、远程设备、MCP 凭证，以及会绕过 allowed_roots 或使 daemon 状态失配的 set_cwd、add_directory、settings 修改。此口是 backend-specific 能力，不承诺跨后端同义。
+
+| 错误码 | 名称 |
+| --- | --- |
+| `-32016` | `backend_unsupported` |
+
 `thread/engineEvent`：`{threadId, turnId?, backend, subtype, payload}`，payload 保留原始原生帧全部字段。Claude 的全部 system 子类型（包括未知类型）及 rate_limit_event、Codex 的原生通知走此通道；已建模事件仍照常发送。无活动 turn 时省略 turnId。此通知是实时流，不落 item 历史。
 客户端在 initialize.capabilities 声明 `engineEvents: true` 才接收此流；服务端通过 capabilities.engine.engineEvents 声明支持，新 client 库默认声明。旧客户端继续使用原有事件，协议版本保持 as/1。
 

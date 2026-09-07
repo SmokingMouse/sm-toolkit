@@ -29,6 +29,7 @@ export interface EngineSession {
   readonly events: AsyncIterable<EngineEvent>;
   spawn(options: SessionOptions): Promise<void>;
   attach(): Promise<void>;
+  engineControl?(subtype: string, params: import("../protocol/index.js").JsonObject): Promise<import("../protocol/index.js").JsonObject>;
   validateTurn?(options: StartTurnParams): void;
   sendTurn(turnId: string, input: UserInput[], options: StartTurnParams): Promise<void>;
   steer(turnId: string, input: UserInput[], options?: Pick<StartTurnParams, "clientTurnId">): Promise<void>;

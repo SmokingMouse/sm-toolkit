@@ -162,6 +162,10 @@
                         {
                           "type": "number",
                           "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
                         }
                       ]
                     },
@@ -2276,6 +2280,10 @@
         {
           "type": "number",
           "const": -32015
+        },
+        {
+          "type": "number",
+          "const": -32016
         }
       ]
     },
@@ -2501,6 +2509,10 @@
                 {
                   "type": "number",
                   "const": -32015
+                },
+                {
+                  "type": "number",
+                  "const": -32016
                 }
               ]
             },
@@ -2837,6 +2849,10 @@
                     {
                       "type": "number",
                       "const": -32015
+                    },
+                    {
+                      "type": "number",
+                      "const": -32016
                     }
                   ]
                 },
@@ -4577,6 +4593,7 @@
       "enum": [
         "initialize",
         "thread/start",
+        "thread/engineControl",
         "thread/resume",
         "thread/attach",
         "thread/detach",
@@ -5641,6 +5658,10 @@
             {
               "type": "number",
               "const": -32015
+            },
+            {
+              "type": "number",
+              "const": -32016
             }
           ]
         },
@@ -6218,6 +6239,10 @@
                     {
                       "type": "number",
                       "const": -32015
+                    },
+                    {
+                      "type": "number",
+                      "const": -32016
                     }
                   ]
                 },
@@ -6521,6 +6546,10 @@
                 {
                   "type": "number",
                   "const": -32015
+                },
+                {
+                  "type": "number",
+                  "const": -32016
                 }
               ]
             },
@@ -6864,6 +6893,10 @@
                 {
                   "type": "number",
                   "const": -32015
+                },
+                {
+                  "type": "number",
+                  "const": -32016
                 }
               ]
             },
@@ -7543,6 +7576,10 @@
                         {
                           "type": "number",
                           "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
                         }
                       ]
                     },
@@ -7751,6 +7788,111 @@
               },
               "additionalProperties": {
                 "$ref": "#/$defs/method:thread~1start:result/$defs/__schema2"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "method:thread/engineControl:params": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "subtype": {
+          "type": "string",
+          "minLength": 1
+        },
+        "params": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/method:thread~1engineControl:params/$defs/__schema0"
+          }
+        }
+      },
+      "required": [
+        "threadId",
+        "subtype",
+        "params"
+      ],
+      "additionalProperties": false,
+      "$defs": {
+        "__schema0": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/method:thread~1engineControl:params/$defs/__schema0"
+              }
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/method:thread~1engineControl:params/$defs/__schema0"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "method:thread/engineControl:result": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/method:thread~1engineControl:result/$defs/__schema0"
+      },
+      "$defs": {
+        "__schema0": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/method:thread~1engineControl:result/$defs/__schema0"
+              }
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/method:thread~1engineControl:result/$defs/__schema0"
               }
             }
           ]
@@ -8071,6 +8213,10 @@
                         {
                           "type": "number",
                           "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
                         }
                       ]
                     },
@@ -8436,6 +8582,10 @@
                         {
                           "type": "number",
                           "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
                         }
                       ]
                     },
@@ -11996,6 +12146,10 @@
                           {
                             "type": "number",
                             "const": -32015
+                          },
+                          {
+                            "type": "number",
+                            "const": -32016
                           }
                         ]
                       },
@@ -12360,6 +12514,10 @@
                         {
                           "type": "number",
                           "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
                         }
                       ]
                     },
@@ -12720,6 +12878,10 @@
                         {
                           "type": "number",
                           "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
                         }
                       ]
                     },
@@ -13390,6 +13552,10 @@
                     {
                       "type": "number",
                       "const": -32015
+                    },
+                    {
+                      "type": "number",
+                      "const": -32016
                     }
                   ]
                 },
@@ -14663,6 +14829,10 @@
                         {
                           "type": "number",
                           "const": -32015
+                        },
+                        {
+                          "type": "number",
+                          "const": -32016
                         }
                       ]
                     },
@@ -14980,6 +15150,10 @@
                     {
                       "type": "number",
                       "const": -32015
+                    },
+                    {
+                      "type": "number",
+                      "const": -32016
                     }
                   ]
                 },
@@ -15538,6 +15712,10 @@
                     {
                       "type": "number",
                       "const": -32015
+                    },
+                    {
+                      "type": "number",
+                      "const": -32016
                     }
                   ]
                 },
@@ -15886,6 +16064,10 @@
                     {
                       "type": "number",
                       "const": -32015
+                    },
+                    {
+                      "type": "number",
+                      "const": -32016
                     }
                   ]
                 },
@@ -19321,6 +19503,10 @@
                 {
                   "type": "number",
                   "const": -32015
+                },
+                {
+                  "type": "number",
+                  "const": -32016
                 }
               ]
             },

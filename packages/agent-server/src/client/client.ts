@@ -133,6 +133,7 @@ export class AgentClient {
   async request<M extends Method>(method: M, params: MethodParams<M>): Promise<MethodResult<M>> {
     await this.connect(); return this.call(method, params);
   }
+  engineControl(params: MethodParams<"thread/engineControl">): Promise<MethodResult<"thread/engineControl">> { return this.request("thread/engineControl", params); }
   private call<M extends Method>(method: M, params: MethodParams<M>): Promise<MethodResult<M>> {
     const id = `cli_${++this.sequence}`;
     return new Promise((resolve, reject) => {
