@@ -108,6 +108,82 @@ function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => voi
   return { child, written, send };
 }
 describe("Claude native frame exchange (fake child only)", () => {
+  for (const [subtype, response] of [
+    ["request_user_dialog", { behavior: "cancelled" }],
+    ["elicitation", { action: "cancel" }],
+    ["future_control", undefined],
+  ] as const) {
+    test(`${subtype}: conservative response and visible notice preserve the active and next turn`, async () => {
+      const fake = fakeProcess(() => {}), events: EngineEvent[] = [];
+      const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
+      const consuming = (async () => { for await (const event of engine.events) events.push(event); })();
+      try {
+        await engine.spawn({ threadId: "th", backend: "claude", cwd: "/tmp" });
+        await engine.sendTurn("tn1", input("go"), { threadId: "th", input: input("go") });
+        fake.send({ type: "control_request", request_id: "unsupported", request: {
+          subtype, dialog_kind: "future_dialog", payload: {}, mcp_server_name: "fixture", message: "Input needed", requested_schema: { type: "object" },
+        } });
+        await until(() => events.some(e => e.type === "error" || e.type === "exit"));
+        const message = `Unsupported Claude control request: ${subtype}`;
+        expect(fake.written.filter(f => f.type === "control_response")).toEqual([
+          { type: "control_response", response: response === undefined
+            ? { subtype: "error", request_id: "unsupported", error: message }
+            : { subtype: "success", request_id: "unsupported", response } },
+        ]);
+        const notices = events.filter(e => e.type === "error");
+        expect(notices).toHaveLength(1);
+        expect(notices[0]).toMatchObject({ type: "error", error: { code: -32015, message }, willRetry: false });
+        expect(NotificationSchemas.error.safeParse(notices[0]).success).toBe(true);
+        expect(events.some(e => e.type === "turnCompleted" || e.type === "exit" || e.type === "approval")).toBe(false);
+        expect(fake.child.exitCode).toBeNull();
+        await engine.steer("tn1", input("continue"));
+        fake.send({ type: "result", result: "survived", usage: {} });
+        await until(() => events.some(e => e.type === "turnCompleted" && e.turnId === "tn1"));
+        await engine.attach();
+        await engine.sendTurn("tn2", input("again"), { threadId: "th", input: input("again") });
+        fake.send({ type: "result", result: "still alive", usage: {} });
+        await until(() => events.some(e => e.type === "turnCompleted" && e.turnId === "tn2"));
+        expect(events.filter(e => e.type === "turnCompleted").map(e => e.status)).toEqual(["completed", "completed"]);
+        expect(events.some(e => e.type === "exit")).toBe(false);
+      } finally { await engine.close("test"); await consuming; }
+    });
+  }
+  test("prompt_suggestion: top-level and control hints are ignored without errors or replies", async () => {
+    const fake = fakeProcess(send => {
+      send({ type: "prompt_suggestion", suggestion: "Next step?" });
+      send({ type: "control_request", request_id: "hint", request: { subtype: "prompt_suggestion", suggestion: "Next step?" } });
+      send({ type: "result", result: "done", usage: {} });
+    }), events: EngineEvent[] = [];
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
+    const consuming = (async () => { for await (const event of engine.events) events.push(event); })();
+    try {
+      await engine.spawn({ threadId: "th", backend: "claude", cwd: "/tmp" });
+      for (const turnId of ["tn1", "tn2"]) {
+        await engine.sendTurn(turnId, input("go"), { threadId: "th", input: input("go") });
+        await until(() => events.some(e => e.type === "turnCompleted" && e.turnId === turnId || e.type === "exit"));
+        await engine.attach();
+      }
+      expect(fake.written.filter(f => f.type === "control_response")).toHaveLength(0);
+      expect(events.filter(e => e.type === "error" || e.type === "exit" || e.type === "approval")).toHaveLength(0);
+      expect(events.filter(e => e.type === "turnCompleted").map(e => e.status)).toEqual(["completed", "completed"]);
+    } finally { await engine.close("test"); await consuming; }
+  });
+  test("can_use_tool without an active turn is denied and leaves the engine usable", async () => {
+    const fake = fakeProcess(send => send({ type: "result", result: "done", usage: {} })), events: EngineEvent[] = [];
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
+    const consuming = (async () => { for await (const event of engine.events) events.push(event); })();
+    try {
+      await engine.spawn({ threadId: "th", backend: "claude", cwd: "/tmp" });
+      fake.send({ type: "control_request", request_id: "orphan", request: { subtype: "can_use_tool", tool_use_id: "tool", tool_name: "Bash", input: {} } });
+      await until(() => events.some(e => e.type === "error" || e.type === "exit"));
+      expect(fake.written.at(-1)).toEqual({ type: "control_response", response: { subtype: "success", request_id: "orphan", response: { behavior: "deny", message: "Unsupported Claude control request: can_use_tool" } } });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ type: "error", willRetry: false });
+      await engine.sendTurn("tn", input("go"), { threadId: "th", input: input("go") });
+      await until(() => events.some(e => e.type === "turnCompleted"));
+      expect(events.some(e => e.type === "exit")).toBe(false);
+    } finally { await engine.close("test"); await consuming; }
+  });
   test("N1/probe13: tool_result before and between turns emits only an unscoped error and engine remains usable", async () => {
     const fake = fakeProcess(send => {
       send({ type: "assistant", message: { content: [{ type: "tool_use", id: "tool", name: "Read", input: {} }] } });
