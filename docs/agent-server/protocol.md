@@ -446,6 +446,8 @@ item 的 `type` 取值取 codex `ThreadItem` 的子集，字段名一致（`aggr
 {"jsonrpc":"2.0","method":"thread/metadata/updated","params":{"threadId":"th_018f…","engineThreadId":"9c1e…"}}
 
 // ── 3. 发一轮
+// 示例省略部分公共字段及 userMessage/reasoning/commandExecution 的完成通知；
+// 它们仍分别消耗完成游标 2/4/6，item.seq 保留开始游标。
 {"jsonrpc":"2.0","id":3,"method":"turn/start","params":{
   "threadId":"th_018f…","clientTurnId":"018f…b2",
   "input":[{"type":"text","text":"把 run-bus 的审批路径讲清楚"}]}}
@@ -455,7 +457,7 @@ item 的 `type` 取值取 codex `ThreadItem` 的子集，字段名一致（`aggr
 {"jsonrpc":"2.0","method":"item/started","params":{"threadId":"th_018f…","turnId":"tn_018f…","seq":1,
   "startedAtMs":1757000001000,
   "item":{"id":"it_1","type":"userMessage","payload":{"content":[{"type":"text","text":"把 run-bus …"}]}}}}
-{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"th_018f…","turnId":"tn_018f…","seq":2,
+{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"th_018f…","turnId":"tn_018f…","seq":3,
   "startedAtMs":1757000001200,
   "item":{"id":"it_2","type":"reasoning","status":"inProgress","payload":{}}}}
 {"jsonrpc":"2.0","method":"item/reasoning/textDelta","params":{"threadId":"th_018f…","turnId":"tn_018f…","itemId":"it_2","delta":"先看 startRun…"}}
@@ -472,12 +474,12 @@ item 的 `type` 取值取 codex `ThreadItem` 的子集，字段名一致（`aggr
   "decidedBy":{"clientId":"c_02","label":"iPhone"},"outcome":"accept"}}
 
 // ── 5. 正文流 + 收尾
-{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"th_018f…","turnId":"tn_018f…","seq":4,
-  "startedAtMs":1757000004000,"item":{"id":"it_4","type":"agentMessage","status":"inProgress","payload":{"text":""}}}}
+{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"th_018f…","turnId":"tn_018f…","seq":7,
+  "startedAtMs":1757000004000,"item":{"id":"it_4","seq":7,"type":"agentMessage","status":"inProgress","payload":{"text":""}}}}
 {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"th_018f…","turnId":"tn_018f…","itemId":"it_4","delta":"审批路径分三段："}}
-{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"th_018f…","turnId":"tn_018f…","seq":4,
+{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"th_018f…","turnId":"tn_018f…","seq":8,
   "completedAtMs":1757000009000,
-  "item":{"id":"it_4","type":"agentMessage","status":"completed","payload":{"text":"审批路径分三段：…"}}}}
+  "item":{"id":"it_4","seq":7,"completedSeq":8,"type":"agentMessage","status":"completed","payload":{"text":"审批路径分三段：…"}}}}
 {"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"th_018f…","turn":{
   "id":"tn_018f…","status":"completed","durationMs":8100,
   "usage":{"inputTokens":12043,"outputTokens":866,"cachedTokens":11200,"cacheCreation":0,"contextTokens":13210}}}}
@@ -487,7 +489,7 @@ item 的 `type` 取值取 codex `ThreadItem` 的子集，字段名一致（`aggr
 {"jsonrpc":"2.0","id":9,"method":"thread/attach","params":{"threadId":"th_018f…","sinceSeq":0}}
 {"jsonrpc":"2.0","id":9,"result":{
   "thread":{"id":"th_018f…","status":{"type":"idle"},"backend":"claude"},
-  "items":[/* seq 1..4 */],"nextSeq":5,"queue":[],"pendingRequests":[]}}
+  "items":[/* item.seq = 1,3,5,7; completedSeq = 2,4,6,8 */],"nextSeq":9,"queue":[],"pendingRequests":[]}}
 ```
 
 ## 12. 未定项（v1 冻结前要拍板）
