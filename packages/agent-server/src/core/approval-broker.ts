@@ -5,6 +5,9 @@ import { LeaseManager } from "./lease-manager.js";
 export interface ApprovalClient extends ClientIdentity { serverRequests: ReadonlySet<ServerRequestMethod>; attached: ReadonlySet<string>; sendRequest: (request: PendingServerRequest) => void }
 export interface ApprovalBrokerOptions { orphanTimeoutMs?: number; timeoutMs?: number; now?: () => number; onDeliveryError?: (threadId: string, error: unknown) => void }
 interface Waiting { request: PendingServerRequest; respond: (result: ServerRequestResult) => void | Promise<void>; since: number; orphan: boolean; timer?: ReturnType<typeof setTimeout> }
+function defaultDecision(request: PendingServerRequest): ServerRequestResult {
+  return request.method === "item/tool/requestUserInput" ? { answers: {} } : request.method === "item/permissions/requestApproval" ? { permissions: {}, scope: "turn" } : { decision: "reject" };
+}
 export class ApprovalBroker {
   private waiting = new Map<string, Waiting>();
   readonly orphanTimeoutMs: number;
@@ -17,7 +20,12 @@ export class ApprovalBroker {
   private audience(request: PendingServerRequest): ApprovalClient[] { return [...this.clients()].filter(c => c.attached.has(request.params.threadId) && c.serverRequests.has(request.method)); }
   create(raw: PendingServerRequest, respond: Waiting["respond"]): void {
     const request = PendingServerRequestSchema.parse(raw), p = request.params;
-    if (this.log.approval(p.requestId)) throw new ProtocolError(ErrorCode.already_resolved, "requestId already used", { threadId: p.threadId });
+    if (this.log.approval(p.requestId)) {
+      this.log.publish({ jsonrpc: "2.0", method: "error", params: { threadId: p.threadId, turnId: p.turnId, error: new ProtocolError(ErrorCode.engine_protocol_error, "engine reused requestId", { threadId: p.threadId }).toJSON(), willRetry: false } });
+      // Preserve the original card and settle only the duplicate engine callback.
+      this.deliver({ request, respond, since: this.now(), orphan: false }, defaultDecision(request));
+      return;
+    }
     this.log.turn(p.turnId, p.threadId); this.log.item(p.threadId, p.itemId);
     this.log.db.query("INSERT INTO approvals(id,thread_id,turn_id,item_id,kind,params_json,status,created_at) VALUES(?,?,?,?,?,?,'pending',?)").run(p.requestId, p.threadId, p.turnId, p.itemId, request.method, JSON.stringify(request), this.now());
     const audience = this.audience(request);
@@ -74,7 +82,7 @@ export class ApprovalBroker {
   }
   expire(requestId: string, reason: string): void {
     const pending = this.waiting.get(requestId); if (!pending) return;
-    const result: ServerRequestResult = pending.request.method === "item/tool/requestUserInput" ? { answers: {} } : pending.request.method === "item/permissions/requestApproval" ? { permissions: {}, scope: "turn" } : { decision: "reject" };
+    const result = defaultDecision(pending.request);
     this.log.db.query("UPDATE approvals SET status='expired',decision_json=?,decided_at=? WHERE id=? AND status='pending'").run(JSON.stringify({ reason, result }), this.now(), requestId);
     this.remove(pending);
     this.log.publish({ jsonrpc: "2.0", method: "serverRequest/expired", params: { threadId: pending.request.params.threadId, requestId, reason } });

@@ -6,6 +6,30 @@ const servers: AgentServer[] = [];
 afterEach(async () => { for (const s of servers.splice(0)) await s.close(); });
 const create = (options = {}) => { const fixture = setup(options); servers.push(fixture.server); return fixture; };
 describe("in-process JSON-RPC server", () => {
+  test("K1: reused requestId rejects only the duplicate callback and keeps the thread alive", async () => {
+    const { server, engines } = create(); const c = await client(server), frames = capture(c);
+    const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+    const { turn } = await c.request("turn/start", { threadId: thread.id, input: input("go") });
+    const engine = engines[0], decisions: unknown[] = [], duplicate: unknown[] = [];
+    engine.emit({ type: "itemStarted", turnId: turn.id, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: process.cwd() } } });
+    const request = { method: capability, params: { requestId: "dup", threadId: thread.id, turnId: turn.id, itemId: "cmd", command: "pwd", cwd: process.cwd(), startedAtMs: Date.now() } };
+    engine.emit({ type: "approval", request, respond: result => { decisions.push(result); } });
+    engine.emit({ type: "approval", request, respond: result => { duplicate.push(result); } });
+    await until(() => duplicate.length === 1);
+    expect(duplicate).toEqual([{ decision: "reject" }]); expect(decisions).toEqual([]);
+    expect(server.threads.get(thread.id).status.type).toBe("running");
+    expect(server.log.pendingRequests(thread.id)).toHaveLength(1);
+    const cards = frames.filter(f => "method" in f && f.method === capability && "id" in f);
+    expect(cards).toHaveLength(1);
+    await c.respond((cards[0] as any).id, { decision: "accept" });
+    expect(decisions).toEqual([{ decision: "accept" }]);
+    engine.emit({ type: "approval", request, respond: result => { duplicate.push(result); } });
+    await until(() => duplicate.length === 2);
+    expect(duplicate[1]).toEqual({ decision: "reject" });
+    expect(frames.filter(f => "method" in f && f.method === "error" && f.params.error.code === -32015)).toHaveLength(2);
+    engine.emit({ type: "turnCompleted", turnId: turn.id, status: "completed" });
+    await until(() => server.threads.get(thread.id).status.type === "idle");
+  });
   test("P1: attach rejects limit; complete suffix and bounded history have separate contracts", async () => {
     const { server } = create({ allowedRoots: [process.cwd()] }); const c = await client(server);
     const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });

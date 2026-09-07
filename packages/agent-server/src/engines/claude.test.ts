@@ -101,6 +101,24 @@ function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => voi
   return { child, written, send };
 }
 describe("Claude native frame exchange (fake child only)", () => {
+  test("N2: orphan tool_result reports -32015 and the same engine completes two turns", async () => {
+    const fake = fakeProcess(send => {
+      send({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "orphan", content: "x" }] } });
+      send({ type: "result", result: "survived", usage: { input_tokens: 1, output_tokens: 1 } });
+    });
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const event of engine.events) events.push(event); })();
+    try {
+      await engine.spawn({ threadId: "th", backend: "claude", cwd: "/tmp" });
+      for (const turnId of ["tn1", "tn2"]) {
+        await engine.sendTurn(turnId, input("go"), { threadId: "th", input: input("go") });
+        await until(() => events.some(e => e.type === "turnCompleted" && e.turnId === turnId));
+      }
+      expect(events.filter(e => e.type === "error")).toHaveLength(2);
+      expect(events.find(e => e.type === "error")).toMatchObject({ error: { code: -32015 } });
+      expect(events.some(e => e.type === "exit")).toBe(false);
+    } finally { await engine.close("test"); await consuming; }
+  });
   test("one spawn, initialize handshake, two user messages, result never closes stdin", async () => {
     let spawns = 0;
     const fake = fakeProcess(send => {

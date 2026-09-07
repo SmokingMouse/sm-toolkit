@@ -74,7 +74,10 @@ export class ClaudeEventMapper {
       }
       case EventType.ToolCallDone: {
         const item = this.items.get(String(d.id));
-        if (!item) throw new ProtocolError(ErrorCode.engine_protocol_error, "tool result without tool call", { raw: jsonValue(d) });
+        if (!item) {
+          out.push({ type: "error", turnId: this.turnId, error: new ProtocolError(ErrorCode.engine_protocol_error, "tool result without tool call", { raw: jsonValue(d) }).toJSON(), willRetry: false });
+          break;
+        }
         const failed = Boolean(d.isError);
         if (item.type === "commandExecution") Object.assign(item.payload, { aggregatedOutput: String(d.output ?? "") + (d.stderr ? `\n${d.stderr}` : ""), ...(typeof d.exitCode === "number" ? { exitCode: d.exitCode } : {}) });
         else if (item.type === "toolCall") Object.assign(item.payload, { output: jsonValue(d.output), isError: failed });
