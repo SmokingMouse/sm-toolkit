@@ -46,12 +46,12 @@ describe("ThreadManager", () => {
     expect(frames.some(f => "method" in f && f.method === "thread/metadata/updated")).toBe(true);
     expect(server.log.findEngine(thread.engineThreadId!)?.id).toBe(thread.id);
   });
-  test("default fork uses native resume + forkSession; fromItemId returns -32008", async () => {
+  test("default fork uses native resume + forkSession; unknown fromItemId returns -32602", async () => {
     const { server, engines } = create(); const c = await client(server); const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
     const fork = await c.request("thread/fork", { threadId: thread.id, clientThreadId: "fork-key" });
     expect(engines[1].options?.forkSession).toBe(true); expect(engines[1].options?.engineThreadId).toBe(thread.engineThreadId); expect(fork.thread.engineThreadId).not.toBe(thread.engineThreadId);
     expect((await c.request("thread/fork", { threadId: thread.id, clientThreadId: "fork-key" })).deduplicated).toBe(true);
-    await expect(c.request("thread/fork", { threadId: thread.id, fromItemId: "item" })).rejects.toMatchObject({ code: ErrorCode.unsupported_capability }); expect(engines).toHaveLength(2);
+    await expect(c.request("thread/fork", { threadId: thread.id, fromItemId: "item" })).rejects.toMatchObject({ code: ErrorCode.invalid_params }); expect(engines).toHaveLength(2);
   });
   test("spawn failure leaves systemError row and can be resumed", async () => {
     const engines: MockEngine[] = [];

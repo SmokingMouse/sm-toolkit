@@ -16,12 +16,12 @@ export type EngineEvent =
   | { type: "itemDelta"; turnId: string; itemId: string; kind: DeltaKind; text: string }
   | { type: "itemUpdated"; turnId: string; item: EngineItem }
   | { type: "itemCompleted"; turnId: string; item: EngineItem }
-  | { type: "turnCompleted"; turnId: string; status: "completed" | "interrupted" | "failed"; usage?: Usage; error?: RpcError }
+  | { type: "turnCompleted"; turnId: string; status: "completed" | "interrupted" | "failed"; usage?: Usage; error?: RpcError; forkPoint?: string }
   | { type: "approval"; request: PendingServerRequest; respond: (result: ServerRequestResult) => void | Promise<void> }
   | { type: "approvalExpired"; turnId: string; requestId: string; reason: string }
   | { type: "exit"; error?: RpcError };
 
-export interface SessionOptions extends StartThreadParams { threadId: string; engineThreadId?: string; forkSession?: boolean }
+export interface SessionOptions extends StartThreadParams { threadId: string; engineThreadId?: string; forkSession?: boolean; forkPoint?: string; seedHistory?: Item[] }
 export interface EngineSession {
   readonly backend: Backend;
   readonly engineThreadId: string | null;

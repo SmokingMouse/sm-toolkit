@@ -1,4 +1,4 @@
-import { ErrorCode, ProtocolError, rpcError, type MethodParams, type MethodResult, type RpcError, type StartThreadParams, type Thread, type ThreadStatus } from "../protocol/index.js";
+import { ErrorCode, ProtocolError, rpcError, type Item, type MethodParams, type MethodResult, type RpcError, type StartThreadParams, type Thread, type ThreadStatus } from "../protocol/index.js";
 import type { EngineEvent, EngineFactory, EngineSession, SessionOptions } from "../engines/session.js";
 import { ItemLog } from "./item-log.js";
 import { TurnQueue } from "./turn-queue.js";
@@ -69,16 +69,20 @@ export class ThreadManager {
     if (status.type === "idle") this.idleSince.set(threadId, this.now()); else this.idleSince.delete(threadId);
     this.log.publish({ jsonrpc: "2.0", method: "thread/status/changed", params: { threadId, status } });
   }
-  async start(params: StartThreadParams, onCreated?: (thread: Thread) => void, internal?: { resume?: string; fork?: boolean; request?: unknown }): Promise<MethodResult<"thread/start">> {
+  async start(params: StartThreadParams, onCreated?: (thread: Thread) => void, internal?: { resume?: string; fork?: boolean; request?: unknown; prefix?: Item[]; forkedFrom?: Thread["forkedFrom"]; forkPoint?: string; seedHistory?: Item[] }): Promise<MethodResult<"thread/start">> {
     const request = internal?.request ?? params;
     const existing = this.log.deduplicate<Thread>("threads", params.clientThreadId, request);
     if (existing) { onCreated?.(existing); await this.opening.get(existing.id); return { thread: this.get(existing.id), deduplicated: true }; }
     const thread: Thread = { id: `th_${crypto.randomUUID()}`, backend: params.backend, engineThreadId: internal?.fork ? null : internal?.resume ?? null, cwd: params.cwd ?? process.cwd(), status: { type: "spawning" }, createdAtMs: this.now(), ...(params.model ? { model: params.model } : {}), ...(params.meta ? { meta: params.meta } : {}), ...(params.clientThreadId ? { clientThreadId: params.clientThreadId } : {}) };
-    const options = { ...params, cwd: thread.cwd };
+    if (internal?.forkedFrom) thread.forkedFrom = internal.forkedFrom;
+    const options = { ...params, cwd: thread.cwd, ...(internal?.seedHistory ? { seedHistory: internal.seedHistory } : {}) };
     thread.permission = params.permission ?? "default";
-    this.log.insertThread(thread, request, options); onCreated?.(thread);
+    this.log.transaction(() => {
+      this.log.insertThread(thread, request, options);
+      if (internal?.prefix && internal.forkedFrom) this.log.copyPrefix(internal.forkedFrom.threadId, thread.id, internal.prefix);
+    }); onCreated?.(thread);
     this.log.publish({ jsonrpc: "2.0", method: "thread/started", params: { threadId: thread.id, thread } });
-    await this.open(thread, { ...options, threadId: thread.id, engineThreadId: internal?.resume, forkSession: internal?.fork });
+    await this.open(thread, { ...options, threadId: thread.id, engineThreadId: internal?.resume, forkSession: internal?.fork, forkPoint: internal?.forkPoint });
     return { thread: this.get(thread.id) };
   }
   private open(thread: Thread, options: SessionOptions): Promise<void> {
@@ -133,16 +137,22 @@ export class ThreadManager {
     const options = { ...this.log.options(thread.id), ...overrides, backend: thread.backend };
     this.log.saveOptions(thread.id, options); thread.cwd = options.cwd ?? thread.cwd; thread.model = options.model; thread.permission = options.permission ?? "default"; delete thread.closedAtMs; this.log.saveThread(thread);
     this.setStatus(thread.id, { type: "spawning" });
-    await this.open(thread, { ...options, threadId: thread.id, engineThreadId: thread.engineThreadId ?? undefined });
+    await this.open(thread, { ...options, threadId: thread.id, engineThreadId: thread.engineThreadId ?? undefined, ...(thread.engineThreadId ? { seedHistory: undefined } : {}) });
     return { thread: this.get(thread.id), attached: false };
   }
   async fork(params: MethodParams<"thread/fork">, onCreated?: (thread: Thread) => void): Promise<MethodResult<"thread/fork">> {
     const source = this.get(params.threadId);
-    // TODO: fromItemId on Claude requires a prefix-jsonl transcript fork.
-    if (params.fromItemId !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "fork fromItemId requires prefix-jsonl support", { threadId: source.id });
-    if (source.backend !== "claude" || !source.engineThreadId) throw new ProtocolError(ErrorCode.unsupported_capability, "native Claude fork needs an engine session id", { threadId: source.id });
+    if (source.backend !== "claude" && source.backend !== "codex") throw new ProtocolError(ErrorCode.unsupported_capability, "fork requires Claude or Codex", { threadId: source.id });
+    const all = this.log.snapshot(source.id).items;
+    const index = params.fromItemId === undefined ? all.length - 1 : all.findIndex(item => item.id === params.fromItemId);
+    if (params.fromItemId !== undefined && index < 0) throw new ProtocolError(ErrorCode.invalid_params, "fromItemId does not belong to the source thread", { threadId: source.id, itemId: params.fromItemId });
+    const prefix = all.slice(0, index + 1), itemId = prefix.at(-1)?.id ?? null;
+    const forkPoint = itemId ? this.log.forkPoint(source.id, itemId) : undefined;
+    // Unmapped and live boundaries must never silently inherit a later native suffix.
+    const native = !!source.engineThreadId && (!!forkPoint || (params.fromItemId === undefined && source.status.type === "idle"));
     const { clientThreadId: _, ...options } = this.log.options(source.id);
-    return this.start({ ...options, clientThreadId: params.clientThreadId }, onCreated, { resume: source.engineThreadId, fork: true, request: params });
+    const { seedHistory: __, ...clean } = options as SessionOptions;
+    return this.start({ ...clean, clientThreadId: params.clientThreadId }, onCreated, { ...(native ? { resume: source.engineThreadId!, fork: true, forkPoint } : { seedHistory: prefix }), prefix, forkedFrom: { threadId: source.id, itemId }, request: params });
   }
   private metadata(threadId: string, engineThreadId: string): void {
     const owner = this.engineThreads.get(engineThreadId);
@@ -185,7 +195,13 @@ export class ThreadManager {
       case "itemDelta": this.log.delta(threadId, event.itemId, event.kind, event.text); break;
       case "itemUpdated": this.log.updateItem(threadId, event.item); break;
       case "itemCompleted": this.log.updateItem(threadId, event.item, true); break;
-      case "turnCompleted": this.approvals?.expireThread(threadId, "turn_completed", turnId); this.queue(threadId).complete(turnId, event.status, event.usage, event.error); break;
+      case "turnCompleted": {
+        this.approvals?.expireThread(threadId, "turn_completed", turnId);
+        this.queue(threadId).complete(turnId, event.status, event.usage, event.error);
+        const last = this.log.snapshot(threadId).items.filter(item => item.turnId === turnId).at(-1);
+        if (last && event.status === "completed" && event.forkPoint) this.log.saveForkPoint(threadId, last.id, event.forkPoint);
+        break;
+      }
       case "approval":
         if (!this.approvals) throw new ProtocolError(ErrorCode.internal, "ApprovalBroker is not configured");
         this.approvals.create(event.request, event.respond); break;
