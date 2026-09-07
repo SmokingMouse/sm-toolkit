@@ -1,0 +1,43 @@
+import { z } from "zod";
+import { IdSchema, TimestampSchema, FileChangesSchema, JsonObjectSchema } from "./models.js";
+
+export const ApprovalDecisionSchema = z.enum(["accept", "acceptForSession", "reject", "abort"]);
+// Permissions remain backend-specific JSON objects in AS v1.
+export const GrantedPermissionsSchema = JsonObjectSchema;
+export const QuestionSchema = z.object({
+  id: IdSchema, question: z.string(), header: z.string().optional(), multiSelect: z.boolean().optional(),
+  options: z.array(z.object({ label: z.string(), description: z.string().optional() })).optional(),
+});
+export const AnswerSchema = z.object({ answers: z.array(z.string()) });
+const base = { requestId: IdSchema, threadId: IdSchema, turnId: IdSchema, itemId: IdSchema };
+const approval = { ...base, reason: z.string().optional(), startedAtMs: TimestampSchema };
+const decision = z.object({ decision: ApprovalDecisionSchema });
+export const ServerRequestSchemas = {
+  "item/commandExecution/requestApproval": {
+    params: z.object({ ...approval, command: z.string(), cwd: z.string() }), result: decision,
+  },
+  "item/fileChange/requestApproval": {
+    params: z.object({ ...approval, changes: FileChangesSchema, grantRoot: z.string().optional() }), result: decision,
+  },
+  "item/permissions/requestApproval": {
+    params: z.object({ ...approval, cwd: z.string(), permissions: JsonObjectSchema }),
+    result: z.object({ permissions: GrantedPermissionsSchema, scope: z.enum(["turn", "thread", "session"]) }),
+  },
+  "item/tool/requestUserInput": {
+    params: z.object({ ...base, questions: z.array(QuestionSchema), isBlocking: z.boolean() }),
+    result: z.object({ answers: z.record(z.string(), AnswerSchema) }),
+  },
+} as const;
+export const ServerRequestMethodSchema = z.enum(Object.keys(ServerRequestSchemas) as [keyof typeof ServerRequestSchemas, ...(keyof typeof ServerRequestSchemas)[]]);
+function pending<T extends keyof typeof ServerRequestSchemas>(method: T) { return z.object({ method: z.literal(method), params: ServerRequestSchemas[method].params }); }
+export const PendingServerRequestSchema = z.discriminatedUnion("method", [
+  pending("item/commandExecution/requestApproval"), pending("item/fileChange/requestApproval"),
+  pending("item/permissions/requestApproval"), pending("item/tool/requestUserInput"),
+]);
+export type ServerRequestMethod = z.infer<typeof ServerRequestMethodSchema>;
+export type PendingServerRequest = z.infer<typeof PendingServerRequestSchema>;
+export type ServerRequestParams<M extends ServerRequestMethod> = z.infer<(typeof ServerRequestSchemas)[M]["params"]>;
+export type ServerRequestResult<M extends ServerRequestMethod = ServerRequestMethod> = z.infer<(typeof ServerRequestSchemas)[M]["result"]>;
+export type ApprovalDecision = z.infer<typeof ApprovalDecisionSchema>;
+export type GrantedPermissions = z.infer<typeof GrantedPermissionsSchema>;
+export type Answer = z.infer<typeof AnswerSchema>;
