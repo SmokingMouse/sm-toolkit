@@ -1,18 +1,19 @@
 import type { Item } from "@smokingmouse/agent-server/protocol";
 import type { RequestCard, TuiModel } from "./model.js";
+import { contextUsage, nativePermission, permissionModes } from "./modes.js";
 
 /** Strip terminal control sequences from untrusted engine/user text before drawing. */
 export function plain(text: string): string {
   return text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "").replace(/\t/g, "  ");
 }
 const json = (v: unknown) => v === undefined ? "" : JSON.stringify(v);
-export function renderItem(item: Item, expanded = false): string[] {
+export function renderItem(item: Item, expanded = false, expandedPlan = true): string[] {
   const state = item.status === "inProgress" ? " …" : item.status === "failed" || item.status === "rejected" ? ` [${item.status}]` : "";
   let body: string;
   switch (item.type) {
     case "userMessage": body = `You: ${item.payload.content.map(c => c.type === "text" ? c.text : c.type === "bash" ? c.command : `[${c.type}] ${c.path}`).join("\n")}`; break;
     case "agentMessage": body = `Agent${state}: ${item.payload.text}`; break;
-    case "reasoning": body = expanded ? `Reasoning${state}: ${[item.payload.summary, item.payload.text].filter(Boolean).join("\n")}` : `Reasoning${state}: [折叠 · Tab 展开]`; break;
+    case "reasoning": body = expanded ? `Reasoning${state}: ${[item.payload.summary, item.payload.text].filter(Boolean).join("\n")}` : `Reasoning${state}: [折叠 · Ctrl-R 展开]`; break;
     case "commandExecution": body = `$ ${item.payload.command}${state}\n  cwd: ${item.payload.cwd}\n${plain(item.payload.aggregatedOutput ?? "").split("\n").slice(-6).join("\n")}${item.payload.exitCode != null ? `\n  exit: ${item.payload.exitCode}` : ""}`; break;
     case "fileChange": body = `Files${state}:\n${item.payload.changes.map(c => `  ${c.kind} ${c.path}`).join("\n")}`; break;
     case "toolCall": body = `Tool ${item.payload.namespace ? item.payload.namespace + "/" : ""}${item.payload.name}${state}${item.payload.isError ? " [error]" : ""}\n  ${json(item.payload.input)}\n  ${json(item.payload.output)}`; break;
@@ -21,8 +22,8 @@ export function renderItem(item: Item, expanded = false): string[] {
     case "error": body = `Error${item.payload.code ? ` (${item.payload.code})` : ""}: ${item.payload.message}`; break;
     case "webSearch": body = `Search: ${item.payload.query}\n${json(item.payload.results)}`; break;
     case "imageOutput": body = `Images: ${item.payload.paths.join(", ")}`; break;
-    case "plan": body = `Plan: ${item.payload.text ?? ""}\n${item.payload.steps?.map(s => `  [${s.status}] ${s.step}`).join("\n") ?? ""}`; break;
-    case "contextCompaction": body = "Context compacted"; break;
+    case "plan": body = expandedPlan ? `Plan: ${item.payload.text ?? ""}\n${item.payload.steps?.map(s => `  [${s.status}] ${s.step}`).join("\n") ?? ""}` : `Plan: [折叠 · ${item.payload.steps?.length ?? 0} steps · Ctrl-P 展开]`; break;
+    case "contextCompaction": body = "── Context compacted · compact_boundary ──"; break;
   }
   return plain(body).split("\n");
 }
@@ -34,7 +35,9 @@ export function renderCard(card: RequestCard): string[] {
   switch (r.method) {
     case "item/commandExecution/requestApproval": lines.push(`Command: ${r.params.command}`, `cwd: ${r.params.cwd}`); break;
     case "item/fileChange/requestApproval": lines.push(...r.params.changes.map(c => `${c.kind} ${c.path}`), ...(r.params.grantRoot ? [`grantRoot: ${r.params.grantRoot}`] : [])); break;
-    case "item/permissions/requestApproval": lines.push(`Permissions: ${json(r.params.permissions)}`, `cwd: ${r.params.cwd}`); break;
+    case "item/permissions/requestApproval":
+      if (r.params.permissions.toolName === "ExitPlanMode") lines.push("退出 Plan mode 审批 · 同意后切换 default");
+      lines.push(`Permissions: ${json(r.params.permissions)}`, `cwd: ${r.params.cwd}`); break;
     case "item/tool/requestUserInput": {
       const q = r.params.questions[card.question];
       if (q) {
@@ -70,13 +73,16 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
   const width = Math.max(1, columns - 1), height = Math.max(4, rows);
   const thread = model.thread, usage = model.usage;
   const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "unknown"} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection} | ${thread?.id ?? "connecting"}`);
-  const body = [...model.items.values()].sort((a, b) => a.seq - b.seq).flatMap(i => [...renderItem(i, model.expandedReasoning), ""]);
+  const context = contextUsage(usage?.contextTokens, model.contextWindow);
+  const status = wrap(`mode ${nativePermission(thread?.permission)} | effort ${model.effort ?? "—"} | model ${model.liveModel ?? thread?.model ?? "—"} | ctx [${context.bar}] ${context.percent ?? "?"}% / ${model.contextWindowEstimated ? "~" : ""}${model.contextWindow}`, width).slice(0, height - 4);
+  const body = [...model.items.values()].sort((a, b) => a.seq - b.seq).flatMap(i => [...renderItem(i, model.expandedReasoning, model.expandedPlan), ""]);
   for (const q of model.queue) body.push(`排队 #${q.position + 1}: ${q.preview}`);
   for (const c of model.cards.values()) if (c !== model.activeCard) body.push(...renderCard(c));
   const content = body.flatMap(line => wrap(line, width));
-  const card = model.activeCard ? renderCard(model.activeCard).flatMap(line => wrap(line, width)) : [];
-  const footer = model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : "Enter 发送/排队 · /steer 插话 · Tab 推理 · PgUp/PgDn 历史 · Ctrl-C 两次退出";
-  const available = height - 4;
+  const picker = model.permissionPicker === undefined ? [] : ["权限模式 · ↑↓/数字选择 · Enter 确认 · Esc 取消", ...[...permissionModes(model.bypassAvailable), "dontAsk"].map((p, i) => `${i === model.permissionPicker ? ">" : " "} ${i + 1}. ${p}${p === nativePermission(thread?.permission) ? " (当前)" : ""}`)];
+  const card = (model.activeCard ? renderCard(model.activeCard) : picker).flatMap(line => wrap(line, width));
+  const footer = model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : "Enter 发送 · Shift+Tab 权限 · Tab effort · Ctrl-P 计划 · Ctrl-R 推理 · Ctrl-C 两次退出";
+  const available = height - 4 - status.length;
   let middle: string[];
   if (card.length) {
     const cardRows = Math.min(card.length, available);
@@ -89,5 +95,5 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
   while (middle.length < available) middle.push("");
   const input = model.activeCard ? model.activeCard.draft : model.input;
   const inputTail = wrap(`> ${input}`, width).at(-1) ?? "> ";
-  return [wrap(header, width)[0], ...middle, wrap(model.message, width)[0], wrap(footer, width)[0], inputTail].join("\n");
+  return [wrap(header, width)[0], ...status.map(line => context.warning ? `\x1b[33m${line}\x1b[0m` : line), ...middle, wrap(model.message, width)[0], wrap(footer, width)[0], inputTail].join("\n");
 }

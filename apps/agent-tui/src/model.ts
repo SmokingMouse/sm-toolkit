@@ -1,5 +1,6 @@
 import { AgentClient, type ClientState } from "@smokingmouse/agent-server/client";
 import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
+import { controlError, estimatedContextWindow, nativePermission, type Effort } from "./modes.js";
 
 export interface RequestCard { request: PendingServerRequest; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
 export class TuiModel {
@@ -12,6 +13,13 @@ export class TuiModel {
   message = "";
   input = "";
   expandedReasoning = false;
+  expandedPlan = true;
+  permissionPicker?: number;
+  bypassAvailable = false;
+  effort?: Effort;
+  liveModel?: string;
+  contextWindow = 200_000;
+  contextWindowEstimated = true;
   scroll = 0;
   activeTurnId?: string;
   private listeners = new Set<() => void>();
@@ -24,7 +32,9 @@ export class TuiModel {
   }
   snapshot(s: AttachResult): void {
     if (this.thread && this.thread.id !== s.thread.id) return;
+    if (!this.thread) this.bypassAvailable = nativePermission(s.thread.permission) === "bypassPermissions";
     this.thread = s.thread; this.queue = s.queue;
+    if (this.contextWindowEstimated) this.contextWindow = estimatedContextWindow(this.liveModel ?? s.thread.model);
     for (const item of s.items) this.items.set(item.id, structuredClone(item));
     const ids = new Set(s.pendingRequests.map(r => r.params.requestId));
     for (const [id, card] of this.cards) if (!ids.has(id) && ["pending", "sending", "offline"].includes(card.state)) {
@@ -43,6 +53,7 @@ export class TuiModel {
   notification(n: ServerNotification): void {
     if ("threadId" in n.params && this.thread && n.params.threadId && n.params.threadId !== this.thread.id) return;
     switch (n.method) {
+      case "thread/permission/changed": if (this.thread) { this.thread.permission = n.params.permission; this.message = `权限模式：${nativePermission(n.params.permission)}`; } break;
       case "thread/status/changed": if (this.thread) this.thread.status = n.params.status; break;
       case "thread/queue/changed": this.queue = n.params.queue; break;
       case "thread/tokenUsage/updated": this.usage = n.params.usage; break;
@@ -72,7 +83,7 @@ export function bindClient(client: AgentClient, model: TuiModel): () => void {
     if (state !== "connected") { model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
     model.changed();
   }), client.onError((error, id) => {
-    model.message = error.message;
+    model.message = controlError(error);
     for (const handle of client.pendingRequests.values()) {
       const card = model.cards.get(handle.params.requestId);
       if (handle.id === id && card?.state === "sending") card.state = "pending";

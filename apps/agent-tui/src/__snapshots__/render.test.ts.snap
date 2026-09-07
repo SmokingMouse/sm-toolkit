@@ -6,7 +6,7 @@ exports[`all item types render stable text, folded and expanded reasoning 1`] = 
 
 Agent …: Hello 世界
 
-Reasoning: [折叠 · Tab 展开]
+Reasoning: [折叠 · Ctrl-R 展开]
 
 $ pwd
   cwd: /tmp
@@ -44,7 +44,7 @@ Images: /tmp/image.png
 Plan: Build
   [pending] test
 
-Context compacted"
+── Context compacted · compact_boundary ──"
 `;
 
 exports[`approval and question cards show contents and resolutions 1`] = `
@@ -78,6 +78,7 @@ Enter to confirm · Esc to cancel"
 
 exports[`fixed header, footer, queue and active card viewport snapshots 1`] = `
 "codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected | th_demo
+mode default | effort — | model — | ctx [??????????] ?% / ~200000
 You: 你好
 [file] /tmp/a.ts
 
@@ -90,14 +91,13 @@ Agent …: Hello 世界
 
 
 
-
-Enter 发送/排队 · /steer 插话 · Tab 推理 · PgUp/PgDn 历史 · Ctrl-C 两次退出
+Enter 发送 · Shift+Tab 权限 · Tab effort · Ctrl-P 计划 · Ctrl-R 推理 · Ctrl-C 两次退出
 > new input"
 `;
 
 exports[`fixed header, footer, queue and active card viewport snapshots 2`] = `
 "codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected
-[file] /tmp/a.ts
+mode default | effort — | model — | ctx [??????????] ?% / ~200000
 
 Agent …: Hello 世界
 
