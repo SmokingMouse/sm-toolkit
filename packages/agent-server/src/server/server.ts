@@ -24,6 +24,7 @@ export interface InProcessClient {
   /** Transport adapters feed decoded JSON frames here, and consume frames/onFrame. */
   send(frame: unknown): Promise<void>;
   onFrame(listener: (frame: Frame) => void): () => void;
+  onClose(listener: () => void): () => void;
   request<M extends Method>(method: M, params: MethodParams<M>): Promise<MethodResult<M>>;
   notifyInitialized(): Promise<void>;
   respond(id: RpcId, result: unknown): Promise<void>;
@@ -50,6 +51,7 @@ class Connection implements InProcessClient, ApprovalClient {
   private sequence = 0;
   private reverseSequence = 0;
   private listeners = new Set<(frame: Frame) => void>();
+  private closeListeners = new Set<() => void>();
   private calls = new Map<RpcId, { resolve: (result: any) => void; reject: (error: unknown) => void }>();
   private ingress: Promise<void> = Promise.resolve();
   constructor(private readonly server: AgentServer) {}
@@ -75,6 +77,10 @@ class Connection implements InProcessClient, ApprovalClient {
     for (const listener of [...this.listeners]) { try { listener(structuredClone(frame)); } catch { /* Transport consumer isolation. */ } }
   }
   onFrame(listener: (frame: Frame) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+  onClose(listener: () => void): () => void {
+    if (this.closed) listener(); else this.closeListeners.add(listener);
+    return () => this.closeListeners.delete(listener);
+  }
   request<M extends Method>(method: M, params: MethodParams<M>): Promise<MethodResult<M>> {
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
@@ -100,6 +106,8 @@ class Connection implements InProcessClient, ApprovalClient {
     this.server.disconnect(this);
     for (const call of this.calls.values()) call.reject(new Error("connection closed"));
     this.calls.clear(); this.stream?.end(); this.listeners.clear(); this.delivered.clear();
+    for (const listener of this.closeListeners) { try { listener(); } catch { /* Transport isolation. */ } }
+    this.closeListeners.clear();
   }
 }
 
