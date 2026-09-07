@@ -16,6 +16,15 @@ test("observation categories retain unknown JSON and highlight retries, limits a
   expect(classifyEvent("hook_started", {}).error).toBe(false);
 });
 const tool = (id: string, seq: number, name: string, input: unknown, output?: unknown): Item => ({ id, seq, turnId: "t", startedAtMs: 0, status: "completed", type: "toolCall", payload: { name, input: input as never, output: output as never } });
+test("P2-5: retry and rate-limit classification outrank hook; error fields are type-checked", () => {
+  expect(classifyEvent("hook_rate_limit_error", {}).category).toBe("rate_limit");
+  expect(classifyEvent("hook_api_retry", {}).category).toBe("retry");
+  expect(classifyEvent("hook_response", { exit_code: "1" }).error).toBe(true);
+  for (const exit_code of ["0", "", "n/a", [], null, true]) expect(classifyEvent("hook_response", { exit_code }).error).toBe(false);
+  expect(classifyEvent("memory", { status: ["failed"] }).error).toBe(false);
+  expect(classifyEvent("memory", { outcome: { status: "failed" } }).error).toBe(false);
+  expect(classifyEvent("memory", { status: [], outcome: "failed" }).error).toBe(true);
+});
 test("P1-2: bounded ring retains latest 2000 events and lays out only visible entries", () => {
   const model = new TuiModel(); model.logExpanded = true;
   for (let i = 0; i < 5000; i++) model.logs.push(classifyEvent("memory", { message: `log-${i}` }));

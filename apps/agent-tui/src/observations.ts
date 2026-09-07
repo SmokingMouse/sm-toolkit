@@ -5,16 +5,15 @@ export interface LogEntry { time: number; subtype: string; category: string; err
 const bounded = (text: string, limit: number) => text.length > limit ? text.slice(0, limit) + "…[截断]" : text;
 /** Bound retained text at ingestion; never stringify or clone a raw payload on redraw. */
 export function classifyEvent(subtype: string, payload: Record<string, unknown>, time = Date.now()): LogEntry {
-  const category = /hook/.test(subtype) ? "hook" : subtype === "local_command" ? "command"
-    : /api_retry/.test(subtype) ? "retry" : /rate_limit/.test(subtype) ? "rate_limit"
+  const category = /rate_limit/.test(subtype) ? "rate_limit" : /api_retry/.test(subtype) ? "retry"
+    : /hook/.test(subtype) ? "hook" : subtype === "local_command" ? "command"
     : /model_refusal_fallback/.test(subtype) ? "fallback" : /memory/.test(subtype) ? "memory"
     : subtype === "away_summary" ? "summary" : "unknown";
   const error = /error|failed|failure|rate_limit|api_retry|refusal/.test(subtype)
     || payload.is_error === true || payload.isError === true || Boolean(payload.error)
-    || (typeof payload.exit_code === "number" && payload.exit_code !== 0)
-    || (typeof payload.exitCode === "number" && payload.exitCode !== 0)
+    || [payload.exit_code, payload.exitCode].some(value => (typeof value === "number" || typeof value === "string" && value.trim() !== "") && Number.isFinite(Number(value)) && Number(value) !== 0)
     || (Array.isArray(payload.hook_errors) && payload.hook_errors.length > 0)
-    || /error|failed|failure/.test(String(payload.status ?? payload.outcome ?? ""));
+    || [payload.status, payload.outcome].some(value => typeof value === "string" && /error|failed|failure/.test(value));
   const detail = ["summary", "output", "stdout", "stderr", "message", "hook_name", "reason"].flatMap(key => typeof payload[key] === "string" ? [payload[key] as string] : []);
   return { time, subtype: bounded(subtype, 256), category, error, summary: bounded(category === "unknown" || !detail.length ? JSON.stringify(payload) : detail.join(" · "), 2048) };
 }
