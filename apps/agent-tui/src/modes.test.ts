@@ -57,8 +57,11 @@ test("native errors are not success and lease messages identify the holder and t
   expect(() => controlSuccess({ response: { subtype: "success" } })).not.toThrow();
   expect(() => controlSuccess({ response: { subtype: "error", error: "policy" } })).toThrow("policy");
   expect(() => controlSuccess({})).toThrow("success");
-  for (const code of [-32012, -32014]) {
+  for (const code of [-32012]) {
     const text = controlError({ code, data: { holder: { label: "phone" } } }, true);
     expect(text).toContain("另一客户端持有控制权（phone）"); expect(text).toContain("/takeover");
   }
+  expect(controlError({ code: -32014 }, true)).toContain("审批已被处理");
+  expect(controlError({ code: -32014 }, true)).not.toContain("/takeover");
+  expect(controlError({ code: -32005, message: "an active thread lease is required for permission escalation" }, true)).toContain("有效控制租约");
 });

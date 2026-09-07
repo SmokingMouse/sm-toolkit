@@ -1,4 +1,5 @@
 import type { Thread } from "@smokingmouse/agent-server/protocol";
+import { ErrorCode } from "@smokingmouse/agent-server/protocol";
 
 export type Permission = NonNullable<Thread["permission"]>;
 export function nativePermission(mode: Permission = "default"): Permission {
@@ -41,7 +42,9 @@ export function controlSuccess(value: unknown): void {
 export function controlError(error: unknown, leaseOperation = false): string {
   const e = error as { code?: number; message?: string; data?: { holder?: { label?: string; clientId?: string } } };
   const holder = e?.data?.holder;
-  return e?.code === -32012 || (leaseOperation && e?.code === -32014)
+  if (e?.code === ErrorCode.already_resolved) return "审批已被处理，请查看当前审批状态";
+  if (leaseOperation && e?.code === ErrorCode.unauthorized && /lease/i.test(e.message ?? "")) return "权限提升需要有效控制租约；租约可能已过期，请重试操作";
+  return e?.code === ErrorCode.lease_held
     ? `另一客户端持有控制权${holder ? `（${holder.label || holder.clientId || "未知"}）` : ""}；/takeover 重试接管（待对方释放或租约到期）`
     : error instanceof Error ? error.message : String(error);
 }

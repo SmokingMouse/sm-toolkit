@@ -51,7 +51,7 @@ async function setup(permission: Permission = "default") {
   a.model.launchPermission = permission;
   const { thread } = await a.client.request("thread/start", { backend: "claude", cwd: home, permission });
   for (const client of clients) await client.request("thread/attach", { threadId: thread.id });
-  engine.assertLease = () => { if (!server.leases.read(thread.id)) throw new ProtocolError(-32014, "lease required"); };
+  engine.assertLease = () => { if (!server.leases.read(thread.id)) throw new ProtocolError(-32005, "lease required"); };
   const command = async (text: string) => { a.model.input = text; await a.controller.key("\r", { name: "return" }); };
   return { home, engine, server, a, b, thread, command };
 }
@@ -147,16 +147,17 @@ test("bypass survives mode changes and reattach; dontAsk is picker-only and canc
   await command("/permissions"); await a.controller.key("", { name: "escape" }); expect(engine.permissions).toHaveLength(count);
 });
 
-test("future -32014 lease gate keeps effort unchanged and exposes takeover", async () => {
-  const { a, command } = await setup();
+test("P2-1 real expired escalation gate is unauthorized, not already_resolved", async () => {
+  const { a, server, thread } = await setup("full");
+  a.model.thread!.permission = "plan";
   const request = a.client.request.bind(a.client);
   a.client.request = async (method, params) => {
-    if (method === "thread/effort/set") throw new ProtocolError(-32014, "lease required");
+    if (method === "thread/permission/set") server.leases.clear(thread.id);
     return request(method, params);
   };
-  await command("/effort high");
-  expect(a.model.effort).toBeUndefined(); expect(a.model.input).toBe("/effort high");
-  expect(a.model.message).toContain("另一客户端持有控制权"); expect(a.model.message).toContain("/takeover");
+  await a.controller.key("", { name: "tab", shift: true });
+  expect(a.model.thread?.permission).toBe("plan");
+  expect(a.model.message).toContain("有效控制租约"); expect(a.model.message).not.toContain("审批已被处理");
 });
 
 test("compact lost response retries with one queued turn and does not invent a boundary", async () => {
