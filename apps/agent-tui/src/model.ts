@@ -36,6 +36,7 @@ export class TuiModel {
   request(request: PendingServerRequest): void {
     if (this.thread && this.thread.id !== request.params.threadId) return;
     const old = this.cards.get(request.params.requestId);
+    if (!old || old.state === "offline") this.scroll = 0;
     this.cards.set(request.params.requestId, { request, state: "pending", question: old?.question ?? 0, answers: old?.answers ?? {}, draft: old?.draft ?? "" });
     this.changed();
   }
@@ -70,7 +71,14 @@ export function bindClient(client: AgentClient, model: TuiModel): () => void {
     model.connection = state;
     if (state !== "connected") { model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
     model.changed();
-  }), client.onError(error => { model.message = error.message; for (const card of model.cards.values()) if (card.state === "sending") card.state = "pending"; model.changed(); }),
+  }), client.onError((error, id) => {
+    model.message = error.message;
+    for (const handle of client.pendingRequests.values()) {
+      const card = model.cards.get(handle.params.requestId);
+      if (handle.id === id && card?.state === "sending") card.state = "pending";
+    }
+    model.changed();
+  }),
   client.onFrame(frame => {
     if (!("method" in frame) || "id" in frame) return;
     const parsed = NotificationMethodSchema.safeParse(frame.method);
