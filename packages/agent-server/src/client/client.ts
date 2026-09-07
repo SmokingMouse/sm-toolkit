@@ -174,7 +174,10 @@ export class AgentClient {
       // AS v1 can add notifications without a version bump; onFrame still exposes them.
       if (!known.success) return;
       const method = known.data;
-      const params = NotificationSchemas[method].parse(frame.params);
+      const parsed = NotificationSchemas[method].safeParse(frame.params);
+      // A malformed notification is local to this frame, not a broken connection.
+      if (!parsed.success) { this.error(parsed.error); return; }
+      const params = parsed.data;
       const notification = { jsonrpc: "2.0", method, params } as ServerNotification;
       if (notification.method === "thread/started") this.cursor(notification.params.threadId);
       if (notification.method === "item/started" || notification.method === "item/completed") this.trackItem(notification.params.threadId, notification.params.item);

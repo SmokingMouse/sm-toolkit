@@ -1,5 +1,5 @@
 import { AgentClient, type ClientState } from "@smokingmouse/agent-server/client";
-import { NotificationMethodSchema, NotificationSchemas, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
+import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
 
 export interface RequestCard { request: PendingServerRequest; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
 export class TuiModel {
@@ -78,12 +78,8 @@ export function bindClient(client: AgentClient, model: TuiModel): () => void {
       if (handle.id === id && card?.state === "sending") card.state = "pending";
     }
     model.changed();
-  }),
-  client.onFrame(frame => {
-    if (!("method" in frame) || "id" in frame) return;
-    const parsed = NotificationMethodSchema.safeParse(frame.method);
-    if (parsed.success) model.notification({ jsonrpc: "2.0", method: parsed.data, params: NotificationSchemas[parsed.data].parse(frame.params) } as ServerNotification);
   })];
+  for (const method of NotificationMethodSchema.options) disposers.push(client.onNotification(method, params => model.notification({ jsonrpc: "2.0", method, params } as ServerNotification)));
   for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput"] as const) disposers.push(client.onServerRequest(method, r => model.request(r)));
   return () => disposers.forEach(fn => fn());
 }
