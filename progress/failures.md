@@ -6,6 +6,13 @@
 
 ## 已结案
 
+### midfork：播种分支恢复覆盖 spawning 状态（resolved）
+
+- 症状：关闭后首次恢复 seeded Claude 报 `invalid thread transition closed -> idle`。
+- 可证伪假设：清空未持久化 engineThreadId 时，把旧 closed 对象写回覆盖了 spawning。
+- 判定命令：`bun test packages/agent-server/src/core/fork.test.ts`。
+- 修复：先清空身份，再转换 spawning；复跑 8 pass，关闭前后 prefix 与后续 native resume 均验证。
+
 ### observe 集成：旧 PTY 契约与统一租约测试接口不匹配（resolved）
 
 - 症状：首轮全量 112 pass / 4 fail；观测 PTY 等待完整 thread id 超时，提示文案不匹配；随后发现部分帧到达就断言导致 unknown_future 缺失。定向单测还暴露 session 假 client 缺少租约回调、原审批竞态在持锁后无法发生。

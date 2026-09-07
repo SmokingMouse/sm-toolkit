@@ -136,11 +136,11 @@ export class ThreadManager {
     const { threadId: _, engineThreadId: __, ...overrides } = params;
     const options = { ...this.log.options<SessionOptions>(thread.id), ...overrides, backend: thread.backend };
     this.log.saveOptions(thread.id, options); thread.cwd = options.cwd ?? thread.cwd; thread.model = options.model; thread.permission = options.permission ?? "default"; delete thread.closedAtMs; this.log.saveThread(thread);
-    this.setStatus(thread.id, { type: "spawning" });
     // Claude replay frames are only durably flushed by a subsequent turn. Before
     // that, recreate the seeded process instead of resuming an incomplete file.
     const reseed = thread.backend === "claude" && options.seedHistory !== undefined;
     if (reseed && thread.engineThreadId) { thread.engineThreadId = null; this.log.saveThread(thread); }
+    this.setStatus(thread.id, { type: "spawning" });
     await this.open(thread, { ...options, threadId: thread.id, ...(reseed ? { engineThreadId: undefined, forkSession: false } : thread.engineThreadId ? { engineThreadId: thread.engineThreadId, forkSession: false, forkPoint: undefined, seedHistory: undefined } : {}) });
     return { thread: this.get(thread.id), attached: false };
   }
