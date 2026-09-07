@@ -62,13 +62,12 @@ export function codexFileChanges(raw: unknown): Extract<Item, { type: "fileChang
 export function mapCodexItem(raw: unknown, completed = false, parentItemId?: string): EngineItem {
   const d = codexRecord(raw);
   let type: EngineItem["type"], payload: unknown;
-  const itemStatus = status(d.status, completed);
   switch (d.type) {
     case "userMessage": type = "userMessage"; payload = { content: userContent(d.content) }; break;
     case "agentMessage": type = "agentMessage"; payload = { text: d.text, ...(d.phase != null ? { phase: d.phase } : {}) }; break;
     case "reasoning": type = "reasoning"; payload = { summary: list(d.summary ?? []).join("\n\n"), text: list(d.content ?? []).join("\n\n") }; break;
     case "commandExecution": type = "commandExecution"; payload = { command: d.command, cwd: d.cwd, ...(d.aggregatedOutput != null ? { aggregatedOutput: d.aggregatedOutput } : {}), ...(d.exitCode !== undefined ? { exitCode: d.exitCode } : {}), ...(d.durationMs != null ? { durationMs: d.durationMs } : {}) }; break;
-    case "fileChange": type = "fileChange"; payload = { changes: codexFileChanges(d.changes), status: itemStatus }; break;
+    case "fileChange": type = "fileChange"; payload = { changes: codexFileChanges(d.changes), status: status(d.status, completed) }; break;
     case "functionCallOutput": type = "toolCall"; payload = { name: d.name, ...(d.namespace != null ? { namespace: d.namespace } : {}), input: null, output: json(d.output) }; break;
     case "dynamicToolCall": type = "toolCall"; payload = { name: d.tool, ...(d.namespace != null ? { namespace: d.namespace } : {}), input: json(d.arguments), ...(d.contentItems != null ? { output: json(d.contentItems) } : {}), ...(d.success != null ? { isError: !d.success } : {}) }; break;
     case "mcpToolCall": type = "mcpToolCall"; payload = { server: d.server, tool: d.tool, arguments: json(d.arguments), ...(d.result != null ? { result: json(d.result) } : {}), ...(d.error != null ? { error: json(d.error) } : {}) }; break;
@@ -86,7 +85,7 @@ export function mapCodexItem(raw: unknown, completed = false, parentItemId?: str
   }
   const parsed = ItemPayloadSchemas[type].safeParse(payload);
   if (!parsed.success) throw codexProtocolError(`Invalid Codex ${String(d.type)} item`, raw);
-  return { id: codexString(d.id, "item id"), type, status: itemStatus, payload: parsed.data };
+  return { id: codexString(d.id, "item id"), type, status: status(d.status, completed), payload: parsed.data };
 }
 
 function usage(raw: unknown, context: unknown): Usage {
@@ -99,6 +98,7 @@ const zeroUsage = (): Usage => ({ usd: null, inputTokens: 0, outputTokens: 0, ca
 
 export class CodexEventMapper {
   private items = new Map<string, EngineItem>();
+  private unknownItems = new Set<string>();
   private parents = new Map<string, string>();
   private parts = new Map<string, { summary: number; reasoning: number }>();
   private inputs: Array<{ key: string; content: UserInput[]; clientTurnId?: string }> = [];
@@ -106,7 +106,7 @@ export class CodexEventMapper {
   private totalUsage?: Usage;
   private turnUsage?: Usage;
   constructor(resumed = false) { if (!resumed) this.totalUsage = zeroUsage(); }
-  beginTurn(turnId: string): void { this.turnId = turnId; this.items.clear(); this.parts.clear(); this.inputs = []; this.turnUsage = undefined; }
+  beginTurn(turnId: string): void { this.turnId = turnId; this.items.clear(); this.unknownItems.clear(); this.parts.clear(); this.inputs = []; this.turnUsage = undefined; }
   registerInput(input: UserInput[], clientTurnId?: string): void { this.inputs.push({ key: inputKey(codexUserInput(input)), content: structuredClone(input), clientTurnId }); }
   getItem(id: string): EngineItem | undefined { return this.items.get(id); }
   private put(item: EngineItem, completed: boolean): EngineEvent[] {
@@ -127,6 +127,7 @@ export class CodexEventMapper {
   }
   map(method: string, raw: unknown): EngineEvent[] {
     const p = codexRecord(raw);
+    if (p.itemId && this.unknownItems.has(p.itemId)) return [{ type: "error", turnId: this.turnId, error: codexProtocolError(`Notification for unsupported Codex item: ${method}`, raw).toJSON(), willRetry: false }];
     if (method === "thread/status/changed") {
       const native = codexRecord(p.status).type;
       if (native === "notLoaded") return []; // Loading is owned by spawn/resume.
@@ -151,6 +152,7 @@ export class CodexEventMapper {
         if (!(error instanceof ProtocolError) || !error.message.startsWith("Unknown Codex item type:")) throw error;
         // An additive native variant is observable but must not kill this thread.
         const fallback: EngineItem = { id: codexString(native.id, "item id"), type: "error", status: "failed", payload: { message: error.message, code: error.code, retryable: false } };
+        this.unknownItems.add(fallback.id);
         return [...this.put(fallback, true), { type: "error", turnId: this.turnId, error: error.toJSON(), willRetry: false }];
       }
       if (native.type === "collabAgentToolCall") for (const threadId of list(native.receiverThreadIds)) this.parents.set(threadId, item.id);

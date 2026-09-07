@@ -107,7 +107,11 @@ function handle(frame: any) {
       setTimeout(() => { process.stderr.write("scripted crash\n"); process.exit(23); }, 80); return;
     }
     if (scenario === "system-error") { notify("thread/status/changed", { threadId, status: { type: "systemError" } }); return; }
-    if (scenario === "unknown-item") { started({ id: `unknown-${turnId}`, type: "futureItem" }); message("survived unknown item"); finish(); return; }
+    if (scenario === "unknown-item") {
+      const item = { id: `unknown-${turnId}`, type: "futureItem", status: "futureStatus" };
+      started(item); notify("item/commandExecution/outputDelta", { ...base(), itemId: item.id, delta: "unknown output" }); completed(item);
+      message("survived unknown item"); finish(); return;
+    }
     if (scenario === "unknown-request") {
       request(911, "future/request", base(), frame => { assert.equal(frame.error.code, -32015); message("unsupported request rejected"); finish(); }); return;
     }
