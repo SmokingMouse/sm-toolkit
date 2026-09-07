@@ -14,6 +14,7 @@ export class Controller {
   private interruptedAt = -Infinity;
   private submitting = false;
   private controlling = false;
+  private droppedControls = 0;
   readonly lease: InputLease;
   private submission?: { text: string; threadId: string; turnId?: string; id: string };
   readonly sessions: Sessions;
@@ -190,10 +191,15 @@ export class Controller {
     } finally { this.submitting = false; this.model.changed(); }
   }
   private async control(action: () => Promise<void>): Promise<void> {
-    if (this.controlling) throw new Error("控制请求处理中，请稍后重试");
+    if (this.controlling) {
+      this.model.discardNote = `控制请求处理中，已丢弃 ${++this.droppedControls} 次切换；请稍后重试`;
+      return;
+    }
     if (this.client.state !== "connected") throw new Error("连接尚未恢复，输入已保留");
     if (!this.model.thread) throw new Error("尚未连接 thread");
     this.controlling = true;
+    this.droppedControls = 0;
+    this.model.discardNote = "";
     try { await action(); } catch (error) { throw new Error(controlError(error, true)); } finally { this.controlling = false; }
   }
   private async withEscalationLease(action: () => Promise<void>): Promise<void> {

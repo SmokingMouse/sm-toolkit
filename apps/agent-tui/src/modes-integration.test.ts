@@ -16,8 +16,10 @@ class ModeEngine extends MockEngine {
   controls: Array<{ subtype: string; params: JsonObject }> = [];
   rejectControl = false;
   rejectPermission = false;
+  permissionDelayMs = 0;
   assertLease = () => {};
   async setPermission(permission: Permission): Promise<void> {
+    await Bun.sleep(this.permissionDelayMs);
     if (["full", "bypassPermissions", "dontAsk"].includes(permission)) this.assertLease();
     if (this.rejectPermission) throw new Error("permission policy denied");
     this.permissions.push(permission);
@@ -261,7 +263,13 @@ test("PTY modes: Shift+Tab three-state cycle, permissions, effort, model, compac
   const key = (text: string) => { screen = ""; proc.terminal!.write(text); };
   try {
     await wait(() => screen.includes(thread.id.slice(0, 11)));
-    for (const mode of ["acceptEdits", "plan", "default"]) { key("\x1b[Z"); await wait(() => screen.includes(`mode ${mode} |`)); expect(engine.permissions.at(-1)).toBe(mode); }
+    engine.permissionDelayMs = 150;
+    key("\x1b[Z\x1b[Z\x1b[Z");
+    await wait(() => screen.includes("权限模式：acceptEdits"));
+    expect(screen).toContain("已丢弃 2 次切换");
+    expect(engine.permissions).toEqual(["acceptEdits"]);
+    engine.permissionDelayMs = 0;
+    for (const mode of ["plan", "default"]) { key("\x1b[Z"); await wait(() => screen.includes(`mode ${mode} |`)); expect(engine.permissions.at(-1)).toBe(mode); }
     key("/permissions \r"); await wait(() => screen.includes("3. plan"));
     expect(screen).not.toContain("4. dontAsk");
     key("3\r"); await wait(() => screen.includes("mode plan |"));
