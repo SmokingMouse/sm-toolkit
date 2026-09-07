@@ -31,7 +31,7 @@ export class Controller {
       }
       if (key.name === "pageup" || key.name === "pagedown") { this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? (this.model.activeCard ? -10 : 10) : (this.model.activeCard ? 10 : -10))); return; }
       if (key.name === "tab") { this.model.expandedReasoning = !this.model.expandedReasoning; return; }
-      if (this.model.activeCard) { await this.cardKey(this.model.activeCard, text, key); return; }
+      if (this.model.activeCard?.state === "pending" && !this.model.activeCard.replying) { await this.cardKey(this.model.activeCard, text, key); return; }
       if (key.name === "return" || key.name === "enter") { await this.submit(); return; }
       if (key.name === "backspace") this.model.input = Array.from(this.model.input).slice(0, -1).join("");
       else if (key.ctrl && key.name === "u") this.model.input = "";
@@ -87,18 +87,35 @@ export class Controller {
   private async withLease<T>(threadId: string, action: () => Promise<T> | T): Promise<T> {
     return this.lease.run(threadId, action);
   }
-  private reply(card: RequestCard, send: () => void): Promise<void> {
-    return this.withLease(card.request.params.threadId, () => new Promise<void>((resolve, reject) => {
-      const finish = (error?: Error) => { clearTimeout(timer); unsubscribe(); error ? reject(error) : resolve(); };
-      const check = () => {
-        if (card.state === "resolved" || card.state === "expired") finish();
-        else if (card.state === "pending" || card.state === "offline") finish(new Error(this.model.message || "审批回复尚未确认"));
-      };
-      const unsubscribe = this.model.onChange(check);
-      const timer = setTimeout(() => { card.state = "pending"; finish(new Error("审批回复超时，等待服务器确认或重试")); }, 30_000);
-      timer.unref(); card.state = "sending";
-      try { send(); this.model.changed(); } catch (error) { card.state = "pending"; finish(error instanceof Error ? error : new Error(String(error))); }
-    }));
+  private async reply(card: RequestCard, send: () => void): Promise<void> {
+    if (card.replying) return;
+    card.replying = true; this.model.changed();
+    const handle = this.client.pendingRequests.get(card.request.params.requestId);
+    try {
+      await this.withLease(card.request.params.threadId, () => {
+        // The acquire round trip may resolve/expire/replace this card. Never revive it.
+        if (card.state !== "pending" || this.model.cards.get(card.request.params.requestId) !== card) return;
+        if (!handle || this.client.pendingRequests.get(card.request.params.requestId) !== handle) {
+          card.state = "expired"; card.note = "请求已失效，等待新快照"; this.model.changed(); return;
+        }
+        card.responseId = handle.id;
+        return new Promise<void>((resolve, reject) => {
+          let finished = false;
+          const finish = (error?: Error) => { if (finished) return; finished = true; clearTimeout(timer); unsubscribe(); error ? reject(error) : resolve(); };
+          const check = () => {
+            if (this.model.cards.get(card.request.params.requestId) !== card || card.state === "resolved" || card.state === "expired") finish();
+            else if (card.state === "pending" || card.state === "offline") finish(new Error(this.model.message || "审批回复尚未确认"));
+          };
+          const unsubscribe = this.model.onChange(check);
+          const timer = setTimeout(() => {
+            if (card.state === "sending") { card.state = "pending"; card.note = "审批回复超时，可重试；不会自动重发"; }
+            finish(new Error("审批回复超时，可重试；不会自动重发")); this.model.changed();
+          }, Math.min(this.client.options.requestTimeoutMs ?? 5000, 5000));
+          timer.unref(); card.state = "sending";
+          try { send(); check(); this.model.changed(); } catch (error) { if (card.state === "sending") card.state = "pending"; finish(error instanceof Error ? error : new Error(String(error))); }
+        });
+      });
+    } finally { card.replying = false; this.model.changed(); }
   }
   private async cardKey(card: RequestCard, text: string | undefined, key: Key): Promise<void> {
     if (card.state !== "pending") return;

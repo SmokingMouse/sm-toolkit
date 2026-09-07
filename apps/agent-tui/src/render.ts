@@ -99,7 +99,7 @@ export function render(model: TuiModel, columns = 100, rows = 30, color = false)
   for (const c of model.cards.values()) if (c !== model.activeCard) body.push(...renderCard(c));
   const content = body.flatMap(line => wrap(line, width));
   const card = model.activeCard ? renderCard(model.activeCard).flatMap(line => wrap(line, width)) : [];
-  const footer = model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : "Enter 发送 · Ctrl-L 日志 · /tasks · /agents · F6 焦点 · PgUp/PgDn 滚动 · Ctrl-C 两次退出";
+  const footer = model.activeCard?.replying ? "审批确认中 · 可继续输入 · Ctrl-C 中断" : model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : "Enter 发送 · Ctrl-L 日志 · /tasks · /agents · F6 焦点 · PgUp/PgDn 滚动 · Ctrl-C 两次退出";
   const panels: string[] = [];
   const budget = Math.max(0, height - 5);
   const logHeader = `系统日志 ${model.logs.length} 条${model.logs.dropped ? ` · 已丢弃 ${model.logs.dropped} 条` : ""}${model.logsMayBeMissing ? " · 重连后可能缺失" : model.logsStartAtAttach ? " · 仅显示接入后事件" : ""} · ${model.logExpanded ? "展开" : "折叠"} · Ctrl-L /log${model.panelFocus === "log" ? " [焦点]" : ""}`;
@@ -134,7 +134,7 @@ export function render(model: TuiModel, columns = 100, rows = 30, color = false)
     middle = content.slice(Math.max(0, end - available), end);
   }
   while (middle.length < available) middle.push("");
-  const input = model.activeCard ? model.activeCard.draft : model.input;
+  const input = model.activeCard?.state === "pending" && !model.activeCard.replying ? model.activeCard.draft : model.input;
   const inputTail = wrap(`> ${input}`, width).at(-1) ?? "> ";
   return [wrap(header, width)[0], ...middle, ...panels, wrap(model.message, width)[0], wrap(footer, width)[0], inputTail].join("\n");
 }

@@ -311,6 +311,101 @@ test("observation commands stay local offline; contested sends and approvals ret
   a.model.input = "/release"; await a.controller.submit();
 });
 
+test("fix2 P1-1: a resolved or expired card cannot be revived after delayed lease acquisition", async () => {
+  for (const expired of [false, true]) {
+    const { a, b, engine, thread } = await setup();
+    a.model.input = "work"; await a.controller.submit(); const turnId = engine.sent[0].turnId;
+    engine.emit({ type: "itemStarted", turnId, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: thread.cwd } } });
+    engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { requestId: "race", threadId: thread.id, turnId, itemId: "cmd", command: "pwd", cwd: thread.cwd, startedAtMs: Date.now() } }, respond() {} });
+    await until(() => !!a.model.activeCard && !!b.model.activeCard);
+    const request = a.client.request.bind(a.client); let acquiring = false;
+    a.client.request = async (method, params) => { if (method === "thread/lease/acquire") { acquiring = true; await Bun.sleep(150); } return request(method, params); };
+    const reply = a.controller.key("y"); await until(() => acquiring);
+    if (expired) engine.emit({ type: "approvalExpired", turnId, requestId: "race", reason: "timeout" });
+    else await b.controller.key("n");
+    await reply;
+    expect(a.model.cards.get("race")?.state).toBe(expired ? "expired" : "resolved");
+    expect(a.model.activeCard).toBeUndefined(); expect(a.model.lease.state).toBe("none");
+    await a.controller.key("Z"); expect(a.model.input).toBe("Z");
+  }
+});
+
+test("fix2 P1-1: late error correlation survives removed handles; timeout restores retry and releases lease", async () => {
+  const { a, engine, thread, peers } = await setup();
+  a.model.input = "work"; await a.controller.submit(); const turnId = engine.sent[0].turnId;
+  engine.emit({ type: "itemStarted", turnId, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: thread.cwd } } });
+  engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { requestId: "late", threadId: thread.id, turnId, itemId: "cmd", command: "pwd", cwd: thread.cwd, startedAtMs: Date.now() } }, respond() {} });
+  await until(() => !!a.model.activeCard);
+  const card = a.model.activeCard!, handle = a.client.pendingRequests.get("late")!;
+  // No response reaches the server, like a stalled outgoing approval response.
+  const respond = handle.respond; handle.respond = () => {};
+  a.client.options.requestTimeoutMs = 80;
+  await a.controller.key("y");
+  expect(card.state).toBe("pending"); expect(card.replying).toBe(false); expect(a.model.lease.state).toBe("none"); expect(a.model.message).toContain("超时");
+  // Simulate client bookkeeping removal while preserving the card's response correlation.
+  const pending = Object.getOwnPropertyDescriptor(a.client, "pendingRequests");
+  Object.defineProperty(a.client, "pendingRequests", { configurable: true, get: () => new Map() });
+  card.state = "sending";
+  peers[0].send(JSON.stringify({ jsonrpc: "2.0", id: handle.id, error: { code: -32014, message: "already resolved" } }));
+  await until(() => card.state === "resolved"); expect(a.model.activeCard).toBeUndefined();
+  if (pending) Object.defineProperty(a.client, "pendingRequests", pending); else Reflect.deleteProperty(a.client, "pendingRequests");
+  handle.respond = respond;
+});
+
+test("fix2 P1-1 PTY: rival during acquire, immediate resolve and slow network keep keyboard and lease usable", async () => {
+  const { home, engine, thread, manager, b } = await setup();
+  const state = join(home, "state"), tokenDir = join(state, "sm-toolkit", "agent-server");
+  mkdirSync(tokenDir, { recursive: true }); writeFileSync(join(tokenDir, "token"), "test\n");
+  let acquireDelay = 0, acquired = false, resolvedDelay = 0, dropResolved = false;
+  const accept = manager.accept.bind(manager);
+  manager.accept = peer => {
+    const send = peer.send.bind(peer);
+    peer.send = text => {
+      const frame = JSON.parse(text);
+      if (frame.method === "serverRequest/resolved") {
+        if (dropResolved) return;
+        if (resolvedDelay) { setTimeout(() => send(text), resolvedDelay); return; }
+      }
+      send(text);
+    };
+    const connection = accept(peer), receive = connection.receive.bind(connection);
+    connection.receive = text => {
+      if (JSON.parse(text).method === "thread/lease/acquire" && acquireDelay) { acquired = true; setTimeout(() => receive(text), acquireDelay); }
+      else receive(text);
+    };
+    return connection;
+  };
+  let screen = ""; const decoder = new TextDecoder();
+  const current = () => screen.slice(screen.lastIndexOf("\x1b[H")).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\r/g, "");
+  const proc = Bun.spawn([resolve(import.meta.dir, "../bin/agent-tui"), "--attach", thread.id, "--socket", join(home, "sock")], {
+    env: { ...process.env, HOME: home, XDG_STATE_HOME: state, XDG_RUNTIME_DIR: "", HERDR_PANE_ID: "", TERM: "xterm-256color" },
+    terminal: { cols: 160, rows: 40, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } },
+  });
+  try {
+    await until(() => current().includes(thread.id)); proc.terminal!.write("work\r"); await until(() => engine.sent.length === 1);
+    const turnId = engine.sent[0].turnId;
+    engine.emit({ type: "itemStarted", turnId, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: home } } });
+    const approval = async (id: string) => {
+      engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { requestId: id, threadId: thread.id, turnId, itemId: "cmd", command: `pwd ${id}`, cwd: home, startedAtMs: Date.now() } }, respond() {} });
+      await until(() => current().includes(`Command: pwd ${id}`));
+    };
+    await approval("rival"); acquireDelay = 200; proc.terminal!.write("y"); await until(() => acquired);
+    await b.controller.key("n"); await until(() => current().includes("已由 phone 处理") && current().includes("租约:未持有"));
+    await Bun.sleep(250); // Also check after the delayed acquire round trip completes.
+    expect(current()).not.toContain("审批确认中"); acquireDelay = 0;
+    proc.terminal!.write("Z"); await until(() => current().includes("> Z")); proc.terminal!.write("\x15"); await until(() => current().endsWith("> "));
+    await approval("instant"); proc.terminal!.write("y"); await until(() => current().includes("已由 agent-tui 处理") && current().includes("租约:未持有"));
+    await approval("slow"); resolvedDelay = 300; proc.terminal!.write("y"); await until(() => current().includes("审批确认中"));
+    proc.terminal!.write("N"); await until(() => current().includes("> N"));
+    await until(() => !current().includes("审批确认中") && current().includes("租约:未持有")); proc.terminal!.write("\x15"); await until(() => current().endsWith("> "));
+    resolvedDelay = 0; dropResolved = true; await approval("timeout"); proc.terminal!.write("y");
+    await Bun.sleep(5100); await until(() => current().includes("审批回复超时") && current().includes("租约:未持有"));
+    await b.client.request("thread/lease/acquire", { threadId: thread.id }); await b.client.request("thread/lease/release", { threadId: thread.id });
+    proc.terminal!.write("y"); await until(() => current().includes("该请求已由其他客户端处理") && !current().includes("审批确认中"));
+    proc.terminal!.write("K"); await until(() => current().includes("> K"));
+  } finally { if (proc.exitCode === null) proc.kill(); await proc.exited; proc.terminal?.close(); }
+}, 15000);
+
 test("P1-2 PTY benchmark: input echo stays below 50ms after 5000 engine events", async () => {
   const { home, engine, thread } = await setup();
   const state = join(home, "state"), tokenDir = join(state, "sm-toolkit", "agent-server");

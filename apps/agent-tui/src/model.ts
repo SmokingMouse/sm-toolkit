@@ -1,9 +1,9 @@
 import { AgentClient, type ClientState } from "@smokingmouse/agent-server/client";
-import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
+import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type RpcId, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
 import { classifyEvent, LogBuffer, object, rebuildTasks } from "./observations.js";
 import { errorCode, errorMessage, leaseHolder } from "./errors.js";
 
-export interface RequestCard { request: PendingServerRequest; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
+export interface RequestCard { request: PendingServerRequest; responseId?: RpcId; replying?: boolean; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
 export class TuiModel {
   thread?: Thread;
   items = new Map<string, Item>();
@@ -61,11 +61,11 @@ export class TuiModel {
     for (const request of s.pendingRequests) this.request(request);
     this.changed();
   }
-  request(request: PendingServerRequest): void {
+  request(request: PendingServerRequest, responseId?: RpcId): void {
     if (this.thread && this.thread.id !== request.params.threadId) return;
     const old = this.cards.get(request.params.requestId);
     if (!old || old.state === "offline") this.scroll = 0;
-    this.cards.set(request.params.requestId, { request, state: "pending", question: old?.question ?? 0, answers: old?.answers ?? {}, draft: old?.draft ?? "" });
+    this.cards.set(request.params.requestId, { request, responseId: responseId ?? old?.responseId, state: "pending", question: old?.question ?? 0, answers: old?.answers ?? {}, draft: old?.draft ?? "" });
     this.changed();
   }
   notification(n: ServerNotification): void {
@@ -110,9 +110,9 @@ export function bindClient(client: AgentClient, model: TuiModel): () => void {
     model.changed();
   }), client.onError((error, id) => {
     model.recordError(error);
-    for (const handle of client.pendingRequests.values()) {
-      const card = model.cards.get(handle.params.requestId);
-      if (handle.id === id && card) {
+    // Keep correlation on the card: AgentClient removes pending handles before late errors arrive.
+    for (const card of model.cards.values()) {
+      if (id != null && card.responseId === id && (card.state === "sending" || card.state === "pending")) {
         if (errorCode(error) === -32014) { card.state = "resolved"; card.note = errorMessage(error); }
         else if (card.state === "sending") card.state = "pending";
       }
@@ -120,6 +120,6 @@ export function bindClient(client: AgentClient, model: TuiModel): () => void {
     model.changed();
   })];
   for (const method of NotificationMethodSchema.options) disposers.push(client.onNotification(method, params => model.notification({ jsonrpc: "2.0", method, params } as ServerNotification)));
-  for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput"] as const) disposers.push(client.onServerRequest(method, r => model.request(r)));
+  for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput"] as const) disposers.push(client.onServerRequest(method, r => model.request(r, r.id)));
   return () => disposers.forEach(fn => fn());
 }
