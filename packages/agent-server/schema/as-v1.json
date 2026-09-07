@@ -987,6 +987,12 @@
                       },
                       "report": {
                         "$ref": "#/$defs/AttachResultSchema/$defs/__schema9"
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "thinking": {
+                        "type": "string"
                       }
                     },
                     "required": [
@@ -3859,6 +3865,12 @@
                 },
                 "report": {
                   "$ref": "#/$defs/ItemSchema/$defs/__schema6"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "thinking": {
+                  "type": "string"
                 }
               },
               "required": [
@@ -9969,6 +9981,12 @@
                       },
                       "report": {
                         "$ref": "#/$defs/method:thread~1attach:result/$defs/__schema9"
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "thinking": {
+                        "type": "string"
                       }
                     },
                     "required": [
@@ -11894,6 +11912,12 @@
                       },
                       "report": {
                         "$ref": "#/$defs/method:thread~1items~1list:result/$defs/__schema6"
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "thinking": {
+                        "type": "string"
                       }
                     },
                     "required": [
@@ -17696,6 +17720,12 @@
                     },
                     "report": {
                       "$ref": "#/$defs/notification:item~1started/$defs/__schema6"
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "thinking": {
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -19071,6 +19101,12 @@
                     },
                     "report": {
                       "$ref": "#/$defs/notification:item~1completed/$defs/__schema6"
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "thinking": {
+                      "type": "string"
                     }
                   },
                   "required": [

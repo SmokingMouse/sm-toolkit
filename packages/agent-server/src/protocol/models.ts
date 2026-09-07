@@ -56,7 +56,7 @@ export const ItemPayloadSchemas = {
   fileChange: z.object({ changes: FileChangesSchema, status: z.enum(["inProgress", "completed", "failed", "rejected"]) }),
   toolCall: z.object({ name: z.string(), namespace: z.string().optional(), input: z.json(), output: z.json().optional(), isError: z.boolean().optional() }),
   mcpToolCall: z.object({ server: z.string(), tool: z.string(), arguments: z.json(), result: z.json().optional(), error: z.json().optional() }),
-  subAgent: z.object({ kind: z.enum(["agent", "bash", "workflow"]), parentItemId: IdSchema, phase: z.string(), progress: z.json().optional(), report: z.json().optional() }),
+  subAgent: z.object({ kind: z.enum(["agent", "bash", "workflow"]), parentItemId: IdSchema, phase: z.string(), progress: z.json().optional(), report: z.json().optional(), text: z.string().optional(), thinking: z.string().optional() }),
   webSearch: z.object({ query: z.string(), results: z.json().optional() }),
   imageOutput: z.object({ paths: z.array(z.string()) }),
   plan: PlanSchema,

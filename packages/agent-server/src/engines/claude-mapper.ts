@@ -16,9 +16,10 @@ export class ClaudeEventMapper {
   private items = new Map<string, EngineItem>();
   private textItem?: EngineItem;
   private reasoningItem?: EngineItem;
+  private subAgents = new Map<string, string>();
   private turnId = "";
   constructor(private readonly cwd: string = process.cwd()) {}
-  beginTurn(turnId: string): void { this.turnId = turnId; this.items.clear(); this.textItem = undefined; this.reasoningItem = undefined; }
+  beginTurn(turnId: string): void { this.turnId = turnId; this.items.clear(); this.subAgents.clear(); this.textItem = undefined; this.reasoningItem = undefined; }
   private start(item: EngineItem, out: EngineEvent[]): void { this.items.set(item.id, item); out.push({ type: "itemStarted", turnId: this.turnId, item: structuredClone(item) }); }
   private complete(item: EngineItem, out: EngineEvent[], failed = false): void {
     if (item.status !== "inProgress") return;
@@ -49,6 +50,15 @@ export class ClaudeEventMapper {
       case EventType.TextChunk:
       case EventType.Thinking: {
         const thinking = event.type === EventType.Thinking;
+        if (d.parentToolUseId) {
+          const parent = String(d.parentToolUseId), id = this.subAgents.get(parent) ?? `subagent_${parent}`;
+          let item = this.items.get(id);
+          if (!item) { item = create("subAgent", { kind: "agent", parentItemId: parent, phase: "progress" }, id); this.subAgents.set(parent, id); this.start(item, out); }
+          const key = thinking ? "thinking" : "text";
+          Object.assign(item.payload, { [key]: String(record(item.payload)[key] ?? "") + String(d.text ?? "") });
+          Object.assign(item.payload, { progress: { ...record(record(item.payload).progress), text: record(item.payload).text ?? "", thinking: record(item.payload).thinking ?? "" } });
+          out.push({ type: "itemUpdated", turnId: this.turnId, item: structuredClone(item) }); break;
+        }
         if (thinking && this.textItem) this.finishText(out);
         if (!thinking && this.reasoningItem) { this.complete(this.reasoningItem, out); this.reasoningItem = undefined; }
         let item = thinking ? this.reasoningItem : this.textItem;
@@ -86,13 +96,15 @@ export class ClaudeEventMapper {
         this.complete(item, out, failed); break;
       }
       case EventType.Task: {
-        const id = String(d.taskId ?? `task_${d.toolUseId}`);
+        const parent = String(d.toolUseId);
+        const id = this.subAgents.get(parent) ?? String(d.taskId ?? `task_${d.toolUseId}`);
+        this.subAgents.set(parent, id);
         let item = this.items.get(id);
         if (!item) {
           item = create("subAgent", { kind: d.taskType === "local_bash" ? "bash" : d.taskType === "local_workflow" ? "workflow" : "agent", parentItemId: String(d.toolUseId), phase: String(d.phase ?? "started") }, id);
           this.start(item, out);
         }
-        Object.assign(item.payload, { phase: String(d.phase ?? "progress"), progress: jsonValue(d), ...(d.summary !== undefined ? { report: jsonValue(d.summary) } : {}) });
+        Object.assign(item.payload, { phase: String(d.phase ?? "progress"), progress: { ...jsonValue(d), ...(record(item.payload).text !== undefined ? { text: record(item.payload).text } : {}), ...(record(item.payload).thinking !== undefined ? { thinking: record(item.payload).thinking } : {}) }, ...(d.summary !== undefined ? { report: jsonValue(d.summary) } : {}) });
         out.push({ type: "itemUpdated", turnId: this.turnId, item: structuredClone(item) });
         if (d.phase === "completed") this.complete(item, out, d.status === "failed");
         break;

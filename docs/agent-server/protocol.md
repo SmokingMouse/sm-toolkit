@@ -121,6 +121,8 @@ client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
 
 ### Backend-specific 逃生门
 
+Claude 启动包含 `--forward-subagent-text`（2.1.258 flag 描述：转发带 parent_tool_use_id 的 assistant/user 帧）。正文和 thinking 按 parent_tool_use_id 聚合到现有 subAgent item 的可选 text/thinking 字段，同时放入 item/subAgent/progress 的 progress，支持快照恢复。各子 agent 与主线程的 partial 去重独立；正文先于 task_started 到达也保持同一 item 身份。
+
 `thread/start` 的 effort 字符串透传 Claude `--effort <level>`。`thread/effort/set` `{threadId,maxThinkingTokens:整数|null,thinkingDisplay?:"summarized"|"omitted"|null}` → 原生 control_response，映射 `set_max_thinking_tokens {max_thinking_tokens,thinking_display?}`（2.1.258 print.ts 分派验证整数/null 与显示枚举）。这控制思考 token 预算，**不等价于** --effort 的模型推理档位；没有捏造 low/high 到 token 的换算。热切也可用 engineControl；turn/start 上不同 effort 标签会提示使用专用方法。热预算为当前 CLI 进程设置，不跨恢复持久化。
 
 `thread/permission/set`：`{threadId, permission}` → `{thread}`。Claude 原生模式 default / acceptEdits / plan / bypassPermissions / dontAsk 映射 --permission-mode，热切发送 set_permission_mode 的 mode 字段；CLI 成功确认后更新 thread.permission、持久化恢复选项，并发送 `thread/permission/changed` `{threadId,permission}`。turn/start.permission 也在发送用户帧前热切。原生拒绝不更新状态，返回 unsupported_capability。CLI 或组织策略仍可拒绝 bypass。

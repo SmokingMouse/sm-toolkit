@@ -26,7 +26,7 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--settings", JSON.stringify({ permissions: { ask: ["*"] } })];
   if (resolved.model) args.push("--model", resolved.model);
   if (options.effort !== undefined) args.push("--effort", options.effort);
-  args.push("--include-hook-events");
+  args.push("--include-hook-events", "--forward-subagent-text");
   if (options.engineThreadId) args.push("--resume", options.engineThreadId);
   if (options.forkSession && options.engineThreadId) args.push("--fork-session");
   if (options.systemPrompt) args.push("--system-prompt", options.systemPrompt);
@@ -77,6 +77,7 @@ export class ClaudeEngine implements EngineSession {
   private nativeRequests = new Map<string, { requestId: string; turnId: string; cancel: () => void }>();
   private sawTextDelta = false;
   private sawThinkingDelta = false;
+  private partials = new Map<string, { text: boolean; thinking: boolean }>();
   constructor(private readonly config: ClaudeEngineOptions = {}) {}
   async spawn(options: SessionOptions): Promise<void> {
     this.options = options; this.mapper = new ClaudeEventMapper(options.cwd);
@@ -143,6 +144,7 @@ export class ClaudeEngine implements EngineSession {
     const model = options.model ?? this.options?.model;
     if (model) await this.control({ subtype: "set_model", model: resolveClaudeModel(model).model });
     this.active = turnId; this.interrupting = false; this.context = null; this.sawTextDelta = false; this.sawThinkingDelta = false; this.mapper.beginTurn(turnId);
+    this.partials.clear(); this.taskParents.clear();
     this.write(message);
   }
   async steer(turnId: string, input: UserInput[]): Promise<void> {
@@ -257,11 +259,27 @@ export class ClaudeEngine implements EngineSession {
     }
     if (t === "stream_event") {
       const delta = obj.event?.delta;
+      if (obj.parent_tool_use_id) {
+        const parent = String(obj.parent_tool_use_id), seen = this.partials.get(parent) ?? { text: false, thinking: false };
+        if (delta?.type === "text_delta") { seen.text = true; emit(EventType.TextChunk, { text: delta.text, parentToolUseId: parent }); }
+        if (delta?.type === "thinking_delta") { seen.thinking = true; emit(EventType.Thinking, { text: delta.thinking, parentToolUseId: parent }); }
+        this.partials.set(parent, seen); return;
+      }
       if (delta?.type === "text_delta") { this.sawTextDelta = true; emit(EventType.TextChunk, { text: delta.text }); }
       if (delta?.type === "thinking_delta") { this.sawThinkingDelta = true; emit(EventType.Thinking, { text: delta.thinking }); }
       return;
     }
     if (t === "assistant") {
+      if (obj.parent_tool_use_id) {
+        // 2.1.258 --forward-subagent-text emits assistant/user envelopes with this parent.
+        const parent = String(obj.parent_tool_use_id), seen = this.partials.get(parent);
+        for (const block of obj.message?.content ?? []) {
+          if (block.type === "text" && !seen?.text && block.text) emit(EventType.TextChunk, { text: block.text, parentToolUseId: parent });
+          if (block.type === "thinking" && !seen?.thinking && block.thinking) emit(EventType.Thinking, { text: block.thinking, parentToolUseId: parent });
+          if (block.type === "tool_use") emit(EventType.ToolCall, { id: block.id, name: block.name, input: block.input, parentToolUseId: parent });
+        }
+        this.partials.delete(parent); return;
+      }
       const u = obj.message?.usage;
       if (u) this.context = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
       for (const block of obj.message?.content ?? []) {

@@ -111,6 +111,30 @@ function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => voi
   return { child, written, send };
 }
 describe("Claude native frame exchange (fake child only)", () => {
+  test("foundation subagent text: interleaved parents, partial fallback and late task metadata share one item", async () => {
+    const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th" });
+      await engine.sendTurn("tn", input("go"), { threadId: "th", input: input("go") });
+      fake.send({ type: "stream_event", event: { delta: { type: "text_delta", text: "main" } } });
+      fake.send({ type: "assistant", parent_tool_use_id: "parent-a", message: { content: [{ type: "text", text: "child A" }, { type: "thinking", thinking: "think A" }] } });
+      fake.send({ type: "system", subtype: "task_started", task_id: "task-a", tool_use_id: "parent-a" });
+      fake.send({ type: "system", subtype: "task_started", task_id: "task-b", tool_use_id: "parent-b" });
+      fake.send({ type: "stream_event", parent_tool_use_id: "parent-b", event: { delta: { type: "text_delta", text: "child B" } } });
+      fake.send({ type: "assistant", parent_tool_use_id: "parent-b", message: { content: [{ type: "text", text: "child B" }] } });
+      fake.send({ type: "assistant", message: { content: [{ type: "text", text: "main" }] } });
+      fake.send({ type: "system", subtype: "task_notification", task_id: "task-a", summary: "done" });
+      fake.send({ type: "result", result: "main", usage: {} });
+      await until(() => events.some(e => e.type === "turnCompleted"));
+      const subagents = events.filter(e => e.type === "itemCompleted" && e.item.type === "subAgent");
+      expect(subagents).toHaveLength(2);
+      expect(subagents[0]).toMatchObject({ item: { payload: { parentItemId: "parent-a", text: "child A", thinking: "think A", report: "done" } } });
+      expect(subagents[1]).toMatchObject({ item: { payload: { parentItemId: "parent-b", text: "child B" } } });
+      expect(events.filter(e => e.type === "itemCompleted" && e.item.type === "agentMessage")).toMatchObject([{ item: { payload: { text: "main" } } }]);
+      expect(buildClaudeLaunch({ backend: "claude", threadId: "th" }).args).toContain("--forward-subagent-text");
+    } finally { await engine.close("test"); await consuming; }
+  });
   test("foundation effort: launch label and live thinking budget have distinct native shapes", async () => {
     let args: string[] = [];
     const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: (_cmd, argv) => { args = argv; return fake.child; } });
