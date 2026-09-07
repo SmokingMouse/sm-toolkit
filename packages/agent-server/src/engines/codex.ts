@@ -100,12 +100,15 @@ export class CodexEngine implements EngineSession {
       child.stdin.on("error", error => this.fail(this.unavailable(error.message)));
       child.on("close", (code, signal) => { if (!this.closed) this.fail(this.unavailable(`Codex app-server exited (${code ?? signal})`)); else this.events.end(); });
       const initialized = await this.request("initialize", { clientInfo: { name: "sm_agent_server", title: "SM Agent Server", version: "0.1.0" }, capabilities: { experimentalApi: true } });
-      const version = String(initialized.userAgent ?? "").match(/codex(?:-cli)?\/([\d.]+)(?=\s|$)/)?.[1];
-      if (version !== CODEX_SCHEMA_VERSION) this.events.push({ type: "error", error: codexProtocolError(`Codex version ${version ?? "unknown"} differs from pinned schema ${CODEX_SCHEMA_VERSION}`, initialized).toJSON(), willRetry: false });
       this.write({ method: "initialized", params: {} });
       await this.request(options.engineThreadId ? "thread/resume" : "thread/start", params, result => {
-        const id = codexString(codexRecord(result.thread).id, "thread id");
+        const thread = codexRecord(result.thread);
+        const id = codexString(thread.id, "thread id");
         if (options.engineThreadId && id !== options.engineThreadId) throw codexProtocolError("Codex resumed a different thread", result);
+        // app-server echoes clientInfo.name in userAgent; the thread is authoritative.
+        const version = (typeof thread.cliVersion === "string" ? thread.cliVersion.trim() : "")
+          || String(initialized.userAgent ?? "").match(/^[^\s/]+\/(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)(?=\s|$)/)?.[1];
+        if (version !== CODEX_SCHEMA_VERSION) this.events.push({ type: "error", error: codexProtocolError(`Codex version ${version ?? "unknown"} differs from pinned schema ${CODEX_SCHEMA_VERSION}`, { initialized, thread }).toJSON(), willRetry: false });
         this.engineThreadId = id; this.events.push({ type: "metadata", engineThreadId: id });
       });
       this.assertAlive(); this.ready = true;
