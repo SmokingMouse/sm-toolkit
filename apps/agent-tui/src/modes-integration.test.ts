@@ -160,6 +160,20 @@ test("P2-1 real expired escalation gate is unauthorized, not already_resolved", 
   expect(a.model.message).toContain("有效控制租约"); expect(a.model.message).not.toContain("审批已被处理");
 });
 
+test("P2-2 takeover rejects a live holder then succeeds after expiry and disconnect", async () => {
+  const { a, b, server, thread, command } = await setup();
+  await b.client.request("thread/lease/acquire", { threadId: thread.id, ttlMs: 100 });
+  await command("/takeover"); expect(a.model.message).toContain("另一客户端持有控制权（phone）");
+  expect(server.leases.read(thread.id)?.holder.clientId).toBe(b.client.clientId);
+  await Bun.sleep(120);
+  await command("/takeover"); expect(server.leases.read(thread.id)?.holder.clientId).toBe(a.client.clientId);
+  expect(render(a.model, 220)).toContain("持有控制权至");
+  await command("/release");
+  await b.client.request("thread/lease/acquire", { threadId: thread.id }); b.client.close();
+  await wait(() => !server.leases.read(thread.id));
+  await command("/takeover"); expect(server.leases.read(thread.id)?.holder.clientId).toBe(a.client.clientId);
+});
+
 test("compact lost response retries with one queued turn and does not invent a boundary", async () => {
   const { a, command, engine } = await setup();
   const request = a.client.request.bind(a.client); let lose = true;
