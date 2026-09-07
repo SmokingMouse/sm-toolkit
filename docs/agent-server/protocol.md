@@ -80,7 +80,7 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 | 方法 | params | result | 说明 |
 |---|---|---|---|
 | `initialize` | 见 §1 | 见 §1 | 握手 |
-| `thread/start` | `{backend, cwd?, model?, permission?, sandbox?, systemPrompt?, tools?, meta?, clientThreadId?}` | `{thread: Thread}` | 新建 thread 并 spawn 引擎 |
+| `thread/start` | `{backend, cwd?, model?, effort?, permission?, autocompact?, sandbox?, systemPrompt?, tools?, meta?, clientThreadId?}` | `{thread: Thread}` | 新建 thread 并 spawn 引擎 |
 | `thread/resume` | `{threadId?, engineThreadId?, backend?, cwd?, …同 start 的覆盖字段}` | `{thread: Thread, attached: boolean}` | **命中活进程即 attach**（`attached:true`，不 spawn）；否则按 `engineThreadId` 重启引擎并续接 |
 | `thread/attach` | `{threadId, sinceSeq?}` | `{thread, items: Item[], nextSeq, queue: QueuedTurn[], pendingRequests: PendingServerRequest[]}` | 拿全量后缀快照并开始收该 thread 的通知；翻历史分页用 thread/items/list |
 | `thread/detach` | `{threadId}` | `{}` | 只退订，不影响 thread |
@@ -132,7 +132,7 @@ Claude 启动包含 `--forward-subagent-text`（2.1.258 flag 描述：转发带 
 `thread/start` 的 effort 字符串透传 Claude `--effort <level>`。`thread/effort/set` `{threadId,maxThinkingTokens:整数|null,thinkingDisplay?:"summarized"|"omitted"|null}` → 原生 control_response，映射 `set_max_thinking_tokens {max_thinking_tokens,thinking_display?}`（2.1.258 print.ts 分派验证整数/null 与显示枚举）。这控制思考 token 预算，**不等价于** --effort 的模型推理档位；没有捏造 low/high 到 token 的换算。热切也可用 engineControl；turn/start 上不同 effort 标签会提示使用专用方法。热预算为当前 CLI 进程设置，不跨恢复持久化。
 
 `thread/permission/set`：`{threadId, permission}` → `{thread}`。Claude 原生模式 default / acceptEdits / plan / bypassPermissions / dontAsk 映射 --permission-mode，热切发送 set_permission_mode 的 mode 字段；CLI 成功确认后更新 thread.permission、持久化恢复选项，并发送 `thread/permission/changed` `{threadId,permission}`。turn/start.permission 也在发送用户帧前热切。原生拒绝不更新状态，返回 unsupported_capability。CLI 或组织策略仍可拒绝 bypass。
-旧值 full / auto-edit 分别映射 bypassPermissions / acceptEdits。readonly 启动时的 --disallowedTools 属于进程工具限制，切权限模式不会解除它。权限模式热切会清除 daemon 会话审批缓存，避免旧授权跨模式复用。
+旧值 full / auto-edit 分别映射 bypassPermissions / acceptEdits。readonly 仅限启动时工具限制（--disallowedTools），不能通过热切新增此限制；已有进程限制也不会被模式热切解除。启动添加 --allow-dangerously-skip-permissions 使原生 PLe 的 isBypassPermissionsModeAvailable 检查允许后续切 bypass，不改变启动时所选模式；组织策略仍可拒绝。权限模式热切会清除 daemon 会话审批缓存，避免旧授权跨模式复用。Codex 保持旧 permission 别名语义，新增 Claude 模式返回 backend_unsupported。
 
 `thread/engineControl` 请求 `{threadId, subtype, params}`，向 Claude 发送 `{type:"control_request", request_id, request:{...params,subtype}}`，result 是完整原生 control_response 帧（包括原生 error response），不拆解 response；调用方必须检查 response.subtype。params 不得包含 subtype。该方法遵守输入 lease；Codex/external 返回 backend_unsupported，未知或不允许的子类型返回 unsupported_capability。传输超时仍为 RPC 错误。
 
@@ -146,6 +146,8 @@ Claude 启动包含 `--forward-subagent-text`（2.1.258 flag 描述：转发带 
 
 `thread/engineEvent`：`{threadId, turnId?, backend, subtype, payload}`，payload 保留原始原生帧全部字段。Claude 的全部 system 子类型（包括未知类型）及 rate_limit_event、Codex 的原生通知走此通道；已建模事件仍照常发送。无活动 turn 时省略 turnId。此通知是实时流，不落 item 历史。
 客户端在 initialize.capabilities 声明 `engineEvents: true` 才接收此流；服务端通过 capabilities.engine.engineEvents 声明支持，新 client 库默认声明。旧客户端继续使用原有事件，协议版本保持 as/1。
+
+initialize.capabilities.engine 还声明 engineControl / permissionSet / effortSet / subAgentText / bashInput / compact 布尔标记（服务端至少启用 Claude 才为 true）；engineEvents 适用于两种原生后端。请求新增字段与通知信封使用 strictObject，原有宽松响应保持前向兼容。
 
 只发给已 `thread/attach` 该 thread 的连接（除 `server/*` 与无 threadId 的服务级 `error`，
 后者发给所有已完成握手且未 optOut error 的连接）。

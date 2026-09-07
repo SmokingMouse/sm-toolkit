@@ -35,6 +35,9 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   const permission = options.permission ?? "default";
   if (permission === "full" || permission === "bypassPermissions") args.push("--dangerously-skip-permissions");
   args.push("--permission-mode", claudePermission(permission));
+  // 2.1.258 PLe checks isBypassPermissionsModeAvailable on a live switch.
+  // This flag permits switching later; it does not select bypass at launch.
+  args.push("--allow-dangerously-skip-permissions");
   if (permission === "readonly") args.push("--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit");
   const env = { ...process.env };
   delete env.CLAUDECODE;
@@ -118,7 +121,10 @@ export class ClaudeEngine implements EngineSession {
     try {
       const frame = await this.control({ ...params, subtype }, true);
       if (record(frame.response).subtype === "success") {
-        if (subtype === "set_permission_mode") this.permissionChanged(PermissionSchema.parse(record(record(frame.response).response).mode ?? params.mode));
+        if (subtype === "set_permission_mode") {
+          const mode = PermissionSchema.safeParse(record(record(frame.response).response).mode ?? params.mode);
+          if (mode.success) this.permissionChanged(mode.data);
+        }
         if (subtype === "set_model" && this.options && typeof params.model === "string") this.options.model = params.model;
       }
       if (record(frame.response).subtype !== "success" && subtype === "interrupt") this.interrupting = interrupting;
@@ -130,11 +136,16 @@ export class ClaudeEngine implements EngineSession {
     this.sessionGrants.clear(); this.events.push({ type: "permissionChanged", permission });
   }
   async setPermission(permission: NonNullable<SessionOptions["permission"]>): Promise<void> {
+    if (permission === "readonly") {
+      if (this.options?.permission === "readonly") return;
+      throw new ProtocolError(ErrorCode.unsupported_capability, "readonly is a launch-time tool restriction; use a native permission mode for hot switching");
+    }
     const response = await this.engineControl("set_permission_mode", { mode: claudePermission(permission) });
     if (record(response.response).subtype !== "success") throw new ProtocolError(ErrorCode.unsupported_capability, String(record(response.response).error ?? "Claude rejected permission mode"), { raw: response });
   }
   private assertAlive(): void { if (!this.process || this.dead || this.closed) throw new ProtocolError(ErrorCode.engine_unavailable, "Claude session is not alive"); }
   validateTurn(options: StartTurnParams): void {
+    if (options.permission === "readonly" && this.options?.permission !== "readonly") throw new ProtocolError(ErrorCode.unsupported_capability, "readonly requires a new session; native permission modes support hot switching");
     if (options.input.some(p => p.type === "bash") && (options.input.length !== 1 || options.input[0].type !== "bash")) throw new ProtocolError(ErrorCode.invalid_params, "bash must be a standalone turn input");
     if ((options.cwd !== undefined && options.cwd !== this.options?.cwd) || options.sandbox !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing cwd or sandbox on a live Claude session is not supported");
     if (options.effort !== undefined && options.effort !== this.options?.effort) throw new ProtocolError(ErrorCode.unsupported_capability, "Use thread/effort/set with maxThinkingTokens for live Claude thinking budget; effort labels are launch-only");
@@ -153,7 +164,7 @@ export class ClaudeEngine implements EngineSession {
     const model = options.model ?? this.options?.model;
     if (model) await this.control({ subtype: "set_model", model: resolveClaudeModel(model).model });
     this.active = turnId; this.interrupting = false; this.context = null; this.sawTextDelta = false; this.sawThinkingDelta = false; this.mapper.beginTurn(turnId);
-    this.partials.clear(); this.taskParents.clear();
+    this.partials.clear(); this.taskParents.clear(); this.bash = undefined;
     if (bash) { this.bash = { itemId: `bash_${crypto.randomUUID()}` }; this.emit({ type: EventType.ToolCall, data: { id: this.bash.itemId, name: "Bash", input: { command: bash.command } }, backend: "claude", sessionId: this.engineThreadId }); }
     this.write(message);
   }

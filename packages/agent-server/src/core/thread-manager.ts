@@ -131,7 +131,7 @@ export class ThreadManager {
     thread = this.get(thread.id);
     const { threadId: _, engineThreadId: __, ...overrides } = params;
     const options = { ...this.log.options(thread.id), ...overrides, backend: thread.backend };
-    this.log.saveOptions(thread.id, options); thread.cwd = options.cwd ?? thread.cwd; thread.model = options.model; delete thread.closedAtMs; this.log.saveThread(thread);
+    this.log.saveOptions(thread.id, options); thread.cwd = options.cwd ?? thread.cwd; thread.model = options.model; thread.permission = options.permission ?? "default"; delete thread.closedAtMs; this.log.saveThread(thread);
     this.setStatus(thread.id, { type: "spawning" });
     await this.open(thread, { ...options, threadId: thread.id, engineThreadId: thread.engineThreadId ?? undefined });
     return { thread: this.get(thread.id), attached: false };

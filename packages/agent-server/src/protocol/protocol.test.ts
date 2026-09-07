@@ -19,7 +19,7 @@ describe("AS v1 protocol", () => {
     expect(rpcError(error)).toEqual({ code, message: name, data: { threadId: "th", retryable: true } });
   });
   test("error data requires retryable and retains diagnostics", () => {
-    expect(Object.keys(ErrorCode)).toHaveLength(20);
+    expect(Object.keys(ErrorCode)).toHaveLength(21);
     expect(ErrorCodeSchema.safeParse(-32099).success).toBe(false);
     expect(ErrorDataSchema.safeParse({ threadId: "th" }).success).toBe(false);
     expect(ErrorDataSchema.parse({ retryable: false, stderr: "tail", raw: "raw", holder: { clientId: "c", label: "web" } }).stderr).toBe("tail");

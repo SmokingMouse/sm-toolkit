@@ -112,6 +112,19 @@ describe("Codex v2 mapper", () => {
 });
 
 describe("Codex stdio process (scripted offline peer)", () => {
+  test("foundation Codex events: raw notifications occur once and new Claude inputs reject before dispatch", async () => {
+    const f = fake(), events = collect(f.engine);
+    await f.engine.spawn({ threadId: "th", backend: "codex", cwd: f.directory });
+    const future = { method: "thread/futureNotice", params: { threadId: f.engine.engineThreadId, nested: [1, null] } };
+    f.engine.receive(future);
+    await f.engine.sendTurn("tn", input("go"), { threadId: "th", input: input("go") });
+    await until(() => events.some(e => e.type === "turnCompleted"));
+    expect(events.filter(e => e.type === "engineEvent" && e.subtype === "thread/futureNotice")).toEqual([{ type: "engineEvent", backend: "codex", subtype: "thread/futureNotice", payload: future }]);
+    expect(events.filter(e => e.type === "engineEvent" && e.subtype === "turn/completed")).toHaveLength(1);
+    expect(() => f.engine.validateTurn({ threadId: "th", input: [{ type: "bash", command: "pwd" }] })).toThrow("requires Claude");
+    expect(() => f.engine.validateTurn({ threadId: "th", input: input("go"), permission: "plan" })).toThrow("require Claude");
+    expect(() => buildCodexThreadParams({ threadId: "th", backend: "codex", autocompact: "auto" })).toThrow("requires Claude");
+  });
   const realUserAgent = "sm_agent_server/0.153.4 (Mac OS 15.7.5; arm64) dumb (sm_agent_server; 0.1.0)";
   const versionCases = [
     { name: "codex-cli/x.y.z fallback", version: { userAgent: "codex-cli/0.153.4" }, warning: undefined },

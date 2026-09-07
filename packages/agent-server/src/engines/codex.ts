@@ -14,6 +14,7 @@ function sandboxMode(options: Pick<SessionOptions, "sandbox" | "permission">): S
   return value as SandboxMode | undefined;
 }
 function approvalPolicy(permission: SessionOptions["permission"]): string | undefined {
+  if (permission && !["readonly", "full", "auto-edit", "default"].includes(permission)) throw new ProtocolError(ErrorCode.backend_unsupported, "native Claude permission modes require Claude; use legacy permission aliases for Codex");
   if (permission === undefined) return undefined;
   return permission === "readonly" || permission === "full" ? "never" : permission === "auto-edit" ? "on-request" : "untrusted";
 }
@@ -209,26 +210,29 @@ export class CodexEngine implements EngineSession {
     }
     if (typeof frame.method !== "string") throw codexProtocolError("Invalid Codex JSON-RPC frame", raw);
     const method = frame.method, params = codexRecord(frame.params);
-    if (!hasId && (!params.threadId || !this.engineThreadId || params.threadId === this.engineThreadId)) {
-      this.events.push({ type: "engineEvent", ...(this.active ? { turnId: this.active.id } : {}), backend: this.backend, subtype: method, payload: structuredClone(frame) });
-    }
     if (hasId && !ServerRequestMethodSchema.safeParse(method).success) { this.rejectRequest(frame, codexProtocolError(`Unknown Codex server request: ${method}`, raw)); return; }
     if (params.threadId && this.engineThreadId && params.threadId !== this.engineThreadId) {
       if (hasId) this.rejectRequest(frame, codexProtocolError("Codex request belongs to another thread", raw));
       return;
     }
+    const nativeTurnId = params.turnId ?? (method === "turn/completed" || method === "turn/started" ? codexRecord(params.turn).id : undefined);
+    const emitRaw = () => {
+      if (!hasId) this.events.push({ type: "engineEvent", ...(this.active && (!nativeTurnId || nativeTurnId === this.active.nativeId) ? { turnId: this.active.id } : {}), backend: this.backend, subtype: method, payload: structuredClone(frame) });
+    };
     if (method === "serverRequest/resolved") {
+      emitRaw();
       const pending = this.approvals.get(params.requestId);
       if (pending) { this.approvals.delete(params.requestId); this.events.push({ type: "approvalExpired", ...pending, reason: "engine_resolved" }); }
       return;
     }
     if (method === "turn/started") {
+      emitRaw();
       // The correlated turn/start response owns the ID. Buffer early items until
       // it arrives; a delayed turn/started must not bind a later queued turn.
       return;
     }
-    const nativeTurnId = params.turnId ?? (method === "turn/completed" ? codexRecord(params.turn).id : undefined);
     if (nativeTurnId && !this.active?.nativeId && this.active) { this.active.buffered.push(frame); return; }
+    emitRaw();
     if (nativeTurnId && nativeTurnId !== this.active?.nativeId) {
       if (hasId) this.rejectRequest(frame, codexProtocolError("Codex request belongs to an inactive turn", raw));
       // Usage can also be sent while resuming an idle thread.

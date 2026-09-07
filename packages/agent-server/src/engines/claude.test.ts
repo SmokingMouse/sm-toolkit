@@ -192,6 +192,7 @@ describe("Claude native frame exchange (fake child only)", () => {
       for (const permission of modes) {
         const args = buildClaudeLaunch({ backend: "claude", threadId: "th", permission }).args;
         expect(args[args.indexOf("--permission-mode") + 1]).toBe(permission);
+        expect(args).toContain("--allow-dangerously-skip-permissions");
         await engine.setPermission(permission);
         expect(fake.written.at(-1).request).toEqual({ subtype: "set_permission_mode", mode: permission });
       }
