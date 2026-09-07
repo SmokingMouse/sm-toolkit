@@ -335,10 +335,10 @@ turn/steer(expectedTurnId=running) ──► 插进当前轮，不进队列
 
 ## 10. 与 codex app-server v2 的关系
 
-### 10.1 直接取用（同名同义）
+### 10.1 直接取用（同名；字段差异见 §10.2）
 
 `initialize` / `initialized`、`thread/start` / `thread/resume` / `thread/fork` /
-`thread/close` / `thread/list` / `thread/read` / `thread/items/list`、
+`thread/list` / `thread/read` / `thread/items/list`、
 `turn/start` / `turn/steer` / `turn/interrupt`、
 `thread/started` / `thread/status/changed` / `thread/queue/changed` /
 `thread/tokenUsage/updated`、`turn/started` / `turn/completed` /
@@ -371,15 +371,54 @@ item 的 `type` 取值取 codex `ThreadItem` 的子集，字段名一致（`aggr
 | D11 | 审批决策 | `CommandExecutionApprovalDecision` 含 `acceptWithExecpolicy…` 等 codex 专属变体 | 只留 `accept / acceptForSession / reject / abort` | 跨后端可表达的最小集；codex 专属变体经 `data.raw` 透传但不进类型 |
 | D12 | 租约 | 无 | `thread/lease/*` | 多客户端下的「我先接管」 |
 
+| D13 | 关闭 | 0.153.4 无 thread/close | AS thread/close 回收独占引擎并保留日志 | daemon 拥有进程生命周期 |
+| D14 | 参数投影 | 原生必填字段见下表 | 增加关联 ID、重放游标、竞答身份；压平输出与 usage | 跨后端共享信封，映射层负责转换；同名不代表原样转发 |
+
+必填字段差异（机械检查读取此表；未列方法必须完全一致）。`thread/resume` 的 AS
+必填集合取 union 各分支交集，身份二选一仍由 zod 校验。其它差异的理由：握手和 backend
+由 AS 自有路由处理；省略 turnId 表示当前轮；服务级 error 无 thread；delta 的分片索引
+在引擎内合并，输出增加 stream；diff 转成 diffStat；审批从已知 item 补齐命令和 changes。
+
+<!-- codex-required-differences -->
+| 方法 | 仅 AS 必填 | 仅 Codex 必填 |
+|---|---|---|
+| `initialize` | client, protocolVersion | clientInfo |
+| `thread/start` | backend | — |
+| `thread/resume` | — | threadId |
+| `turn/interrupt` | — | turnId |
+| `error` | — | threadId, turnId |
+| `thread/started` | threadId | — |
+| `thread/queue/changed` | queue | — |
+| `thread/tokenUsage/updated` | usage | tokenUsage, turnId |
+| `turn/started` | turnId | — |
+| `turn/completed` | turnId | — |
+| `turn/diff/updated` | diffStat | diff |
+| `item/started` | itemId, seq | — |
+| `item/completed` | itemId, seq | — |
+| `item/commandExecution/outputDelta` | chunk, stream | delta |
+| `serverRequest/resolved` | decidedBy, outcome | — |
+| `item/reasoning/summaryTextDelta` | — | summaryIndex |
+| `item/reasoning/textDelta` | — | contentIndex |
+| `item/commandExecution/requestApproval` | command, cwd, requestId | — |
+| `item/fileChange/requestApproval` | changes, requestId | — |
+| `item/tool/requestUserInput` | requestId | — |
+| `item/permissions/requestApproval` | requestId | — |
+<!-- /codex-required-differences -->
+
 ### 10.3 对齐校验点（实现期的机械检查）
 
-1. `scripts/check-codex-alignment.ts`：读 `/tmp/codex-app-server-schema/v2/*.json`，
-   对 §10.1 列出的每个名字断言 codex 侧仍存在且 params 必填字段是 AS 的超集；
-   不成立就让 CI 红，逼人回来更新 §10.2 的差异表。
+1. `packages/agent-server/scripts/check-codex-alignment.ts`：读 schema 根目录的
+   ClientRequest / ClientNotification / ServerNotification / ServerRequest（这些枚举引用 v2 参数定义）。
+   对 §10.1 每个名字检查所属方向与存在性，再对 params 必填集合做双向差集比较；
+   仅允许 §10.2 明列的字段差异。新增、移除或过时例外均让 CI 红。
 2. codex schema 由 `codex app-server generate-json-schema --out <dir>` 生成，
-   版本号锁进仓（`docs/agent-server/codex-schema-version.txt`，实现期补）。
+   版本号锁进仓（`docs/agent-server/codex-schema-version.txt`）。脚本核对本机 CLI 版本；
+   默认复用带匹配版本标记的 `/tmp/codex-app-server-schema`，否则在临时目录生成并清理。
+   `--schema-dir <dir>` 可检查带 `codex-schema-version.txt` 的离线 schema。
+   引擎在 initialize 响应里核对 userAgent；不匹配发 -32015 error，保持 thread 可用。
 3. `CodexSession` 的映射层禁止出现「猜」：收到未知 item type / 未知 server
-   request → 发 `error` 通知 + `-32015 engine_protocol_error`，不静默丢弃。
+   request → 发 `error` 通知 + `-32015 engine_protocol_error`，不静默丢弃、不拆 thread。
+   未知 item 映射成 error item；未知反向请求还要回复对应原生 RPC 的 -32015。
 
 ## 11. 示例：一轮完整交互
 

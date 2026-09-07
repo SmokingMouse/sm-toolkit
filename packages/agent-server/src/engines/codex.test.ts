@@ -251,11 +251,22 @@ describe("Codex through AS core", () => {
     expect(peers).toHaveLength(2);
     expect(peers[1].trace().some(t => t.direction === "in" && t.frame.method === "thread/resume")).toBe(true);
   });
-  test.each(["unknown-item", "system-error"])("%s produces AS error and systemError", async scenario => {
+  test.each(["unknown-item", "unknown-request", "version-mismatch"])("C1/C2: %s reports -32015 while thread and next turn survive", async scenario => {
+    const { server, peers } = integrated(scenario), c = await client(server), frames: Frame[] = capture(c);
+    const { thread } = await c.request("thread/start", { backend: "codex", cwd: tmpdir() });
+    const first = await c.request("turn/start", { threadId: thread.id, input: input("go") });
+    await until(() => server.log.turn(first.turn.id).status === "completed");
+    expect(frames.some(f => "method" in f && f.method === "error" && f.params.error.code === -32015)).toBe(true);
+    const next = await c.request("turn/start", { threadId: thread.id, input: input("again") });
+    await until(() => server.log.turn(next.turn.id).status === "completed");
+    expect(server.threads.get(thread.id).status.type).toBe("idle");
+    expect(peers).toHaveLength(1);
+  });
+  test.each(["system-error"])("%s produces AS error and systemError", async scenario => {
     const { server } = integrated(scenario), c = await client(server), frames: Frame[] = capture(c);
     const { thread } = await c.request("thread/start", { backend: "codex", cwd: tmpdir() });
     await c.request("turn/start", { threadId: thread.id, input: input("go") });
     await until(() => server.threads.get(thread.id).status.type === "systemError");
-    expect(frames.some(f => "method" in f && f.method === "error" && f.params.error.code === (scenario === "unknown-item" ? -32015 : -32004))).toBe(true);
+    expect(frames.some(f => "method" in f && f.method === "error" && f.params.error.code === -32004)).toBe(true);
   });
 });

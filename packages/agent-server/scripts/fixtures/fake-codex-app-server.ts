@@ -75,7 +75,7 @@ function handle(frame: any) {
     initialized = true;
     if (scenario === "no-handshake") return;
     if (scenario === "bad-handshake") { process.stdout.write("invalid json\n"); return; }
-    reply(frame.id, { userAgent: "codex/0.153.4", codexHome: "/tmp/fake-codex", platformFamily: "unix", platformOs: "macos" }); return;
+    reply(frame.id, { userAgent: scenario === "version-mismatch" ? "codex/99.0.0" : "codex/0.153.4", codexHome: "/tmp/fake-codex", platformFamily: "unix", platformOs: "macos" }); return;
   }
   assert.ok(initialized, "initialize must be first");
   if (frame.method === "initialized") { acknowledged = true; return; }
@@ -107,7 +107,7 @@ function handle(frame: any) {
       setTimeout(() => { process.stderr.write("scripted crash\n"); process.exit(23); }, 80); return;
     }
     if (scenario === "system-error") { notify("thread/status/changed", { threadId, status: { type: "systemError" } }); return; }
-    if (scenario === "unknown-item") { started({ id: "unknown", type: "futureItem" }); return; }
+    if (scenario === "unknown-item") { started({ id: `unknown-${turnId}`, type: "futureItem" }); message("survived unknown item"); finish(); return; }
     if (scenario === "unknown-request") {
       request(911, "future/request", base(), frame => { assert.equal(frame.error.code, -32015); message("unsupported request rejected"); finish(); }); return;
     }

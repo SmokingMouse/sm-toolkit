@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { ErrorCode, ProtocolError, ServerRequestMethodSchema, type StartTurnParams, type UserInput } from "../protocol/index.js";
 import { AsyncQueue, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
 import { CodexEventMapper, codexProtocolError, codexRecord, codexString, codexUserInput, mapCodexDecision, mapCodexRequest } from "./codex-mapper.js";
+import { CODEX_SCHEMA_VERSION } from "./codex-version.js";
 
 type NativeId = string | number;
 type NativeFrame = Record<string, any>;
@@ -98,7 +99,9 @@ export class CodexEngine implements EngineSession {
       child.on("error", error => this.fail(this.unavailable(error.message)));
       child.stdin.on("error", error => this.fail(this.unavailable(error.message)));
       child.on("close", (code, signal) => { if (!this.closed) this.fail(this.unavailable(`Codex app-server exited (${code ?? signal})`)); else this.events.end(); });
-      await this.request("initialize", { clientInfo: { name: "sm_agent_server", title: "SM Agent Server", version: "0.1.0" }, capabilities: { experimentalApi: true } });
+      const initialized = await this.request("initialize", { clientInfo: { name: "sm_agent_server", title: "SM Agent Server", version: "0.1.0" }, capabilities: { experimentalApi: true } });
+      const version = String(initialized.userAgent ?? "").match(/codex(?:-cli)?\/([\d.]+)(?=\s|$)/)?.[1];
+      if (version !== CODEX_SCHEMA_VERSION) this.events.push({ type: "error", error: codexProtocolError(`Codex version ${version ?? "unknown"} differs from pinned schema ${CODEX_SCHEMA_VERSION}`, initialized).toJSON(), willRetry: false });
       this.write({ method: "initialized", params: {} });
       await this.request(options.engineThreadId ? "thread/resume" : "thread/start", params, result => {
         const id = codexString(codexRecord(result.thread).id, "thread id");

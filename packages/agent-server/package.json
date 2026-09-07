@@ -21,7 +21,8 @@
     "build": "tsc --build",
     "typecheck": "tsc --build",
     "test": "bun test",
-    "schema": "bun run scripts/generate-schema.ts"
+    "schema": "bun run scripts/generate-schema.ts",
+    "check-codex-alignment": "bun run scripts/check-codex-alignment.ts"
   },
   "dependencies": {
     "@smokingmouse/agent": "workspace:*",

@@ -145,7 +145,14 @@ export class CodexEventMapper {
     }
     if (method === "item/started" || method === "item/completed") {
       const native = codexRecord(p.item), completed = method === "item/completed";
-      const item = mapCodexItem(native, completed, this.parents.get(native.agentThreadId));
+      let item: EngineItem;
+      try { item = mapCodexItem(native, completed, this.parents.get(native.agentThreadId)); }
+      catch (error) {
+        if (!(error instanceof ProtocolError) || !error.message.startsWith("Unknown Codex item type:")) throw error;
+        // An additive native variant is observable but must not kill this thread.
+        const fallback: EngineItem = { id: codexString(native.id, "item id"), type: "error", status: "failed", payload: { message: error.message, code: error.code, retryable: false } };
+        return [...this.put(fallback, true), { type: "error", turnId: this.turnId, error: error.toJSON(), willRetry: false }];
+      }
       if (native.type === "collabAgentToolCall") for (const threadId of list(native.receiverThreadIds)) this.parents.set(threadId, item.id);
       if (item.type === "userMessage") {
         const old = this.items.get(item.id);
