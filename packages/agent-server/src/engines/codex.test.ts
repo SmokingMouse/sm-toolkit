@@ -161,10 +161,11 @@ describe("Codex stdio process (scripted offline peer)", () => {
   });
   test("resume uses native thread id and forwards model/effort through thread and turn config", async () => {
     const f = fake(), events = collect(f.engine);
-    await f.engine.spawn({ threadId: "as-th", backend: "codex", engineThreadId: "previous-native", cwd: f.directory, model: "thread-model", effort: "high", permission: "readonly" });
+    await f.engine.spawn({ threadId: "as-th", backend: "codex", engineThreadId: "previous-native", cwd: f.directory, model: "thread-model", effort: "high", permission: "readonly", serviceTier: "default" });
     await f.engine.sendTurn("as-turn", input("go"), { threadId: "as-th", input: input("go"), model: "turn-model", effort: "low", cwd: f.directory, permission: "auto-edit", sandbox: "workspace-write" });
     await until(() => events.some(e => e.type === "turnCompleted"));
     const requests = f.trace().filter(t => t.direction === "in").map(t => t.frame);
+    for (const method of ["thread/resume", "turn/start"]) expect(requests.find(r => r.method === method).params.serviceTier).toBe("default");
     expect(requests.find(r => r.method === "thread/resume").params).toMatchObject({ threadId: "previous-native", excludeTurns: true, model: "thread-model", config: { model_reasoning_effort: "high" }, sandbox: "read-only", approvalPolicy: "never" });
     expect(requests.find(r => r.method === "turn/start").params).toMatchObject({ threadId: "previous-native", model: "turn-model", effort: "low", sandboxPolicy: { type: "workspaceWrite" }, approvalPolicy: "on-request" });
   });

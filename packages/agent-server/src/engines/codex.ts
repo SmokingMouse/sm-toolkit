@@ -31,20 +31,20 @@ export function buildCodexThreadParams(options: SessionOptions): Record<string, 
     ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(sandbox ? { sandbox } : {}), ...(approval ? { approvalPolicy: approval } : {}),
-    approvalsReviewer: "user", serviceTier: "default",
+    approvalsReviewer: "user", serviceTier: options.serviceTier ?? "default",
     ...(options.systemPrompt !== undefined ? { baseInstructions: options.systemPrompt } : {}),
     ...(options.effort !== undefined ? { config: { model_reasoning_effort: options.effort } } : {}),
     ...(options.engineThreadId ? { threadId: options.engineThreadId, excludeTurns: true } : {}),
   };
 }
-function turnOverrides(options: StartTurnParams): Record<string, unknown> {
+function turnOverrides(options: StartTurnParams, serviceTier: SessionOptions["serviceTier"] = "default"): Record<string, unknown> {
   checkEffort(options.effort);
   const mode = sandboxMode(options), approval = approvalPolicy(options.permission);
   const sandboxPolicy = mode === "read-only" ? { type: "readOnly" } : mode === "workspace-write" ? { type: "workspaceWrite" } : mode === "danger-full-access" ? { type: "dangerFullAccess" } : undefined;
   return {
     ...(options.cwd !== undefined ? { cwd: options.cwd } : {}), ...(options.model !== undefined ? { model: options.model } : {}),
     ...(options.effort !== undefined ? { effort: options.effort } : {}), ...(approval ? { approvalPolicy: approval } : {}),
-    ...(sandboxPolicy ? { sandboxPolicy } : {}), serviceTier: "default", approvalsReviewer: "user",
+    ...(sandboxPolicy ? { sandboxPolicy } : {}), serviceTier, approvalsReviewer: "user",
     ...(options.clientTurnId ? { clientUserMessageId: options.clientTurnId } : {}),
   };
 }
@@ -127,7 +127,7 @@ export class CodexEngine implements EngineSession {
     const turn: ActiveTurn = { id: turnId, interrupting: false, buffered: [] };
     this.active = turn; this.mapper.beginTurn(turnId); this.mapper.registerInput(input, options.clientTurnId);
     try {
-      await this.request("turn/start", { threadId: this.engineThreadId, input: codexUserInput(input), ...turnOverrides(options) }, result => this.bindTurn(turn, codexString(codexRecord(result.turn).id, "turn id")));
+      await this.request("turn/start", { threadId: this.engineThreadId, input: codexUserInput(input), ...turnOverrides(options, this.options?.serviceTier) }, result => this.bindTurn(turn, codexString(codexRecord(result.turn).id, "turn id")));
     } catch (error) {
       this.fail(error instanceof ProtocolError ? error : this.unavailable(String(error))); throw error;
     }

@@ -22,6 +22,15 @@ test("close cannot bypass another client's input lease", async () => {
   await b.request("thread/close", { threadId: thread.id });
 });
 afterEach(async () => { for (const s of servers.splice(0)) await s.close(); });
+test("serviceTier is Codex-only and cannot silently disappear on Claude start/resume", async () => {
+  const { server, engines } = setup(); servers.push(server); const c = await client(server);
+  await expect(c.request("thread/start", { backend: "claude", cwd: process.cwd(), serviceTier: "default" })).rejects.toMatchObject({ code: -32008, message: "serviceTier requires Codex" });
+  expect(engines).toHaveLength(0);
+  const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+  await c.request("thread/close", { threadId: thread.id });
+  await expect(c.request("thread/resume", { threadId: thread.id, serviceTier: "default" })).rejects.toMatchObject({ code: -32008, message: "serviceTier requires Codex" });
+  expect(engines).toHaveLength(1);
+});
 test("fjContext rejects traversal, arbitrary env, missing/fable models and unsupported tier before spawn", async () => {
   const { server, engines } = setup(); servers.push(server); const c = await client(server);
   const valid = { backend: "codex" as const, cwd: process.cwd(), model: "gpt-6-astra", permission: "full" as const, serviceTier: "default" as const, fjContext: { root: process.cwd(), cid: "fj-test" } };

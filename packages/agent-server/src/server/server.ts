@@ -240,6 +240,7 @@ export class AgentServer {
           if (!p.permission) throw new ProtocolError(ErrorCode.invalid_params, "fjContext requires explicit permission");
           if (p.backend === "codex" && (p.model !== "gpt-6-astra" || p.serviceTier !== "default")) throw new ProtocolError(ErrorCode.invalid_params, "fj Codex requires gpt-6-astra and serviceTier default");
         }
+        if (p.backend === "claude" && p.serviceTier !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "serviceTier requires Codex");
         if (p.backend === "claude") validateClaudeEffort(p.effort);
         if (!this.backends.includes(p.backend)) throw new ProtocolError(ErrorCode.unsupported_capability, "backend is not available");
         return this.threads.start({ ...p, cwd: this.cwd(p.cwd) }, thread => this.attach(connection, thread.id));
@@ -267,7 +268,10 @@ export class AgentServer {
             if (p.model !== undefined && (!p.model.trim() || /fable/i.test(p.model) || (existing.backend === "codex" && p.model !== "gpt-6-astra"))) throw new ProtocolError(ErrorCode.invalid_params, "fj resume requires an explicit compatible model");
           }
         }
-        if ((existing?.backend ?? p.backend ?? "claude") === "claude") validateClaudeEffort(p.effort);
+        if ((existing?.backend ?? p.backend ?? "claude") === "claude") {
+          if (p.serviceTier !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "serviceTier requires Codex");
+          validateClaudeEffort(p.effort);
+        }
         if (existing) permissionInput(existing.id, p.permission);
         if (!existing && !p.cwd) throw new ProtocolError(ErrorCode.invalid_params, "cwd is required when importing an unknown engineThreadId");
         if (existing) this.cwd(p.cwd ?? existing.cwd);
