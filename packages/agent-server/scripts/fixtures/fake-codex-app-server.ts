@@ -5,6 +5,9 @@ import { createInterface } from "node:readline";
 // Offline stdio peer. Wire shapes were taken from codex-cli 0.153.4's generated
 // schema; this process never imports an SDK, reads credentials, or makes requests.
 const scenario = process.env.FAKE_CODEX_SCENARIO ?? "conversation";
+const version = process.env.FAKE_CODEX_VERSION ? JSON.parse(process.env.FAKE_CODEX_VERSION) : {
+  userAgent: "codex/0.153.4", cliVersion: scenario === "version-mismatch" ? "99.0.0" : "0.153.4",
+};
 const trace = process.env.FAKE_CODEX_TRACE;
 const record = (direction: string, frame: unknown) => { if (trace) appendFileSync(trace, JSON.stringify({ direction, frame }) + "\n"); };
 const send = (frame: unknown) => { record("out", frame); process.stdout.write(JSON.stringify(frame) + "\n"); };
@@ -75,7 +78,7 @@ function handle(frame: any) {
     initialized = true;
     if (scenario === "no-handshake") return;
     if (scenario === "bad-handshake") { process.stdout.write("invalid json\n"); return; }
-    reply(frame.id, { userAgent: scenario === "version-mismatch" ? "codex/99.0.0" : "codex/0.153.4", codexHome: "/tmp/fake-codex", platformFamily: "unix", platformOs: "macos" }); return;
+    reply(frame.id, { userAgent: version.userAgent, codexHome: "/tmp/fake-codex", platformFamily: "unix", platformOs: "macos" }); return;
   }
   assert.ok(initialized, "initialize must be first");
   if (frame.method === "initialized") { acknowledged = true; return; }
@@ -85,7 +88,7 @@ function handle(frame: any) {
     if (frame.method === "thread/resume") { assert.ok(p.threadId); threadId = p.threadId; }
     assert.equal(p.serviceTier, "default"); assert.equal(p.approvalsReviewer, "user");
     cwd = p.cwd ?? cwd;
-    const thread = { id: threadId, sessionId: threadId, cliVersion: "0.153.4", cwd, ephemeral: false, createdAt: 1, updatedAt: 1, modelProvider: "fake", preview: "", projectId: null, source: "appServer", status: { type: "idle" }, turns: [] };
+    const thread = { id: threadId, sessionId: threadId, cliVersion: version.cliVersion, cwd, ephemeral: false, createdAt: 1, updatedAt: 1, modelProvider: "fake", preview: "", projectId: null, source: "appServer", status: { type: "idle" }, turns: [] };
     reply(frame.id, { thread, model: p.model ?? "model-from-config", modelProvider: "fake", cwd, reasoningEffort: p.config?.model_reasoning_effort ?? null, approvalPolicy: p.approvalPolicy ?? "untrusted", approvalsReviewer: "user", sandbox: { type: "workspaceWrite" } });
     notify("thread/started", { thread }); notify("thread/status/changed", { threadId, status: { type: "idle" } }); return;
   }

@@ -27,7 +27,7 @@ test("N1: all Codex mapper error paths omit turnId before beginTurn", () => {
 });
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
-function fake(scenario = "simple", options: { handshakeTimeoutMs?: number } = {}) {
+function fake(scenario = "simple", options: { handshakeTimeoutMs?: number; version?: { userAgent?: unknown; cliVersion?: unknown } } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "as-codex-")), tracePath = join(directory, "wire.jsonl");
   cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
   const launches: Array<{ command: string; args: string[]; cwd?: string; env: NodeJS.ProcessEnv }> = [];
@@ -35,7 +35,7 @@ function fake(scenario = "simple", options: { handshakeTimeoutMs?: number } = {}
   const engine = new CodexEngine({ ...options, spawnProcess: (command, args, opts) => {
     launches.push({ command, args, cwd: opts.cwd, env: { AS_TEST_MARKER: opts.env.AS_TEST_MARKER } });
     // Even if the production default executable changes, tests only start Bun.
-    child = spawn(process.execPath, [fixture], { ...opts, env: { ...opts.env, FAKE_CODEX_SCENARIO: scenario, FAKE_CODEX_TRACE: tracePath }, stdio: "pipe" });
+    child = spawn(process.execPath, [fixture], { ...opts, env: { ...opts.env, FAKE_CODEX_SCENARIO: scenario, FAKE_CODEX_TRACE: tracePath, FAKE_CODEX_VERSION: options.version ? JSON.stringify(options.version) : undefined }, stdio: "pipe" });
     return child as ReturnType<NonNullable<import("./codex.js").CodexEngineOptions["spawnProcess"]>>;
   } });
   cleanup.push(() => engine.close("test"));
@@ -112,6 +112,26 @@ describe("Codex v2 mapper", () => {
 });
 
 describe("Codex stdio process (scripted offline peer)", () => {
+  const realUserAgent = "sm_agent_server/0.153.4 (Mac OS 15.7.5; arm64) dumb (sm_agent_server; 0.1.0)";
+  const versionCases = [
+    { name: "codex-cli/x.y.z fallback", version: { userAgent: "codex-cli/0.153.4" }, warning: undefined },
+    { name: "sm_agent_server/x.y.z real fallback", version: { userAgent: realUserAgent }, warning: undefined },
+    { name: "cliVersion takes priority over mismatched userAgent", version: { userAgent: "codex-cli/99.0.0", cliVersion: "0.153.4" }, warning: undefined },
+    { name: "cliVersion mismatch takes priority over matching userAgent", version: { userAgent: realUserAgent, cliVersion: "99.0.0" }, warning: "99.0.0" },
+    { name: "both missing report unknown", version: {}, warning: "unknown" },
+    { name: "empty cliVersion falls back to userAgent", version: { userAgent: realUserAgent, cliVersion: " " }, warning: undefined },
+    { name: "unparseable userAgent reports unknown", version: { userAgent: "no version" }, warning: "unknown" },
+    { name: "fallback mismatch remains visible", version: { userAgent: "another-client/99.0.0" }, warning: "99.0.0" },
+  ];
+  for (const resumed of [false, true]) test.each(versionCases)(`version on thread/${resumed ? "resume" : "start"}: $name`, async ({ version, warning }) => {
+    const f = fake("simple", { version }), events = collect(f.engine);
+    await f.engine.spawn({ threadId: "as-thread", backend: "codex", cwd: f.directory, ...(resumed ? { engineThreadId: "previous-native" } : {}) });
+    await until(() => events.some(e => e.type === "metadata"));
+    const errors = events.filter(e => e.type === "error");
+    expect(errors).toHaveLength(warning ? 1 : 0);
+    if (warning) expect(errors[0]).toMatchObject({ error: { code: -32015, message: `Codex version ${warning} differs from pinned schema 0.153.4` }, willRetry: false });
+    expect(f.trace().filter(t => t.direction === "in").slice(0, 3).map(t => t.frame.method)).toEqual(["initialize", "initialized", resumed ? "thread/resume" : "thread/start"]);
+  });
   test("initialize/initialized precede thread/start; one process serves two turns and attach", async () => {
     const f = fake(), events = collect(f.engine);
     await f.engine.spawn({ threadId: "as-thread", backend: "codex", cwd: f.directory });
