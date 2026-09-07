@@ -27,7 +27,7 @@ Enter 发 `turn/start`；运行时同样入队，显示从 1 起的排队位置�
 | `/fork` | — | 从当前引擎会话末端 fork 并切换；服务端目前仅支持具有 engine session id 的 Claude thread |
 | `/steer <文本>` | — | 向当前 turn 插话 |
 
-选择器显示短 id、标题（无标题时取首条用户提示）、状态、cwd、最近活动时间。协议没有 updatedAt 字段，因此时间取 items 的最大开始/完成时间与 thread 的创建/关闭时间。状态栏显示短 id、cwd、model、权限；未返回 model 时显示 `unknown`，当前 Thread 协议不暴露权限，权限显示 `unknown`，不猜测 daemon 的配置。
+选择器显示短 id、标题（无标题时取首条用户提示）、状态、cwd、最近活动时间。协议没有 updatedAt 字段，因此时间取 items 的最大开始/完成时间与 thread 的创建/关闭时间。状态栏显示短 id、cwd、model；未返回 model 时显示 `unknown`。thread 状态包含 `permission` 时显示权限，缺少该字段时省略，不猜测 daemon 的配置。
 
 切换成功后清理旧会话画面并 detach 旧订阅，不 close/interrupt 旧 thread。Ctrl+N/Ctrl+T 在审批卡上也可使用；卡片保留在 daemon，切回时恢复。快捷键保留输入草稿，命令成功后清空命令输入，失败保留输入并显示错误。
 

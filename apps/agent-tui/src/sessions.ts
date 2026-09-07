@@ -21,7 +21,7 @@ export class Sessions {
         do {
           const page = await this.client.request("thread/list", { cursor, limit: 100 });
           for (const thread of page.threads) {
-            let itemCursor: string | undefined, title = thread.title, updatedAtMs = thread.closedAtMs ?? thread.createdAtMs;
+            let itemCursor: string | undefined, title = thread.title, updatedAtMs = Math.max(thread.createdAtMs, thread.closedAtMs ?? 0);
             do {
               const page = await this.client.request("thread/items/list", { threadId: thread.id, cursor: itemCursor, limit: 1000, direction: "asc" });
               for (const item of page.items) {

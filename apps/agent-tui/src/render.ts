@@ -70,7 +70,8 @@ export function wrap(line: string, width: number): string[] {
 export function render(model: TuiModel, columns = 100, rows = 30): string {
   const width = Math.max(1, columns - 1), height = Math.max(4, rows);
   const thread = model.thread, usage = model.usage;
-  const status = `${thread ? shortId(thread.id) : "connecting"} | cwd ${thread?.cwd ?? "—"} | model ${thread?.model ?? "unknown"} | permission unknown`;
+  const permission = thread && "permission" in thread && typeof thread.permission === "string" ? ` | permission ${thread.permission}` : "";
+  const status = `${thread ? shortId(thread.id) : "connecting"} | cwd ${thread?.cwd ?? "—"} | model ${thread?.model ?? "unknown"}${permission}`;
   const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "unknown"} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection}`);
   const headers = [...wrap(status, width), ...wrap(header, width)].slice(0, Math.max(1, height - 4));
   const body = [...model.items.values()].sort((a, b) => a.seq - b.seq).flatMap(i => [...renderItem(i, model.expandedReasoning), ""]);

@@ -48,7 +48,7 @@ test("sessions PTY: /new /clear /threads /fork /resume, Ctrl-N Ctrl-T, disconnec
     proc = Bun.spawn([resolve(import.meta.dir, "../bin/agent-tui"), "--attach", thread.id, "--socket", paths.socketPath], {
       env, terminal: { cols: 180, rows: 36, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } },
     });
-    await wait(() => screen.includes(shortId(thread.id)) && screen.includes("permission unknown"), "initial status");
+    await wait(() => screen.includes(shortId(thread.id)) && screen.includes("model mock-model"), "initial status");
     expect(screen).toContain(home); expect(screen).toContain("mock-model");
     write("original prompt\r"); await wait(() => first.sent.length === 1, "first prompt");
     const turnId = first.sent[0].turnId;

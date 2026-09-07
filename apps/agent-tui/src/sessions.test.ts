@@ -52,10 +52,13 @@ test("session commands are consumed locally; failed attach preserves current vie
   model.input = "/resume missing"; await controller.key(undefined, { name: "return" });
   expect(model.thread?.id).toBe("old"); expect(model.input).toBe("/resume missing"); expect(model.message).toBe("missing thread");
 });
-test("status includes thread cwd model and explicit unavailable permission; picker escapes titles", () => {
+test("status shows permission only when present in thread state; picker escapes titles", () => {
   const { model } = setup();
   model.picker = { index: 0, entries: [{ thread: thread("new"), title: "bad\x1b[2Jtitle", updatedAtMs: 1 }] };
   const screen = render(model, 120, 20);
-  for (const value of ["old", "cwd /tmp", "model test-model", "permission unknown", "badtitle", "1970-01-01"]) expect(screen).toContain(value);
+  for (const value of ["old", "cwd /tmp", "model test-model", "badtitle", "1970-01-01"]) expect(screen).toContain(value);
+  expect(screen).not.toContain("permission");
+  Object.assign(model.thread!, { permission: "readonly" });
+  expect(render(model, 120, 20)).toContain("permission readonly");
   expect(screen).not.toContain("\x1b");
 });
