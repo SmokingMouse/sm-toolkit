@@ -36,7 +36,9 @@ export function parseOptions(args: string[], env: NodeJS.ProcessEnv = process.en
     if (v.socket && v.ws) throw new Error("--socket and --ws are mutually exclusive");
     if (v.ws && !["ws:", "wss:"].includes(new URL(v.ws).protocol)) throw new Error("--ws requires a ws:// or wss:// URL");
   }
-  return { attach: v.attach, backend: v.backend as Options["backend"], permission: PermissionSchema.parse(v.permission ?? "default"), cwd: resolve(v.cwd || process.cwd()),
+  const permission = PermissionSchema.safeParse(v.permission ?? "default");
+  if (!permission.success) throw new Error(`--permission 需为 ${PermissionSchema.options.join("|")}`);
+  return { attach: v.attach, backend: v.backend as Options["backend"], permission: permission.data, cwd: resolve(v.cwd || process.cwd()),
     endpoint: v.ws ? { transport: "ws", url: v.ws } : { transport: "unix", path: resolve(v.socket || paths.socketPath) }, tokenPath: paths.tokenPath, help: !!v.help };
 }
 

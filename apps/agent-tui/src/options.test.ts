@@ -15,6 +15,13 @@ test("P1-3 --permission is validated and only accepted for new threads", () => {
   expect(() => parseOptions(["--attach", "th", "--permission", "full"])).toThrow();
   expect(() => parseOptions(["--new", "--backend", "claude", "--permission", "invalid"])).toThrow();
 });
+test("review2 P2-5 invalid permission prints one legal-values hint without Zod diagnostics", async () => {
+  const proc = Bun.spawn([process.execPath, resolve(import.meta.dir, "../bin/agent-tui"), "--new", "--backend", "claude", "--permission", "banana"], { stdout: "pipe", stderr: "pipe" });
+  const stderr = await new Response(proc.stderr).text();
+  expect(await proc.exited).toBe(1);
+  expect(stderr.trim()).toBe("agent-tui: --permission 需为 readonly|auto-edit|full|default|acceptEdits|plan|bypassPermissions|dontAsk");
+});
+
 test("uses daemon XDG resolution without creating or modifying token files", () => {
   expect(parseOptions(["--attach", "th"], { HOME: "/h", XDG_STATE_HOME: "/state", XDG_RUNTIME_DIR: "/run" })).toMatchObject({ endpoint: { path: "/run/sm-toolkit/agent-server.sock" }, tokenPath: "/state/sm-toolkit/agent-server/token" });
   const home = mkdtempSync("/tmp/tui-token-"); const token = join(home, "token");
