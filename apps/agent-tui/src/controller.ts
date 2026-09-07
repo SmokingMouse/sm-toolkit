@@ -45,6 +45,7 @@ export class Controller {
     if (text === "/tasks") { this.model.tasksVisible = !this.model.tasksVisible; this.model.panelFocus = this.model.tasksVisible ? "tasks" : "history"; this.model.input = ""; this.model.changed(); return; }
     if (text === "/agents" || text.startsWith("/agents ")) {
       const id = text.slice(7).trim(), agents = [...this.model.items.values()].filter(i => i.type === "subAgent" && (!id || i.id === id || i.payload.parentItemId === id));
+      if (!agents.length) this.model.message = "没有匹配的子 agent";
       const collapse = agents.some(i => !this.model.collapsedAgents.has(i.id));
       for (const i of agents) { if (collapse) this.model.collapsedAgents.add(i.id); else this.model.collapsedAgents.delete(i.id); }
       this.model.input = ""; this.model.changed(); return;

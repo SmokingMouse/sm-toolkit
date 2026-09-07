@@ -262,6 +262,7 @@ test("observation commands stay local offline; contested sends and approvals ret
   a.model.connection = "disconnected";
   for (const command of ["/log", "/tasks", "/agents"]) { a.model.input = command; await a.controller.submit(); expect(a.model.input).toBe(""); }
   expect(a.model.logExpanded).toBe(true); expect(a.model.tasksVisible).toBe(true); expect(engine.sent).toHaveLength(0);
+  a.model.input = "/agents missing"; await a.controller.submit(); expect(a.model.message).toBe("没有匹配的子 agent");
   a.model.connection = "connected";
   b.model.input = "/takeover"; await b.controller.submit();
   a.model.input = "preserved"; await a.controller.key("\r", { name: "return" });
