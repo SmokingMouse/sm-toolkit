@@ -3,6 +3,7 @@ import type { Backend, Item, PendingServerRequest, RpcError, ServerRequestResult
 export interface EngineItem { id: string; type: Item["type"]; payload: Item["payload"]; status?: Item["status"] }
 export type DeltaKind = "text" | "reasoning" | "summary" | "stdout" | "stderr";
 export type EngineEvent =
+  | { type: "engineEvent"; turnId?: string; backend: Backend; subtype: string; payload: import("../protocol/index.js").JsonObject }
   | { type: "metadata"; engineThreadId: string }
   | { type: "status"; status: ThreadStatus }
   | { type: "usage"; usage: Usage }

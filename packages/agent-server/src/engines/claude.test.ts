@@ -108,6 +108,26 @@ function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => voi
   return { child, written, send };
 }
 describe("Claude native frame exchange (fake child only)", () => {
+  test("foundation events: all system frames and rate limits survive before, during and after turns", async () => {
+    const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const event of engine.events) events.push(event); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th" });
+      const before = { type: "system", subtype: "hook_started", extra: { future: [1, true, null] } };
+      fake.send(before);
+      await engine.sendTurn("tn", input("go"), { threadId: "th", input: input("go") });
+      for (const subtype of ["init", "compact_boundary", "local_command", "api_retry", "model_refusal_fallback", "memory_saved", "future_unknown"]) fake.send({ type: "system", subtype, untouched: true });
+      fake.send({ type: "rate_limit_event", rate_limit_info: { status: "allowed_warning" } });
+      fake.send({ type: "result", result: "done", usage: {} });
+      fake.send({ type: "system", subtype: "turn_duration", duration: 10 });
+      await until(() => events.filter(e => e.type === "engineEvent").length === 10);
+      const raw = events.filter(e => e.type === "engineEvent");
+      expect(raw[0]).toEqual({ type: "engineEvent", backend: "claude", subtype: "hook_started", payload: before });
+      expect(raw[1].turnId).toBe("tn"); expect(raw.at(-1)).not.toHaveProperty("turnId");
+      expect(events.some(e => e.type === "itemCompleted" && e.item.type === "contextCompaction")).toBe(true);
+      expect(buildClaudeLaunch({ backend: "claude", threadId: "th" }).args).toContain("--include-hook-events");
+    } finally { await engine.close("test"); await consuming; }
+  });
   for (const [subtype, response] of [
     ["request_user_dialog", { behavior: "cancelled" }],
     ["elicitation", { action: "cancel" }],

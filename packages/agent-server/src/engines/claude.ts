@@ -11,6 +11,7 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   const resolved = resolveClaudeModel(options.model);
   const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--settings", JSON.stringify({ permissions: { ask: ["*"] } })];
   if (resolved.model) args.push("--model", resolved.model);
+  args.push("--include-hook-events");
   if (options.engineThreadId) args.push("--resume", options.engineThreadId);
   if (options.forkSession && options.engineThreadId) args.push("--fork-session");
   if (options.systemPrompt) args.push("--system-prompt", options.systemPrompt);
@@ -199,6 +200,7 @@ export class ClaudeEngine implements EngineSession {
     }
     if (typeof obj.session_id === "string" && obj.session_id !== this.engineThreadId) { this.engineThreadId = obj.session_id; this.events.push({ type: "metadata", engineThreadId: this.engineThreadId! }); }
     if (t === "system") {
+      this.events.push({ type: "engineEvent", ...(this.active ? { turnId: this.active } : {}), backend: this.backend, subtype: String(obj.subtype ?? "system"), payload: jsonValue(obj) });
       if (obj.subtype === "init") return;
       const phase: Record<string, string> = { task_started: "started", task_progress: "progress", task_updated: "updated", task_notification: "completed" };
       if (phase[obj.subtype]) {
@@ -254,7 +256,8 @@ export class ClaudeEngine implements EngineSession {
     }
     if (t === "error") { this.fail(new ProtocolError(ErrorCode.engine_unavailable, String(obj.message ?? obj.error ?? "Claude error"))); return; }
     // 2.1.258 Ase schema emits prompt_suggestion as a top-level informational frame.
-    if (["keep_alive", "rate_limit_event", "tool_progress", "tool_use_summary", "auth_status", "prompt_suggestion"].includes(t)) return;
+    if (t === "rate_limit_event") { this.events.push({ type: "engineEvent", ...(this.active ? { turnId: this.active } : {}), backend: this.backend, subtype: t, payload: jsonValue(obj) }); return; }
+    if (["keep_alive", "tool_progress", "tool_use_summary", "auth_status", "prompt_suggestion"].includes(t)) return;
     throw new ProtocolError(ErrorCode.engine_protocol_error, "Unknown Claude frame", { raw: JSON.stringify(raw).slice(0, 2000) });
   }
 }

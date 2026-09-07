@@ -44,6 +44,7 @@ class Connection implements InProcessClient, ApprovalClient {
   readonly reverse = new Map<RpcId, string>();
   readonly delivered = new Set<string>();
   readonly optOut = new Set<string>();
+  engineEvents = false;
   label = "in-process";
   initialized = false;
   initializing = false;
@@ -97,7 +98,7 @@ class Connection implements InProcessClient, ApprovalClient {
     const id = `srv_${this.clientId}_${++this.reverseSequence}`; this.reverse.set(id, request.params.requestId);
     this.emit({ jsonrpc: "2.0", id, method: request.method, params: request.params });
   }
-  notification(frame: ServerNotification): void { if (!this.optOut.has(frame.method)) this.emit(frame); }
+  notification(frame: ServerNotification): void { if (frame.method === "thread/engineEvent" && !this.engineEvents) return; if (!this.optOut.has(frame.method)) this.emit(frame); }
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -208,9 +209,10 @@ export class AgentServer {
           if (expected.length !== provided.length || !timingSafeEqual(expected, provided)) throw new ProtocolError(ErrorCode.unauthorized, "invalid token");
         }
         connection.initializing = true; connection.label = p.client.label;
+        connection.engineEvents = p.capabilities?.engineEvents === true;
         for (const capability of p.capabilities?.serverRequests ?? []) connection.serverRequests.add(capability);
         for (const notification of p.capabilities?.notifications?.optOut ?? []) connection.optOut.add(notification);
-        return { protocolVersion: "as/1", server: { name: "agent-server", version: "0.1.0" }, clientId: connection.clientId, capabilities: { backends: this.backends, steer: true, fork: this.backends.includes("claude"), leases: true, externalProviders: false, maxQueuedTurns: this.threads.maxQueuedTurns } };
+        return { protocolVersion: "as/1", server: { name: "agent-server", version: "0.1.0" }, clientId: connection.clientId, capabilities: { backends: this.backends, steer: true, fork: this.backends.includes("claude"), leases: true, externalProviders: false, maxQueuedTurns: this.threads.maxQueuedTurns, engine: { engineEvents: true } } };
       }
       case "thread/start": {
         const p = params(method);

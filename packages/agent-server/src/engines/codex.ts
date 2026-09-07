@@ -208,6 +208,9 @@ export class CodexEngine implements EngineSession {
     }
     if (typeof frame.method !== "string") throw codexProtocolError("Invalid Codex JSON-RPC frame", raw);
     const method = frame.method, params = codexRecord(frame.params);
+    if (!hasId && (!params.threadId || !this.engineThreadId || params.threadId === this.engineThreadId)) {
+      this.events.push({ type: "engineEvent", ...(this.active ? { turnId: this.active.id } : {}), backend: this.backend, subtype: method, payload: structuredClone(frame) });
+    }
     if (hasId && !ServerRequestMethodSchema.safeParse(method).success) { this.rejectRequest(frame, codexProtocolError(`Unknown Codex server request: ${method}`, raw)); return; }
     if (params.threadId && this.engineThreadId && params.threadId !== this.engineThreadId) {
       if (hasId) this.rejectRequest(frame, codexProtocolError("Codex request belongs to another thread", raw));

@@ -2166,6 +2166,34 @@
       ],
       "additionalProperties": false
     },
+    "EngineCapabilitiesSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "engineEvents": {
+          "type": "boolean"
+        },
+        "engineControl": {
+          "type": "boolean"
+        },
+        "permissionSet": {
+          "type": "boolean"
+        },
+        "effortSet": {
+          "type": "boolean"
+        },
+        "subAgentText": {
+          "type": "boolean"
+        },
+        "bashInput": {
+          "type": "boolean"
+        },
+        "compact": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "ErrorCodeSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "anyOf": [
@@ -4573,6 +4601,7 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "string",
       "enum": [
+        "thread/engineEvent",
         "initialized",
         "thread/started",
         "thread/status/changed",
@@ -7136,6 +7165,9 @@
         "capabilities": {
           "type": "object",
           "properties": {
+            "engineEvents": {
+              "type": "boolean"
+            },
             "serverRequests": {
               "type": "array",
               "items": {
@@ -7231,6 +7263,33 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 9007199254740991
+            },
+            "engine": {
+              "type": "object",
+              "properties": {
+                "engineEvents": {
+                  "type": "boolean"
+                },
+                "engineControl": {
+                  "type": "boolean"
+                },
+                "permissionSet": {
+                  "type": "boolean"
+                },
+                "effortSet": {
+                  "type": "boolean"
+                },
+                "subAgentText": {
+                  "type": "boolean"
+                },
+                "bashInput": {
+                  "type": "boolean"
+                },
+                "compact": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
             }
           },
           "required": [
@@ -14391,6 +14450,80 @@
         "answers"
       ],
       "additionalProperties": false
+    },
+    "notification:thread/engineEvent": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex",
+            "external"
+          ]
+        },
+        "subtype": {
+          "type": "string"
+        },
+        "payload": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/notification:thread~1engineEvent/$defs/__schema0"
+          }
+        }
+      },
+      "required": [
+        "threadId",
+        "backend",
+        "subtype",
+        "payload"
+      ],
+      "additionalProperties": false,
+      "$defs": {
+        "__schema0": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/notification:thread~1engineEvent/$defs/__schema0"
+              }
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/notification:thread~1engineEvent/$defs/__schema0"
+              }
+            }
+          ]
+        }
+      }
     },
     "notification:initialized": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",

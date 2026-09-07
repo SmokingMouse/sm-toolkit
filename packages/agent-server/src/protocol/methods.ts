@@ -5,6 +5,7 @@ import { PendingServerRequestSchema, ServerRequestMethodSchema } from "./request
 const empty = z.object({});
 const threadId = z.object({ threadId: IdSchema });
 const limit = z.number().int().positive().max(10000).optional();
+export const EngineCapabilitiesSchema = z.strictObject({ engineEvents: z.boolean().optional(), engineControl: z.boolean().optional(), permissionSet: z.boolean().optional(), effortSet: z.boolean().optional(), subAgentText: z.boolean().optional(), bashInput: z.boolean().optional(), compact: z.boolean().optional() });
 export const ThreadOptionsSchema = z.strictObject({
   cwd: AbsolutePathSchema.optional(), model: z.string().optional(), effort: z.string().min(1).optional(), permission: PermissionSchema.optional(),
   sandbox: z.string().optional(), systemPrompt: z.string().optional(), tools: z.union([z.literal("all"), z.array(z.string())]).optional(),
@@ -23,8 +24,8 @@ export const ResumeThreadParamsSchema = z.union([
 ]);
 export const MethodSchemas = {
   initialize: {
-    params: z.object({ protocolVersion: z.string(), token: z.string().optional(), client: z.object({ name: z.string(), version: z.string(), kind: z.string(), label: z.string() }), capabilities: z.object({ serverRequests: z.array(ServerRequestMethodSchema).optional(), notifications: z.object({ optOut: z.array(z.string()) }).optional() }).optional() }),
-    result: z.object({ protocolVersion: z.literal("as/1"), server: z.object({ name: z.string(), version: z.string() }), clientId: IdSchema, capabilities: z.object({ backends: z.array(BackendSchema), steer: z.boolean(), fork: z.boolean(), leases: z.boolean(), externalProviders: z.boolean(), maxQueuedTurns: z.number().int().nonnegative() }) }),
+    params: z.object({ protocolVersion: z.string(), token: z.string().optional(), client: z.object({ name: z.string(), version: z.string(), kind: z.string(), label: z.string() }), capabilities: z.object({ engineEvents: z.boolean().optional(), serverRequests: z.array(ServerRequestMethodSchema).optional(), notifications: z.object({ optOut: z.array(z.string()) }).optional() }).optional() }),
+    result: z.object({ protocolVersion: z.literal("as/1"), server: z.object({ name: z.string(), version: z.string() }), clientId: IdSchema, capabilities: z.object({ backends: z.array(BackendSchema), steer: z.boolean(), fork: z.boolean(), leases: z.boolean(), externalProviders: z.boolean(), maxQueuedTurns: z.number().int().nonnegative(), engine: EngineCapabilitiesSchema.optional() }) }),
   },
   "thread/start": { params: StartThreadParamsSchema, result: threadResult },
   "thread/resume": { params: ResumeThreadParamsSchema, result: threadResult.extend({ attached: z.boolean() }) },
