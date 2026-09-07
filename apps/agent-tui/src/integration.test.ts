@@ -56,6 +56,8 @@ test("P2-f: real approval resolves before a delayed thread scan completes", asyn
   try {
     engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { threadId: thread.id, turnId: turn.id, itemId: "tool", requestId: "scan-approval", startedAtMs: Date.now(), command: "pwd", cwd: home } }, respond: result => { decision = result; } });
     await until(() => !!a.model.activeCard);
+    for (const text of ["y", "s", "n", "a"]) await a.controller.key(text, { paste: true });
+    expect(decision).toBeUndefined(); expect(a.model.input).toBe("ysna");
     await a.controller.key("y"); await until(() => !!decision);
     expect(decision).toEqual({ decision: "accept" }); expect(a.controller.sessions.scanning).toBe(true);
     expect(a.model.discardNote).toBe("");
@@ -376,6 +378,28 @@ test("image validation and lost responses preserve drafts and retry the same att
   expect(engine.sent).toHaveLength(1); expect(engine.sent[0].input).toHaveLength(2);
   expect(a.model.input).toBe(""); expect(a.model.attachments).toEqual([]);
 });
+
+test("review2 input P2-1 PTY pasted y/s/n/a stay in input; physical approval keys still decide", async () => {
+  await inputPty(async ({ engine, thread, write, screen, wait }) => {
+    write("work\r"); await wait(() => engine.sent.length === 1, "approval turn started");
+    const turnId = engine.sent[0].turnId;
+    engine.emit({ type: "itemStarted", turnId, item: { id: "paste-approval-tool", type: "toolCall", payload: { name: "shell", input: {} } } });
+    let answer: ServerRequestResult | undefined;
+    engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: {
+      requestId: "paste-approval", threadId: thread.id, turnId, itemId: "paste-approval-tool", startedAtMs: Date.now(), command: "pwd paste-approval", cwd: thread.cwd,
+    } }, respond(result) { answer = result; } });
+    await wait(() => screen().includes("pwd paste-approval"), "approval card rendered");
+    let draft = "";
+    for (const text of ["y", "s", "n", "a"]) {
+      write(`\x1b[200~${text}\x1b[201~`); draft += text;
+      await wait(() => screen().includes(`> ${draft}`), "paste appears in input");
+      expect(answer).toBeUndefined(); expect(engine.interrupted).toHaveLength(0);
+    }
+    write("n"); await wait(() => answer !== undefined, "physical n rejects");
+    expect(answer).toEqual({ decision: "reject" });
+    expect(screen()).toContain("> ysna"); expect(engine.sent).toHaveLength(1);
+  });
+}, inputPtyTimeout);
 
 test("P2-2 PTY question card accepts normalized multiline paste without selecting or submitting", async () => {
   await inputPty(async ({ engine, thread, write, screen, wait }) => {

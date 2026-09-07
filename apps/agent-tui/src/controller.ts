@@ -29,6 +29,12 @@ export class Controller {
   async key(text: string | undefined, key: Key = {}): Promise<void> {
     try {
       this.lease.touch(this.model.thread?.id);
+      // Approval shortcuts apply only to physical keys, including during a session scan.
+      if (key.paste && this.model.activeCard && this.model.activeCard.request.method !== "item/tool/requestUserInput") {
+        this.model.input += text ?? "";
+        this.model.completion = undefined;
+        return;
+      }
       if (key.ctrl && key.name === "c") {
         if (this.now() - this.interruptedAt < 1500) { this.exit(); return; }
         this.interruptedAt = this.now(); this.model.message = "已请求中断；1.5 秒内再按 Ctrl-C 退出";

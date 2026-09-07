@@ -105,7 +105,7 @@ function frameLayout(model: TuiModel, columns: number, rows: number) {
   const notices = model.discardNote ? [wrap(model.discardNote, width)[0]] : [];
   const headers = [...wrap(status, width), ...wrap(header, width), ...modeStatus.map(line => context.warning ? `\x1b[33m${line}\x1b[0m` : line)].slice(0, Math.max(1, height - 4 - notices.length));
   const baseAvailable = Math.max(0, height - headers.length - 3 - notices.length);
-  const input = model.activeCard?.state === "pending" && !model.activeCard.replying ? model.activeCard.draft : model.input;
+  const input = model.activeCard?.state === "pending" && !model.activeCard.replying && model.activeCard.request.method === "item/tool/requestUserInput" ? model.activeCard.draft : model.input;
   const inputLines = input.split("\n").flatMap((line, i) => wrap(`${i ? "  " : "> "}${line}`, width));
   const inputRows = inputLines.slice(-Math.max(1, Math.min(6, height - 4)));
   const completion = !model.activeCard && model.permissionPicker === undefined && !model.picker && !model.sessionOperation && model.completion;
