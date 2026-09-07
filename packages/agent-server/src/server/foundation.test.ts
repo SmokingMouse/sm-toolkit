@@ -69,6 +69,19 @@ test("P2-1: invalid Claude effort rejects start, live resume and turn before nat
   } finally { await f.server.close(); }
 });
 
+test("P2-3: unnegotiated connections receive permission changes but not engineEvent", async () => {
+  const f = fixture();
+  try {
+    const old = await client(f.server, "old"), frames = capture(old);
+    const { thread } = await old.request("thread/start", { backend: "claude" });
+    f.send({ type: "system", subtype: "new_notice" });
+    await old.request("thread/permission/set", { threadId: thread.id, permission: "plan" });
+    expect(frames.some(n => "method" in n && n.method === "thread/permission/changed")).toBe(true);
+    expect(frames.some(n => "method" in n && n.method === "thread/engineEvent")).toBe(false);
+    expect(old.closed).toBe(false); expect((await old.request("server/health", {})).threads.idle).toBe(1);
+  } finally { await f.server.close(); }
+});
+
 test("foundation RPC: capabilities, hot permission persistence, effort shape, lease and backend refusals", async () => {
   const f = fixture();
   try {

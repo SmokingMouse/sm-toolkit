@@ -4,6 +4,7 @@ AS v1 的本机会话服务、unix/WS 传输与 TypeScript 客户端。协议见
 [protocol.md](../../docs/agent-server/protocol.md)。运行环境为 Bun。
 
 Claude 原生能力可通过 `thread/engineEvent` 观察（完整 system 帧、hook、未知子类型与速率限制），通过 `thread/engineControl` 调用白名单控制指令。旧事件照常保留，版本仍为 as/1；新库默认协商 engineEvents 和 bashInput，旧客户端收到兼容的文本输入记录。
+只有 engineEvent 需能力协商；permission/changed 仍发给已订阅线程的旧连接，由旧库静默忽略未知通知。
 
 ```ts
 const { thread } = await client.request("thread/start", {

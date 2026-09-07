@@ -163,6 +163,7 @@ Claude effort 仅允许 low/medium/high/xhigh/max，非法值在 start/resume/tu
 `thread/engineEvent`：`{threadId, turnId?, backend, subtype, payload}`，payload 保留原始原生帧全部字段。Claude 的全部 system 子类型（包括未知类型）及 rate_limit_event、Codex 的原生通知走此通道；已建模事件仍照常发送。无活动 turn 时省略 turnId。此通知是实时流，不落 item 历史。
 Claude 未知顶层 type 同样通过 engineEvent 原样上抛并继续会话；缺少字符串 type 的帧只发 willRetry:false 的 error 通知。JSON 解析失败及真实引擎 error 仍按原有失败路径处理。
 客户端在 initialize.capabilities 声明 `engineEvents: true` 才接收此流；服务端通过 capabilities.engine.engineEvents 声明支持，新 client 库默认声明。旧客户端继续使用原有事件，协议版本保持 as/1。
+门禁仅针对 thread/engineEvent。thread/permission/changed 仍发送给所有已 attach 且未 optOut 的连接，不要求新增能力；旧 client 按 AS v1 未知通知规则静默忽略，不会断线或报错。不能把此行为描述成“所有新通知默认对旧连接关闭”。
 
 initialize.capabilities.engine 还声明 engineControl / permissionSet / effortSet / subAgentText / bashInput / compact 布尔标记（服务端至少启用 Claude 才为 true）；engineEvents 适用于两种原生后端。请求新增字段与通知信封使用 strictObject，原有宽松响应保持前向兼容。
 
