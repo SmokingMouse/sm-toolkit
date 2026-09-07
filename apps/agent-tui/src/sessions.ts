@@ -1,6 +1,6 @@
 import type { AgentClient } from "@smokingmouse/agent-server/client";
 import type { Thread } from "@smokingmouse/agent-server/protocol";
-import type { TuiModel } from "./model.js";
+import { canResume, type TuiModel } from "./model.js";
 
 export interface ThreadEntry { thread: Thread; title: string; updatedAtMs: number }
 export const shortId = (id: string) => id.slice(0, 11);
@@ -62,7 +62,12 @@ export class Sessions {
   }
   private async attach(threadId: string): Promise<void> {
     const previous = this.model.thread?.id;
-    const snapshot = await this.client.request("thread/attach", { threadId });
+    let snapshot = await this.client.request("thread/attach", { threadId });
+    if (canResume(snapshot.thread)) {
+      this.model.message = "正在恢复会话引擎…"; this.model.changed();
+      await this.client.request("thread/resume", { threadId });
+      snapshot = await this.client.request("thread/attach", { threadId });
+    }
     this.model.select(snapshot);
     this.model.message = `已切换会话 ${threadId}`;
     if (previous && previous !== threadId) await this.client.request("thread/detach", { threadId: previous });

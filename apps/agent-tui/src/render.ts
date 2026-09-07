@@ -1,5 +1,5 @@
 import type { Item } from "@smokingmouse/agent-server/protocol";
-import type { RequestCard, TuiModel } from "./model.js";
+import { canResume, type RequestCard, type TuiModel } from "./model.js";
 import { shortId } from "./sessions.js";
 
 /** Strip terminal control sequences from untrusted engine/user text before drawing. */
@@ -72,7 +72,7 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
   const thread = model.thread, usage = model.usage;
   const permission = thread && "permission" in thread && typeof thread.permission === "string" ? ` | permission ${thread.permission}` : "";
   const status = `${thread ? shortId(thread.id) : "connecting"} | cwd ${thread?.cwd ?? "—"} | model ${thread?.model ?? "unknown"}${permission}`;
-  const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "unknown"} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection}`);
+  const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "unknown"}${canResume(thread) ? "（可恢复 · /resume）" : ""} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection}`);
   const headers = [...wrap(status, width), ...wrap(header, width)].slice(0, Math.max(1, height - 4));
   const body = [...model.items.values()].sort((a, b) => a.seq - b.seq).flatMap(i => [...renderItem(i, model.expandedReasoning), ""]);
   for (const q of model.queue) body.push(`排队 #${q.position + 1}: ${q.preview}`);

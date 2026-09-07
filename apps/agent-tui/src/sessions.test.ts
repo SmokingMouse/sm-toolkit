@@ -82,6 +82,24 @@ test("P2-6: Esc during picker attach is explicitly rejected and does not pretend
   pending.release(); await operation;
   expect(model.thread?.id).toBe("new"); expect(model.picker).toBeUndefined();
 });
+test("P0-2: resume reopens closed and systemError engines and refreshes snapshot", async () => {
+  for (const status of ["closed", "systemError"] as const) {
+    const { client, model, controller, calls } = setup(), original = client.request.bind(client);
+    let resumed = false;
+    client.request = async (method, params) => {
+      const result = await original(method, params);
+      if (method === "thread/resume") resumed = true;
+      if (method === "thread/attach" && "thread" in result) result.thread.status = { type: resumed ? "idle" : status };
+      return result;
+    };
+    model.thread!.status = { type: status };
+    expect(render(model, 120, 20)).toContain("可恢复 · /resume");
+    await controller.sessions.run("/resume", "old");
+    expect(calls.map(c => c[0])).toEqual(["thread/attach", "thread/resume", "thread/attach"]);
+    expect(model.thread?.status.type).toBe("idle");
+    expect(render(model, 120, 20)).not.toContain("可恢复");
+  }
+});
 test("status shows permission only when present in thread state; picker escapes titles", () => {
   const { model } = setup();
   model.picker = { index: 0, entries: [{ thread: thread("new"), title: "bad\x1b[2Jtitle", updatedAtMs: 1 }] };

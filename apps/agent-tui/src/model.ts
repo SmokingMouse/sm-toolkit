@@ -3,6 +3,9 @@ import { NotificationMethodSchema, type AttachResult, type Item, type PendingSer
 import type { ThreadEntry } from "./sessions.js";
 
 export interface RequestCard { request: PendingServerRequest; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
+export function canResume(thread: Thread | undefined): boolean {
+  return !!thread && thread.backend !== "external" && ["systemError", "closed"].includes(thread.status.type);
+}
 export class TuiModel {
   thread?: Thread;
   items = new Map<string, Item>();
@@ -80,7 +83,9 @@ export function bindClient(client: AgentClient, model: TuiModel): () => void {
   const disposers = [client.onSnapshot(s => model.snapshot(s)), client.onStateChange(state => {
     model.connection = state;
     if (state === "disconnected" && model.thread) recovering = true;
-    if (recovering) model.message = state === "connected" ? `已重连并恢复会话 ${model.thread?.id}（sinceSeq 补齐）` : "连接中断，正在自动重连…";
+    if (recovering) model.message = state === "connected" ? canResume(model.thread)
+      ? "已重连并补齐历史；引擎已停止，请用 /resume 选择会话恢复"
+      : `已重连并恢复会话 ${model.thread?.id}（sinceSeq 补齐）` : "连接中断，正在自动重连…";
     if (state === "connected") recovering = false;
     if (state !== "connected") { model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
     model.changed();
