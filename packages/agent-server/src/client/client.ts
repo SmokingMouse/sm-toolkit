@@ -41,6 +41,7 @@ export class AgentClient {
   private cursors = new Map<string, Cursor>();
   private pending = new Map<string, ServerRequestHandle>();
   private requestStates = new Map<string, PendingRequestState>();
+  private pendingStatesEnabled = false;
   private frameListeners = new Set<Listener<Frame>>();
   private notifications = new Set<Listener<ServerNotification>>();
   private requests = new Set<Listener<ServerRequestHandle>>();
@@ -54,7 +55,7 @@ export class AgentClient {
   get clientId(): string | undefined { return this.initialized?.clientId; }
   get initializeResult(): MethodResult<"initialize"> | undefined { return this.initialized && structuredClone(this.initialized); }
   get pendingRequests(): ReadonlyMap<string, ServerRequestHandle> { return new Map(this.pending); }
-  /** Latest observed states, including terminal states until detach/reconnect/attach reconciliation. */
+  /** Empty unless negotiated and subscribed; terminal states last until detach/reconnect/attach reconciliation. */
   get pendingRequestStates(): ReadonlyMap<string, PendingRequestState> { return structuredClone(this.requestStates); }
 
   static async connectUnix(options: ClientOptions & { path: string }): Promise<AgentClient> {
@@ -98,11 +99,14 @@ export class AgentClient {
       const wire = await openWire(this.endpoint, text => { if (generation === this.generation) this.receive(text); }, error => this.lost(generation, error), this.options.connectTimeoutMs ?? 5000);
       if (this.stopped || generation !== this.generation) { wire.close(); throw new Error("connection cancelled"); }
       this.wire = wire;
+      const capabilities = { engineEvents: true, bashInput: true, pendingRequests: true, ...this.options.capabilities };
       this.initialized = await this.call("initialize", {
         protocolVersion: this.options.protocolVersion ?? "as/1", token: this.options.token,
         client: this.options.client ?? { name: "agent-client", version: "0.1.0", kind: "library", label: "agent-client" },
-        capabilities: { engineEvents: true, bashInput: true, pendingRequests: true, ...this.options.capabilities },
+        capabilities,
       });
+      this.pendingStatesEnabled = capabilities.pendingRequests === true && this.initialized.capabilities.pendingRequests === true
+        && !capabilities.notifications?.optOut.includes("thread/pendingRequests");
       this.send({ jsonrpc: "2.0", method: "initialized", params: {} });
       for (const threadId of [...this.cursors.keys()]) {
         try { await this.call("thread/attach", { threadId, sinceSeq: this.sinceSeq(threadId) }); }
@@ -124,6 +128,7 @@ export class AgentClient {
     ++this.generation;
     const wire = this.wire; this.wire = undefined; wire?.close(); this.pending.clear();
     this.requestStates.clear();
+    this.pendingStatesEnabled = false;
     for (const call of this.calls.values()) { clearTimeout(call.timer); call.reject(error); }
     this.calls.clear(); this.setState(this.stopped ? "closed" : "disconnected"); this.scheduleReconnect();
   }
@@ -192,7 +197,7 @@ export class AgentClient {
       if (notification.method === "thread/started") this.cursor(notification.params.threadId);
       if (notification.method === "item/started" || notification.method === "item/completed") this.trackItem(notification.params.threadId, notification.params.item);
       if (notification.method === "serverRequest/resolved" || notification.method === "serverRequest/expired") this.pending.delete(notification.params.requestId);
-      if (notification.method === "thread/pendingRequests") this.requestStates.set(notification.params.requestId, structuredClone(notification.params));
+      if (notification.method === "thread/pendingRequests" && this.pendingStatesEnabled) this.requestStates.set(notification.params.requestId, structuredClone(notification.params));
       this.emit(this.notifications, notification);
     } catch (error) { this.error(error as Error); this.lost(this.generation, error as Error); }
   }
@@ -228,7 +233,7 @@ export class AgentClient {
     } else if (method === "thread/attach") {
       const snapshot = result as AttachResult, threadId = snapshot.thread.id;
       this.clearRequestStates(threadId);
-      for (const request of snapshot.pendingRequests) if (request.state) this.requestStates.set(request.params.requestId, structuredClone(request.state));
+      if (this.pendingStatesEnabled) for (const request of snapshot.pendingRequests) if (request.state) this.requestStates.set(request.params.requestId, structuredClone(request.state));
       const cursor = this.cursor(threadId);
       cursor.highest = Math.max(cursor.highest, snapshot.nextSeq - 1);
       for (const item of snapshot.items) this.trackItem(threadId, item);

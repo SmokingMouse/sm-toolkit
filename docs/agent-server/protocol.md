@@ -322,7 +322,8 @@ type PendingServerRequest = {
 
 `thread/attach.pendingRequests` 始终是该 thread 的**完整未决列表**，不受 sinceSeq 影响；当前服务端为每条提供 status=pending 的 state。收到快照时替换该 thread 的请求状态，随后按 requestId 应用有序增量。状态通知不走 item seq，也不回放；断线后重新 attach 即可重建当前状态，离线期间已解决的请求不会出现在快照中，不能据此恢复历史 decidedBy。旧客户端可忽略新增 state，不声明能力就不会收到新通知；notifications.optOut 仍可退订。
 
-AgentClient 默认声明 pendingRequests，`onPendingRequests(state => ...)` 在更新 `pendingRequestStates` 只读表后触发（仅增量）；快照经 `onSnapshot` 触发时表已重建。表保留当前连接观察到的终态，直到该 thread 再 attach / detach，断线时清空；用 status=pending 筛出未决项。原 `pendingRequests` 表仍保存可答复的 ServerRequestHandle，签名不变。只读客户端不需要声明 serverRequests；初次 attach 和自动重连的快照均可建立状态。连接旧服务端时 state 可缺省，通过 initialize 结果判断是否支持本功能。
+未协商 pendingRequests 或通过 notifications.optOut 退订的连接，其 attach 快照保留完整未决请求，但不提供 state。
+AgentClient 默认声明 pendingRequests，`onPendingRequests(state => ...)` 在更新 `pendingRequestStates` 只读表后触发（仅增量）；快照经 `onSnapshot` 触发时表已重建。表保留当前连接观察到的终态，直到该 thread 再 attach / detach，断线时清空；用 status=pending 筛出未决项。未协商能力（含旧服务端）或已 optOut 时此表保持为空。原 `pendingRequests` 表仍保存可答复的 ServerRequestHandle，签名不变。只读客户端不需要声明 serverRequests；初次 attach 和自动重连的快照均可建立状态。
 
 ## 6. item 种类与字段
 

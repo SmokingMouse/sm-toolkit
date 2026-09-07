@@ -128,6 +128,36 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
     await until(() => decision !== undefined); expect(decision).toEqual({ decision: "accept" });
   });
 
+  for (const mode of ["undeclared", "disabled", "optOut"] as const) test(`P2-4: ${mode} attach and reconnect keep request states empty while approval handles work`, async () => {
+    const { home, engines, manager, connect } = await setup();
+    const owner = await connect("owner");
+    const observer = await connect(mode, { capabilities: {
+      serverRequests: [approval], pendingRequests: mode === "undeclared" ? undefined : mode === "optOut",
+      ...(mode === "optOut" ? { notifications: { optOut: ["thread/pendingRequests"] } } : {}),
+    }, reconnect: { minDelayMs: 10, maxDelayMs: 10 } });
+    const { thread } = await owner.request("thread/start", { backend: "claude", cwd: home });
+    const { turn } = await owner.request("turn/start", { threadId: thread.id, input: input("approval") });
+    engines[0].emit({ type: "itemStarted", turnId: turn.id, item: { id: "command", type: "commandExecution", payload: { command: "pwd", cwd: home } } });
+    let decision: unknown;
+    engines[0].emit({ type: "approval", request: { method: approval, params: { requestId: "pending", threadId: thread.id, turnId: turn.id, itemId: "command", command: "pwd", cwd: home, startedAtMs: Date.now() } }, respond: result => { decision = result; } });
+    await until(() => owner.pendingRequests.has("pending"));
+    const snapshots: AttachResult[] = [], events: unknown[] = [];
+    observer.onSnapshot(snapshot => snapshots.push(snapshot)); observer.onPendingRequests(state => events.push(state));
+    await observer.request("thread/attach", { threadId: thread.id });
+    expect(snapshots[0].pendingRequests).toHaveLength(1);
+    expect(snapshots[0].pendingRequests[0].state).toBeUndefined();
+    expect(observer.pendingRequestStates.size).toBe(0);
+    expect(observer.pendingRequests.has("pending")).toBe(true);
+    const oldId = observer.clientId!; manager.disconnect(oldId);
+    await until(() => observer.state === "connected" && observer.clientId !== oldId && snapshots.length === 2);
+    expect(snapshots[1].pendingRequests[0].state).toBeUndefined();
+    expect(observer.pendingRequestStates.size).toBe(0);
+    observer.pendingRequests.get("pending")!.respond({ decision: "accept" });
+    await until(() => decision !== undefined && observer.pendingRequests.size === 0);
+    expect(decision).toEqual({ decision: "accept" });
+    expect(observer.pendingRequestStates.size).toBe(0); expect(events).toEqual([]);
+  });
+
   test("pendingRequests: read-only client table reconciles snapshots, resolution, reconnect and detach", async () => {
     const { home, engines, manager, connect } = await setup();
     const owner = await connect("phone"), display = await connect("display", { capabilities: {}, reconnect: { minDelayMs: 80, maxDelayMs: 80 } });
