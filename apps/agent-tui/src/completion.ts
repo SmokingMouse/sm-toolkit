@@ -10,18 +10,20 @@ export const commands: Candidate[] = [
   { name: "steer", description: "向当前 turn 插话：/steer <text>" },
 ];
 
-/** Subsequence matching; contiguous and early matches sort first. */
+/** Contiguous substrings first (earliest first), then subsequences by skipped characters. */
 export function fuzzyMatch(query: string, candidates: Candidate[], limit = 50): Candidate[] {
   query = query.toLowerCase();
   return candidates.map(candidate => {
     const name = candidate.name.toLowerCase(); let cursor = 0, score = 0;
+    const contiguous = name.indexOf(query);
+    if (contiguous >= 0) return { candidate, group: 0, score: contiguous };
     for (const char of query) {
       const index = name.indexOf(char, cursor);
-      if (index < 0) return { candidate, score: Infinity };
+      if (index < 0) return { candidate, group: 1, score: Infinity };
       score += index - cursor; cursor = index + 1;
     }
-    return { candidate, score };
-  }).filter(c => Number.isFinite(c.score)).sort((a, b) => a.score - b.score || a.candidate.name.localeCompare(b.candidate.name)).slice(0, limit).map(c => c.candidate);
+    return { candidate, group: 1, score };
+  }).filter(c => Number.isFinite(c.score)).sort((a, b) => a.group - b.group || a.score - b.score || a.candidate.name.localeCompare(b.candidate.name)).slice(0, limit).map(c => c.candidate);
 }
 
 interface FileTools { git?: string | null; rg?: string | null }

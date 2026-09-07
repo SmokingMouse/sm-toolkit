@@ -13,6 +13,18 @@ test("fuzzy subsequence ranking is case insensitive, deterministic and capped at
   expect(completionToken("/steer words")).toBeUndefined();
 });
 
+test("P2-3 contiguous matches outrank earlier scattered matches, then use earliest substring", () => {
+  const rank = (query: string, names: string[]) => fuzzyMatch(query, names.map(name => ({ name, description: "" }))).map(c => c.name);
+  expect(rank("READ", ["unrelated-a-d.ts", "src/thread-reader.ts", "readme.md", "very/long/path/read.txt"]))
+    .toEqual(["readme.md", "src/thread-reader.ts", "very/long/path/read.txt", "unrelated-a-d.ts"]);
+  // An early scattered occurrence must not override the position of a later literal one.
+  expect(rank("read", ["r_e_a_d/xx/read", "zz/read", "read", "r-e-a-d"]))
+    .toEqual(["read", "zz/read", "r_e_a_d/xx/read", "r-e-a-d"]);
+  expect(rank("aa", ["a/a/aa", "xx/aa", "a---a", "aa"]))
+    .toEqual(["aa", "xx/aa", "a/a/aa", "a---a"]);
+  expect(rank("", ["z", "a"])).toEqual(["a", "z"]);
+});
+
 test("recursive file completion honors nested gitignore, negation, dotfiles and excluded directories outside git", async () => {
   const cwd = mkdtempSync("/tmp/tui-complete-");
   const put = (name: string, body = "") => { const path = join(cwd, name); mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, body); };
