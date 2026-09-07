@@ -117,6 +117,19 @@ test("P2-5: an empty daemon list gives Enter feedback and Esc dismisses it", asy
   expect(calls.filter(c => c[0] === "thread/attach")).toHaveLength(0);
   await controller.key(undefined, { name: "escape" }); expect(model.picker).toBeUndefined();
 });
+test("P2-3: paginated history retains late completions of older items in activity ordering", async () => {
+  const { model, controller, client } = setup();
+  client.request = (async (method: string, params: any) => {
+    if (method === "thread/list") return { threads: [thread("old")], nextCursor: null };
+    if (method === "thread/items/list") return params.cursor
+      ? { items: [{ id: "prompt", type: "userMessage", seq: 2, startedAtMs: 200, turnId: "t", payload: { content: [{ type: "text", text: "first prompt" }] } }], nextCursor: null }
+      : { items: [{ id: "long-tool", type: "agentMessage", seq: 1, startedAtMs: 100, completedAtMs: 500, turnId: "t", payload: { text: "late completion" } }], nextCursor: "next" };
+    throw new Error(method);
+  }) as AgentClient["request"];
+  await controller.sessions.run("/threads");
+  expect(model.picker?.entries[0].updatedAtMs).toBe(500);
+  expect(model.picker?.entries[0].title).toBe("first prompt");
+});
 test("P0-2: resume reopens closed and systemError engines and refreshes snapshot", async () => {
   for (const status of ["closed", "systemError"] as const) {
     const { client, model, controller, calls } = setup(), original = client.request.bind(client);
