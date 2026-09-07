@@ -145,7 +145,7 @@ export class AgentServer {
     return cwd;
   }
   private attach(connection: Connection, threadId: string): void {
-    if (connection.attached.has(threadId)) return;
+    if (connection.closed || connection.attached.has(threadId)) return;
     this.threads.get(threadId);
     const detach = this.log.subscribe(threadId, frame => connection.notification(frame));
     connection.attached.add(threadId); connection.subscriptions.set(threadId, detach);
@@ -179,7 +179,10 @@ export class AgentServer {
       const method = MethodSchema.safeParse(frame.method);
       if (!method.success) throw new ProtocolError(ErrorCode.method_not_found, `unknown method ${frame.method}`);
       const params = MethodSchemas[method.data].params.parse(frame.params);
-      const result = await this.dispatch(connection, method.data, params);
+      // A synchronous snapshot and its response share one event-loop turn. Awaiting
+      // an already-resolved promise here lets newer deltas overtake that snapshot.
+      const dispatched = this.dispatch(connection, method.data, params);
+      const result = dispatched instanceof Promise ? await dispatched : dispatched;
       const validated = MethodSchemas[method.data].result.parse(result);
       connection.emit({ jsonrpc: "2.0", id: frame.id, result: validated });
     } catch (error) {
@@ -188,7 +191,7 @@ export class AgentServer {
       if (rpc.code === ErrorCode.unsupported_protocol_version || ("method" in frame && frame.method === "initialize" && rpc.code === ErrorCode.unauthorized)) connection.close();
     }
   }
-  private async dispatch(connection: Connection, method: Method, raw: MethodParams<Method>): Promise<unknown> {
+  private dispatch(connection: Connection, method: Method, raw: MethodParams<Method>): unknown {
     // Narrow at each method using the schema's inferred params type.
     const params = <M extends Method>(_method: M) => raw as MethodParams<M>;
     switch (method) {
@@ -233,11 +236,11 @@ export class AgentServer {
         const more = threads.length > limit; threads = threads.slice(0, limit); return { threads, nextCursor: more ? threads.at(-1)!.id : null };
       }
       case "thread/fork": { const p = params(method); this.cwd(this.threads.get(p.threadId).cwd); return this.threads.fork(p, thread => this.attach(connection, thread.id)); }
-      case "thread/close": { const p = params(method); await this.threads.close(p.threadId, p.reason); this.leases.clear(p.threadId); return {}; }
-      case "thread/interrupt": return { interruptedTurnId: await this.threads.queue(params(method).threadId).interrupt() };
+      case "thread/close": { const p = params(method); return this.threads.close(p.threadId, p.reason).then(() => { this.leases.clear(p.threadId); return {}; }); }
+      case "thread/interrupt": return this.threads.queue(params(method).threadId).interrupt().then(interruptedTurnId => ({ interruptedTurnId }));
       case "turn/start": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); if (p.cwd) this.cwd(p.cwd); return this.threads.queue(p.threadId).enqueue(p); }
-      case "turn/steer": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); await this.threads.queue(p.threadId).steer(p); return {}; }
-      case "turn/interrupt": { const p = params(method); await this.threads.queue(p.threadId).interrupt(p.turnId); return {}; }
+      case "turn/steer": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.queue(p.threadId).steer(p).then(() => ({})); }
+      case "turn/interrupt": { const p = params(method); return this.threads.queue(p.threadId).interrupt(p.turnId).then(() => ({})); }
       case "turn/cancel": { const p = params(method); this.threads.queue(p.threadId).cancel(p.turnId); return {}; }
       case "thread/queue/read": return { queue: this.threads.queue(params(method).threadId).read() };
       case "thread/lease/acquire": { const p = params(method); this.threads.get(p.threadId); return { lease: this.leases.acquire(p.threadId, { clientId: connection.clientId, label: connection.label }, p.ttlMs) }; }

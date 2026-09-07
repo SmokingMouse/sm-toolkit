@@ -170,9 +170,13 @@ export class AgentClient {
         if (!this.options.capabilities?.serverRequests?.includes(request.method)) throw new Error(`undeclared server request: ${request.method}`);
         this.rememberRequest(request, frame.id); return;
       }
-      const method = NotificationMethodSchema.parse(frame.method);
+      const known = NotificationMethodSchema.safeParse(frame.method);
+      // AS v1 can add notifications without a version bump; onFrame still exposes them.
+      if (!known.success) return;
+      const method = known.data;
       const params = NotificationSchemas[method].parse(frame.params);
       const notification = { jsonrpc: "2.0", method, params } as ServerNotification;
+      if (notification.method === "thread/started") this.cursor(notification.params.threadId);
       if (notification.method === "item/started" || notification.method === "item/completed") this.trackItem(notification.params.threadId, notification.params.item);
       if (notification.method === "serverRequest/resolved" || notification.method === "serverRequest/expired") this.pending.delete(notification.params.requestId);
       this.emit(this.notifications, notification);

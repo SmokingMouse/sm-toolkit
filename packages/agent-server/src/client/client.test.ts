@@ -23,7 +23,7 @@ for (const transport of ["unix", "ws"] as const) describe(`client over ${transpo
     const client = new AgentClient(endpoint, { token: "test", reconnect: { minDelayMs: 25, maxDelayMs: 25 } });
     cleanups.push(async () => {
       client.close(); await server.close(); listener.close();
-      if ("url" in listener) await expect(fetch(listener.url.replace("ws:", "http:"), { signal: AbortSignal.timeout(1000) })).rejects.toThrow();
+      if ("url" in listener) await expect(Bun.connect({ hostname: "127.0.0.1", port: listener.port, socket: { data() {}, connectError() {} } })).rejects.toMatchObject({ code: "ECONNREFUSED" });
       expect(manager.size).toBe(0); rmSync(directory, { recursive: true, force: true });
     });
     await client.connect();

@@ -52,9 +52,9 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<RunningDae
         finally {
           unix!.close(); ws?.close();
           if (existsSync(paths.endpointPath) && readFileSync(paths.endpointPath, "utf8") === endpoint) unlinkSync(paths.endpointPath);
-          releasePid(); log("agent-server stopped"); resolveClosed();
+          releasePid(); log("agent-server stopped");
         }
-      })();
+      })().finally(resolveClosed);
       return shuttingDown;
     } };
   } catch (error) {
