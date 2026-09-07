@@ -153,7 +153,26 @@ export class ClaudeEngine implements EngineSession {
       return;
     }
     if (t === "control_request") {
-      if (obj.request?.subtype !== "can_use_tool" || !this.active || !this.options) throw new ProtocolError(ErrorCode.engine_protocol_error, "Unsupported Claude control request");
+      const subtype = record(obj.request).subtype;
+      if (subtype === "prompt_suggestion") return;
+      if (subtype !== "can_use_tool" || !this.active || !this.options) {
+        const message = `Unsupported Claude control request: ${String(subtype)}`;
+        // Local @anthropic-ai/claude-code 2.1.258 bin/claude.exe (rg -a):
+        // bJe: behavior enum [completed,cancelled]; gAn: action enum [accept,decline,cancel].
+        // can_use_tool deny schema requires behavior:"deny", message:string.
+        // hae/ul: control_response.response = {subtype:"error",request_id,error:string}
+        // for unknown requests. Use dialog cancellation: parked dialogs ignore error replies.
+        const response = subtype === "can_use_tool" ? { behavior: "deny", message }
+          : subtype === "request_user_dialog" ? { behavior: "cancelled" }
+          : subtype === "elicitation" ? { action: "cancel" } : undefined;
+        if (typeof obj.request_id === "string") {
+          this.write({ type: "control_response", response: response === undefined
+            ? { subtype: "error", request_id: obj.request_id, error: message }
+            : { subtype: "success", request_id: obj.request_id, response } });
+        }
+        this.events.push({ type: "error", error: new ProtocolError(ErrorCode.engine_protocol_error, message).toJSON(), willRetry: false });
+        return;
+      }
       const req: ToolPermissionRequest = { requestId: String(obj.request_id), toolUseId: String(obj.request.tool_use_id), toolName: String(obj.request.tool_name), input: obj.request.input };
       emit(EventType.ToolCall, { id: req.toolUseId, name: req.toolName, input: req.input });
       const grantKey = JSON.stringify([req.toolName, req.input]);
@@ -234,7 +253,8 @@ export class ClaudeEngine implements EngineSession {
       emit(EventType.Result, { text: obj.result, cost }); return;
     }
     if (t === "error") { this.fail(new ProtocolError(ErrorCode.engine_unavailable, String(obj.message ?? obj.error ?? "Claude error"))); return; }
-    if (["keep_alive", "rate_limit_event", "tool_progress", "tool_use_summary", "auth_status"].includes(t)) return;
+    // 2.1.258 Ase schema emits prompt_suggestion as a top-level informational frame.
+    if (["keep_alive", "rate_limit_event", "tool_progress", "tool_use_summary", "auth_status", "prompt_suggestion"].includes(t)) return;
     throw new ProtocolError(ErrorCode.engine_protocol_error, "Unknown Claude frame", { raw: JSON.stringify(raw).slice(0, 2000) });
   }
 }

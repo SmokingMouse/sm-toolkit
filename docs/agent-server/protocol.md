@@ -169,6 +169,8 @@ client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
 | `error` | `{threadId?, turnId?, error: {code,message,data?}, willRetry}` |
 | `server/shuttingDown` | `{reason, graceMs}` |
 
+Claude 不支持的反向 control request 会保守拒绝或取消，并发 `error`（`willRetry:false`）；这条通知不终止会话或当前 turn。未知子类型回复原生 error response，`prompt_suggestion` 等纯提示帧静默忽略。
+
 ## 5. 反向请求（server → client）
 
 服务端向**所有声明了对应 capability 且已 attach 该 thread**的客户端发同一个
