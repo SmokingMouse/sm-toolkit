@@ -1,5 +1,5 @@
 import { AgentClient, type ClientState } from "@smokingmouse/agent-server/client";
-import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type RpcId, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
+import { NotificationMethodSchema, type AttachResult, type Item, type PendingRequestState, type PendingServerRequest, type QueuedTurn, type RpcId, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
 import { classifyEvent, LogBuffer, object, rebuildTasks } from "./observations.js";
 import { errorCode, errorMessage, leaseHolder } from "./errors.js";
 import type { ThreadEntry } from "./sessions.js";
@@ -8,6 +8,9 @@ import type { Completion } from "./completion.js";
 import { controlError, estimatedContextWindow, nativePermission, permissionModes, type Effort, type Permission } from "./modes.js";
 
 export interface RequestCard { request: PendingServerRequest; responseId?: RpcId; replying?: boolean; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
+export function expiredNote(reason: string): string {
+  return `${reason === "timeout" ? "请求超时" : "请求已撤回/过期"}：${reason}`;
+}
 export function canResume(thread: Thread | undefined): boolean {
   return !!thread && thread.backend !== "external" && ["systemError", "closed"].includes(thread.status.type);
 }
@@ -15,6 +18,12 @@ export class TuiModel {
   thread?: Thread;
   items = new Map<string, Item>();
   cards = new Map<string, RequestCard>();
+  pendingStates = new Map<string, PendingRequestState>();
+  get pendingCount(): number {
+    const ids = new Set([...this.pendingStates.values()].filter(s => s.status === "pending").map(s => s.requestId));
+    for (const [id, card] of this.cards) if (["pending", "sending", "offline"].includes(card.state)) ids.add(id);
+    return ids.size;
+  }
   queue: QueuedTurn[] = [];
   usage?: Usage;
   connection: ClientState = "disconnected";
@@ -123,6 +132,7 @@ export class TuiModel {
     if (this.contextWindowEstimated) this.contextWindow = estimatedContextWindow(s.thread.model);
     for (const item of s.items) this.items.set(item.id, structuredClone(item));
     const ids = new Set(s.pendingRequests.map(r => r.params.requestId));
+    this.pendingStates.clear();
     for (const [id, card] of this.cards) if (!ids.has(id) && ["pending", "sending", "offline"].includes(card.state)) {
       card.state = "expired"; card.note = "重连确认已处理（处理者未知）";
     }
@@ -134,11 +144,22 @@ export class TuiModel {
     const old = this.cards.get(request.params.requestId);
     if (!old || old.state === "offline") this.scroll = 0;
     this.cards.set(request.params.requestId, { request, responseId: responseId ?? old?.responseId, state: "pending", question: old?.question ?? 0, answers: old?.answers ?? {}, draft: old?.draft ?? "" });
+    if (request.state) this.pendingState(request.state);
     this.changed();
+  }
+  private pendingState(state: PendingRequestState): void {
+    this.pendingStates.set(state.requestId, structuredClone(state));
+    const card = this.cards.get(state.requestId);
+    if (state.status !== "pending") {
+      const note = state.status === "resolved" ? `已由 ${state.decidedBy?.label || state.decidedBy?.clientId || "未知客户端"} 处理` : expiredNote(state.reason ?? "unknown");
+      if (card) { card.state = state.status; card.replying = false; card.note = note; }
+      this.message = note;
+    }
   }
   notification(n: ServerNotification): void {
     if ("threadId" in n.params && this.thread && n.params.threadId && n.params.threadId !== this.thread.id) return;
     switch (n.method) {
+      case "thread/pendingRequests": this.pendingState(n.params); break;
       case "thread/metadata/updated":
         if (this.thread) {
           const { threadId: _, ...metadata } = n.params;
@@ -170,8 +191,8 @@ export class TuiModel {
         }
         break;
       }
-      case "serverRequest/resolved": { const c = this.cards.get(n.params.requestId); if (c) { c.state = "resolved"; c.note = `已由 ${n.params.decidedBy.label || n.params.decidedBy.clientId} 处理`; } break; }
-      case "serverRequest/expired": { const c = this.cards.get(n.params.requestId); if (c) { c.state = "expired"; c.note = `已过期：${n.params.reason}`; } break; }
+      case "serverRequest/resolved": { this.pendingStates.delete(n.params.requestId); const c = this.cards.get(n.params.requestId); if (c) { c.state = "resolved"; c.replying = false; c.note = `已由 ${n.params.decidedBy.label || n.params.decidedBy.clientId} 处理`; } break; }
+      case "serverRequest/expired": { this.pendingStates.delete(n.params.requestId); const c = this.cards.get(n.params.requestId); if (c) { c.state = "expired"; c.replying = false; c.note = expiredNote(n.params.reason); } break; }
       case "error": this.message = n.params.error.message; break;
       case "server/shuttingDown": this.message = `daemon stopping: ${n.params.reason}`; break;
     }

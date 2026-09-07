@@ -78,7 +78,7 @@ Enter to confirm · Esc to cancel"
 
 exports[`fixed header, footer, queue and active card viewport snapshots 1`] = `
 "th_demo | cwd /tmp | model unknown
-codex running | 租约:未持有 | queue 1 | tokens 10 in / 4 out / 3 cached | connected
+codex running | 待处理 0 | 租约:未持有 | queue 1 | tokens 10 in / 4 out / 3 cached | connected
 mode default | effort — | model — | ctx [??????????] ?% / ~200000 | bypass 上限未知，已隐藏
 You: 你好
 [file] /tmp/a.ts
@@ -97,8 +97,8 @@ Ctrl-N 新建 · Ctrl-T 会话 · Enter 发送 · Tab effort · Shift-Tab 权限
 
 exports[`fixed header, footer, queue and active card viewport snapshots 2`] = `
 "th_demo | cwd /tmp | model unknown
-codex running | 租约:未持有 | queue 1 | tokens 10 in / 4 out / 3 cach
-ed | connected
+codex running | 待处理 1 | 租约:未持有 | queue 1 | tokens 10 in / 4 o
+ut / 3 cached | connected
 mode default | effort — | model — | ctx [??????????] ?% / ~200000 | b
 ypass 上限未知，已隐藏
 [request] Action Required

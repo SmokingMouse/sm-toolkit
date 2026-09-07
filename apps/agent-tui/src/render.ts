@@ -98,7 +98,7 @@ function frameLayout(model: TuiModel, columns: number, rows: number) {
   const width = Math.max(1, columns - 1), height = Math.max(4, rows);
   const thread = model.thread, usage = model.usage;
   const status = `${thread ? shortId(thread.id) : "connecting"} | cwd ${thread?.cwd ?? "—"} | model ${thread?.model ?? "unknown"}`;
-  const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "unknown"}${canResume(thread) ? "（可恢复 · /resume）" : ""} | 租约:${model.leaseLabel} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection}`);
+  const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "unknown"}${canResume(thread) ? "（可恢复 · /resume）" : ""} | 待处理 ${model.pendingCount}${model.connection !== "connected" ? "（离线待确认）" : ""} | 租约:${model.leaseLabel} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection}`);
   const context = contextUsage(usage?.contextTokens, model.contextWindow);
   const modeStatus = wrap(`mode ${nativePermission(thread?.permission)} | effort ${model.effort ? `${model.effort}（本端设置）` : "—"} | model ${thread?.model ?? "—"} | ctx [${context.bar}] ${context.percent ?? "?"}% / ${model.contextWindowEstimated ? "~" : ""}${model.contextWindow}${model.launchPermission === undefined ? " | bypass 上限未知，已隐藏" : ""}`, width).slice(0, height - 4);
   if (model.leaseExpiresAt > Date.now()) modeStatus.splice(0, modeStatus.length, ...wrap(`${modeStatus.join("")} | 持有控制权至 ${new Date(model.leaseExpiresAt).toLocaleTimeString()} · /release`, width).slice(0, height - 4));
