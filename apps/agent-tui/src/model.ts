@@ -1,5 +1,6 @@
 import { AgentClient, type ClientState } from "@smokingmouse/agent-server/client";
 import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
+import { classifyEvent, rebuildTasks, type LogEntry } from "./observations.js";
 
 export interface RequestCard { request: PendingServerRequest; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
 export class TuiModel {
@@ -13,6 +14,20 @@ export class TuiModel {
   input = "";
   expandedReasoning = false;
   scroll = 0;
+  logs: LogEntry[] = [];
+  logExpanded = false;
+  logScroll = 0;
+  logsMayBeMissing = false;
+  tasksVisible = false;
+  taskScroll = 0;
+  panelFocus: "history" | "log" | "tasks" = "history";
+  collapsedAgents = new Set<string>();
+  get tasks() { return rebuildTasks(this.items.values()); }
+  setConnection(state: ClientState): void {
+    // engineEvent is live-only in AS/1: no item sequence exists to replay this interval.
+    if (this.connection === "connected" && state !== "connected" && this.thread) this.logsMayBeMissing = true;
+    this.connection = state;
+  }
   activeTurnId?: string;
   private listeners = new Set<() => void>();
   onChange(fn: () => void): () => void { this.listeners.add(fn); return () => this.listeners.delete(fn); }
@@ -43,6 +58,7 @@ export class TuiModel {
   notification(n: ServerNotification): void {
     if ("threadId" in n.params && this.thread && n.params.threadId && n.params.threadId !== this.thread.id) return;
     switch (n.method) {
+      case "thread/engineEvent": this.logs.push(classifyEvent(n.params.subtype, n.params.payload)); break;
       case "thread/status/changed": if (this.thread) this.thread.status = n.params.status; break;
       case "thread/queue/changed": this.queue = n.params.queue; break;
       case "thread/tokenUsage/updated": this.usage = n.params.usage; break;
@@ -68,7 +84,7 @@ export class TuiModel {
 
 export function bindClient(client: AgentClient, model: TuiModel): () => void {
   const disposers = [client.onSnapshot(s => model.snapshot(s)), client.onStateChange(state => {
-    model.connection = state;
+    model.setConnection(state);
     if (state !== "connected") { model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
     model.changed();
   }), client.onError((error, id) => {

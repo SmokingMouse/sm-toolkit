@@ -89,15 +89,14 @@ Agent …: Hello 世界
 
 
 
+系统日志 0 条 · 折叠 · Ctrl-L /log
 
-
-Enter 发送/排队 · /steer 插话 · Tab 推理 · PgUp/PgDn 历史 · Ctrl-C 两次退出
+Enter 发送 · Ctrl-L 日志 · /tasks · /agents · F6 焦点 · PgUp/PgDn 滚动 · Ctrl-C 两次退出
 > new input"
 `;
 
 exports[`fixed header, footer, queue and active card viewport snapshots 2`] = `
 "codex running | queue 1 | tokens 10 in / 4 out / 3 cached | connected
-[file] /tmp/a.ts
 
 Agent …: Hello 世界
 
@@ -107,6 +106,7 @@ Command: ls
 cwd: /tmp
 y 允许 · s 本会话允许 · n 拒绝 · a 中止
 Enter to confirm · Esc to cancel
+系统日志 0 条 · 折叠 · Ctrl-L /log
 
 审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片
 > "

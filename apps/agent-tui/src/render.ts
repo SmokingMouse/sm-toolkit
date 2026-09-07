@@ -1,5 +1,6 @@
 import type { Item } from "@smokingmouse/agent-server/protocol";
 import type { RequestCard, TuiModel } from "./model.js";
+import { object } from "./observations.js";
 
 /** Strip terminal control sequences from untrusted engine/user text before drawing. */
 export function plain(text: string): string {
@@ -66,17 +67,51 @@ export function wrap(line: string, width: number): string[] {
   }
   lines.push(current); return lines;
 }
-export function render(model: TuiModel, columns = 100, rows = 30): string {
+export function renderTimeline(model: TuiModel): string[] {
+  const items = [...model.items.values()].sort((a, b) => a.seq - b.seq), seen = new Set<string>();
+  const children = new Map<string, Item[]>();
+  for (const item of items) if (item.type === "subAgent") children.set(item.payload.parentItemId, [...children.get(item.payload.parentItemId) ?? [], item]);
+  const visit = (item: Item, depth: number): string[] => {
+    if (seen.has(item.id)) return []; seen.add(item.id);
+    const indent = "  ".repeat(Math.min(depth, 8));
+    let lines: string[];
+    if (item.type === "subAgent") {
+      const p = item.payload, collapsed = model.collapsedAgents.has(item.id), progress = object(p.progress);
+      lines = [`${collapsed ? "▸" : "▾"} SubAgent ${item.id} [${item.status}] ${p.phase} · parent ${p.parentItemId}`];
+      if (!collapsed) lines.push(...[p.text ?? progress.text, model.expandedReasoning ? p.thinking ?? progress.thinking : undefined, p.report === undefined ? undefined : json(p.report)].filter(v => typeof v === "string" && v.length > 0).flatMap(v => plain(String(v)).split("\n")).map(line => `  ${line}`));
+      if (collapsed) { const hide = (id: string) => { for (const child of children.get(id) ?? []) if (!seen.has(child.id)) { seen.add(child.id); hide(child.id); } }; hide(item.id); return lines.map(l => indent + plain(l)); }
+    } else lines = renderItem(item, model.expandedReasoning);
+    return [...lines.map(l => indent + plain(l)), ...(children.get(item.id) ?? []).flatMap(child => visit(child, depth + 1)), ""];
+  };
+  return [...items.filter(i => i.type !== "subAgent").flatMap(i => visit(i, 0)), ...items.flatMap(i => visit(i, 0))];
+}
+
+export function render(model: TuiModel, columns = 100, rows = 30, color = false): string {
   const width = Math.max(1, columns - 1), height = Math.max(4, rows);
   const thread = model.thread, usage = model.usage;
   const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "unknown"} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection} | ${thread?.id ?? "connecting"}`);
-  const body = [...model.items.values()].sort((a, b) => a.seq - b.seq).flatMap(i => [...renderItem(i, model.expandedReasoning), ""]);
+  const body = renderTimeline(model);
   for (const q of model.queue) body.push(`排队 #${q.position + 1}: ${q.preview}`);
   for (const c of model.cards.values()) if (c !== model.activeCard) body.push(...renderCard(c));
   const content = body.flatMap(line => wrap(line, width));
   const card = model.activeCard ? renderCard(model.activeCard).flatMap(line => wrap(line, width)) : [];
-  const footer = model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : "Enter 发送/排队 · /steer 插话 · Tab 推理 · PgUp/PgDn 历史 · Ctrl-C 两次退出";
-  const available = height - 4;
+  const footer = model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : "Enter 发送 · Ctrl-L 日志 · /tasks · /agents · F6 焦点 · PgUp/PgDn 滚动 · Ctrl-C 两次退出";
+  const panels: string[] = [];
+  const budget = Math.max(0, height - 5);
+  const logHeader = `系统日志 ${model.logs.length} 条${model.logsMayBeMissing ? " · 重连后可能缺失" : ""} · ${model.logExpanded ? "展开" : "折叠"} · Ctrl-L /log${model.panelFocus === "log" ? " [焦点]" : ""}`;
+  if (budget > 0) panels.push(wrap(logHeader, width)[0]);
+  const tail = (lines: string[], count: number, scroll: number) => { const end = Math.max(Math.min(lines.length, count), lines.length - scroll); return lines.slice(Math.max(0, end - count), end); };
+  if (!model.activeCard && model.logExpanded) {
+    const lines = model.logs.flatMap(entry => wrap(`${new Date(entry.time).toISOString().slice(11, 23)} ${entry.error ? "[!] " : ""}${entry.subtype}: ${entry.summary.replace(/\r?\n/g, " ↵ ")}`, width).map(line => color && entry.error ? `\x1b[31m${line}\x1b[0m` : line));
+    panels.push(...tail(lines, Math.min(Math.floor(budget / 3), Math.max(0, budget - panels.length - (model.tasksVisible ? 1 : 0))), model.logScroll));
+  }
+  if (!model.activeCard && model.tasksVisible && panels.length < budget) {
+    const tasks = [...model.tasks.values()];
+    panels.push(wrap(`Tasks ${tasks.length} · /tasks${model.panelFocus === "tasks" ? " [焦点]" : ""}`, width)[0]);
+    const lines = tasks.flatMap(t => wrap(`[${t.status}] #${t.id}${t.inferred ? "?" : ""} ${t.title}`, width));
+    panels.push(...tail(lines.length ? lines : wrap("暂无已观测任务", width), Math.min(Math.floor(budget / 3), budget - panels.length), model.taskScroll));
+  }
+  const available = height - 4 - panels.length;
   let middle: string[];
   if (card.length) {
     const cardRows = Math.min(card.length, available);
@@ -89,5 +124,5 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
   while (middle.length < available) middle.push("");
   const input = model.activeCard ? model.activeCard.draft : model.input;
   const inputTail = wrap(`> ${input}`, width).at(-1) ?? "> ";
-  return [wrap(header, width)[0], ...middle, wrap(model.message, width)[0], wrap(footer, width)[0], inputTail].join("\n");
+  return [wrap(header, width)[0], ...middle, ...panels, wrap(model.message, width)[0], wrap(footer, width)[0], inputTail].join("\n");
 }
