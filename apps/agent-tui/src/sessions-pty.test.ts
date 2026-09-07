@@ -64,8 +64,13 @@ test("sessions PTY: /new /clear /threads /fork /resume, Ctrl-N Ctrl-T, disconnec
     await create("/clear \r");
     const fourth = await create("\x0e");
     const forked = await create("/fork \r");
-    expect(forked.engine.options?.forkSession).toBe(true);
-    expect(forked.engine.options?.engineThreadId).toBe(fourth.engine.engineThreadId!);
+    // Empty tips have no stable native coordinate; a fresh empty seed cannot
+    // accidentally include a concurrent source append during native loading.
+    expect(forked.engine.options?.forkSession).not.toBe(true);
+    expect(forked.engine.options?.engineThreadId).toBeUndefined();
+    expect(forked.engine.options?.seedHistory).toEqual([]);
+    expect((await observer.request("thread/read", { threadId: forked.id })).thread.forkedFrom).toEqual({ threadId: fourth.id, itemId: null });
+    expect(forked.engine.engineThreadId).not.toBe(fourth.engine.engineThreadId);
     expect(engines.slice(0, -1).every(e => !e.closed)).toBe(true);
 
     write(`/resume ${thread.id}\r`); await attached(thread.id);

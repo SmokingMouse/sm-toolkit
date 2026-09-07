@@ -82,7 +82,8 @@ for (const backend of ["claude", "codex"] as const) describe(`midfork ${backend}
     const empty = await c.request("thread/fork", { threadId: thread.id });
     expect(empty.thread.forkedFrom).toEqual({ threadId: thread.id, itemId: null });
     expect(server.log.snapshot(empty.thread.id)).toMatchObject({ items: [], nextSeq: 1 });
-    expect(engines[1].options?.forkSession).toBe(true);
+    expect(engines[1].options?.forkSession).not.toBe(true);
+    expect(engines[1].options?.seedHistory).toEqual([]);
     await c.request("turn/start", { threadId: thread.id, input: input("live tip") });
     const before = server.log.snapshot(thread.id);
     const live = await c.request("thread/fork", { threadId: thread.id });
@@ -90,6 +91,22 @@ for (const backend of ["claude", "codex"] as const) describe(`midfork ${backend}
     expect(engines[2].options?.forkSession).not.toBe(true);
     expect(server.log.snapshot(live.thread.id).items.map(withoutTurn)).toEqual(before.items.map(withoutTurn));
   });
+});
+
+test("midfork: idle tip without native coordinate seeds its captured prefix despite concurrent append", async () => {
+  const { server, engines } = fixture(), c = await client(server);
+  const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+  const { turn } = await c.request("turn/start", { threadId: thread.id, input: input("captured") });
+  engines[0].emit({ type: "turnCompleted", turnId: turn.id, status: "completed" });
+  await until(() => server.threads.get(thread.id).status.type === "idle");
+  const before = server.log.snapshot(thread.id).items;
+  const forkJob = server.threads.fork({ threadId: thread.id });
+  await c.request("turn/start", { threadId: thread.id, input: input("arrived after fork") });
+  const fork = await forkJob;
+  expect(engines[1].options?.engineThreadId).toBeUndefined();
+  expect(engines[1].options?.forkSession).not.toBe(true);
+  expect(engines[1].options?.seedHistory).toEqual(before);
+  expect(server.log.snapshot(fork.thread.id).items.map(withoutTurn)).toEqual(before.map(withoutTurn));
 });
 
 test("midfork: every item kind is a valid boundary and live payload is frozen", async () => {

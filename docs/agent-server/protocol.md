@@ -147,8 +147,10 @@ type Thread = {
 
 | 引擎 | 原生路径 | 任意 item 的播种路径 |
 |---|---|---|
-| Claude | 成功 turn 的末项记录末个非 tool-use assistant UUID；`--resume <session> --fork-session --resume-session-at <uuid>` 含尾截断。未指定 item 的 idle tip 也可原生 fork | 新进程依序接收 stream-json 用户消息（`shouldQuery:false, client_composed:true`）与助手消息；每条用户等待无推理 result 后再继续。未续聊关闭的分支恢复时重播种 |
-| Codex | `thread/fork {threadId,lastTurnId}` 截至已完成 turn（含）；无坐标的 idle tip 可省略 lastTurnId | `thread/start` 的 developerInstructions 携带角色标注的 JSON 历史数据；没有消息 history 导入参数。不会生成额外 AS 用户 item 或提前发起 turn |
+| Claude | 成功 turn 的末项记录末个非 tool-use assistant UUID；`--resume <session> --fork-session --resume-session-at <uuid>` 含尾截断；缺省 item 也使用捕获的精确坐标 | 新进程依序接收 stream-json 用户消息（`shouldQuery:false, client_composed:true`）与助手消息；每条用户等待无推理 result 后再继续。未续聊关闭的分支恢复时重播种 |
+| Codex | `thread/fork {threadId,lastTurnId}` 截至已完成 turn（含）；缺省 item 也使用捕获的精确坐标 | `thread/start` 的 developerInstructions 携带角色标注的 JSON 历史数据；没有消息 history 导入参数。不会生成额外 AS 用户 item 或提前发起 turn |
+
+缺少精确原生坐标时（包括空日志、旧会话和运行中边界）使用播种；不对可并发追加的源会话做无坐标 tip fork，避免原生加载时混入快照之后的新消息。
 
 播种只恢复 AS 可见内容：文字保留，工具调用/结果、reasoning 等序列化为历史文本，
 不执行工具；图片/文件只保留路径与元数据，不重新读取原始字节。隐藏思考、原生压缩状态、

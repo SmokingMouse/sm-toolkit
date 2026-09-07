@@ -154,7 +154,7 @@ export class ThreadManager {
     const forkPoint = itemId ? this.log.forkPoint(source.id, itemId) : undefined;
     // Unmapped and live boundaries must never silently inherit a later native suffix.
     const unflushedSeed = source.backend === "claude" && this.log.options<SessionOptions>(source.id).seedHistory !== undefined;
-    const native = !unflushedSeed && !!source.engineThreadId && (!!forkPoint || (params.fromItemId === undefined && source.status.type === "idle"));
+    const native = !unflushedSeed && !!source.engineThreadId && !!forkPoint;
     const { clientThreadId: _, ...options } = this.log.options(source.id);
     const { seedHistory: __, engineThreadId: ___, forkSession: ____, forkPoint: _____, ...clean } = options as SessionOptions;
     return this.start({ ...clean, clientThreadId: params.clientThreadId }, onCreated, { ...(native ? { resume: source.engineThreadId!, fork: true, forkPoint } : { seedHistory: prefix }), prefix, forkedFrom: { threadId: source.id, itemId }, request: params });

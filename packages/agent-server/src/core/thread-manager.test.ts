@@ -48,8 +48,12 @@ describe("ThreadManager", () => {
   });
   test("default fork uses native resume + forkSession; unknown fromItemId returns -32602", async () => {
     const { server, engines } = create(); const c = await client(server); const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+    const { turn } = await c.request("turn/start", { threadId: thread.id, input: input("checkpoint") });
+    engines[0].emit({ type: "turnCompleted", turnId: turn.id, status: "completed", forkPoint: "native-checkpoint" });
+    await until(() => server.threads.get(thread.id).status.type === "idle");
     const fork = await c.request("thread/fork", { threadId: thread.id, clientThreadId: "fork-key" });
     expect(engines[1].options?.forkSession).toBe(true); expect(engines[1].options?.engineThreadId).toBe(thread.engineThreadId); expect(fork.thread.engineThreadId).not.toBe(thread.engineThreadId);
+    expect(engines[1].options?.forkPoint).toBe("native-checkpoint");
     expect((await c.request("thread/fork", { threadId: thread.id, clientThreadId: "fork-key" })).deduplicated).toBe(true);
     await expect(c.request("thread/fork", { threadId: thread.id, fromItemId: "item" })).rejects.toMatchObject({ code: ErrorCode.invalid_params }); expect(engines).toHaveLength(2);
   });

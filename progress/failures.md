@@ -6,6 +6,14 @@
 
 ## 已结案
 
+### midfork：无坐标原生 tip fork 的并发追加竞态（resolved）
+
+- 症状：审查发现 AS 先捕获前缀、原生稍后加载 tip，期间源追加可能进入引擎上下文而不在复制日志中。
+- 可证伪假设：无 UUID/turnId 坐标的原生 tip 加载无法约束到请求时刻。
+- 判定命令：`bun test packages/agent-server/src/core/fork.test.ts`（idle tip without native coordinate）。
+- 修复：只有精确原生坐标才走原生 fork，其他边界播种冻结快照；定向 core 25 pass。
+- 全量 TUI 首次复跑 121 pass / 1 fail：旧 PTY 断言空 thread 必走 native fork；改为验证空播种、null lineage 和独立 engine ID，保留原会话未关闭断言。原失败日志：同契约 out/agent-tui-tests-before-tip-assertion.log。
+
 ### midfork：播种分支恢复覆盖 spawning 状态（resolved）
 
 - 症状：关闭后首次恢复 seeded Claude 报 `invalid thread transition closed -> idle`。
