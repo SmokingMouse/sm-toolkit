@@ -1,5 +1,6 @@
 import { AgentClient, type ClientState } from "@smokingmouse/agent-server/client";
 import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
+import type { ImageInput } from "./attachments.js";
 
 export interface RequestCard { request: PendingServerRequest; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
 export class TuiModel {
@@ -11,6 +12,7 @@ export class TuiModel {
   connection: ClientState = "disconnected";
   message = "";
   input = "";
+  attachments: ImageInput[] = [];
   expandedReasoning = false;
   scroll = 0;
   activeTurnId?: string;

@@ -1,5 +1,6 @@
 import type { AgentClient } from "@smokingmouse/agent-server/client";
 import type { RequestCard, TuiModel } from "./model.js";
+import { imageInput, messageInput, pasteImage, unquote } from "./attachments.js";
 
 export interface Key { name?: string; ctrl?: boolean; meta?: boolean; sequence?: string }
 export class Controller {
@@ -28,18 +29,28 @@ export class Controller {
     finally { this.model.changed(); }
   }
   async submit(): Promise<void> {
-    const text = this.model.input.trim(), thread = this.model.thread;
-    if (!text || !thread || this.submitting) return;
+    const text = this.model.input, thread = this.model.thread;
+    const attachments = [...this.model.attachments];
+    if ((!text.trim() && !attachments.length) || !thread || this.submitting) return;
     if (this.client.state !== "connected") throw new Error("连接尚未恢复，输入已保留");
     if (thread.backend === "external") throw new Error("External thread 为只读");
     this.submitting = true;
     try {
+      if (text.trim() === "/paste-image") {
+        this.model.attachments.push(await pasteImage());
+        if (this.model.input === text) this.model.input = "";
+        this.model.message = "已附加剪贴板图片；Enter 发送，可继续输入文字";
+        return;
+      }
       const steer = text.startsWith("/steer ");
-      const input = [{ type: "text" as const, text: steer ? text.slice(7).trim() : text }];
-      if (!input[0].text) return;
+      const input = /^\/image(?:\s|$)/.test(text)
+        ? [...attachments, await imageInput(unquote(text.slice(6).trim()), thread.cwd)]
+        : await messageInput(steer ? text.slice(7) : text, thread.cwd, attachments);
+      if (!input.length) return;
+      const fingerprint = JSON.stringify(input);
       const turnId = steer ? this.model.activeTurnId : undefined;
-      if (!this.submission || this.submission.text !== text || this.submission.threadId !== thread.id || this.submission.turnId !== turnId) {
-        this.submission = { text, threadId: thread.id, turnId, id: crypto.randomUUID() };
+      if (!this.submission || this.submission.text !== fingerprint || this.submission.threadId !== thread.id || this.submission.turnId !== turnId) {
+        this.submission = { text: fingerprint, threadId: thread.id, turnId, id: crypto.randomUUID() };
       }
       const clientTurnId = this.submission.id;
       if (steer) {
@@ -52,7 +63,8 @@ export class Controller {
         this.model.message = queued ? `已排队 #${queued.position + 1}` : turn.status === "queued" ? "已入队，等待队列位置" : "已发送";
       }
       // Do not erase text typed while the request was in flight.
-      if (this.model.input.trim() === text) this.model.input = "";
+      if (this.model.input === text) this.model.input = "";
+      this.model.attachments = this.model.attachments.filter(i => !attachments.includes(i));
       this.submission = undefined;
       this.model.scroll = 0;
     } finally { this.submitting = false; this.model.changed(); }
