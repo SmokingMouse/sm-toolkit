@@ -33,6 +33,7 @@ export class Controller {
         else if (key.name === "return" || key.name === "enter") {
           const entry = picker.entries[picker.index];
           if (entry) await this.sessions.run("/resume", entry.thread.id);
+          else this.model.message = "没有可选择的会话；按 Esc 退出";
         }
         return;
       }

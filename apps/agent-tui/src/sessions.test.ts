@@ -104,6 +104,19 @@ test("P2-6: Esc during picker attach is explicitly rejected and does not pretend
   pending.release(); await operation;
   expect(model.thread?.id).toBe("new"); expect(model.picker).toBeUndefined();
 });
+test("P2-5: an empty daemon list gives Enter feedback and Esc dismisses it", async () => {
+  const { model, controller, client, calls } = setup(), original = client.request.bind(client);
+  client.request = async (method, params) => {
+    const result = await original(method, params);
+    if (method === "thread/list" && "threads" in result) result.threads = [];
+    return result;
+  };
+  await controller.sessions.run("/threads");
+  expect(render(model, 120, 20)).toContain("daemon 中没有会话");
+  await controller.key(undefined, { name: "return" }); expect(model.message).toContain("没有可选择的会话");
+  expect(calls.filter(c => c[0] === "thread/attach")).toHaveLength(0);
+  await controller.key(undefined, { name: "escape" }); expect(model.picker).toBeUndefined();
+});
 test("P0-2: resume reopens closed and systemError engines and refreshes snapshot", async () => {
   for (const status of ["closed", "systemError"] as const) {
     const { client, model, controller, calls } = setup(), original = client.request.bind(client);
