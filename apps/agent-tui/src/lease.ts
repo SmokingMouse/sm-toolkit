@@ -7,6 +7,7 @@ export class InputLease {
   private active = 0;
   private manual = false;
   private generation = 0;
+  private disposed = false;
   private timer?: ReturnType<typeof setTimeout>;
   private readonly unsubscribe: () => void;
   constructor(private readonly client: AgentClient, private readonly model: TuiModel, readonly ttlMs = 30_000) {
@@ -19,6 +20,7 @@ export class InputLease {
   }
   private clearTimer(): void { clearTimeout(this.timer); this.timer = undefined; }
   private async acquire(threadId: string): Promise<void> {
+    if (this.disposed) throw new Error("租约控制器已关闭");
     try {
       const { lease } = await this.client.request("thread/lease/acquire", { threadId, ttlMs: this.ttlMs });
       this.model.lease = { state: "self", expiresAtMs: lease.expiresAtMs, threadId };
@@ -64,5 +66,5 @@ export class InputLease {
   relinquish(threadId: string): Promise<void> {
     return this.serialize(async () => { this.manual = false; if (!this.active) await this.release(threadId); });
   }
-  dispose(): void { this.generation++; this.clearTimer(); this.unsubscribe(); }
+  dispose(): void { this.disposed = true; this.generation++; this.active = 0; this.manual = false; this.clearTimer(); this.unsubscribe(); }
 }

@@ -31,16 +31,18 @@ cd apps/agent-tui && bun test
 
 ## 观测面板
 
-系统日志订阅 `thread/engineEvent`，默认只占一行计数。`Ctrl-L` 或 `/log` 展开/折叠，按本地收到时间（UTC）显示 hook 摘要、`local_command` 斜杠命令回显、`api_retry`、`rate_limit`、`model_refusal_fallback`、memory、away_summary。未知 subtype 保留单行 JSON，终端宽度不足时软换行；错误/重试/限流用红色和 `[!]` 标记。引擎文字在绘制前过滤终端控制符。
+系统日志订阅 `thread/engineEvent`，默认只占一行计数。`Ctrl-L` 或 `/log` 展开/折叠，按本地收到时间（UTC）显示 hook 摘要、`local_command` 斜杠命令回显、`api_retry`、`rate_limit`、`model_refusal_fallback`、memory、away_summary。未知 subtype 显示单行 JSON，终端宽度不足时软换行；错误/重试/限流用红色和 `[!]` 标记，限流/重试归类优先于 hook。环形缓冲只保留最近 2000 条，表头显示丢弃计数；摘要最多 2048 字符、subtype 最多 256 字符，超长显示「截断」，不保留无界原始 payload。每帧仅排列可见日志窗口。引擎文字在绘制前过滤终端控制符并拆分换行，不突破固定帧高。
 
-子 agent 按 `parentItemId`（引擎的 `parent_tool_use_id`）嵌套到父工具下面，显示状态、phase 和持续更新的正文；父工具尚未出现时保留带 parent 标识的独立项。`/agents` 折叠/展开全部，`/agents <item-id 或 parent-id>` 切换指定项；Tab 同时控制子 agent thinking 的显示。
+子 agent 按 `parentItemId`（引擎的 `parent_tool_use_id`）嵌套到父工具下面，显示状态、phase 和持续更新的正文；父工具尚未出现时按 seq 保留带 parent 标识的独立项。`/agents` 折叠/展开全部，`/agents <item-id 或 parent-id>` 切换指定项，不存在时提示「没有匹配的子 agent」；Tab 同时控制子 agent thinking 的显示。
 
-`/tasks` 切换底栏。根据 `TaskCreate`、`TaskUpdate`、`TaskList` 工具输入及结构化输出按 item 顺序重建 id、标题、状态；调用开始即乐观刷新，失败/拒绝后撤销，删除状态移除任务，重复快照不重复创建。没有明确 id 的 TaskCreate 用观测序号推断并标 `?`，TaskList 无结构化任务数据时保留当前列表；该面板是已观测任务的重建，不保证覆盖引擎侧未出现在历史中的任务。
+`/tasks` 切换底栏。根据 `TaskCreate`、`TaskUpdate`、`TaskList` 工具输入及结构化输出按 item 顺序重建 id、标题、状态；调用开始即乐观刷新，失败/拒绝后撤销，删除状态移除任务，重复快照不重复创建。没有明确 id 的 TaskCreate 使用 `local:<item-id>` 并标 `?`；内部以 Symbol 键与引擎真实字符串 id 隔离，TaskUpdate 不能误改推断项。TaskList 无结构化任务数据时保留当前列表；该面板是已观测任务的重建，不保证覆盖引擎侧未出现在历史中的任务。
 
-展开面板自动获得滚动焦点，F6 在历史、日志、任务之间切换；PgUp/PgDn 滚动当前焦点，任务和日志各保留自己的位置。审批卡优先占用屏幕和按键。面板命令只在本地执行，断线也能切换，不发送给模型。
+展开面板自动获得滚动焦点，F6 在历史、日志、任务之间切换；PgUp/PgDn 滚动当前焦点，日志按事件滚动，任务按行滚动，各保留自己的位置。审批卡优先占用屏幕和按键。面板命令只在本地执行，断线也能切换，不发送给模型。
 
-AS/1 的 engineEvent 不在 item 日志中，断线后系统日志永久标「重连后可能缺失」，已有日志保留；重连快照恢复子 agent 和任务，不伪造离线日志。重新启动 TUI 仅有新收到的系统日志。
+AS/1 的 engineEvent 不在 item 日志中，首次 attach 就标「仅显示接入后事件」，断线后永久标「重连后可能缺失」；已有日志在缓冲上限内保留，重连快照恢复子 agent 和任务，不伪造离线日志。
 
-观测不取 lease。发送、插话、中断和审批回复先获取短租约，操作后释放；被拒保留输入/待审批卡并显示「另一客户端持有控制权」及协议返回的持有方。`/takeover` 仅重试 `thread/lease/acquire`，成功后保持租约至 `/release`、到期或断线，不强制抢占；被拒时请持有方释放或到期后重试。手动租约不自动续期。
+观测和 Ctrl-C 中断不取 lease，另一客户端持锁也可急停。发送、插话和审批回复显式获取 30 秒租约；等待操作结果（审批等待 resolved/expired/错误）后释放。并发操作共享引用计数，最后一项完成才释放；长操作和 `/takeover` 每半个 TTL 用 acquire 续期。`/release` 停止手动持有，仍有操作时延后释放。断线/退出停止续期；续期失败显示错误，不自动重放操作。表头显示「持有/续期中」「未持有」或「他端持有」。协议无租约广播/查询接口，他端信息只代表最近一次拒绝，不声称实时探测。
 
-新增验证：`observations.test.ts` 覆盖事件归类、任务重建、嵌套、重连标识、视口与控制符过滤；`integration.test.ts` 的 `observe PTY` 使用真实 bin + MockEngine 覆盖日志折叠/展开/滚动、子 agent 正文更新/嵌套/折叠、任务刷新和重连，租约测试覆盖双客户端拒绝与恢复。
+`/takeover` 仅重试 `thread/lease/acquire`，不强制抢占；`-32012` 提示持有方释放或到期后重试。`-32014` 是 already_resolved，提示已由其他客户端处理并撤卡；`-32005` 是 unauthorized，保留原生原因，不误报为他端持锁。打底 `1b168c9` 的提升类 permission/engineControl 操作须在持有有效租约时发出；本 TUI 没有新增这些控制入口。中断始终不受租约门禁约束。
+
+新增验证：`observations.test.ts` 覆盖事件归类、任务重建、嵌套、重连标识、换行/ANSI 反例和有界窗口；`lease.test.ts` 覆盖短 TTL、并发引用计数、续期、释放与断线；`integration.test.ts` 覆盖真实服务器急停/租约/撤卡、观测 PTY 以及 5000 条事件后按键回显 <50ms 的真实 PTY 基准。测试只启动 MockEngine。

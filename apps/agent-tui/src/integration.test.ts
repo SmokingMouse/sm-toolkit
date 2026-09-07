@@ -7,6 +7,7 @@ import { ConnectionManager, listenUnix, listenWebSocket, type WirePeer } from "@
 import type { PendingServerRequest, ServerRequestResult } from "@smokingmouse/agent-server/protocol";
 import { bindClient, TuiModel } from "./model.js";
 import { Controller } from "./controller.js";
+import { InputLease } from "./lease.js";
 import { render, renderItem } from "./render.js";
 
 export async function until(predicate: () => boolean): Promise<void> {
@@ -243,6 +244,26 @@ test("P0-1: Ctrl-C interrupts under another client's lease before the second pre
   await a.controller.key("\x03", { ctrl: true, name: "c" });
   expect(engine.interrupted).toEqual([engine.sent[0].turnId]); expect(a.exited).toBe(false);
   await a.controller.key("\x03", { ctrl: true, name: "c" }); expect(a.exited).toBe(true);
+});
+test("P0-1: approval abort still interrupts when its reply lease is denied", async () => {
+  const { a, b, engine, thread } = await setup();
+  a.model.input = "work"; await a.controller.submit(); const turnId = engine.sent[0].turnId;
+  engine.emit({ type: "itemStarted", turnId, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: thread.cwd } } });
+  engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { requestId: "abort-held", threadId: thread.id, turnId, itemId: "cmd", command: "pwd", cwd: thread.cwd, startedAtMs: Date.now() } }, respond() {} });
+  await until(() => !!a.model.activeCard); await b.client.request("thread/lease/acquire", { threadId: thread.id });
+  await a.controller.key("a"); expect(engine.interrupted).toContain(turnId);
+});
+test("P1-3: real server lease excludes rivals across multiple TTLs and releases after long work", async () => {
+  const { a, b, thread } = await setup(), lease = new InputLease(a.client, a.model, 200);
+  let finish!: () => void;
+  try {
+    const work = lease.run(thread.id, () => new Promise<void>(resolve => { finish = resolve; }));
+    await until(() => !!finish); await Bun.sleep(450);
+    await expect(b.client.request("thread/lease/acquire", { threadId: thread.id })).rejects.toMatchObject({ code: -32012 });
+    expect(render(a.model, 160)).toContain("租约:持有/续期中");
+    finish(); await work; expect(render(a.model, 160)).toContain("租约:未持有");
+    await b.client.request("thread/lease/acquire", { threadId: thread.id });
+  } finally { finish?.(); lease.dispose(); }
 });
 
 test("P2-4: first attach marks the live-only log gap even when no events were replayed", async () => {
