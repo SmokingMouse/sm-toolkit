@@ -101,12 +101,20 @@ export function render(model: TuiModel, columns = 100, rows = 30, color = false)
   const footer = model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : "Enter 发送 · Ctrl-L 日志 · /tasks · /agents · F6 焦点 · PgUp/PgDn 滚动 · Ctrl-C 两次退出";
   const panels: string[] = [];
   const budget = Math.max(0, height - 5);
-  const logHeader = `系统日志 ${model.logs.length} 条${model.logsMayBeMissing ? " · 重连后可能缺失" : ""} · ${model.logExpanded ? "展开" : "折叠"} · Ctrl-L /log${model.panelFocus === "log" ? " [焦点]" : ""}`;
+  const logHeader = `系统日志 ${model.logs.length} 条${model.logs.dropped ? ` · 已丢弃 ${model.logs.dropped} 条` : ""}${model.logsMayBeMissing ? " · 重连后可能缺失" : ""} · ${model.logExpanded ? "展开" : "折叠"} · Ctrl-L /log${model.panelFocus === "log" ? " [焦点]" : ""}`;
   if (budget > 0) panels.push(wrap(logHeader, width)[0]);
   const tail = (lines: string[], count: number, scroll: number) => { const end = Math.max(Math.min(lines.length, count), lines.length - scroll); return lines.slice(Math.max(0, end - count), end); };
   if (!model.activeCard && model.logExpanded) {
-    const lines = model.logs.flatMap(entry => wrap(`${new Date(entry.time).toISOString().slice(11, 23)} ${entry.error ? "[!] " : ""}${entry.subtype}: ${entry.summary.replace(/\r?\n/g, " ↵ ")}`, width).map(line => color && entry.error ? `\x1b[31m${line}\x1b[0m` : line));
-    panels.push(...tail(lines, Math.min(Math.floor(budget / 3), Math.max(0, budget - panels.length - (model.tasksVisible ? 1 : 0))), model.logScroll));
+    const count = Math.min(Math.floor(budget / 3), Math.max(0, budget - panels.length - (model.tasksVisible ? 1 : 0)));
+    let lines: string[] = [];
+    // Scroll by events, lay out only the entries needed to fill this viewport.
+    const end = model.logs.length - Math.min(model.logScroll, Math.max(0, model.logs.length - count));
+    for (let index = end - 1; index >= 0 && lines.length < count; index--) {
+      const entry = model.logs.at(index)!;
+      const entryLines = wrap(`${new Date(entry.time).toISOString().slice(11, 23)} ${entry.error ? "[!] " : ""}${entry.subtype}: ${entry.summary.replace(/\r?\n/g, " ↵ ")}`, width);
+      lines = [...entryLines.map(line => color && entry.error ? `\x1b[31m${line}\x1b[0m` : line), ...lines];
+    }
+    panels.push(...lines.slice(Math.max(0, lines.length - count)));
   }
   if (!model.activeCard && model.tasksVisible && panels.length < budget) {
     const tasks = [...model.tasks.values()];

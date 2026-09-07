@@ -1,8 +1,9 @@
 import type { Item } from "@smokingmouse/agent-server/protocol";
 
 export const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-export interface LogEntry { time: number; subtype: string; category: string; error: boolean; summary: string; payload: unknown }
-/** Keep unknown payloads intact, including nested fields; display sanitization happens at render time. */
+export interface LogEntry { time: number; subtype: string; category: string; error: boolean; summary: string }
+const bounded = (text: string, limit: number) => text.length > limit ? text.slice(0, limit) + "…[截断]" : text;
+/** Bound retained text at ingestion; never stringify or clone a raw payload on redraw. */
 export function classifyEvent(subtype: string, payload: Record<string, unknown>, time = Date.now()): LogEntry {
   const category = /hook/.test(subtype) ? "hook" : subtype === "local_command" ? "command"
     : /api_retry/.test(subtype) ? "retry" : /rate_limit/.test(subtype) ? "rate_limit"
@@ -15,7 +16,23 @@ export function classifyEvent(subtype: string, payload: Record<string, unknown>,
     || (Array.isArray(payload.hook_errors) && payload.hook_errors.length > 0)
     || /error|failed|failure/.test(String(payload.status ?? payload.outcome ?? ""));
   const detail = ["summary", "output", "stdout", "stderr", "message", "hook_name", "reason"].flatMap(key => typeof payload[key] === "string" ? [payload[key] as string] : []);
-  return { time, subtype, category, error, summary: category === "unknown" || !detail.length ? JSON.stringify(payload) : detail.join(" · "), payload: structuredClone(payload) };
+  return { time, subtype: bounded(subtype, 256), category, error, summary: bounded(category === "unknown" || !detail.length ? JSON.stringify(payload) : detail.join(" · "), 2048) };
+}
+
+export class LogBuffer {
+  readonly capacity = 2000;
+  private entries: LogEntry[] = [];
+  private start = 0;
+  dropped = 0;
+  get length(): number { return this.entries.length; }
+  push(entry: LogEntry): void {
+    if (this.length < this.capacity) this.entries.push(entry);
+    else { this.entries[this.start] = entry; this.start = (this.start + 1) % this.capacity; this.dropped++; }
+  }
+  at(index: number): LogEntry | undefined {
+    if (index < 0) index += this.length;
+    return index < 0 || index >= this.length ? undefined : this.entries[(this.start + index) % this.capacity];
+  }
 }
 
 export interface ObservedTask { id: string; title: string; status: string; inferred?: boolean }

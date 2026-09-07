@@ -268,6 +268,29 @@ test("observation commands stay local offline; contested sends and approvals ret
   a.model.input = "/release"; await a.controller.submit();
 });
 
+test("P1-2 PTY benchmark: input echo stays below 50ms after 5000 engine events", async () => {
+  const { home, engine, thread } = await setup();
+  const state = join(home, "state"), tokenDir = join(state, "sm-toolkit", "agent-server");
+  mkdirSync(tokenDir, { recursive: true }); writeFileSync(join(tokenDir, "token"), "test\n");
+  let screen = ""; const decoder = new TextDecoder();
+  const proc = Bun.spawn([resolve(import.meta.dir, "../bin/agent-tui"), "--attach", thread.id, "--socket", join(home, "sock")], {
+    env: { ...process.env, HOME: home, XDG_STATE_HOME: state, XDG_RUNTIME_DIR: "", HERDR_PANE_ID: "", TERM: "xterm-256color" },
+    terminal: { cols: 160, rows: 40, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } },
+  });
+  try {
+    await until(() => screen.includes(thread.id)); proc.terminal!.write("\x0c");
+    for (let i = 0; i < 5000; i++) engine.emit({ type: "engineEvent", backend: "claude", subtype: "memory", payload: { message: `benchmark-${i}` } });
+    await until(() => screen.includes("已丢弃 3000 条") && screen.includes("benchmark-4999"));
+    const timings: number[] = []; let input = "";
+    for (const letter of "ABCDE") {
+      screen = ""; input += letter; const start = performance.now(); proc.terminal!.write(letter);
+      await until(() => screen.includes(`> ${input}`)); timings.push(performance.now() - start);
+    }
+    console.info(`P1-2 PTY 5000 events: echo ms=${timings.map(t => t.toFixed(2)).join(",")}, max=${Math.max(...timings).toFixed(2)}`);
+    expect(Math.max(...timings)).toBeLessThan(50);
+  } finally { if (proc.exitCode === null) proc.kill(); await proc.exited; proc.terminal?.close(); }
+}, 15000);
+
 test("observe PTY: engine event folding/scrolling, nested agents, task refresh and reconnect gap", async () => {
   const { home, engine, thread, manager } = await setup();
   const state = join(home, "state"), tokenDir = join(state, "sm-toolkit", "agent-server");

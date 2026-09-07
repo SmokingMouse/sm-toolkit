@@ -16,6 +16,20 @@ test("observation categories retain unknown JSON and highlight retries, limits a
   expect(classifyEvent("hook_started", {}).error).toBe(false);
 });
 const tool = (id: string, seq: number, name: string, input: unknown, output?: unknown): Item => ({ id, seq, turnId: "t", startedAtMs: 0, status: "completed", type: "toolCall", payload: { name, input: input as never, output: output as never } });
+test("P1-2: bounded ring retains latest 2000 events and lays out only visible entries", () => {
+  const model = new TuiModel(); model.logExpanded = true;
+  for (let i = 0; i < 5000; i++) model.logs.push(classifyEvent("memory", { message: `log-${i}` }));
+  expect(model.logs.length).toBe(2000); expect(model.logs.dropped).toBe(3000);
+  expect(model.logs.at(0)?.summary).toBe("log-3000"); expect(model.logs.at(-1)?.summary).toBe("log-4999");
+  // An offscreen entry must not be formatted at all, regardless of its size.
+  Object.defineProperty(model.logs.at(0)!, "summary", { get() { throw new Error("offscreen entry formatted"); } });
+  expect(render(model)).toContain("已丢弃 3000 条"); expect(render(model)).toContain("log-4999");
+  const huge = classifyEvent("future", { blob: "x".repeat(1_000_000) });
+  expect(huge.summary.length).toBeLessThan(2100); expect(huge.summary).toContain("[截断]");
+  model.logs.push(huge);
+  const start = performance.now(); for (let i = 0; i < 20; i++) render(model);
+  expect((performance.now() - start) / 20).toBeLessThan(10);
+});
 test("P1-1: newlines and ANSI in every observation field cannot overflow a fixed-height frame", () => {
   const model = new TuiModel(), hostile = "one\ntwo\nthree\x1b[2J\x1b]52;c;clipboard\x07\r\x00";
   model.tasksVisible = true; model.logExpanded = true;

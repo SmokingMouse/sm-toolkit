@@ -12,7 +12,7 @@ export async function runTerminal(client: AgentClient, model: TuiModel): Promise
   const done = new Promise<void>(resolve => { stop = resolve; });
   const controller = new Controller(client, model, stop);
   const draw = () => { timer = undefined; output.write("\x1b[H" + render(model, output.columns, output.rows, true).replace(/\n/g, "\x1b[K\r\n") + "\x1b[K"); };
-  const schedule = () => { if (!timer) timer = setTimeout(draw, 32); };
+  const schedule = () => { if (!timer) timer = setTimeout(draw, 16); };
   const keypress = (text: string, key: Key) => { void controller.key(text, key); };
   const dispose = model.onChange(schedule);
   emitKeypressEvents(input); input.setRawMode(true); input.resume();

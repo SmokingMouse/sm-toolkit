@@ -1,6 +1,6 @@
 import { AgentClient, type ClientState } from "@smokingmouse/agent-server/client";
 import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
-import { classifyEvent, object, rebuildTasks, type LogEntry } from "./observations.js";
+import { classifyEvent, LogBuffer, object, rebuildTasks } from "./observations.js";
 
 export interface RequestCard { request: PendingServerRequest; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
 export class TuiModel {
@@ -14,7 +14,7 @@ export class TuiModel {
   input = "";
   expandedReasoning = false;
   scroll = 0;
-  logs: LogEntry[] = [];
+  logs = new LogBuffer();
   logExpanded = false;
   logScroll = 0;
   logsMayBeMissing = false;
