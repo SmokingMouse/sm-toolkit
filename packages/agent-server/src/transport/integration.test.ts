@@ -128,6 +128,50 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
     await until(() => decision !== undefined); expect(decision).toEqual({ decision: "accept" });
   });
 
+  test("pendingRequests: read-only client table reconciles snapshots, resolution, reconnect and detach", async () => {
+    const { home, engines, manager, connect } = await setup();
+    const owner = await connect("phone"), display = await connect("display", { capabilities: {}, reconnect: { minDelayMs: 80, maxDelayMs: 80 } });
+    const muted = await connect("muted", { capabilities: { notifications: { optOut: ["thread/pendingRequests"] } } }), unrelated = await connect("unrelated");
+    const { thread } = await owner.request("thread/start", { backend: "claude", cwd: home });
+    await muted.request("thread/attach", { threadId: thread.id });
+    const { turn } = await owner.request("turn/start", { threadId: thread.id, input: input("status") });
+    const create = (id: string) => {
+      engines[0].emit({ type: "itemStarted", turnId: turn.id, item: { id, type: "commandExecution", payload: { command: "pwd", cwd: home } } });
+      engines[0].emit({ type: "approval", request: { method: approval, params: { threadId: thread.id, turnId: turn.id, itemId: id, requestId: id, command: "pwd", cwd: home, startedAtMs: Date.now() } }, respond: () => {} });
+    };
+    create("before-attach"); await until(() => owner.pendingRequests.has("before-attach"));
+    await display.request("thread/attach", { threadId: thread.id, sinceSeq: 99999 });
+    expect(display.pendingRequestStates.get("before-attach")?.status).toBe("pending");
+    expect(display.pendingRequests.size).toBe(0);
+    const events: string[] = [], unsubscribe = display.onPendingRequests(state => {
+      expect(display.pendingRequestStates.get(state.requestId)).toEqual(state);
+      events.push(`${state.requestId}:${state.status}`);
+      state.decidedBy = null; // Listener mutations cannot corrupt the stored table.
+    });
+    create("live"); await until(() => events.length === 1 && owner.pendingRequests.has("live"));
+    owner.pendingRequests.get("live")!.respond({ decision: "accept" });
+    await until(() => events.length === 2);
+    expect(events).toEqual(["live:pending", "live:resolved"]);
+    expect(display.pendingRequestStates.get("live")?.decidedBy).toEqual({ clientId: owner.clientId!, label: "phone" });
+    const copy = display.pendingRequestStates.get("live")!; copy.status = "pending";
+    expect(display.pendingRequestStates.get("live")?.status).toBe("resolved");
+    await muted.request("server/health", {}); await unrelated.request("server/health", {});
+    expect(muted.pendingRequestStates.size).toBe(0); expect(unrelated.pendingRequestStates.size).toBe(0);
+    const snapshots: AttachResult[] = []; display.onSnapshot(snapshot => snapshots.push(snapshot));
+    const oldId = display.clientId!; manager.disconnect(oldId);
+    await until(() => display.state === "disconnected"); expect(display.pendingRequestStates.size).toBe(0);
+    owner.pendingRequests.get("before-attach")!.respond({ decision: "reject" });
+    create("offline");
+    await until(() => display.state === "connected" && display.clientId !== oldId && snapshots.length === 1);
+    expect([...display.pendingRequestStates.keys()]).toEqual(["offline"]);
+    expect(snapshots[0].pendingRequests[0].state).toEqual(display.pendingRequestStates.get("offline")!);
+    expect(events).toEqual(["live:pending", "live:resolved"]); // No replay or fabricated snapshot deltas.
+    unsubscribe(); owner.pendingRequests.get("offline")!.respond({ decision: "accept" });
+    await until(() => display.pendingRequestStates.get("offline")?.status === "resolved");
+    expect(events).toHaveLength(2);
+    await display.request("thread/detach", { threadId: thread.id }); expect(display.pendingRequestStates.size).toBe(0);
+  });
+
   test("disconnect detaches, releases leases and keeps the engine alive", async () => {
     const { home, engines, connect, manager } = await setup();
     const a = await connect("a"), b = await connect("b");
@@ -199,6 +243,29 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
     b.onNotification("item/agentMessage/delta", p => { rendered += p.delta; gotDelta = true; });
     await b.request("thread/attach", { threadId: thread.id });
     await until(() => gotDelta); expect(rendered).toBe("before after");
+  });
+
+  test("pendingRequests: resolution at attach snapshot boundary cannot resurrect a pending state", async () => {
+    const { home, engines, server, connect } = await setup();
+    const owner = await connect("owner"), display = await connect("display", { capabilities: {} });
+    const { thread } = await owner.request("thread/start", { backend: "claude", cwd: home });
+    const { turn } = await owner.request("turn/start", { threadId: thread.id, input: input("boundary") });
+    engines[0].emit({ type: "itemStarted", turnId: turn.id, item: { id: "boundary", type: "commandExecution", payload: { command: "pwd", cwd: home } } });
+    engines[0].emit({ type: "approval", request: { method: approval, params: { requestId: "boundary", threadId: thread.id, turnId: turn.id, itemId: "boundary", command: "pwd", cwd: home, startedAtMs: Date.now() } }, respond: () => {} });
+    await until(() => owner.pendingRequests.has("boundary"));
+    const snapshot = server.log.snapshot.bind(server.log);
+    server.log.snapshot = (...args) => {
+      const value = snapshot(...args);
+      queueMicrotask(() => server.approvals.answer("boundary", owner.clientId!, { decision: "accept" }));
+      return value;
+    };
+    const states: string[] = [];
+    display.onSnapshot(() => states.push(display.pendingRequestStates.get("boundary")!.status));
+    display.onPendingRequests(state => states.push(state.status));
+    await display.request("thread/attach", { threadId: thread.id });
+    await until(() => states.length === 2);
+    expect(states).toEqual(["pending", "resolved"]);
+    expect(display.pendingRequestStates.get("boundary")?.decidedBy?.clientId).toBe(owner.clientId!);
   });
 
   test("an additive AS v1 notification remains observable without dropping the connection", async () => {

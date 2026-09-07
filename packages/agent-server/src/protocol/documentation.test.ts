@@ -25,3 +25,12 @@ test("asrev-doccheck: protocol names and business error codes match registries i
   for (const [name, code] of Object.entries(ErrorCode)) if (code >= -32099 && code <= -32000) expect(codes.get(name)).toBe(code);
   for (const [name, code] of codes) expect(ErrorCode[name as keyof typeof ErrorCode]).toBe(code);
 });
+
+test("pendingRequests: normative notification, capability and state fields match the schema", () => {
+  const doc = readFileSync(new URL("../../../../docs/agent-server/protocol.md", import.meta.url), "utf8");
+  expect(doc.split("### 4.1")[1].split("### 4.2")[0]).toContain("| `thread/pendingRequests` |");
+  expect(doc).toContain("| `capabilities.pendingRequests` |");
+  const block = doc.split("type PendingRequestState = {")[1].split("};")[0];
+  for (const name of Object.keys(NotificationSchemas["thread/pendingRequests"].shape)) expect(block).toMatch(new RegExp(`\\b${name}\\??:`));
+  expect(doc).toContain("state?: PendingRequestState");
+});

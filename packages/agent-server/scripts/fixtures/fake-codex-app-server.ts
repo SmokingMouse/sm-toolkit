@@ -124,6 +124,18 @@ function handle(frame: any) {
     }
     if (scenario === "native-error") { notify("error", { ...base(), error: { message: "temporary provider error", codexErrorInfo: "serverOverloaded" }, willRetry: true }); message("recovered"); finish(); return; }
     if (scenario === "hold" && p.input[0].text !== "complete") return;
+    if (scenario === "pending-status" || scenario === "pending-withdraw") {
+      const command = { id: `command-${turns}`, type: "commandExecution", command: "pwd", cwd, status: "inProgress" };
+      started(command);
+      request(71, "item/commandExecution/requestApproval", { ...base(), itemId: command.id, command: "pwd", cwd, startedAtMs: Date.now() }, frame => {
+        assert.ok(["accept", "decline"].includes(frame.result.decision));
+        completed({ ...command, status: "completed", aggregatedOutput: "", exitCode: 0, durationMs: 1 }); finish();
+      });
+      if (scenario === "pending-withdraw") setTimeout(() => {
+        pending.delete(71); notify("serverRequest/resolved", { threadId, requestId: 71 }); finish();
+      }, 80);
+      return;
+    }
     if (scenario === "conversation") { conversation(); return; }
     message("done"); tokens(); finish(); return;
   }

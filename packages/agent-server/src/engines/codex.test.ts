@@ -236,15 +236,59 @@ describe("Codex stdio process (scripted offline peer)", () => {
   });
 });
 
-function integrated(scenario: string) {
+function integrated(scenario: string, approvalTimeoutMs?: number) {
   const peers: ReturnType<typeof fake>[] = [];
-  const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [tmpdir()], idleTimeoutMs: 0, engineFactory: () => {
+  const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [tmpdir()], idleTimeoutMs: 0, approvalTimeoutMs, engineFactory: () => {
     const peer = fake(peers.length ? "simple" : scenario); peers.push(peer); return peer.engine;
   } });
   cleanup.push(() => server.close());
   return { server, peers };
 }
 describe("Codex through AS core", () => {
+  test("pendingRequests: fake child, read-only observer, snapshot, four kinds and decidedBy; legacy stays connected", async () => {
+    const { server } = integrated("conversation");
+    const owner = await client(server, "phone", [...ServerRequestMethodSchema.options]);
+    const legacy = await client(server, "legacy", []), legacyFrames = capture(legacy);
+    const observer = server.connectInProcess(), observerFrames = capture(observer);
+    const init = await observer.request("initialize", { protocolVersion: "as/1", client: { name: "display", label: "display", kind: "test", version: "1" }, capabilities: { pendingRequests: true } });
+    await observer.notifyInitialized(); expect(init.capabilities.pendingRequests).toBe(true);
+    const { thread } = await owner.request("thread/start", { backend: "codex", cwd: tmpdir() });
+    await observer.request("thread/attach", { threadId: thread.id }); await legacy.request("thread/attach", { threadId: thread.id });
+    const cards = capture(owner);
+    const { turn } = await owner.request("turn/start", { threadId: thread.id, input: input("go") });
+    await until(() => server.log.pendingRequests(thread.id).length === 1);
+    const snapshot = await observer.request("thread/attach", { threadId: thread.id, sinceSeq: 99999 });
+    expect(snapshot.items.every(i => i.status === "inProgress")).toBe(true);
+    expect(snapshot.pendingRequests).toHaveLength(1);
+    expect(snapshot.pendingRequests[0].state).toMatchObject({ threadId: thread.id, turnId: turn.id, kind: "commandExecution", status: "pending", decidedBy: null });
+    const respond = (frame: Frame) => { if ("id" in frame && "method" in frame && ServerRequestMethodSchema.safeParse(frame.method).success) void owner.respond(frame.id, decision(frame.method as ServerRequestMethod)); };
+    owner.onFrame(respond); for (const card of cards) respond(card);
+    await until(() => server.log.turn(turn.id).status === "completed");
+    const updates = observerFrames.filter(f => "method" in f && f.method === "thread/pendingRequests").map(f => NotificationSchemas["thread/pendingRequests"].parse((f as any).params));
+    expect(updates).toHaveLength(8);
+    expect(updates.filter(p => p.status === "pending").map(p => p.kind)).toEqual(["commandExecution", "fileChange", "permissions", "userInput"]);
+    for (let i = 0; i < updates.length; i += 2) {
+      expect(updates[i].createdAtMs).toBeGreaterThan(0); expect(updates[i + 1].updatedAtMs).toBeGreaterThanOrEqual(updates[i].createdAtMs);
+      expect(updates[i + 1]).toEqual({ ...updates[i], status: "resolved", decidedBy: { clientId: owner.clientId, label: "phone" }, updatedAtMs: updates[i + 1].updatedAtMs });
+    }
+    expect(observerFrames.some(f => "id" in f && "method" in f && ServerRequestMethodSchema.safeParse(f.method).success)).toBe(false);
+    expect(legacyFrames.some(f => "method" in f && f.method === "thread/pendingRequests")).toBe(false);
+    await legacy.request("server/health", {}); expect(legacy.closed).toBe(false);
+    expect((await observer.request("thread/attach", { threadId: thread.id })).pendingRequests).toEqual([]);
+  });
+  test.each(["pending-status", "pending-withdraw"])("pendingRequests: fake child %s publishes expired with reason", async scenario => {
+    const { server } = integrated(scenario, scenario === "pending-status" ? 40 : 10000);
+    const owner = await client(server, "owner"), observer = server.connectInProcess(), frames = capture(observer);
+    await observer.request("initialize", { protocolVersion: "as/1", client: { name: "display", label: "display", kind: "test", version: "1" }, capabilities: { pendingRequests: true } }); await observer.notifyInitialized();
+    const { thread } = await owner.request("thread/start", { backend: "codex", cwd: tmpdir() });
+    await observer.request("thread/attach", { threadId: thread.id });
+    const { turn } = await owner.request("turn/start", { threadId: thread.id, input: input("go") });
+    await until(() => server.log.turn(turn.id).status === "completed");
+    const updates = frames.filter(f => "method" in f && f.method === "thread/pendingRequests").map(f => NotificationSchemas["thread/pendingRequests"].parse((f as any).params));
+    expect(updates.map(p => p.status)).toEqual(["pending", "expired"]);
+    expect(updates[1]).toMatchObject({ requestId: updates[0].requestId, threadId: thread.id, turnId: turn.id, kind: "commandExecution", decidedBy: null, reason: scenario === "pending-status" ? "timeout" : "engine_resolved" });
+    expect((await observer.request("thread/attach", { threadId: thread.id })).pendingRequests).toEqual([]);
+  });
   test("native user items appear once, attachments/clientTurnId survive, and all approvals reach AS clients", async () => {
     const { server } = integrated("conversation"), c = await client(server, "codex-test", [...ServerRequestMethodSchema.options]), frames = capture(c);
     c.onFrame(frame => { if ("id" in frame && "method" in frame && ServerRequestMethodSchema.safeParse(frame.method).success) void c.respond(frame.id, decision(frame.method as ServerRequestMethod)); });

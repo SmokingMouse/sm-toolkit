@@ -181,6 +181,7 @@ initialize.capabilities.engine 还声明 engineControl / permissionSet / effortS
 |---|---|---|
 | `thread/engineEvent` | `{threadId, turnId?, backend, subtype: string, payload: JsonObject}` | 原生帧；仅协商 engineEvents=true 的连接，实时不回放 |
 | `thread/permission/changed` | `{threadId, permission: Permission}` | 原生权限切换成功，随持久化状态更新发出 |
+| `thread/pendingRequests` | `PendingRequestState`（下见类型块） | 每次创建、解决或撤回一个请求时，向所有 attach 且声明 pendingRequests 能力的客户端推送一条状态；不要求 serverRequests 能力 |
 | `thread/started` | `{thread}` | 新 thread 建立（含别的客户端建的） |
 | `thread/status/changed` | `{threadId, status: ThreadStatus}` | `spawning/idle/running/interrupted/systemError/closed` 迁移 |
 | `thread/queue/changed` | `{threadId, queue: QueuedTurn[]}` | 入队 / 出队 / 取消。**带全量队列**（codex 只带 `threadId` 要客户端回查，见 §10.2） |
@@ -216,7 +217,6 @@ initialize.capabilities.engine 还声明 engineControl / permissionSet / effortS
 |---|---|---|
 | `serverRequest/resolved` | `{threadId, requestId, decidedBy:{clientId,label}, outcome}` | 某个客户端先答了，**其余客户端据此撤卡** |
 | `serverRequest/expired` | `{threadId, requestId, reason}` | 超时 / 引擎消失 / thread 关闭 |
-| `thread/pendingRequests` | `PendingRequestState`（下见类型块） | 每次创建、解决或撤回一个请求时，向所有 attach 且声明 pendingRequests 能力的客户端推送一条状态；不要求 serverRequests 能力 |
 
 ### 4.5 服务级
 
