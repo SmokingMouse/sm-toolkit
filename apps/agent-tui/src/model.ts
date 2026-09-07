@@ -31,7 +31,7 @@ export class TuiModel {
   get bypassAvailable(): boolean { return nativePermission(this.launchPermission) === "bypassPermissions"; }
   get readonlyRestricted(): boolean { return this.launchPermission === "readonly" || this.thread?.permission === "readonly"; }
   get permissionChoices(): Permission[] {
-    return this.readonlyRestricted ? ["readonly"] : [...permissionModes(this.bypassAvailable), ...(this.bypassAvailable ? ["dontAsk" as const] : [])];
+    return this.readonlyRestricted ? ["readonly"] : [...permissionModes(this.bypassAvailable), ...(this.bypassAvailable || this.launchPermission === "dontAsk" ? ["dontAsk" as const] : [])];
   }
   effort?: Effort;
   leaseExpiresAt = 0;

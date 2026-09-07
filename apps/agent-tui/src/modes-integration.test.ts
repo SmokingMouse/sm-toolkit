@@ -59,6 +59,19 @@ async function setup(permission: Permission = "default") {
   return { home, engine, server, a, b, thread, command, connect };
 }
 
+test("review2 P2-3 dontAsk launch has a current picker row and can return without enabling bypass", async () => {
+  const { a, command, engine } = await setup("dontAsk");
+  await command("/permissions");
+  expect(render(a.model)).toContain("> 4. dontAsk (当前)");
+  expect(a.model.permissionChoices).not.toContain("bypassPermissions");
+  await a.controller.key("1"); await a.controller.key("\r", { name: "return" });
+  expect(a.model.thread?.permission).toBe("default");
+  await command("/permissions");
+  await a.controller.key("4"); await a.controller.key("\r", { name: "return" });
+  expect(a.model.thread?.permission).toBe("dontAsk");
+  expect(engine.permissions).toEqual(["default", "dontAsk"]);
+});
+
 test("P1-1 readonly cycle and picker preserve launch restrictions without any RPC", async () => {
   const { a, engine, server, thread, command } = await setup("readonly");
   await a.controller.key("", { name: "tab", shift: true });
