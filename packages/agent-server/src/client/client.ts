@@ -134,6 +134,7 @@ export class AgentClient {
     await this.connect(); return this.call(method, params);
   }
   engineControl(params: MethodParams<"thread/engineControl">): Promise<MethodResult<"thread/engineControl">> { return this.request("thread/engineControl", params); }
+  setPermission(params: MethodParams<"thread/permission/set">): Promise<MethodResult<"thread/permission/set">> { return this.request("thread/permission/set", params); }
   private call<M extends Method>(method: M, params: MethodParams<M>): Promise<MethodResult<M>> {
     const id = `cli_${++this.sequence}`;
     return new Promise((resolve, reject) => {

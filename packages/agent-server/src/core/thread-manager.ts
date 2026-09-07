@@ -36,6 +36,14 @@ export class ThreadManager {
     this.timer = setInterval(() => { void this.sweepIdle(); }, Math.max(10, Math.min(this.idleTimeoutMs || 60_000, 60_000))); this.timer.unref();
   }
   get(threadId: string): Thread { return this.log.thread(threadId); }
+  async setPermission(params: MethodParams<"thread/permission/set">): Promise<MethodResult<"thread/permission/set">> {
+    const thread = this.get(params.threadId);
+    if (thread.backend !== "claude") throw new ProtocolError(ErrorCode.backend_unsupported, "live permission mode requires Claude");
+    const engine = this.session(thread.id);
+    if (!engine.setPermission) throw new ProtocolError(ErrorCode.backend_unsupported, "live permission mode unavailable");
+    await engine.setPermission(params.permission);
+    return { thread: this.get(thread.id) };
+  }
   engineControl(params: MethodParams<"thread/engineControl">): Promise<MethodResult<"thread/engineControl">> {
     const thread = this.get(params.threadId);
     if (thread.backend !== "claude") throw new ProtocolError(ErrorCode.backend_unsupported, `${thread.backend} does not support Claude engine controls`);
@@ -67,6 +75,7 @@ export class ThreadManager {
     if (existing) { onCreated?.(existing); await this.opening.get(existing.id); return { thread: this.get(existing.id), deduplicated: true }; }
     const thread: Thread = { id: `th_${crypto.randomUUID()}`, backend: params.backend, engineThreadId: internal?.fork ? null : internal?.resume ?? null, cwd: params.cwd ?? process.cwd(), status: { type: "spawning" }, createdAtMs: this.now(), ...(params.model ? { model: params.model } : {}), ...(params.meta ? { meta: params.meta } : {}), ...(params.clientThreadId ? { clientThreadId: params.clientThreadId } : {}) };
     const options = { ...params, cwd: thread.cwd };
+    thread.permission = params.permission ?? "default";
     this.log.insertThread(thread, request, options); onCreated?.(thread);
     this.log.publish({ jsonrpc: "2.0", method: "thread/started", params: { threadId: thread.id, thread } });
     await this.open(thread, { ...options, threadId: thread.id, engineThreadId: internal?.resume, forkSession: internal?.fork });
@@ -146,6 +155,11 @@ export class ThreadManager {
     this.log.publish({ jsonrpc: "2.0", method: "thread/metadata/updated", params: { threadId, engineThreadId } });
   }
   private handle(threadId: string, event: EngineEvent): void {
+    if (event.type === "permissionChanged") {
+      const thread = this.get(threadId); thread.permission = event.permission;
+      this.log.saveThread(thread); this.log.saveOptions(threadId, { ...this.log.options<StartThreadParams>(threadId), permission: event.permission });
+      this.log.publish({ jsonrpc: "2.0", method: "thread/permission/changed", params: { threadId, permission: event.permission } }); return;
+    }
     if (event.type === "engineEvent") { const { type: _, ...params } = event; this.log.publish({ jsonrpc: "2.0", method: "thread/engineEvent", params: { threadId, ...params } }); return; }
     if (event.type === "metadata") { this.metadata(threadId, event.engineThreadId); return; }
     if (event.type === "exit") { this.engineDied(threadId, event.error ?? new ProtocolError(ErrorCode.engine_unavailable, "engine exited", { retryable: true }).toJSON()); return; }

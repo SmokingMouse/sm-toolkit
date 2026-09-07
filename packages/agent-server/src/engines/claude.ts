@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { EventType, resolveClaudeModel, type AgentEvent, type Cost } from "@smokingmouse/agent";
-import { ErrorCode, ProtocolError, type JsonObject, type StartTurnParams, type UserInput } from "../protocol/index.js";
+import { ErrorCode, PermissionSchema, ProtocolError, type JsonObject, type StartTurnParams, type UserInput } from "../protocol/index.js";
 import { AsyncQueue, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
 import { ClaudeEventMapper, jsonValue, mapPermissionDecision, mapPermissionRequest, record, type ToolPermissionRequest } from "./claude-mapper.js";
 
@@ -16,6 +16,9 @@ export const CLAUDE_CONTROL_ALLOWLIST = new Set([
   "rewind_conversation", "rewind_files", "seed_read_state", "background_tasks", "stop_task",
   "reload_plugins", "reload_skills", "side_question",
 ]);
+export function claudePermission(permission: SessionOptions["permission"] = "default"): string {
+  return permission === "full" ? "bypassPermissions" : permission === "auto-edit" ? "acceptEdits" : permission === "readonly" ? "default" : permission;
+}
 
 export function buildClaudeLaunch(options: SessionOptions): { args: string[]; env: NodeJS.ProcessEnv } {
   if (options.sandbox !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Claude sandbox override is not supported");
@@ -29,8 +32,8 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   if (options.systemPrompt) args.push("--system-prompt", options.systemPrompt);
   if (options.tools && options.tools !== "all") args.push("--tools", options.tools.join(","));
   const permission = options.permission ?? "default";
-  if (permission === "full") args.push("--dangerously-skip-permissions");
-  else args.push("--permission-mode", permission === "auto-edit" ? "acceptEdits" : "default");
+  if (permission === "full" || permission === "bypassPermissions") args.push("--dangerously-skip-permissions");
+  args.push("--permission-mode", claudePermission(permission));
   if (permission === "readonly") args.push("--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit");
   const env = { ...process.env };
   delete env.CLAUDECODE;
@@ -105,24 +108,37 @@ export class ClaudeEngine implements EngineSession {
     this.assertAlive();
     if (!CLAUDE_CONTROL_ALLOWLIST.has(subtype)) throw new ProtocolError(ErrorCode.unsupported_capability, `Claude control is not allowed: ${subtype}`);
     if ("subtype" in params) throw new ProtocolError(ErrorCode.invalid_params, "params must not override subtype");
+    if (subtype === "set_permission_mode" && !["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"].includes(String(params.mode))) throw new ProtocolError(ErrorCode.invalid_params, "unsupported permission mode");
     const interrupting = this.interrupting;
     if (subtype === "interrupt" && this.active) this.interrupting = true;
     try {
       const frame = await this.control({ ...params, subtype }, true);
+      if (record(frame.response).subtype === "success") {
+        if (subtype === "set_permission_mode") this.permissionChanged(PermissionSchema.parse(record(record(frame.response).response).mode ?? params.mode));
+        if (subtype === "set_model" && this.options && typeof params.model === "string") this.options.model = params.model;
+      }
       if (record(frame.response).subtype !== "success" && subtype === "interrupt") this.interrupting = interrupting;
       return frame;
     } catch (error) { if (subtype === "interrupt") this.interrupting = interrupting; throw error; }
   }
+  private permissionChanged(permission: NonNullable<SessionOptions["permission"]>): void {
+    if (this.options) this.options.permission = permission;
+    this.sessionGrants.clear(); this.events.push({ type: "permissionChanged", permission });
+  }
+  async setPermission(permission: NonNullable<SessionOptions["permission"]>): Promise<void> {
+    const response = await this.engineControl("set_permission_mode", { mode: claudePermission(permission) });
+    if (record(response.response).subtype !== "success") throw new ProtocolError(ErrorCode.unsupported_capability, String(record(response.response).error ?? "Claude rejected permission mode"), { raw: response });
+  }
   private assertAlive(): void { if (!this.process || this.dead || this.closed) throw new ProtocolError(ErrorCode.engine_unavailable, "Claude session is not alive"); }
   validateTurn(options: StartTurnParams): void {
     if ((options.cwd !== undefined && options.cwd !== this.options?.cwd) || options.sandbox !== undefined || options.effort !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing cwd, sandbox or effort on a live Claude session is not supported");
-    if (options.permission && options.permission !== (this.options?.permission ?? "default")) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing permission policy requires a new Claude session");
     if (options.model && options.model !== this.options?.model && resolveClaudeModel(options.model).env) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing endpoint requires a new Claude session");
   }
   async sendTurn(turnId: string, input: UserInput[], options: StartTurnParams): Promise<void> {
     this.assertAlive(); this.validateTurn(options);
     if (this.active) throw new ProtocolError(ErrorCode.turn_not_active, "Claude already has an active turn");
     const message = claudeUserMessage(input);
+    if (options.permission && claudePermission(options.permission) !== claudePermission(this.options?.permission)) await this.setPermission(options.permission);
     const model = options.model ?? this.options?.model;
     if (model) await this.control({ subtype: "set_model", model: resolveClaudeModel(model).model });
     this.active = turnId; this.interrupting = false; this.context = null; this.sawTextDelta = false; this.sawThinkingDelta = false; this.mapper.beginTurn(turnId);

@@ -220,6 +220,7 @@ export class AgentServer {
         return this.threads.start({ ...p, cwd: this.cwd(p.cwd) }, thread => this.attach(connection, thread.id));
       }
       case "thread/engineControl": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.engineControl(p); }
+      case "thread/permission/set": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.setPermission(p); }
       case "thread/resume": {
         const p = params(method);
         if (p.cwd) this.cwd(p.cwd);

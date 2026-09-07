@@ -7,7 +7,7 @@ export const TimestampSchema = z.number().int().nonnegative().max(Number.MAX_SAF
 export const JsonObjectSchema = z.record(z.string(), z.json());
 export const AbsolutePathSchema = z.string().regex(/^(?:\/|[A-Za-z]:[\\/])/, "absolute local path required");
 export const BackendSchema = z.enum(["claude", "codex", "external"]);
-export const PermissionSchema = z.enum(["readonly", "auto-edit", "full", "default"]);
+export const PermissionSchema = z.enum(["readonly", "auto-edit", "full", "default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"]);
 export const UserInputSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text"), text: z.string() }),
   z.object({ type: z.literal("image"), path: AbsolutePathSchema, mime: z.string().min(1) }),
@@ -25,6 +25,7 @@ export const ThreadStatusSchema = z.object({ type: ThreadStatusTypeSchema, error
 export const ThreadSchema = z.object({
   id: IdSchema, backend: BackendSchema, engineThreadId: IdSchema.nullable(), status: ThreadStatusSchema,
   cwd: AbsolutePathSchema, model: z.string().optional(), title: z.string().optional(), meta: JsonObjectSchema.optional(),
+  permission: PermissionSchema.optional(),
   createdAtMs: TimestampSchema, closedAtMs: TimestampSchema.optional(), clientThreadId: IdSchema.optional(),
 });
 export const TurnSchema = z.object({

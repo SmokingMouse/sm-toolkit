@@ -3,6 +3,7 @@ import type { Backend, Item, PendingServerRequest, RpcError, ServerRequestResult
 export interface EngineItem { id: string; type: Item["type"]; payload: Item["payload"]; status?: Item["status"] }
 export type DeltaKind = "text" | "reasoning" | "summary" | "stdout" | "stderr";
 export type EngineEvent =
+  | { type: "permissionChanged"; permission: NonNullable<StartThreadParams["permission"]> }
   | { type: "engineEvent"; turnId?: string; backend: Backend; subtype: string; payload: import("../protocol/index.js").JsonObject }
   | { type: "metadata"; engineThreadId: string }
   | { type: "status"; status: ThreadStatus }
@@ -30,6 +31,7 @@ export interface EngineSession {
   spawn(options: SessionOptions): Promise<void>;
   attach(): Promise<void>;
   engineControl?(subtype: string, params: import("../protocol/index.js").JsonObject): Promise<import("../protocol/index.js").JsonObject>;
+  setPermission?(permission: NonNullable<StartThreadParams["permission"]>): Promise<void>;
   validateTurn?(options: StartTurnParams): void;
   sendTurn(turnId: string, input: UserInput[], options: StartTurnParams): Promise<void>;
   steer(turnId: string, input: UserInput[], options?: Pick<StartTurnParams, "clientTurnId">): Promise<void>;

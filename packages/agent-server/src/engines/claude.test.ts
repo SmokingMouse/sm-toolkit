@@ -111,6 +111,36 @@ function fakeProcess(onUser: (send: (frame: unknown) => void, frame: any) => voi
   return { child, written, send };
 }
 describe("Claude native frame exchange (fake child only)", () => {
+  test("foundation permissions: native argv and acknowledged hot switching preserve the session", async () => {
+    const modes = ["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"] as const;
+    const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th" });
+      for (const permission of modes) {
+        const args = buildClaudeLaunch({ backend: "claude", threadId: "th", permission }).args;
+        expect(args[args.indexOf("--permission-mode") + 1]).toBe(permission);
+        await engine.setPermission(permission);
+        expect(fake.written.at(-1).request).toEqual({ subtype: "set_permission_mode", mode: permission });
+      }
+      await engine.sendTurn("tn", input("go"), { threadId: "th", input: input("go"), permission: "plan" });
+      await engine.setPermission("acceptEdits");
+      fake.send({ type: "result", result: "done", usage: {} });
+      await until(() => events.some(e => e.type === "turnCompleted"));
+      expect(events.filter(e => e.type === "permissionChanged").map(e => e.permission)).toEqual([...modes, "plan", "acceptEdits"]);
+      await engine.attach();
+    } finally { await engine.close("test"); await consuming; }
+  });
+  test("foundation permissions: native rejection leaves current mode unchanged", async () => {
+    const fake = fakeProcess(() => {}, (send, f) => send({ type: "control_response", response: { subtype: "error", request_id: f.request_id, error: "policy denied" } }));
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th" });
+      await expect(engine.setPermission("plan")).rejects.toMatchObject({ code: -32008 });
+      expect(events.filter(e => e.type === "permissionChanged")).toHaveLength(0); await engine.attach();
+    } finally { await engine.close("test"); await consuming; }
+  });
   test("foundation control: opaque success and error responses, denylist and subtype injection", async () => {
     const replies: unknown[] = [];
     const fake = fakeProcess(() => {}, (send, f) => {

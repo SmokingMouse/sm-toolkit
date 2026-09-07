@@ -2,9 +2,11 @@ import { z } from "zod";
 import { ClientIdentitySchema, FileChangesSchema, IdSchema, ItemSchema, JsonObjectSchema, PlanSchema, QueuedTurnSchema, ThreadSchema, ThreadStatusSchema, TimestampSchema, TurnSchema, UsageSchema } from "./models.js";
 import { RpcErrorSchema } from "./errors.js";
 import { BackendSchema } from "./models.js";
+import { PermissionSchema } from "./models.js";
 const item = { threadId: IdSchema, turnId: IdSchema, itemId: IdSchema };
 const delta = z.object({ ...item, delta: z.string() });
 export const NotificationSchemas = {
+  "thread/permission/changed": z.strictObject({ threadId: IdSchema, permission: PermissionSchema }),
   "thread/engineEvent": z.strictObject({ threadId: IdSchema, turnId: IdSchema.optional(), backend: BackendSchema, subtype: z.string(), payload: JsonObjectSchema }),
   initialized: z.object({}),
   "thread/started": z.object({ threadId: IdSchema, thread: ThreadSchema }),

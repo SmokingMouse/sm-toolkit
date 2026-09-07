@@ -121,6 +121,9 @@ client 库与 TUI 共用这些参数类型，TUI 不提供环境覆盖选项。
 
 ### Backend-specific 逃生门
 
+`thread/permission/set`：`{threadId, permission}` → `{thread}`。Claude 原生模式 default / acceptEdits / plan / bypassPermissions / dontAsk 映射 --permission-mode，热切发送 set_permission_mode 的 mode 字段；CLI 成功确认后更新 thread.permission、持久化恢复选项，并发送 `thread/permission/changed` `{threadId,permission}`。turn/start.permission 也在发送用户帧前热切。原生拒绝不更新状态，返回 unsupported_capability。CLI 或组织策略仍可拒绝 bypass。
+旧值 full / auto-edit 分别映射 bypassPermissions / acceptEdits。readonly 启动时的 --disallowedTools 属于进程工具限制，切权限模式不会解除它。权限模式热切会清除 daemon 会话审批缓存，避免旧授权跨模式复用。
+
 `thread/engineControl` 请求 `{threadId, subtype, params}`，向 Claude 发送 `{type:"control_request", request_id, request:{...params,subtype}}`，result 是完整原生 control_response 帧（包括原生 error response），不拆解 response；调用方必须检查 response.subtype。params 不得包含 subtype。该方法遵守输入 lease；Codex/external 返回 backend_unsupported，未知或不允许的子类型返回 unsupported_capability。传输超时仍为 RPC 错误。
 
 本机 Claude Code 2.1.258 `bin/claude.exe` 的 print.ts `d.request.subtype` 分派是白名单证据。允许：set_model、set_permission_mode、set_max_thinking_tokens、list_models、file_suggestions、read_file、get_workspace_diff、get_plan、get_context_usage、get_session_cost、get_usage、get_settings、get_binary_version、mcp_status、mcp_reconnect、mcp_toggle、interrupt、rewind_conversation、rewind_files、seed_read_state、background_tasks、stop_task、reload_plugins、reload_skills、side_question。参数语义由对应 Claude 版本定义；rewind_files 会修改工作区。interrupt 的 cancel_queued 只作用于 CLI 队列，AS 队列仍由 turn/cancel 管理。
