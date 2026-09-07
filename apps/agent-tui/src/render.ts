@@ -85,8 +85,14 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
   if (model.picker) {
     const { entries, index } = model.picker;
     const lines = entries.map((e, i) => wrap(`${i === index ? ">" : " "} ${shortId(e.thread.id)} | ${e.title} | ${e.thread.status.type} | ${e.thread.cwd} | ${new Date(e.updatedAtMs).toISOString()}`, width));
-    const start = lines.slice(0, index).reduce((n, l) => n + l.length, 0);
-    middle = entries.length ? lines.flat().slice(start, start + available) : ["（daemon 中没有会话）"].slice(0, available);
+    const top = lines.slice(0, index).reduce((n, l) => n + l.length, 0);
+    const bottom = top + (lines[index]?.length ?? 0), all = lines.flat();
+    let offset = model.picker.offset ?? 0;
+    if (top < offset) offset = top;
+    else if (bottom > offset + available) offset = Math.min(top, bottom - available);
+    offset = Math.max(0, Math.min(offset, all.length - available));
+    model.picker.offset = offset;
+    middle = entries.length ? all.slice(offset, offset + available) : ["（daemon 中没有会话）"].slice(0, available);
   } else if (card.length) {
     const cardRows = Math.min(card.length, available);
     const offset = Math.min(model.scroll, Math.max(0, card.length - cardRows));

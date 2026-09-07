@@ -19,7 +19,7 @@ export class TuiModel {
   scroll = 0;
   activeTurnId?: string;
   sessionOperation?: string;
-  picker?: { entries: ThreadEntry[]; index: number };
+  picker?: { entries: ThreadEntry[]; index: number; offset?: number };
   select(snapshot: AttachResult): void {
     this.thread = snapshot.thread;
     this.items.clear(); this.cards.clear(); this.queue = []; this.usage = undefined;
