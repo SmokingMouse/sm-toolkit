@@ -22,7 +22,6 @@ export class TuiModel {
     return this.readonlyRestricted ? ["readonly"] : [...permissionModes(this.bypassAvailable), ...(this.bypassAvailable ? ["dontAsk" as const] : [])];
   }
   effort?: Effort;
-  liveModel?: string;
   leaseExpiresAt = 0;
   contextWindow = 200_000;
   contextWindowEstimated = true;
@@ -39,7 +38,8 @@ export class TuiModel {
   snapshot(s: AttachResult): void {
     if (this.thread && this.thread.id !== s.thread.id) return;
     this.thread = s.thread; this.queue = s.queue;
-    if (this.contextWindowEstimated) this.contextWindow = estimatedContextWindow(this.liveModel ?? s.thread.model);
+    this.effort = undefined;
+    if (this.contextWindowEstimated) this.contextWindow = estimatedContextWindow(s.thread.model);
     for (const item of s.items) this.items.set(item.id, structuredClone(item));
     const ids = new Set(s.pendingRequests.map(r => r.params.requestId));
     for (const [id, card] of this.cards) if (!ids.has(id) && ["pending", "sending", "offline"].includes(card.state)) {
@@ -58,6 +58,13 @@ export class TuiModel {
   notification(n: ServerNotification): void {
     if ("threadId" in n.params && this.thread && n.params.threadId && n.params.threadId !== this.thread.id) return;
     switch (n.method) {
+      case "thread/metadata/updated":
+        if (this.thread) {
+          const { threadId: _, ...metadata } = n.params;
+          Object.assign(this.thread, metadata);
+          if (this.contextWindowEstimated) this.contextWindow = estimatedContextWindow(this.thread.model);
+        }
+        break;
       case "thread/permission/changed": if (this.thread) { this.thread.permission = n.params.permission; this.message = `权限模式：${nativePermission(n.params.permission)}`; } break;
       case "thread/status/changed": if (this.thread) this.thread.status = n.params.status; break;
       case "thread/queue/changed": this.queue = n.params.queue; break;
@@ -85,7 +92,7 @@ export class TuiModel {
 export function bindClient(client: AgentClient, model: TuiModel): () => void {
   const disposers = [client.onSnapshot(s => model.snapshot(s)), client.onStateChange(state => {
     model.connection = state;
-    if (state !== "connected") { model.leaseExpiresAt = 0; model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
+    if (state !== "connected") { model.effort = undefined; model.leaseExpiresAt = 0; model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
     model.changed();
   }), client.onError((error, id) => {
     model.message = controlError(error);

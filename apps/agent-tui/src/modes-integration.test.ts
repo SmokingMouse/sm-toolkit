@@ -26,6 +26,7 @@ class ModeEngine extends MockEngine {
   }
   async engineControl(subtype: string, params: JsonObject): Promise<JsonObject> {
     this.controls.push({ subtype, params });
+    if (!this.rejectControl && subtype === "set_model") { this.emit({ type: "modelChanged", model: String(params.model) }); await Bun.sleep(0); }
     return { type: "control_response", response: this.rejectControl ? { subtype: "error", error: "control policy denied" } : { subtype: "success", response: {} } };
   }
 }
@@ -53,7 +54,7 @@ async function setup(permission: Permission = "default") {
   for (const client of clients) await client.request("thread/attach", { threadId: thread.id });
   engine.assertLease = () => { if (!server.leases.read(thread.id)) throw new ProtocolError(-32005, "lease required"); };
   const command = async (text: string) => { a.model.input = text; await a.controller.key("\r", { name: "return" }); };
-  return { home, engine, server, a, b, thread, command };
+  return { home, engine, server, a, b, thread, command, connect };
 }
 
 test("P1-1 readonly cycle and picker preserve launch restrictions without any RPC", async () => {
@@ -116,12 +117,12 @@ test("mode commands use leases, preserve input/state on rejection, and retry tak
   expect(a.model.message).toContain("另一客户端持有控制权（phone）"); expect(engine.controls).toHaveLength(0);
   await b.client.request("thread/lease/release", { threadId: thread.id });
   await command("/takeover"); expect(a.model.message).toContain("已接管");
-  await command("/model opus"); expect(a.model.liveModel).toBe("opus");
+  await command("/model opus"); expect(a.model.thread?.model).toBe("opus");
   await command("/effort high"); expect(engine.controls.at(-1)).toEqual({ subtype: "set_max_thinking_tokens", params: { max_thinking_tokens: 32768 } });
   expect(a.model.effort).toBe("high");
   engine.rejectControl = true;
   await command("/effort max"); expect(a.model.effort).toBe("high"); expect(a.model.input).toBe("/effort max");
-  await command("/model forbidden"); expect(a.model.liveModel).toBe("opus"); expect(a.model.message).toContain("policy denied");
+  await command("/model forbidden"); expect(a.model.thread?.model).toBe("opus"); expect(a.model.message).toContain("policy denied");
   await command("/effort invalid"); expect(a.model.message).toContain("用法");
   engine.rejectPermission = true;
   await a.controller.key("", { name: "tab", shift: true }); expect(a.model.thread?.permission).toBe("default");
@@ -172,6 +173,21 @@ test("P2-2 takeover rejects a live holder then succeeds after expiry and disconn
   await b.client.request("thread/lease/acquire", { threadId: thread.id }); b.client.close();
   await wait(() => !server.leases.read(thread.id));
   await command("/takeover"); expect(server.leases.read(thread.id)?.holder.clientId).toBe(a.client.clientId);
+});
+
+test("P2-3 model metadata synchronizes peers and fresh attach; unsupported effort state stays explicitly local", async () => {
+  const { a, b, thread, command, connect } = await setup();
+  await command("/model gpt-5"); await wait(() => b.model.thread?.model === "gpt-5");
+  expect(b.model.contextWindow).toBe(400_000);
+  await command("/effort high"); expect(render(a.model, 220)).toContain("high（本端设置）");
+  expect(b.model.effort).toBeUndefined();
+  await a.client.request("thread/attach", { threadId: thread.id }); expect(a.model.effort).toBeUndefined();
+  b.model.input = "/effort low"; await b.controller.key("\r", { name: "return" });
+  expect(b.model.effort).toBe("low"); b.client.close(); expect(b.model.effort).toBeUndefined();
+  await command("/model opus");
+  const c = await connect("reconnected"); await c.client.request("thread/attach", { threadId: thread.id });
+  expect(c.model.thread?.model).toBe("opus"); expect(c.model.effort).toBeUndefined();
+  expect(c.model.contextWindow).toBe(200_000);
 });
 
 test("compact lost response retries with one queued turn and does not invent a boundary", async () => {
@@ -236,8 +252,8 @@ test("PTY modes: Shift+Tab three-state cycle, permissions, effort, model, compac
     key("/permissions\r"); await wait(() => screen.includes("4. dontAsk"));
     key("4\r"); await wait(() => screen.includes("mode dontAsk |"));
     key("\x1b[Z"); await wait(() => screen.includes("mode default |"));
-    key("/effort high\r"); await wait(() => screen.includes("effort high |"));
-    key("\t"); await wait(() => screen.includes("effort max |"));
+    key("/effort high\r"); await wait(() => screen.includes("effort high（本端设置） |"));
+    key("\t"); await wait(() => screen.includes("effort max（本端设置） |"));
     expect(engine.controls.at(-1)).toEqual({ subtype: "set_max_thinking_tokens", params: { max_thinking_tokens: 65536 } });
     key("/model gpt-5\r"); await wait(() => screen.includes("model gpt-5 |")); expect(screen).toContain("~400000");
     key("/compact\r"); await wait(() => engine.sent.length === 1);

@@ -74,7 +74,7 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
   const thread = model.thread, usage = model.usage;
   const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "unknown"} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection} | ${thread?.id ?? "connecting"}`);
   const context = contextUsage(usage?.contextTokens, model.contextWindow);
-  const status = wrap(`mode ${nativePermission(thread?.permission)} | effort ${model.effort ?? "—"} | model ${model.liveModel ?? thread?.model ?? "—"} | ctx [${context.bar}] ${context.percent ?? "?"}% / ${model.contextWindowEstimated ? "~" : ""}${model.contextWindow}${model.launchPermission === undefined ? " | bypass 上限未知，已隐藏" : ""}`, width).slice(0, height - 4);
+  const status = wrap(`mode ${nativePermission(thread?.permission)} | effort ${model.effort ? `${model.effort}（本端设置）` : "—"} | model ${thread?.model ?? "—"} | ctx [${context.bar}] ${context.percent ?? "?"}% / ${model.contextWindowEstimated ? "~" : ""}${model.contextWindow}${model.launchPermission === undefined ? " | bypass 上限未知，已隐藏" : ""}`, width).slice(0, height - 4);
   if (model.leaseExpiresAt > Date.now()) status.splice(0, status.length, ...wrap(`${status.join("")} | 持有控制权至 ${new Date(model.leaseExpiresAt).toLocaleTimeString()} · /release`, width).slice(0, height - 4));
   const body = [...model.items.values()].sort((a, b) => a.seq - b.seq).flatMap(i => [...renderItem(i, model.expandedReasoning, model.expandedPlan), ""]);
   for (const q of model.queue) body.push(`排队 #${q.position + 1}: ${q.preview}`);

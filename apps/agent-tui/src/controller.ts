@@ -144,8 +144,9 @@ export class Controller {
       if (command === "/takeover") { await this.acquire(30_000); this.model.message = "已接管控制权（独占输入 30 秒）；请重试原操作 · /release 释放"; return; }
       if (command === "/model") {
         controlSuccess(await this.client.request("thread/engineControl", { threadId, subtype: "set_model", params: { model: value } }));
-        this.model.liveModel = value; this.model.message = `模型：${value}`;
-        if (this.model.contextWindowEstimated) this.model.contextWindow = estimatedContextWindow(value);
+        const { thread } = await this.client.request("thread/read", { threadId });
+        this.model.thread = thread; this.model.message = `模型：${thread.model ?? "默认"}`;
+        if (this.model.contextWindowEstimated) this.model.contextWindow = estimatedContextWindow(thread.model);
       } else {
         if (!this.submission || this.submission.text !== text || this.submission.threadId !== threadId) this.submission = { text, threadId, id: crypto.randomUUID() };
         await this.client.request("thread/compact", { threadId, clientTurnId: this.submission.id, ...(value ? { instructions: value } : {}) });
