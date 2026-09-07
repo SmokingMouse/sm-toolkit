@@ -1,6 +1,6 @@
 import { AgentClient, type ClientState } from "@smokingmouse/agent-server/client";
 import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
-import { controlError, estimatedContextWindow, nativePermission, type Effort } from "./modes.js";
+import { controlError, estimatedContextWindow, nativePermission, permissionModes, type Effort, type Permission } from "./modes.js";
 
 export interface RequestCard { request: PendingServerRequest; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
 export class TuiModel {
@@ -16,6 +16,9 @@ export class TuiModel {
   expandedPlan = true;
   permissionPicker?: number;
   bypassAvailable = false;
+  get permissionChoices(): Permission[] {
+    return this.thread?.permission === "readonly" ? ["readonly"] : [...permissionModes(this.bypassAvailable), "dontAsk"];
+  }
   effort?: Effort;
   liveModel?: string;
   contextWindow = 200_000;

@@ -10,7 +10,7 @@ test("permission cycle table excludes dontAsk and gates bypass, including legacy
     const modes = permissionModes(bypass);
     modes.forEach((mode, index) => expect(nextPermission(mode, bypass)).toBe(modes[(index + 1) % modes.length]));
     expect(nextPermission("dontAsk", bypass)).toBe("default");
-    expect(nextPermission("readonly", bypass)).toBe("default");
+    expect(nextPermission("readonly", bypass)).toBe("readonly");
   }
   expect(nextPermission("auto-edit", false)).toBe("plan");
   expect(nextPermission("full", true)).toBe("default");

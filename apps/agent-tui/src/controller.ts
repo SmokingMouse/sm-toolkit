@@ -82,6 +82,10 @@ export class Controller {
     await this.client.request("thread/lease/acquire", { threadId: this.model.thread!.id });
   }
   private async setPermission(permission: Permission): Promise<void> {
+    if (this.model.thread?.permission === "readonly") {
+      this.model.message = "readonly 为启动限制，当前线程保持 readonly；更改需新建线程";
+      return;
+    }
     await this.acquire();
     const { thread } = await this.client.request("thread/permission/set", { threadId: this.model.thread!.id, permission });
     this.model.thread = thread;
@@ -93,7 +97,7 @@ export class Controller {
     this.model.effort = effort;
     this.model.message = `effort ${effort} · thinking budget ${effortBudgets[effort]}`;
   }
-  private get permissionChoices(): Permission[] { return [...permissionModes(this.model.bypassAvailable), "dontAsk"]; }
+  private get permissionChoices(): Permission[] { return this.model.permissionChoices; }
   private async permissionKey(text: string | undefined, key: Key): Promise<void> {
     const choices = this.permissionChoices;
     if (key.name === "escape") { this.model.permissionPicker = undefined; return; }

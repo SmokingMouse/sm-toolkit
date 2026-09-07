@@ -55,6 +55,18 @@ async function setup(permission: Permission = "default") {
   return { home, engine, server, a, b, thread, command };
 }
 
+test("P1-1 readonly cycle and picker preserve launch restrictions without any RPC", async () => {
+  const { a, engine, server, thread, command } = await setup("readonly");
+  await a.controller.key("", { name: "tab", shift: true });
+  expect(a.model.thread?.permission).toBe("readonly"); expect(engine.permissions).toHaveLength(0);
+  expect(server.log.options<any>(thread.id).permission).toBe("readonly");
+  await command("/permissions");
+  expect(a.model.permissionChoices).toEqual(["readonly"]);
+  expect(render(a.model)).toContain("> 1. readonly (当前)");
+  await a.controller.key("\r", { name: "return" });
+  expect(engine.permissions).toHaveLength(0); expect(server.leases.read(thread.id)).toBeUndefined();
+});
+
 test("mode commands use leases, preserve input/state on rejection, and retry takeover", async () => {
   const { a, b, thread, engine, command } = await setup();
   await b.client.request("thread/lease/acquire", { threadId: thread.id });

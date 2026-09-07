@@ -79,7 +79,7 @@ export function render(model: TuiModel, columns = 100, rows = 30): string {
   for (const q of model.queue) body.push(`排队 #${q.position + 1}: ${q.preview}`);
   for (const c of model.cards.values()) if (c !== model.activeCard) body.push(...renderCard(c));
   const content = body.flatMap(line => wrap(line, width));
-  const picker = model.permissionPicker === undefined ? [] : ["权限模式 · ↑↓/数字选择 · Enter 确认 · Esc 取消", ...[...permissionModes(model.bypassAvailable), "dontAsk"].map((p, i) => `${i === model.permissionPicker ? ">" : " "} ${i + 1}. ${p}${p === nativePermission(thread?.permission) ? " (当前)" : ""}`)];
+  const picker = model.permissionPicker === undefined ? [] : ["权限模式 · ↑↓/数字选择 · Enter 确认 · Esc 取消", ...model.permissionChoices.map((p, i) => `${i === model.permissionPicker ? ">" : " "} ${i + 1}. ${p}${p === nativePermission(thread?.permission) ? " (当前)" : ""}`)];
   const card = (model.activeCard ? renderCard(model.activeCard) : picker).flatMap(line => wrap(line, width));
   const footer = model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : "Enter 发送 · Shift+Tab 权限 · Tab effort · Ctrl-P 计划 · Ctrl-R 推理 · Ctrl-C 两次退出";
   const available = height - 4 - status.length;

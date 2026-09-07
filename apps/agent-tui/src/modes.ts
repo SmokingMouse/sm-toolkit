@@ -9,6 +9,7 @@ export function permissionModes(bypass: boolean): Permission[] {
 }
 export function nextPermission(mode: Permission | undefined, bypass: boolean): Permission {
   const modes = permissionModes(bypass);
+  if (mode === "readonly") return "readonly";
   return modes[(modes.indexOf(nativePermission(mode)) + 1) % modes.length];
 }
 // UI budget presets, not a claim that native --effort labels have this mapping.
