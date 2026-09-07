@@ -17,13 +17,17 @@ export const StartTurnParamsSchema = z.object({
 });
 export const AttachResultSchema = z.object({ thread: ThreadSchema, items: z.array(ItemSchema), nextSeq: z.number().int().positive(), queue: z.array(QueuedTurnSchema), pendingRequests: z.array(PendingServerRequestSchema) });
 const threadResult = z.object({ thread: ThreadSchema, deduplicated: z.literal(true).optional() });
+const resumeOptions = ThreadOptionsSchema.extend({ threadId: IdSchema.optional(), engineThreadId: IdSchema.optional(), backend: BackendSchema.optional() });
+export const ResumeThreadParamsSchema = z.union([
+  resumeOptions.extend({ threadId: IdSchema }), resumeOptions.extend({ engineThreadId: IdSchema }),
+]);
 export const MethodSchemas = {
   initialize: {
     params: z.object({ protocolVersion: z.string(), token: z.string().optional(), client: z.object({ name: z.string(), version: z.string(), kind: z.string(), label: z.string() }), capabilities: z.object({ serverRequests: z.array(ServerRequestMethodSchema).optional(), notifications: z.object({ optOut: z.array(z.string()) }).optional() }).optional() }),
     result: z.object({ protocolVersion: z.literal("as/1"), server: z.object({ name: z.string(), version: z.string() }), clientId: IdSchema, capabilities: z.object({ backends: z.array(BackendSchema), steer: z.boolean(), fork: z.boolean(), leases: z.boolean(), externalProviders: z.boolean(), maxQueuedTurns: z.number().int().nonnegative() }) }),
   },
   "thread/start": { params: StartThreadParamsSchema, result: threadResult },
-  "thread/resume": { params: ThreadOptionsSchema.extend({ threadId: IdSchema.optional(), engineThreadId: IdSchema.optional(), backend: BackendSchema.optional() }).refine(p => p.threadId || p.engineThreadId, "threadId or engineThreadId required"), result: threadResult.extend({ attached: z.boolean() }) },
+  "thread/resume": { params: ResumeThreadParamsSchema, result: threadResult.extend({ attached: z.boolean() }) },
   "thread/attach": { params: threadId.extend({ sinceSeq: z.number().int().nonnegative().optional(), limit }), result: AttachResultSchema },
   "thread/detach": { params: threadId, result: empty },
   "thread/items/list": { params: threadId.extend({ cursor: z.string().optional(), limit, turnId: IdSchema.optional(), direction: z.enum(["asc", "desc"]).optional() }), result: z.object({ items: z.array(ItemSchema), nextCursor: z.string().nullable() }) },

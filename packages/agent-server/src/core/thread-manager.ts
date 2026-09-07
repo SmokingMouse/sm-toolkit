@@ -44,7 +44,7 @@ export class ThreadManager {
   queue(threadId: string): TurnQueue {
     this.get(threadId);
     let queue = this.queues.get(threadId);
-    if (!queue) { queue = new TurnQueue(threadId, this.log, () => this.session(threadId), status => this.setStatus(threadId, status), this.maxQueuedTurns); this.queues.set(threadId, queue); }
+    if (!queue) { queue = new TurnQueue(threadId, this.log, () => this.session(threadId), status => this.setStatus(threadId, status), this.maxQueuedTurns, error => this.engineDied(threadId, error)); this.queues.set(threadId, queue); }
     return queue;
   }
   setStatus(threadId: string, status: ThreadStatus): void {
@@ -151,6 +151,7 @@ export class ThreadManager {
       case "approval":
         if (!this.approvals) throw new ProtocolError(ErrorCode.internal, "ApprovalBroker is not configured");
         this.approvals.create(event.request, event.respond); break;
+      case "approvalExpired": this.approvals?.expire(event.requestId, event.reason); break;
     }
   }
   engineDied(threadId: string, error: RpcError): void {

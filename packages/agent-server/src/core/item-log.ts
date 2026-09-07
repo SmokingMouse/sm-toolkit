@@ -10,6 +10,7 @@ export function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 type JsonRow = { data_json: string };
+type ItemRow = { id: string; seq: number; turn_id: string; type: string; status: string; payload_json: string; started_at: number; completed_at: number | null };
 export interface ApprovalRow { id: string; thread_id: string; status: string; params_json: string; decided_by: string | null; decision_json: string | null }
 export type NotificationListener = (notification: ServerNotification) => void;
 
@@ -97,14 +98,18 @@ export class ItemLog {
     return rows.map((r, position) => ({ turnId: r.turn_id, ...(r.client_turn_id ? { clientTurnId: r.client_turn_id } : {}), position, enqueuedAtMs: r.enqueued_at, preview: r.preview }));
   }
   private key(threadId: string, itemId: string): string { return `${threadId}\0${itemId}`; }
-  private readItems(threadId: string): Item[] {
-    const rows = this.db.query<{ id: string; seq: number; turn_id: string; type: string; status: string; payload_json: string; started_at: number; completed_at: number | null }, [string]>("SELECT * FROM items WHERE thread_id = ? ORDER BY seq").all(threadId);
-    return rows.map(r => structuredClone(this.partial.get(this.key(threadId, r.id)) ?? ItemSchema.parse({ id: r.id, seq: r.seq, turnId: r.turn_id, type: r.type, status: r.status, payload: JSON.parse(r.payload_json), startedAtMs: r.started_at, ...(r.completed_at !== null ? { completedAtMs: r.completed_at } : {}) })));
+  private decodeItem(threadId: string, row: ItemRow): Item {
+    return structuredClone(this.partial.get(this.key(threadId, row.id)) ?? ItemSchema.parse({ id: row.id, seq: row.seq, turnId: row.turn_id, type: row.type, status: row.status, payload: JSON.parse(row.payload_json), startedAtMs: row.started_at, ...(row.completed_at !== null ? { completedAtMs: row.completed_at } : {}) }));
   }
+  private readItems(threadId: string): Item[] {
+    return this.logRows(threadId).map(row => this.decodeItem(threadId, row));
+  }
+  private logRows(threadId: string): ItemRow[] { return this.db.query<ItemRow, [string]>("SELECT * FROM items WHERE thread_id = ? ORDER BY seq").all(threadId); }
   item(threadId: string, itemId: string): Item {
-    const found = this.readItems(threadId).find(i => i.id === itemId);
-    if (!found) throw new ProtocolError(ErrorCode.engine_protocol_error, "item not found", { threadId, itemId });
-    return found;
+    const partial = this.partial.get(this.key(threadId, itemId)); if (partial) return structuredClone(partial);
+    const row = this.db.query<ItemRow, [string, string]>("SELECT * FROM items WHERE thread_id=? AND id=?").get(threadId, itemId);
+    if (!row) throw new ProtocolError(ErrorCode.engine_protocol_error, "item not found", { threadId, itemId });
+    return this.decodeItem(threadId, row);
   }
   startItem(threadId: string, turnId: string, draft: EngineItem, now = Date.now()): Item {
     const item = this.transaction(() => {
@@ -153,9 +158,8 @@ export class ItemLog {
     const direction = params.direction ?? "asc", limit = params.limit ?? 100;
     const cursor = params.cursor === undefined ? undefined : Number(params.cursor);
     if (cursor !== undefined && (!Number.isSafeInteger(cursor) || cursor < 0)) throw new ProtocolError(ErrorCode.invalid_params, "invalid item cursor");
-    let items = this.readItems(params.threadId).filter(i => (!params.turnId || i.turnId === params.turnId) && (cursor === undefined || (direction === "asc" ? i.seq > cursor : i.seq < cursor)));
-    if (direction === "desc") items.reverse();
-    const more = items.length > limit; items = items.slice(0, limit);
+    const rows = this.db.query<ItemRow, [string, string | null, string | null, number | null, number | null, number]>(`SELECT * FROM items WHERE thread_id=? AND (? IS NULL OR turn_id=?) AND (? IS NULL OR seq ${direction === "asc" ? ">" : "<"} ?) ORDER BY seq ${direction === "asc" ? "ASC" : "DESC"} LIMIT ?`).all(params.threadId, params.turnId ?? null, params.turnId ?? null, cursor ?? null, cursor ?? null, limit + 1);
+    const more = rows.length > limit, items = rows.slice(0, limit).map(row => this.decodeItem(params.threadId, row));
     return { items, nextCursor: more ? String(items.at(-1)!.seq) : null };
   }
   pendingRequests(threadId: string): PendingServerRequest[] { return this.db.query<{ params_json: string }, [string]>("SELECT params_json FROM approvals WHERE thread_id=? AND status='pending' ORDER BY created_at,id").all(threadId).map(r => JSON.parse(r.params_json)); }

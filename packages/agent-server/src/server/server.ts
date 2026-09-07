@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { timingSafeEqual } from "node:crypto";
 import { ApprovalBroker, ItemLog, LeaseManager, ThreadManager, type ApprovalClient } from "../core/index.js";
 import { AsyncQueue, ClaudeEngine, type EngineFactory } from "../engines/index.js";
@@ -32,11 +32,16 @@ export interface InProcessClient {
 
 class Connection implements InProcessClient, ApprovalClient {
   readonly clientId = `c_${crypto.randomUUID()}`;
-  readonly frames = new AsyncQueue<Frame>();
+  private stream?: AsyncQueue<Frame>;
+  get frames(): AsyncIterable<Frame> {
+    if (!this.stream) { this.stream = new AsyncQueue<Frame>(); if (this.closed) this.stream.end(); }
+    return this.stream;
+  }
   readonly serverRequests = new Set<ServerRequestMethod>();
   readonly attached = new Set<string>();
   readonly subscriptions = new Map<string, () => void>();
   readonly reverse = new Map<RpcId, string>();
+  readonly delivered = new Set<string>();
   readonly optOut = new Set<string>();
   label = "in-process";
   initialized = false;
@@ -66,7 +71,7 @@ class Connection implements InProcessClient, ApprovalClient {
         if ("error" in frame) call.reject(new ProtocolError(frame.error.code, frame.error.message, frame.error.data)); else call.resolve(frame.result);
       }
     }
-    this.frames.push(frame);
+    this.stream?.push(structuredClone(frame));
     for (const listener of [...this.listeners]) { try { listener(structuredClone(frame)); } catch { /* Transport consumer isolation. */ } }
   }
   onFrame(listener: (frame: Frame) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
@@ -74,14 +79,15 @@ class Connection implements InProcessClient, ApprovalClient {
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
       this.calls.set(id, { resolve, reject });
-      void this.send({ jsonrpc: "2.0", id, method, params }).catch(error => { this.calls.delete(id); reject(error); });
+      void this.send(JSON.parse(JSON.stringify({ jsonrpc: "2.0", id, method, params }))).catch(error => { this.calls.delete(id); reject(error); });
     });
   }
   notifyInitialized(): Promise<void> { return this.send({ jsonrpc: "2.0", method: "initialized", params: {} }); }
   respond(id: RpcId, result: unknown): Promise<void> { return this.send({ jsonrpc: "2.0", id, result }); }
   sendRequest(request: PendingServerRequest): void {
     // Each connection has its own wire ID; requestId is the durable logical ID.
-    if ([...this.reverse.values()].includes(request.params.requestId)) return;
+    if (this.delivered.has(request.params.requestId)) return;
+    this.delivered.add(request.params.requestId);
     const id = `srv_${this.clientId}_${++this.reverseSequence}`; this.reverse.set(id, request.params.requestId);
     this.emit({ jsonrpc: "2.0", id, method: request.method, params: request.params });
   }
@@ -93,7 +99,7 @@ class Connection implements InProcessClient, ApprovalClient {
     this.subscriptions.clear(); this.attached.clear(); this.reverse.clear();
     this.server.disconnect(this);
     for (const call of this.calls.values()) call.reject(new Error("connection closed"));
-    this.calls.clear(); this.frames.end(); this.listeners.clear();
+    this.calls.clear(); this.stream?.end(); this.listeners.clear(); this.delivered.clear();
   }
 }
 
@@ -110,7 +116,7 @@ export class AgentServer {
   constructor(private readonly options: ServerOptions = {}) {
     this.allowedRoots = (options.allowedRoots ?? [homedir()]).map(root => realpathSync(resolve(root)));
     this.backends = options.backends ?? ["claude"];
-    this.log = new ItemLog(options.databasePath);
+    this.log = new ItemLog(options.databasePath ?? join(homedir(), ".agent-server", "agent-server.db"));
     this.threads = new ThreadManager(this.log, options.engineFactory ?? (backend => {
       if (backend !== "claude") throw new ProtocolError(ErrorCode.unsupported_capability, `backend ${backend} is not installed`);
       return new ClaudeEngine();
@@ -138,6 +144,10 @@ export class AgentServer {
   }
   async receive(connection: Connection, raw: unknown): Promise<void> {
     if (connection.closed) return;
+    if (this.closed) {
+      const id = raw && typeof raw === "object" && "id" in raw && (typeof raw.id === "string" || typeof raw.id === "number") ? raw.id : null;
+      connection.emit({ jsonrpc: "2.0", id, error: new ProtocolError(ErrorCode.engine_unavailable, "server is shutting down").toJSON() }); return;
+    }
     const parsed = FrameSchema.safeParse(raw);
     if (!parsed.success) {
       const id = raw && typeof raw === "object" && "id" in raw && (typeof raw.id === "string" || (typeof raw.id === "number" && Number.isSafeInteger(raw.id))) ? raw.id : null;
@@ -200,7 +210,11 @@ export class AgentServer {
         return this.threads.resume(existing ? p : { ...p, cwd: this.cwd(p.cwd) }, thread => this.attach(connection, thread.id));
       }
       case "thread/attach": { const p = params(method); this.attach(connection, p.threadId); return this.log.snapshot(p.threadId, p.sinceSeq, p.limit); }
-      case "thread/detach": { const p = params(method); this.threads.get(p.threadId); connection.subscriptions.get(p.threadId)?.(); connection.subscriptions.delete(p.threadId); connection.attached.delete(p.threadId); this.approvals.audienceChanged(); return {}; }
+      case "thread/detach": {
+        const p = params(method); this.threads.get(p.threadId); connection.subscriptions.get(p.threadId)?.(); connection.subscriptions.delete(p.threadId); connection.attached.delete(p.threadId);
+        for (const request of this.log.pendingRequests(p.threadId)) connection.delivered.delete(request.params.requestId);
+        this.approvals.audienceChanged(); return {};
+      }
       case "thread/read": return { thread: this.threads.get(params(method).threadId) };
       case "thread/items/list": return this.log.listItems(params(method));
       case "thread/list": {

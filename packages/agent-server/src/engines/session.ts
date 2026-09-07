@@ -10,6 +10,7 @@ export type EngineEvent =
   | { type: "itemCompleted"; turnId: string; item: EngineItem }
   | { type: "turnCompleted"; turnId: string; status: "completed" | "interrupted" | "failed"; usage?: Usage; error?: RpcError }
   | { type: "approval"; request: PendingServerRequest; respond: (result: ServerRequestResult) => void | Promise<void> }
+  | { type: "approvalExpired"; turnId: string; requestId: string; reason: string }
   | { type: "exit"; error?: RpcError };
 
 export interface SessionOptions extends StartThreadParams { threadId: string; engineThreadId?: string; forkSession?: boolean }

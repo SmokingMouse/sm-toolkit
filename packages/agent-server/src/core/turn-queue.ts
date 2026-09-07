@@ -6,7 +6,7 @@ export class TurnQueue {
   private active: string | null = null;
   private frozen = false;
   private dispatch = new Map<string, Promise<void>>();
-  constructor(readonly threadId: string, private readonly log: ItemLog, private readonly engine: () => EngineSession, private readonly status: (status: ThreadStatus) => void, readonly maxQueuedTurns = 8) {}
+  constructor(readonly threadId: string, private readonly log: ItemLog, private readonly engine: () => EngineSession, private readonly status: (status: ThreadStatus) => void, readonly maxQueuedTurns = 8, private readonly onEngineFailure?: (error: RpcError) => void) {}
   get runningTurnId(): string | null { return this.active; }
   get isFrozen(): boolean { return this.frozen; }
   read() { return this.log.queue(this.threadId); }
@@ -14,7 +14,8 @@ export class TurnQueue {
   enqueue(params: MethodParams<"turn/start">): MethodResult<"turn/start"> {
     const existing = this.log.deduplicate<Turn>("turns", params.clientTurnId, params);
     if (existing) return { turn: existing, deduplicated: true };
-    const state = this.log.thread(this.threadId).status.type;
+    const thread = this.log.thread(this.threadId), state = thread.status.type;
+    if (thread.backend === "external") throw new ProtocolError(ErrorCode.unsupported_capability, "external threads are read-only", { threadId: this.threadId });
     if (state === "closed") throw new ProtocolError(ErrorCode.thread_closed, "thread closed", { threadId: this.threadId });
     if (state === "systemError" || state === "spawning") throw new ProtocolError(ErrorCode.engine_unavailable, "resume thread before starting a turn", { threadId: this.threadId, retryable: true });
     this.engine().validateTurn?.(params);
@@ -37,7 +38,7 @@ export class TurnQueue {
     // Set up the promise before invoking the engine, including synchronous fakes.
     const sent = Promise.resolve().then(() => this.engine().sendTurn(turn.id, input.input, input));
     this.dispatch.set(turn.id, sent);
-    void sent.catch(error => { if (this.active === turn.id) this.freeze(rpcError(error)); }).finally(() => { this.dispatch.delete(turn.id); });
+    void sent.catch(error => { if (this.active === turn.id) { if (this.onEngineFailure) this.onEngineFailure(rpcError(error)); else this.freeze(rpcError(error)); } }).finally(() => { this.dispatch.delete(turn.id); });
   }
   private assertActive(expected?: string): string {
     if (!this.active || (expected && expected !== this.active) || this.frozen) throw new ProtocolError(ErrorCode.turn_not_active, "turn is not active", { threadId: this.threadId, turnId: expected });

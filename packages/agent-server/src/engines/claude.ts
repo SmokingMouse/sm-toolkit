@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { EventType, resolveClaudeModel, type AgentEvent, type Cost } from "@smokingmouse/agent";
-import { ErrorCode, ProtocolError, rpcError, type StartTurnParams, type UserInput } from "../protocol/index.js";
+import { ErrorCode, ProtocolError, type StartTurnParams, type UserInput } from "../protocol/index.js";
 import { AsyncQueue, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
 import { ClaudeEventMapper, jsonValue, mapPermissionDecision, mapPermissionRequest, record, type ToolPermissionRequest } from "./claude-mapper.js";
 
@@ -57,6 +57,9 @@ export class ClaudeEngine implements EngineSession {
   private controls = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   private taskParents = new Map<string, string>();
   private sessionGrants = new Set<string>();
+  private nativeRequests = new Map<string, { requestId: string; turnId: string; cancel: () => void }>();
+  private sawTextDelta = false;
+  private sawThinkingDelta = false;
   constructor(private readonly config: ClaudeEngineOptions = {}) {}
   async spawn(options: SessionOptions): Promise<void> {
     this.options = options; this.mapper = new ClaudeEventMapper(options.cwd);
@@ -87,7 +90,7 @@ export class ClaudeEngine implements EngineSession {
   private assertAlive(): void { if (!this.process || this.dead || this.closed) throw new ProtocolError(ErrorCode.engine_unavailable, "Claude session is not alive"); }
   validateTurn(options: StartTurnParams): void {
     if ((options.cwd !== undefined && options.cwd !== this.options?.cwd) || options.sandbox !== undefined || options.effort !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing cwd, sandbox or effort on a live Claude session is not supported");
-    if (options.permission && options.permission !== this.options?.permission) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing permission policy requires a new Claude session");
+    if (options.permission && options.permission !== (this.options?.permission ?? "default")) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing permission policy requires a new Claude session");
     if (options.model && options.model !== this.options?.model && resolveClaudeModel(options.model).env) throw new ProtocolError(ErrorCode.unsupported_capability, "Changing endpoint requires a new Claude session");
   }
   async sendTurn(turnId: string, input: UserInput[], options: StartTurnParams): Promise<void> {
@@ -96,7 +99,7 @@ export class ClaudeEngine implements EngineSession {
     const message = claudeUserMessage(input);
     const model = options.model ?? this.options?.model;
     if (model) await this.control({ subtype: "set_model", model: resolveClaudeModel(model).model });
-    this.active = turnId; this.interrupting = false; this.context = null; this.mapper.beginTurn(turnId);
+    this.active = turnId; this.interrupting = false; this.context = null; this.sawTextDelta = false; this.sawThinkingDelta = false; this.mapper.beginTurn(turnId);
     this.write(message);
   }
   async steer(turnId: string, input: UserInput[]): Promise<void> {
@@ -153,14 +156,25 @@ export class ClaudeEngine implements EngineSession {
       const req: ToolPermissionRequest = { requestId: String(obj.request_id), toolUseId: String(obj.request.tool_use_id), toolName: String(obj.request.tool_name), input: obj.request.input };
       emit(EventType.ToolCall, { id: req.toolUseId, name: req.toolName, input: req.input });
       const grantKey = JSON.stringify([req.toolName, req.input]);
+      let cancelled = false;
       const respond = (decision: Parameters<typeof mapPermissionDecision>[1]) => {
-        if (this.dead || this.closed) return;
+        this.nativeRequests.delete(req.requestId);
+        if (this.dead || this.closed || cancelled) return;
         if ("decision" in decision && decision.decision === "acceptForSession") this.sessionGrants.add(grantKey);
         this.write({ type: "control_response", response: { subtype: "success", request_id: req.requestId, response: mapPermissionDecision(req, decision) } });
         if ("decision" in decision && decision.decision === "abort" && this.active) void this.interrupt(this.active).catch(error => this.fail(new ProtocolError(ErrorCode.engine_unavailable, String(error))));
       };
       if (this.sessionGrants.has(grantKey)) respond({ decision: "accept" });
-      else this.events.push({ type: "approval", request: mapPermissionRequest(req, this.options.threadId, this.active, this.options.cwd ?? process.cwd()), respond });
+      else {
+        const requestId = `ar_${crypto.randomUUID()}`;
+        this.nativeRequests.set(req.requestId, { requestId, turnId: this.active, cancel: () => { cancelled = true; } });
+        this.events.push({ type: "approval", request: mapPermissionRequest({ ...req, requestId }, this.options.threadId, this.active, this.options.cwd ?? process.cwd()), respond });
+      }
+      return;
+    }
+    if (t === "control_cancel_request") {
+      const pending = this.nativeRequests.get(String(obj.request_id));
+      if (pending) { pending.cancel(); this.nativeRequests.delete(String(obj.request_id)); this.events.push({ type: "approvalExpired", turnId: pending.turnId, requestId: pending.requestId, reason: "engine_cancelled" }); }
       return;
     }
     if (typeof obj.session_id === "string" && obj.session_id !== this.engineThreadId) { this.engineThreadId = obj.session_id; this.events.push({ type: "metadata", engineThreadId: this.engineThreadId! }); }
@@ -180,14 +194,20 @@ export class ClaudeEngine implements EngineSession {
     }
     if (t === "stream_event") {
       const delta = obj.event?.delta;
-      if (delta?.type === "text_delta") emit(EventType.TextChunk, { text: delta.text });
-      if (delta?.type === "thinking_delta") emit(EventType.Thinking, { text: delta.thinking });
+      if (delta?.type === "text_delta") { this.sawTextDelta = true; emit(EventType.TextChunk, { text: delta.text }); }
+      if (delta?.type === "thinking_delta") { this.sawThinkingDelta = true; emit(EventType.Thinking, { text: delta.thinking }); }
       return;
     }
     if (t === "assistant") {
       const u = obj.message?.usage;
       if (u) this.context = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-      for (const block of obj.message?.content ?? []) if (block.type === "tool_use") emit(EventType.ToolCall, { id: block.id, name: block.name, input: block.input, parentToolUseId: obj.parent_tool_use_id });
+      for (const block of obj.message?.content ?? []) {
+        if (block.type === "tool_use") emit(EventType.ToolCall, { id: block.id, name: block.name, input: block.input, parentToolUseId: obj.parent_tool_use_id });
+        // Some compatible endpoints omit partials or return an empty result string.
+        if (block.type === "text" && !this.sawTextDelta && block.text) emit(EventType.TextChunk, { text: block.text });
+        if (block.type === "thinking" && !this.sawThinkingDelta && block.thinking) emit(EventType.Thinking, { text: block.thinking });
+      }
+      this.sawTextDelta = false; this.sawThinkingDelta = false;
       return;
     }
     if (t === "user") {
@@ -207,7 +227,7 @@ export class ClaudeEngine implements EngineSession {
       emit(EventType.Result, { text: obj.result, cost }); return;
     }
     if (t === "error") { this.fail(new ProtocolError(ErrorCode.engine_unavailable, String(obj.message ?? obj.error ?? "Claude error"))); return; }
-    if (["keep_alive", "rate_limit_event", "control_cancel_request", "tool_progress", "tool_use_summary", "auth_status"].includes(t)) return;
+    if (["keep_alive", "rate_limit_event", "tool_progress", "tool_use_summary", "auth_status"].includes(t)) return;
     throw new ProtocolError(ErrorCode.engine_protocol_error, "Unknown Claude frame", { raw: JSON.stringify(raw).slice(0, 2000) });
   }
 }
