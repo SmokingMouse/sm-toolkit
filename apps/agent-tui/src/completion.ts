@@ -20,6 +20,9 @@ export const commands: Candidate[] = [
   { name: "image", description: "发送图片：/image <path>" },
   { name: "paste-image", description: "附加 macOS 剪贴板图片（pngpaste）" },
   { name: "steer", description: "向当前 turn 插话：/steer <text>" },
+  { name: "log", description: "展开或折叠系统日志" },
+  { name: "tasks", description: "切换已观测任务底栏" },
+  { name: "agents", description: "折叠或展开子 agent：/agents [id]" },
 ];
 
 /** Contiguous substrings first (earliest first), then subsequences by skipped characters. */

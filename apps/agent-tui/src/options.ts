@@ -19,6 +19,7 @@ Up/Down: select completion; Tab/Enter: insert; Esc: dismiss
 Shift+Tab: permissions; /permissions: picker; Tab: effort; /effort low|medium|high|max
 /model <name>; /compact [instructions]; /takeover; /release; /context <window tokens>
 Ctrl-R: reasoning; Ctrl-P: plan; PageUp/PageDown: history; approvals: y/s/n/a
+Ctrl-L /log: system log; /tasks: tasks; /agents [id]: subagents; F6: panel focus
 Questions: number selects/toggles, Enter advances/submits; type a free answer
 Token and default socket use agent-server HOME/XDG resolution.`;
 

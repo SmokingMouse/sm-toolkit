@@ -1,11 +1,13 @@
 import { AgentClient, type ClientState } from "@smokingmouse/agent-server/client";
-import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
+import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type RpcId, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
+import { classifyEvent, LogBuffer, object, rebuildTasks } from "./observations.js";
+import { errorCode, errorMessage, leaseHolder } from "./errors.js";
 import type { ThreadEntry } from "./sessions.js";
 import type { ImageInput } from "./attachments.js";
 import type { Completion } from "./completion.js";
 import { controlError, estimatedContextWindow, nativePermission, permissionModes, type Effort, type Permission } from "./modes.js";
 
-export interface RequestCard { request: PendingServerRequest; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
+export interface RequestCard { request: PendingServerRequest; responseId?: RpcId; replying?: boolean; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
 export function canResume(thread: Thread | undefined): boolean {
   return !!thread && thread.backend !== "external" && ["systemError", "closed"].includes(thread.status.type);
 }
@@ -18,6 +20,7 @@ export class TuiModel {
   connection: ClientState = "disconnected";
   message = "";
   discardNote = "";
+  leaseWarning = "";
   input = "";
   attachments: ImageInput[] = [];
   completion?: Completion;
@@ -35,21 +38,68 @@ export class TuiModel {
   contextWindow = 200_000;
   contextWindowEstimated = true;
   scroll = 0;
+  logs = new LogBuffer();
+  logExpanded = false;
+  private logAnchorEnd?: number;
+  private logAnchorStart?: number;
+  get logScroll(): number { return this.logAnchorEnd === undefined ? 0 : Math.max(0, this.logs.dropped + this.logs.length - this.logAnchorEnd); }
+  set logScroll(offset: number) {
+    this.logAnchorEnd = offset <= 0 ? undefined : this.logs.dropped + this.logs.length - offset;
+    this.logAnchorStart = undefined;
+  }
+  get logViewportLost(): boolean { return this.logAnchorStart !== undefined && this.logAnchorStart < this.logs.dropped; }
+  logWindowEnd(count: number): number {
+    if (this.logAnchorEnd === undefined) return this.logs.length;
+    if (this.logAnchorStart === undefined) this.logAnchorEnd = Math.max(this.logs.dropped + Math.min(count, this.logs.length), Math.min(this.logs.dropped + this.logs.length, this.logAnchorEnd));
+    return this.logAnchorEnd - this.logs.dropped;
+  }
+  rememberLogWindowStart(index: number): void {
+    if (this.logAnchorEnd !== undefined && this.logAnchorStart === undefined) this.logAnchorStart = this.logs.dropped + index;
+  }
+  logsMayBeMissing = false;
+  logsStartAtAttach = false;
+  tasksVisible = false;
+  taskScroll = 0;
+  panelFocus: "history" | "log" | "tasks" = "history";
+  collapsedAgents = new Set<string>();
+  lease: { state: "none" } | { state: "self"; expiresAtMs: number; threadId: string } | { state: "other"; holder: string } = { state: "none" };
+  get leaseLabel(): string {
+    return this.lease.state === "self" && this.lease.expiresAtMs > Date.now() ? this.leaseWarning ? "释放未确认（未续期）" : "持有/续期中"
+      : this.lease.state === "other" ? `他端持有:${this.lease.holder}（最近拒绝）` : "未持有";
+  }
+  recordError(error: unknown): void {
+    if (errorCode(error) === -32012) this.lease = { state: "other", holder: leaseHolder(error) ?? "未知客户端" };
+    else if (errorCode(error) === -32005) this.lease = { state: "none" };
+    this.message = errorMessage(error); this.changed();
+  }
+  recordLeaseReleaseError(error: unknown): void {
+    if (errorCode(error) === -32012) this.lease = { state: "other", holder: leaseHolder(error) ?? "未知客户端" };
+    this.leaseWarning = `租约释放未确认：${errorMessage(error)}`;
+    this.changed();
+  }
+  get tasks() { return rebuildTasks(this.items.values()); }
+  setConnection(state: ClientState): void {
+    // engineEvent is live-only in AS/1: no item sequence exists to replay this interval.
+    if (this.connection === "connected" && state !== "connected" && this.thread) this.logsMayBeMissing = true;
+    this.connection = state;
+  }
   activeTurnId?: string;
   sessionOperation?: string;
   resumeConfirmation?: string;
   picker?: { entries: ThreadEntry[]; index: number; offset?: number };
-  private sessionModes = new Map<string, { launchPermission?: Permission; leaseExpiresAt: number }>();
+  private sessionModes = new Map<string, { launchPermission?: Permission }>();
   forgetLeases(): void {
     this.leaseExpiresAt = 0;
-    for (const modes of this.sessionModes.values()) modes.leaseExpiresAt = 0;
   }
   select(snapshot: AttachResult): void {
     if (this.thread?.id !== snapshot.thread.id) {
-      if (this.thread) this.sessionModes.set(this.thread.id, { launchPermission: this.launchPermission, leaseExpiresAt: this.leaseExpiresAt });
+      if (this.thread) this.sessionModes.set(this.thread.id, { launchPermission: this.launchPermission });
       const modes = this.sessionModes.get(snapshot.thread.id);
       this.launchPermission = modes?.launchPermission;
-      this.leaseExpiresAt = modes?.leaseExpiresAt ?? 0;
+      this.leaseExpiresAt = 0;
+      this.lease = { state: "none" }; this.leaseWarning = "";
+      this.logs = new LogBuffer(); this.logScroll = 0; this.logsMayBeMissing = false;
+      this.collapsedAgents.clear(); this.taskScroll = 0;
     }
     this.permissionPicker = undefined; this.completion = undefined;
     this.thread = snapshot.thread;
@@ -67,6 +117,7 @@ export class TuiModel {
   }
   snapshot(s: AttachResult): void {
     if (this.thread && this.thread.id !== s.thread.id) return;
+    this.logsStartAtAttach = true;
     this.thread = s.thread; this.queue = s.queue;
     this.effort = undefined;
     if (this.contextWindowEstimated) this.contextWindow = estimatedContextWindow(s.thread.model);
@@ -78,11 +129,11 @@ export class TuiModel {
     for (const request of s.pendingRequests) this.request(request);
     this.changed();
   }
-  request(request: PendingServerRequest): void {
+  request(request: PendingServerRequest, responseId?: RpcId): void {
     if (this.thread && this.thread.id !== request.params.threadId) return;
     const old = this.cards.get(request.params.requestId);
     if (!old || old.state === "offline") this.scroll = 0;
-    this.cards.set(request.params.requestId, { request, state: "pending", question: old?.question ?? 0, answers: old?.answers ?? {}, draft: old?.draft ?? "" });
+    this.cards.set(request.params.requestId, { request, responseId: responseId ?? old?.responseId, state: "pending", question: old?.question ?? 0, answers: old?.answers ?? {}, draft: old?.draft ?? "" });
     this.changed();
   }
   notification(n: ServerNotification): void {
@@ -96,6 +147,7 @@ export class TuiModel {
         }
         break;
       case "thread/permission/changed": if (this.thread) this.thread.permission = n.params.permission; break;
+      case "thread/engineEvent": this.logs.push(classifyEvent(n.params.subtype, n.params.payload)); break;
       case "thread/status/changed": if (this.thread) this.thread.status = n.params.status; break;
       case "thread/queue/changed": this.queue = n.params.queue; break;
       case "thread/tokenUsage/updated": this.usage = n.params.usage; break;
@@ -109,7 +161,15 @@ export class TuiModel {
       }
       case "item/commandExecution/outputDelta": { const i = this.items.get(n.params.itemId); if (i?.type === "commandExecution") i.payload.aggregatedOutput = (i.payload.aggregatedOutput ?? "") + n.params.chunk; break; }
       case "item/fileChange/patchUpdated": { const i = this.items.get(n.params.itemId); if (i?.type === "fileChange") i.payload.changes = n.params.changes; break; }
-      case "item/subAgent/progress": { const i = this.items.get(n.params.itemId); if (i?.type === "subAgent") Object.assign(i.payload, { phase: n.params.phase, progress: n.params.progress }); break; }
+      case "item/subAgent/progress": {
+        const i = this.items.get(n.params.itemId);
+        if (i?.type === "subAgent") {
+          Object.assign(i.payload, { phase: n.params.phase, progress: n.params.progress });
+          const progress = object(n.params.progress);
+          for (const key of ["text", "thinking"] as const) if (typeof progress[key] === "string") i.payload[key] = progress[key];
+        }
+        break;
+      }
       case "serverRequest/resolved": { const c = this.cards.get(n.params.requestId); if (c) { c.state = "resolved"; c.note = `已由 ${n.params.decidedBy.label || n.params.decidedBy.clientId} 处理`; } break; }
       case "serverRequest/expired": { const c = this.cards.get(n.params.requestId); if (c) { c.state = "expired"; c.note = `已过期：${n.params.reason}`; } break; }
       case "error": this.message = n.params.error.message; break;
@@ -122,7 +182,7 @@ export class TuiModel {
 export function bindClient(client: AgentClient, model: TuiModel): () => void {
   let recovering = false;
   const disposers = [client.onSnapshot(s => model.snapshot(s)), client.onStateChange(state => {
-    model.connection = state;
+    model.setConnection(state);
     if (state === "disconnected" && model.thread) recovering = true;
     if (recovering) model.message = state === "connected" ? canResume(model.thread)
       ? "已重连并补齐历史；引擎已停止，请用 /resume 选择会话恢复"
@@ -131,14 +191,17 @@ export function bindClient(client: AgentClient, model: TuiModel): () => void {
     if (state !== "connected") { model.effort = undefined; model.forgetLeases(); model.activeTurnId = undefined; for (const c of model.cards.values()) if (c.state === "pending" || c.state === "sending") c.state = "offline"; }
     model.changed();
   }), client.onError((error, id) => {
-    model.message = controlError(error);
-    for (const handle of client.pendingRequests.values()) {
-      const card = model.cards.get(handle.params.requestId);
-      if (handle.id === id && card?.state === "sending") card.state = "pending";
+    model.recordError(error);
+    // Keep correlation on the card: AgentClient removes pending handles before late errors arrive.
+    for (const card of model.cards.values()) {
+      if (id != null && card.responseId === id && (card.state === "sending" || card.state === "pending")) {
+        if (errorCode(error) === -32014) { card.state = "resolved"; card.note = errorMessage(error); }
+        else if (card.state === "sending") card.state = "pending";
+      }
     }
     model.changed();
   })];
   for (const method of NotificationMethodSchema.options) disposers.push(client.onNotification(method, params => model.notification({ jsonrpc: "2.0", method, params } as ServerNotification)));
-  for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput"] as const) disposers.push(client.onServerRequest(method, r => model.request(r)));
+  for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput"] as const) disposers.push(client.onServerRequest(method, r => model.request(r, r.id)));
   return () => disposers.forEach(fn => fn());
 }

@@ -218,16 +218,17 @@ test("P2-1 ExitPlanMode losing approval never switches permission or suggests ta
   engine.emit({ type: "itemStarted", turnId, item: { id: "plan", type: "plan", payload: { text: "Review" } } });
   engine.emit({ type: "approval", request: { method: "item/permissions/requestApproval", params: { requestId: "race-plan", threadId: thread.id, turnId, itemId: "plan", cwd: home, startedAtMs: Date.now(), permissions: { toolName: "ExitPlanMode", input: {} } } }, respond() {} });
   await wait(() => !!a.model.activeCard && !!b.model.activeCard);
-  const handle = a.client.pendingRequests.get("race-plan")!, respond = handle.respond.bind(handle);
-  let replay = Promise.resolve();
-  handle.respond = result => {
-    replay = b.controller.key("n").then(async () => {
+  // The unified lease excludes rivals after acquisition. Race before a's acquire instead.
+  const request = a.client.request.bind(a.client);
+  a.client.request = async (method, params) => {
+    if (method === "thread/lease/acquire") {
+      await b.controller.key("n");
       await wait(() => a.model.cards.get("race-plan")?.state === "resolved");
-      respond(result);
-    });
+    }
+    return request(method, params);
   };
   await a.controller.key("y");
-  await replay; await a.client.request("server/health", {});
+  await a.client.request("server/health", {});
   expect(a.model.thread?.permission).toBe("plan"); expect(engine.permissions).toHaveLength(0);
   expect(a.model.message).not.toContain("/takeover");
 });

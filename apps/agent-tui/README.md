@@ -27,7 +27,7 @@ Enter 发 `turn/start`；运行时同样入队，显示从 1 起的排队位置�
 | `/model <name>` | `thread/engineControl set_model`，检查原生 success 后读取 thread.model；他端和重连通过 metadata 通知及快照同步 |
 | `/compact [instructions]` | `thread/compact`，正常排队；收到持久化的 `contextCompaction` item 时显示 compact_boundary 分隔，重试复用去重键 |
 | Ctrl-P、Ctrl-R | 分别折叠/展开 plan（默认展开）和 reasoning（默认折叠）；plan 保留正文和每一步状态 |
-| `/takeover`、`/release` | 显式获取 30 秒独占输入 lease / 释放；状态栏显示持有截止时间 |
+| `/takeover`、`/release` | 手动获取独占输入 lease / 释放；活跃时续期，空闲后到期 |
 | `/context <窗口 token 数>` | 覆盖当前 TUI 的上下文窗口估算 |
 | `/new`、`/clear`（Ctrl+N） | 沿用当前 thread 的 cwd、backend、model 起新 thread 并切换；旧 thread 继续运行 |
 | `/threads`（Ctrl+T） | 列出 daemon 全部会话，按最近活动降序；↑/↓ 选择、Enter attach、Esc 取消 |
@@ -39,12 +39,11 @@ Enter 发 `turn/start`；运行时同样入队，显示从 1 起的排队位置�
 
 键位优先级：Ctrl-C 始终可用；会话操作期间按原保护规则丢弃输入（扫描期间允许审批/问题卡）；关闭会话确认、会话选择器、审批卡、权限选择器依次接管按键。Ctrl-N/Ctrl-T 可从普通审批卡切换会话，控制请求提交期间需等确认。补全列表中的普通 Tab/Enter 插入候选，Shift+Tab 保留权限切换；没有补全时 Tab 切 effort，Ctrl-R 切 reasoning，Ctrl-P 切 plan。Shift+Enter/Ctrl-J 始终用于主输入换行，Ctrl-U 清空文字与附件。输入完整无参数命令后，若补全仍开着，先 Enter 插入再 Enter 执行，或加空格后 Enter。
 
-切换会话时按 thread id 保存本端已知启动权限和租约显示，未知会话隐藏 bypass 资格；权限面板、补全和本端 effort 标签重置。草稿及待发附件仍保留。
-
+切换会话时按 thread id 保存本端已知启动权限，清空租约显示并停止旧会话续期，未知会话隐藏 bypass 资格；权限面板、补全和本端 effort 标签重置。草稿及待发附件仍保留。
 
 模式以 `thread.permission`、`thread/permission/changed` 为准；他端通知只更新状态栏，不覆盖本端发送/排队等消息。readonly 是 CLI 启动工具限制，不能安全热切来回：当前或本端记录的启动模式为 readonly 时，快捷键和面板都保持该限制，不发 permission/set；更改需新建线程。
 
-仅目标为 full/bypassPermissions/dontAsk 的提权切换需 lease：TUI 临时获取 5 秒租约，在成功或失败后立即 release；default/acceptEdits/plan、effort/model/compact、ExitPlanMode 审批不主动拿租约。用户先显式 `/takeover` 获取的租约会保留至释放、断线或 30 秒到期，普通操作不偷偷续租。打底门禁的缺租约错误为 `-32005 unauthorized`，他人持有为 `-32012 lease_held`；`-32014 already_resolved` 表示审批已被处理，不引导接管。协议没有强制抢占或持有方剩余 TTL 查询：他人仍持有时 `/takeover` 会拒绝，需等其释放、断线或到期后重新执行；不是轮询命令，也不会擅自持续抢锁。
+租约统一由按 threadId 隔离的 `InputLease` 管理：发送、插话、审批（含 ExitPlanMode）和提权操作在未持有时获取 30 秒短租约，操作进行中每半 TTL 续期，完成或失败后释放；并发操作共享引用计数，最后一项完成才释放。只有 full/bypassPermissions/dontAsk 权限切换属于提权；default/acceptEdits/plan 及 effort/model/compact 控制不主动取租约。手动 `/takeover` 保留租约，只有最近一个 TTL 窗口内有输入或审批活动时才续期；无活动就停止续期，已有租约自然到期，`/release` 可显式放手（在途操作完成后释放）。切换会话立即停止旧 thread 的续期并让原租约到期，新 thread 不复用旧句柄；切回也重新取租约。断线/退出停止所有续期。状态栏保留持有、未持有、他端持有三态；他端信息仅来自最近拒绝，协议没有实时租约广播/查询或强制抢占。观测和 Ctrl-C 中断不取租约，另一客户端持锁也可急停。释放失败不覆盖操作结果，另显「租约释放未确认」；残留租约等待当前 TTL 到期，下次成功取放租约清除警告。`-32012` 提示持有方释放或到期后再 `/takeover`，`-32014` 表示审批已处理并撤卡，`-32005` 保留原生授权原因，不误报为他端持锁。
 
 ExitPlanMode 显示专用审批卡，y 使用 turn 授权、s 使用 session 授权；收到本客户端获胜的 `serverRequest/resolved` 后切换 default。拒绝、审批已处理和他端先答不切模式。
 
@@ -96,3 +95,21 @@ P2-a–f 回归补充：消息去重、错误与丢弃提示共存、跨尺寸 r
 输入 PTY E2E 自己创建 Bun PTY，父进程无需交互式终端。每一步按引擎收包或最新屏幕状态等待（10 秒上限），失败会打印步骤、子进程退出码和末尾终端输出；每例总预算 60 秒，覆盖启动、多个 RPC/渲染步骤及清理。图片例在模拟 pngpaste 中注入 5.2 秒延迟，回归默认 5 秒总超时导致的失败；同步仍等待实际附件状态。模拟程序使用绝对系统命令，TUI 使用测试进程同一 Bun，避免父进程 PATH 中的包装脚本改变测试行为。
 
 四项输入 PTY 用例均显式构造只有 Bun 和模拟 pngpaste 的 PATH，并断言其中没有 git/rg。单测分别验证真实 Git 仓库枚举、可选 rg 命令分支（离线 fixture，不要求本机安装 rg）和无外部程序的 fs 分支。
+
+## 观测面板
+
+系统日志订阅 `thread/engineEvent`，默认只占一行计数。`Ctrl-L` 或 `/log` 展开/折叠，按本地收到时间（UTC）显示 hook 摘要、`local_command` 斜杠命令回显、`api_retry`、`rate_limit`、`model_refusal_fallback`、memory、away_summary。未知 subtype 显示单行 JSON，终端宽度不足时软换行；错误/重试/限流用红色和 `[!]` 标记，限流/重试归类优先于 hook。环形缓冲只保留最近 2000 条，表头显示丢弃计数；摘要最多 2048 字符、subtype 最多 256 字符，超长显示「截断」，不保留无界原始 payload。每帧仅排列可见日志窗口。引擎文字在绘制前过滤终端控制符并拆分换行，不突破固定帧高。
+
+子 agent 按 `parentItemId`（引擎的 `parent_tool_use_id`）嵌套到父工具下面，显示状态、phase 和持续更新的正文；父工具尚未出现时按 seq 保留带 parent 标识的独立项。`/agents` 折叠/展开全部，`/agents <item-id 或 parent-id>` 切换指定项，不存在时提示「没有匹配的子 agent」；Ctrl-R 同时控制子 agent thinking 的显示。键位冲突按上面的优先级处理：普通 Tab 仍用于补全或 effort，Shift-Tab 用于权限，观测分支原来的 Tab 推理映射统一为 Ctrl-R。
+
+`/tasks` 切换底栏。根据 `TaskCreate`、`TaskUpdate`、`TaskList` 工具输入及结构化输出按 item 顺序重建 id、标题、状态；调用开始即乐观刷新，失败/拒绝后撤销，删除状态移除任务，重复快照不重复创建。没有明确 id 的 TaskCreate 使用 `local:<item-id>` 并标 `?`；内部以 Symbol 键与引擎真实字符串 id 隔离，TaskUpdate 不能误改推断项。TaskList 无结构化任务数据时保留当前列表；该面板是已观测任务的重建，不保证覆盖引擎侧未出现在历史中的任务。
+
+展开面板自动获得滚动焦点，F6 在历史、日志、任务之间切换；PgUp/PgDn 滚动当前焦点，日志按事件滚动，任务按行滚动。离开日志尾部后锚定所看事件，新事件不挤走视口；锚定的条目被环形缓冲淘汰时显示「已滚出保留窗口」，不悄悄切换成别的内容，按 PgUp/PgDn 重新定位。回到尾部恢复跟随新事件。面板命令只在本地执行，断线也能切换，不发送给模型。
+
+审批在获取租约后重新核对卡片状态和响应 handle；已经 resolved/expired 的卡片不会被复活。错误回执按卡片保留的 RPC id 关联，不依赖客户端尚未删除的 pending handle。审批获取租约和等待确认期间可继续输入普通消息；等待确认上限 5 秒（客户端超时更短时跟随该值），失败或超时恢复审批按键、释放临时租约，保留答案供手动重试，不自动重发。迟到的确认仍可正常撤卡。
+
+AS/1 的 engineEvent 不在 item 日志中，首次 attach 就标「仅显示接入后事件」，断线后永久标「重连后可能缺失」；已有日志在缓冲上限内保留，重连快照恢复子 agent 和任务，不伪造离线日志。
+
+新增验证：`observations.test.ts` 覆盖事件归类、任务重建、嵌套、重连标识、换行/ANSI 反例和有界窗口；`lease.test.ts` 覆盖短 TTL、并发引用计数、续期、释放与断线；`integration.test.ts` 覆盖真实服务器急停/租约/撤卡、观测 PTY 以及 5000 条事件后按键回显 <50ms 的真实 PTY 基准。测试只启动 MockEngine。
+
+已知限制：极窄终端（columns ≤ 2、有效宽度 1）会丢弃占两列的汉字/emoji 等宽字形，例如 `wrap("宽宽宽", 1)` 返回空行。该存量行为本轮未改，固定帧高规则仍成立；正常宽度终端不受此限制影响。

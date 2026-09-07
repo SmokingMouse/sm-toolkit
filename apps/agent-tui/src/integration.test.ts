@@ -7,6 +7,7 @@ import { ConnectionManager, listenUnix, listenWebSocket, type WirePeer } from "@
 import type { PendingServerRequest, ServerRequestResult } from "@smokingmouse/agent-server/protocol";
 import { bindClient, TuiModel } from "./model.js";
 import { Controller } from "./controller.js";
+import { InputLease } from "./lease.js";
 import { render, renderItem } from "./render.js";
 
 export async function until(predicate: () => boolean): Promise<void> {
@@ -28,7 +29,7 @@ async function setup(transport: "unix" | "ws" = "unix") {
   const clients: AgentClient[] = [];
   cleanup.push(async () => { clients.forEach(c => c.close()); listener.close(); await server.close(); rmSync(home, { recursive: true, force: true }); });
   async function connect(label: string) {
-    const client = new AgentClient(endpoint, { token: "test", client: { name: label, label, kind: "test", version: "1" }, reconnect: { minDelayMs: 150, maxDelayMs: 150 }, capabilities: { serverRequests: ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput"] } });
+    const client = new AgentClient(endpoint, { token: "test", client: { name: label, label, kind: "test", version: "1" }, reconnect: { minDelayMs: 150, maxDelayMs: 150 }, capabilities: { engineEvents: true, serverRequests: ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput"] } });
     clients.push(client); const model = new TuiModel(); bindClient(client, model);
     let exited = false;
     const controller = new Controller(client, model, () => { exited = true; });
@@ -397,3 +398,263 @@ test("P2-2 PTY question card accepts normalized multiline paste without selectin
     expect(engine.sent).toHaveLength(1);
   });
 }, inputPtyTimeout);
+
+test("P0-1: Ctrl-C interrupts under another client's lease before the second press exits", async () => {
+  const { a, b, engine } = await setup();
+  a.model.input = "running"; await a.controller.submit();
+  b.model.input = "/takeover"; await b.controller.submit();
+  await a.controller.key("\x03", { ctrl: true, name: "c" });
+  expect(engine.interrupted).toEqual([engine.sent[0].turnId]); expect(a.exited).toBe(false);
+  await a.controller.key("\x03", { ctrl: true, name: "c" }); expect(a.exited).toBe(true);
+});
+test("P0-1: approval abort still interrupts when its reply lease is denied", async () => {
+  const { a, b, engine, thread } = await setup();
+  a.model.input = "work"; await a.controller.submit(); const turnId = engine.sent[0].turnId;
+  engine.emit({ type: "itemStarted", turnId, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: thread.cwd } } });
+  engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { requestId: "abort-held", threadId: thread.id, turnId, itemId: "cmd", command: "pwd", cwd: thread.cwd, startedAtMs: Date.now() } }, respond() {} });
+  await until(() => !!a.model.activeCard); await b.client.request("thread/lease/acquire", { threadId: thread.id });
+  await a.controller.key("a"); expect(engine.interrupted).toContain(turnId);
+});
+test("P1-3: real server lease excludes rivals across multiple TTLs and releases after long work", async () => {
+  const { a, b, thread } = await setup(), lease = new InputLease(a.client, a.model, 200);
+  let finish!: () => void;
+  try {
+    const work = lease.run(thread.id, () => new Promise<void>(resolve => { finish = resolve; }));
+    await until(() => !!finish); await Bun.sleep(450);
+    await expect(b.client.request("thread/lease/acquire", { threadId: thread.id })).rejects.toMatchObject({ code: -32012 });
+    expect(render(a.model, 160)).toContain("租约:持有/续期中");
+    finish(); await work; expect(render(a.model, 160)).toContain("租约:未持有");
+    await b.client.request("thread/lease/acquire", { threadId: thread.id });
+  } finally { finish?.(); lease.dispose(); }
+});
+
+test("P2-4: first attach marks the live-only log gap even when no events were replayed", async () => {
+  const { a, b, engine, thread } = await setup();
+  await b.client.request("thread/detach", { threadId: thread.id });
+  engine.emit({ type: "engineEvent", backend: "claude", subtype: "memory", payload: { message: "before attach" } });
+  await until(() => a.model.logs.length === 1);
+  await b.client.request("thread/attach", { threadId: thread.id });
+  expect(b.model.logs.length).toBe(0); expect(render(b.model)).toContain("仅显示接入后事件");
+});
+
+test("P2-1: asynchronous already_resolved response withdraws the matching approval card", async () => {
+  const { a, engine, thread, peers } = await setup();
+  a.model.input = "work"; await a.controller.submit(); const turnId = engine.sent[0].turnId;
+  engine.emit({ type: "itemStarted", turnId, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: thread.cwd } } });
+  engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { requestId: "stale", threadId: thread.id, turnId, itemId: "cmd", command: "pwd", cwd: thread.cwd, startedAtMs: Date.now() } }, respond() {} });
+  await until(() => !!a.model.activeCard);
+  a.model.activeCard!.state = "sending";
+  peers[0].send(JSON.stringify({ jsonrpc: "2.0", id: a.client.pendingRequests.get("stale")!.id, error: { code: -32014, message: "server request already resolved" } }));
+  await until(() => a.model.cards.get("stale")?.state === "resolved");
+  expect(a.model.activeCard).toBeUndefined(); expect(a.model.message).toBe("该请求已由其他客户端处理"); expect(a.model.leaseLabel).toBe("未持有");
+});
+
+test("observation commands stay local offline; contested sends and approvals retain input and name lease holder", async () => {
+  const { a, b, engine, thread } = await setup();
+  a.model.connection = "disconnected";
+  for (const command of ["/log", "/tasks", "/agents"]) { a.model.input = command; await a.controller.submit(); expect(a.model.input).toBe(""); }
+  expect(a.model.logExpanded).toBe(true); expect(a.model.tasksVisible).toBe(true); expect(engine.sent).toHaveLength(0);
+  a.model.input = "/agents missing"; await a.controller.submit(); expect(a.model.message).toBe("没有匹配的子 agent");
+  a.model.connection = "connected";
+  b.model.input = "/takeover"; await b.controller.submit();
+  a.model.input = "preserved"; await a.controller.key("\r", { name: "return" });
+  expect(a.model.input).toBe("preserved"); expect(a.model.message).toContain("另一客户端持有控制权：phone"); expect(engine.sent).toHaveLength(0);
+  b.model.input = "/release"; await b.controller.submit();
+  await a.controller.key("\r", { name: "return" }); expect(engine.sent).toHaveLength(1);
+  // Ordinary sends release their short lease, allowing another client to acquire it.
+  b.model.input = "/takeover"; await b.controller.submit();
+  let decided = false;
+  engine.emit({ type: "itemStarted", turnId: engine.sent[0].turnId, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: thread.cwd } } });
+  engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { requestId: "leased", threadId: thread.id, turnId: engine.sent[0].turnId, itemId: "cmd", command: "pwd", cwd: thread.cwd, startedAtMs: Date.now() } }, respond() { decided = true; } });
+  await until(() => !!a.model.activeCard);
+  await a.controller.key("y"); expect(decided).toBe(false); expect(a.model.activeCard?.state).toBe("pending"); expect(a.model.message).toContain("phone");
+  b.model.input = "/release"; await b.controller.submit(); await a.controller.key("y"); await until(() => decided);
+  a.model.input = "/takeover"; await a.controller.submit(); expect(a.model.message).toContain("已接管控制权");
+  a.model.input = "/release"; await a.controller.submit();
+});
+
+test("fix2 P2-1: failed lease cleanup preserves delivered turn result and reports a separate warning", async () => {
+  for (const failure of [new Error("release lost"), Object.assign(new Error("lease taken"), { code: -32012, data: { holder: { label: "phone" } } })]) {
+    const { a, engine } = await setup(); const request = a.client.request.bind(a.client);
+    a.client.request = async (method, params) => { if (method === "thread/lease/release") throw failure; return request(method, params); };
+    a.model.input = "important"; await a.controller.key("\r", { name: "return" });
+    expect(engine.sent).toHaveLength(1); expect(a.model.input).toBe(""); expect(a.model.message).toBe("已发送");
+    expect(a.model.leaseWarning).toContain("租约释放未确认"); expect(render(a.model, 200)).toContain("已发送 · 租约释放未确认");
+  }
+});
+
+test("fix2 P1-1: a resolved or expired card cannot be revived after delayed lease acquisition", async () => {
+  for (const expired of [false, true]) {
+    const { a, b, engine, thread } = await setup();
+    a.model.input = "work"; await a.controller.submit(); const turnId = engine.sent[0].turnId;
+    engine.emit({ type: "itemStarted", turnId, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: thread.cwd } } });
+    engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { requestId: "race", threadId: thread.id, turnId, itemId: "cmd", command: "pwd", cwd: thread.cwd, startedAtMs: Date.now() } }, respond() {} });
+    await until(() => !!a.model.activeCard && !!b.model.activeCard);
+    const request = a.client.request.bind(a.client); let acquiring = false;
+    a.client.request = async (method, params) => { if (method === "thread/lease/acquire") { acquiring = true; await Bun.sleep(150); } return request(method, params); };
+    const reply = a.controller.key("y"); await until(() => acquiring);
+    if (expired) engine.emit({ type: "approvalExpired", turnId, requestId: "race", reason: "timeout" });
+    else await b.controller.key("n");
+    await reply;
+    expect(a.model.cards.get("race")?.state).toBe(expired ? "expired" : "resolved");
+    expect(a.model.activeCard).toBeUndefined(); expect(a.model.lease.state).toBe("none");
+    await a.controller.key("Z"); expect(a.model.input).toBe("Z");
+  }
+});
+
+test("fix2 P1-1: late error correlation survives removed handles; timeout restores retry and releases lease", async () => {
+  const { a, engine, thread, peers } = await setup();
+  a.model.input = "work"; await a.controller.submit(); const turnId = engine.sent[0].turnId;
+  engine.emit({ type: "itemStarted", turnId, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: thread.cwd } } });
+  engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { requestId: "late", threadId: thread.id, turnId, itemId: "cmd", command: "pwd", cwd: thread.cwd, startedAtMs: Date.now() } }, respond() {} });
+  await until(() => !!a.model.activeCard);
+  const card = a.model.activeCard!, handle = a.client.pendingRequests.get("late")!;
+  // No response reaches the server, like a stalled outgoing approval response.
+  const respond = handle.respond; handle.respond = () => {};
+  a.client.options.requestTimeoutMs = 80;
+  await a.controller.key("y");
+  expect(card.state).toBe("pending"); expect(card.replying).toBe(false); expect(a.model.lease.state).toBe("none"); expect(a.model.message).toContain("超时");
+  // Simulate client bookkeeping removal while preserving the card's response correlation.
+  const pending = Object.getOwnPropertyDescriptor(a.client, "pendingRequests");
+  Object.defineProperty(a.client, "pendingRequests", { configurable: true, get: () => new Map() });
+  card.state = "sending";
+  peers[0].send(JSON.stringify({ jsonrpc: "2.0", id: handle.id, error: { code: -32014, message: "already resolved" } }));
+  await until(() => card.state === "resolved"); expect(a.model.activeCard).toBeUndefined();
+  if (pending) Object.defineProperty(a.client, "pendingRequests", pending); else Reflect.deleteProperty(a.client, "pendingRequests");
+  handle.respond = respond;
+});
+
+test("fix2 P1-1 PTY: rival during acquire, immediate resolve and slow network keep keyboard and lease usable", async () => {
+  const { home, engine, thread, manager, b } = await setup();
+  const state = join(home, "state"), tokenDir = join(state, "sm-toolkit", "agent-server");
+  mkdirSync(tokenDir, { recursive: true }); writeFileSync(join(tokenDir, "token"), "test\n");
+  let acquireDelay = 0, acquired = false, resolvedDelay = 0, dropResolved = false;
+  const accept = manager.accept.bind(manager);
+  manager.accept = peer => {
+    const send = peer.send.bind(peer);
+    peer.send = text => {
+      const frame = JSON.parse(text);
+      if (frame.method === "serverRequest/resolved") {
+        if (dropResolved) return;
+        if (resolvedDelay) { setTimeout(() => send(text), resolvedDelay); return; }
+      }
+      send(text);
+    };
+    const connection = accept(peer), receive = connection.receive.bind(connection);
+    connection.receive = text => {
+      if (JSON.parse(text).method === "thread/lease/acquire" && acquireDelay) { acquired = true; setTimeout(() => receive(text), acquireDelay); }
+      else receive(text);
+    };
+    return connection;
+  };
+  let screen = ""; const decoder = new TextDecoder();
+  const current = () => screen.slice(screen.lastIndexOf("\x1b[H")).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\r/g, "");
+  const proc = Bun.spawn([resolve(import.meta.dir, "../bin/agent-tui"), "--attach", thread.id, "--socket", join(home, "sock")], {
+    env: { ...process.env, HOME: home, XDG_STATE_HOME: state, XDG_RUNTIME_DIR: "", HERDR_PANE_ID: "", TERM: "xterm-256color" },
+    terminal: { cols: 160, rows: 40, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } },
+  });
+  try {
+    await until(() => current().includes(thread.id.slice(0, 11)) && current().includes("> ")); proc.terminal!.write("work\r"); await until(() => engine.sent.length === 1);
+    const turnId = engine.sent[0].turnId;
+    engine.emit({ type: "itemStarted", turnId, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: home } } });
+    const approval = async (id: string) => {
+      engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { requestId: id, threadId: thread.id, turnId, itemId: "cmd", command: `pwd ${id}`, cwd: home, startedAtMs: Date.now() } }, respond() {} });
+      await until(() => current().includes(`Command: pwd ${id}`));
+    };
+    await approval("rival"); acquireDelay = 200; proc.terminal!.write("y"); await until(() => acquired);
+    await b.controller.key("n"); await until(() => current().includes("已由 phone 处理") && current().includes("租约:未持有"));
+    await Bun.sleep(250); // Also check after the delayed acquire round trip completes.
+    expect(current()).not.toContain("审批确认中"); acquireDelay = 0;
+    proc.terminal!.write("Z"); await until(() => current().includes("> Z")); proc.terminal!.write("\x15"); await until(() => current().endsWith("> "));
+    await approval("instant"); proc.terminal!.write("y"); await until(() => current().includes("已由 agent-tui 处理") && current().includes("租约:未持有"));
+    await approval("slow"); resolvedDelay = 300; proc.terminal!.write("y"); await until(() => current().includes("审批确认中"));
+    proc.terminal!.write("N"); await until(() => current().includes("> N"));
+    await until(() => !current().includes("审批确认中") && current().includes("租约:未持有")); proc.terminal!.write("\x15"); await until(() => current().endsWith("> "));
+    resolvedDelay = 0; dropResolved = true; await approval("timeout"); proc.terminal!.write("y");
+    await Bun.sleep(5100); await until(() => current().includes("审批回复超时") && current().includes("租约:未持有"));
+    await b.client.request("thread/lease/acquire", { threadId: thread.id }); await b.client.request("thread/lease/release", { threadId: thread.id });
+    proc.terminal!.write("y"); await until(() => current().includes("该请求已由其他客户端处理") && !current().includes("审批确认中"));
+    proc.terminal!.write("K"); await until(() => current().includes("> K"));
+  } finally { if (proc.exitCode === null) proc.kill(); await proc.exited; proc.terminal?.close(); }
+}, 15000);
+
+test("P1-2 PTY benchmark: input echo stays below 50ms after 5000 engine events", async () => {
+  const { home, engine, thread } = await setup();
+  const state = join(home, "state"), tokenDir = join(state, "sm-toolkit", "agent-server");
+  mkdirSync(tokenDir, { recursive: true }); writeFileSync(join(tokenDir, "token"), "test\n");
+  let screen = ""; const decoder = new TextDecoder();
+  const proc = Bun.spawn([resolve(import.meta.dir, "../bin/agent-tui"), "--attach", thread.id, "--socket", join(home, "sock")], {
+    env: { ...process.env, HOME: home, XDG_STATE_HOME: state, XDG_RUNTIME_DIR: "", HERDR_PANE_ID: "", TERM: "xterm-256color" },
+    terminal: { cols: 160, rows: 40, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } },
+  });
+  try {
+    await until(() => screen.includes("\x1b[H") && screen.includes(thread.id.slice(0, 11)) && screen.includes("> ")); proc.terminal!.write("\x0c");
+    for (let i = 0; i < 5000; i++) engine.emit({ type: "engineEvent", backend: "claude", subtype: "memory", payload: { message: `benchmark-${i}` } });
+    await until(() => screen.includes("已丢弃 3000 条") && screen.includes("benchmark-4999"));
+    const timings: number[] = []; let input = "";
+    for (const letter of "ABCDE") {
+      screen = ""; input += letter; const start = performance.now(); proc.terminal!.write(letter);
+      await until(() => screen.includes(`> ${input}`)); timings.push(performance.now() - start);
+    }
+    console.info(`P1-2 PTY 5000 events: echo ms=${timings.map(t => t.toFixed(2)).join(",")}, max=${Math.max(...timings).toFixed(2)}`);
+    expect(Math.max(...timings)).toBeLessThan(50);
+  } finally { if (proc.exitCode === null) proc.kill(); await proc.exited; proc.terminal?.close(); }
+}, 15000);
+
+test("observe PTY: engine event folding/scrolling, nested agents, task refresh and reconnect gap", async () => {
+  const { home, engine, thread, manager } = await setup();
+  const state = join(home, "state"), tokenDir = join(state, "sm-toolkit", "agent-server");
+  mkdirSync(tokenDir, { recursive: true }); writeFileSync(join(tokenDir, "token"), "test\n");
+  let screen = ""; const decoder = new TextDecoder();
+  const current = () => screen.slice(screen.lastIndexOf("\x1b[H")).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\r/g, "");
+  const proc = Bun.spawn([resolve(import.meta.dir, "../bin/agent-tui"), "--attach", thread.id, "--socket", join(home, "sock")], {
+    env: { ...process.env, HOME: home, XDG_STATE_HOME: state, XDG_RUNTIME_DIR: "", HERDR_PANE_ID: "", TERM: "xterm-256color" },
+    terminal: { cols: 160, rows: 60, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } },
+  });
+  try {
+    await until(() => current().includes(thread.id.slice(0, 11)) && current().includes("> "));
+    proc.terminal!.write("observe\r"); await until(() => engine.sent.length === 1);
+    const turnId = engine.sent[0].turnId;
+    const subtypes = ["stop_hook_summary", "local_command", "api_retry", "rate_limit", "model_refusal_fallback", "memory", "away_summary", "unknown_future"];
+    for (const subtype of subtypes) engine.emit({ type: "engineEvent", backend: "claude", turnId, subtype, payload: { message: `echo-${subtype}`, extra: { retained: true } } });
+    await until(() => current().includes("系统日志 8 条")); expect(current()).not.toContain("echo-local_command");
+    proc.terminal!.write("\x0c"); await until(() => current().includes("unknown_future") && current().endsWith("> "));
+    for (const subtype of subtypes) expect(current()).toContain(subtype);
+    expect(current()).toContain('"extra":{"retained":true}'); expect(screen).toContain("\x1b[31m");
+    proc.terminal!.write("/log \r"); await until(() => current().includes("折叠 · Ctrl-L")); expect(current()).not.toContain("echo-local_command");
+    engine.emit({ type: "itemStarted", turnId, item: { id: "parent", type: "toolCall", payload: { name: "Agent", input: { prompt: "inspect" } } } });
+    engine.emit({ type: "itemStarted", turnId, item: { id: "child", type: "subAgent", payload: { kind: "agent", parentItemId: "parent", phase: "working", text: "CHILD TEXT" } } });
+    engine.emit({ type: "itemStarted", turnId, item: { id: "nested", type: "subAgent", payload: { kind: "agent", parentItemId: "child", phase: "working", text: "NESTED TEXT" } } });
+    await until(() => current().includes("NESTED TEXT"));
+    expect(current()).toContain("      NESTED TEXT"); expect(current()).toContain("[inProgress] working · parent parent");
+    engine.emit({ type: "itemUpdated", turnId, item: { id: "child", type: "subAgent", payload: { kind: "agent", parentItemId: "parent", phase: "working", text: "CHILD STREAMED", progress: { text: "CHILD STREAMED" } } } });
+    await until(() => current().includes("CHILD STREAMED")); expect(current()).not.toContain("CHILD TEXT");
+    proc.terminal!.write("/agents child\r"); await until(() => current().includes("▸ SubAgent child")); expect(current()).not.toContain("NESTED TEXT");
+    proc.terminal!.write("/agents child\r"); await until(() => current().includes("NESTED TEXT"));
+    engine.emit({ type: "itemCompleted", turnId, item: { id: "child", type: "subAgent", payload: { kind: "agent", parentItemId: "parent", phase: "done", text: "CHILD FINAL" } } });
+    await until(() => current().includes("[completed] done") && current().includes("CHILD FINAL"));
+    proc.terminal!.write("/tasks \r"); await until(() => current().includes("Tasks 0"));
+    engine.emit({ type: "itemStarted", turnId, item: { id: "create", type: "toolCall", payload: { name: "TaskCreate", input: { id: "42", subject: "PTY TASK" } } } });
+    await until(() => current().includes("[pending] #42 PTY TASK"));
+    engine.emit({ type: "itemStarted", turnId, item: { id: "update", type: "toolCall", payload: { name: "TaskUpdate", input: { taskId: "42", status: "completed" } } } });
+    await until(() => current().includes("[completed] #42 PTY TASK"));
+    engine.emit({ type: "itemStarted", turnId, item: { id: "list", type: "toolCall", payload: { name: "TaskList", input: { tasks: [{ id: "99", subject: "LIST TASK", status: "in_progress" }] } } } });
+    await until(() => current().includes("[in_progress] #99 LIST TASK")); expect(current()).not.toContain("[completed] #42");
+    proc.terminal!.write("/tasks \r"); await until(() => !current().includes("Tasks 1"));
+    for (let i = 0; i < 40; i++) engine.emit({ type: "engineEvent", backend: "claude", turnId, subtype: "memory", payload: { message: `scroll-event-${i}` } });
+    await until(() => current().includes("系统日志 48 条"));
+    proc.terminal!.write("/log \r"); await until(() => current().includes("scroll-event-39"));
+    proc.terminal!.write("\x1b[5~"); await until(() => !current().includes("scroll-event-39") && current().includes("scroll-event-34"));
+    proc.terminal!.write("\x1b[6~"); await until(() => current().includes("scroll-event-39"));
+    manager.close();
+    engine.emit({ type: "engineEvent", backend: "claude", turnId, subtype: "local_command", payload: { message: "OFFLINE LOST" } });
+    await until(() => current().includes("重连后可能缺失") && current().includes("| connected"));
+    expect(current()).not.toContain("OFFLINE LOST"); expect(engine.spawnCount).toBe(1);
+    proc.terminal!.write("/log \r"); await until(() => current().includes("折叠 · Ctrl-L"));
+    proc.terminal!.write("/tasks \r");
+    try { await until(() => current().includes("[in_progress] #99 LIST TASK")); }
+    catch (error) { throw new Error(`${String(error)}\n${current()}`); }
+    proc.terminal!.write("\x03"); await until(() => engine.interrupted.length === 1); proc.terminal!.write("\x03");
+    expect(await Promise.race([proc.exited, Bun.sleep(3000).then(() => -100)])).toBe(0);
+  } finally { if (proc.exitCode === null) proc.kill(); await proc.exited; proc.terminal?.close(); }
+}, 15000);

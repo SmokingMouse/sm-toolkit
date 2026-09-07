@@ -11,11 +11,12 @@ function gate() { let release!: () => void; const promise = new Promise<void>(re
 function setup() {
   const model = new TuiModel(); model.thread = thread("old"); model.connection = "connected";
   const calls: Array<[string, any]> = [];
-  const client = { state: "connected", async request(method: string, params: any) {
+  const client = { state: "connected", options: {}, onStateChange: () => () => {}, onNotification: () => () => {}, async request(method: string, params: any) {
     calls.push([method, params]);
     if (method === "thread/list") return { threads: [thread("old"), thread("new")], nextCursor: null };
     if (method === "thread/items/list") return { items: [], nextCursor: null };
     if (method === "thread/attach") return { thread: thread(params.threadId), items: [], queue: [], pendingRequests: [], nextSeq: 1 };
+    if (method === "thread/lease/acquire") return { lease: { expiresAtMs: Date.now() + params.ttlMs } };
     return { thread: thread("new") };
   } } as unknown as AgentClient;
   return { model, calls, client, controller: new Controller(client, model, () => {}) };
@@ -28,7 +29,6 @@ test("selector sorts recent activity first with stable id tie break without muta
 test("integration: switching threads isolates launch eligibility and lease display while preserving drafts", async () => {
   const { model, controller } = setup();
   model.launchPermission = "bypassPermissions"; model.leaseExpiresAt = Date.now() + 30000;
-  const expiry = model.leaseExpiresAt;
   model.effort = "high"; model.permissionPicker = 2;
   model.input = "draft\nsecond line"; model.attachments = [{ type: "image", path: "/tmp/test.png", mime: "image/png" }];
   await controller.sessions.run("/resume", "new");
@@ -36,7 +36,7 @@ test("integration: switching threads isolates launch eligibility and lease displ
   expect(model.permissionPicker).toBeUndefined(); expect(model.effort).toBeUndefined();
   expect(model.input).toBe("draft\nsecond line"); expect(model.attachments).toHaveLength(1);
   await controller.sessions.run("/resume", "old");
-  expect(model.bypassAvailable).toBe(true); expect(model.leaseExpiresAt).toBe(expiry);
+  expect(model.bypassAvailable).toBe(true); expect(model.leaseExpiresAt).toBe(0);
   await controller.sessions.run("/resume", "new");
   model.forgetLeases();
   await controller.sessions.run("/resume", "old");
@@ -262,7 +262,7 @@ test("P2-f: approval decisions remain usable while thread listing is delayed", a
     client.request = async (method, params) => { if (method === "thread/list") await pending.promise; return original(method, params); };
     const request = { method: "item/commandExecution/requestApproval" as const, params: { threadId: "old", turnId: "turn", itemId: "item", requestId: "approval", startedAtMs: 0, command: "pwd", cwd: "/tmp" } };
     let decision: unknown;
-    Object.defineProperty(client, "pendingRequests", { value: new Map([["approval", { ...request, respond: (value: unknown) => { decision = value; } }]]) });
+    Object.defineProperty(client, "pendingRequests", { value: new Map([["approval", { ...request, respond: (value: unknown) => { decision = value; model.cards.get("approval")!.state = "resolved"; model.changed(); } }]]) });
     model.request(request); model.input = "existing draft";
     const operation = controller.sessions.run("/threads");
     expect(render(model, 120, 20)).toContain("审批/问题卡可操作");
@@ -277,7 +277,7 @@ test("P2-f: user question drafts and Enter work during the no-argument resume sc
   client.request = async (method, params) => { if (method === "thread/list") await pending.promise; return original(method, params); };
   const request = { method: "item/tool/requestUserInput" as const, params: { threadId: "old", turnId: "turn", itemId: "item", requestId: "question", startedAtMs: 0, isBlocking: true, questions: [{ id: "q", question: "Continue?" }] } };
   let answer: unknown;
-  Object.defineProperty(client, "pendingRequests", { value: new Map([["question", { ...request, respond: (value: unknown) => { answer = value; } }]]) });
+  Object.defineProperty(client, "pendingRequests", { value: new Map([["question", { ...request, respond: (value: unknown) => { answer = value; model.cards.get("question")!.state = "resolved"; model.changed(); } }]]) });
   model.request(request);
   const operation = controller.sessions.run("/resume");
   await controller.key("yes"); await controller.key(undefined, { name: "return" });

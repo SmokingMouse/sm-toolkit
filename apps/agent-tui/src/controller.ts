@@ -5,13 +5,16 @@ import { pickerOffset } from "./render.js";
 import { imageInput, messageInput, pasteImage, unquote } from "./attachments.js";
 import { CompletionSource } from "./completion.js";
 import { controlError, controlSuccess, effortBudgets, efforts, estimatedContextWindow, nativePermission, nextEffort, nextPermission, permissionModes, type Effort, type Permission } from "./modes.js";
+import { InputLease } from "./lease.js";
 
 export interface Key { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean; paste?: boolean; sequence?: string }
 export class Controller {
   private completions = new CompletionSource();
+  get inFlight(): boolean { return this.submitting || this.controlling || !!this.model.activeCard?.replying; }
   private interruptedAt = -Infinity;
   private submitting = false;
   private controlling = false;
+  readonly lease: InputLease;
   private submission?: { text: string; threadId: string; turnId?: string; id: string };
   readonly sessions: Sessions;
   private columns = 100;
@@ -20,9 +23,11 @@ export class Controller {
     this.columns = columns; this.rows = rows;
     if (this.model.picker) this.model.picker.offset = pickerOffset(this.model, columns, rows);
   }
-  constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) { this.sessions = new Sessions(client, model); }
+  constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) { this.sessions = new Sessions(client, model); this.lease = new InputLease(client, model); }
+  dispose(): void { this.lease.dispose(); }
   async key(text: string | undefined, key: Key = {}): Promise<void> {
     try {
+      this.lease.touch(this.model.thread?.id);
       if (key.ctrl && key.name === "c") {
         if (this.now() - this.interruptedAt < 1500) { this.exit(); return; }
         this.interruptedAt = this.now(); this.model.message = "已请求中断；1.5 秒内再按 Ctrl-C 退出";
@@ -70,8 +75,17 @@ export class Controller {
         }
         return;
       }
+      if (key.ctrl && key.name === "l") { this.toggleLog(); return; }
+      if (key.name === "f6") {
+        const focus = ["history", ...(this.model.logExpanded ? ["log"] : []), ...(this.model.tasksVisible ? ["tasks"] : [])] as const;
+        this.model.panelFocus = focus[(focus.indexOf(this.model.panelFocus) + 1) % focus.length] as typeof this.model.panelFocus; return;
+      }
+      if (!this.model.activeCard && (key.name === "pageup" || key.name === "pagedown") && this.model.panelFocus !== "history") {
+        const field = this.model.panelFocus === "log" ? "logScroll" : "taskScroll";
+        this.model[field] = Math.max(0, this.model[field] + (key.name === "pageup" ? 5 : -5)); return;
+      }
       if (key.name === "pageup" || key.name === "pagedown") { this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? (this.model.activeCard ? -10 : 10) : (this.model.activeCard ? 10 : -10))); return; }
-      if (this.model.activeCard) { await this.cardKey(this.model.activeCard, text, key); return; }
+      if (this.model.activeCard?.state === "pending" && !this.model.activeCard.replying) { await this.cardKey(this.model.activeCard, text, key); return; }
       if (this.model.permissionPicker !== undefined) { await this.permissionKey(text, key); return; }
       if (key.paste || (key.ctrl && key.name === "j") || (key.shift && ["return", "enter"].includes(key.name ?? ""))) {
         this.model.input += key.paste ? (text ?? "") : "\n";
@@ -105,7 +119,7 @@ export class Controller {
       this.model.completion = undefined;
       const next = await this.completions.complete(draft, this.model.thread?.cwd ?? process.cwd());
       if (draft === this.model.input) this.model.completion = next;
-    } catch (error) { this.model.message = controlError(error); }
+    } catch (error) { this.model.recordError(error); }
     finally { this.resize(); this.model.changed(); }
   }
   async submit(): Promise<void> {
@@ -113,6 +127,15 @@ export class Controller {
     const attachments = [...this.model.attachments];
     if (this.sessions.busy) { this.sessions.rejectInput(); return; }
     if (this.submitting || this.controlling) { this.model.message = "提交进行中，本次提交已丢弃，请稍后重试"; this.model.changed(); return; }
+    if (text.trim() === "/log") { this.toggleLog(); this.model.input = ""; this.model.changed(); return; }
+    if (text.trim() === "/tasks") { this.model.tasksVisible = !this.model.tasksVisible; this.model.panelFocus = this.model.tasksVisible ? "tasks" : "history"; this.model.input = ""; this.model.changed(); return; }
+    if (text.trim() === "/agents" || text.trim().startsWith("/agents ")) {
+      const id = text.trim().slice(7).trim(), agents = [...this.model.items.values()].filter(i => i.type === "subAgent" && (!id || i.id === id || i.payload.parentItemId === id));
+      if (!agents.length) this.model.message = "没有匹配的子 agent";
+      const collapse = agents.some(i => !this.model.collapsedAgents.has(i.id));
+      for (const i of agents) { if (collapse) this.model.collapsedAgents.add(i.id); else this.model.collapsedAgents.delete(i.id); }
+      this.model.input = ""; this.model.changed(); return;
+    }
     if ((!text.trim() && !attachments.length) || !thread) return;
     if (this.client.state !== "connected") throw new Error("连接尚未恢复，输入已保留");
     const [command, ...args] = text.trim().split(/\s+/);
@@ -151,10 +174,10 @@ export class Controller {
       const clientTurnId = this.submission.id;
       if (steer) {
         if (!this.model.activeTurnId) throw new Error("当前 turn id 未知；请用普通输入排队");
-        await this.client.request("turn/steer", { threadId: thread.id, expectedTurnId: this.model.activeTurnId, input, clientTurnId });
+        await this.withLease(thread.id, () => this.client.request("turn/steer", { threadId: thread.id, expectedTurnId: turnId!, input, clientTurnId }));
         this.model.message = "已插话";
       } else {
-        const { turn } = await this.client.request("turn/start", { threadId: thread.id, input, clientTurnId });
+        const { turn } = await this.withLease(thread.id, () => this.client.request("turn/start", { threadId: thread.id, input, clientTurnId }));
         const queued = this.model.queue.find(q => q.turnId === turn.id);
         this.model.message = queued ? `已排队 #${queued.position + 1}` : turn.status === "queued" ? "已入队，等待队列位置" : "已发送";
       }
@@ -173,18 +196,8 @@ export class Controller {
     this.controlling = true;
     try { await action(); } catch (error) { throw new Error(controlError(error, true)); } finally { this.controlling = false; }
   }
-  private async acquire(ttlMs: number): Promise<void> {
-    const { lease } = await this.client.request("thread/lease/acquire", { threadId: this.model.thread!.id, ttlMs });
-    this.model.leaseExpiresAt = lease.expiresAtMs;
-  }
   private async withEscalationLease(action: () => Promise<void>): Promise<void> {
-    if (this.model.leaseExpiresAt > this.now()) { await action(); return; }
-    await this.acquire(5000);
-    try { await action(); }
-    finally {
-      try { await this.client.request("thread/lease/release", { threadId: this.model.thread!.id }); }
-      finally { this.model.leaseExpiresAt = 0; }
-    }
+    await this.lease.run(this.model.thread!.id, action);
   }
   private async setPermission(permission: Permission): Promise<void> {
     if (this.model.readonlyRestricted) {
@@ -235,8 +248,8 @@ export class Controller {
     await this.control(async () => {
       const threadId = this.model.thread!.id;
       if (command === "/effort") { await this.setEffort(value as Effort); return; }
-      if (command === "/release") { await this.client.request("thread/lease/release", { threadId }); this.model.leaseExpiresAt = 0; this.model.message = "已释放控制权"; return; }
-      if (command === "/takeover") { await this.acquire(30_000); this.model.message = "已接管控制权（独占输入 30 秒）；请重试原操作 · /release 释放"; return; }
+      if (command === "/release") { await this.lease.relinquish(threadId); this.model.message = "已释放控制权"; return; }
+      if (command === "/takeover") { await this.lease.takeover(threadId); this.model.message = "已接管控制权（活跃时续期，空闲后到期）；请重试原操作 · /release 释放"; return; }
       if (command === "/model") {
         controlSuccess(await this.client.request("thread/engineControl", { threadId, subtype: "set_model", params: { model: value } }));
         const { thread } = await this.client.request("thread/read", { threadId });
@@ -250,6 +263,40 @@ export class Controller {
     });
     return true;
   }
+  private toggleLog(): void { this.model.logExpanded = !this.model.logExpanded; this.model.panelFocus = this.model.logExpanded ? "log" : "history"; }
+  private async withLease<T>(threadId: string, action: () => Promise<T> | T): Promise<T> {
+    return this.lease.run(threadId, action);
+  }
+  private async reply(card: RequestCard, send: () => void): Promise<void> {
+    if (card.replying) return;
+    card.replying = true; this.model.changed();
+    const handle = this.client.pendingRequests.get(card.request.params.requestId);
+    try {
+      await this.withLease(card.request.params.threadId, () => {
+        // The acquire round trip may resolve/expire/replace this card. Never revive it.
+        if (card.state !== "pending" || this.model.cards.get(card.request.params.requestId) !== card) return;
+        if (!handle || this.client.pendingRequests.get(card.request.params.requestId) !== handle) {
+          card.state = "expired"; card.note = "请求已失效，等待新快照"; this.model.changed(); return;
+        }
+        card.responseId = handle.id;
+        return new Promise<void>((resolve, reject) => {
+          let finished = false;
+          const finish = (error?: Error) => { if (finished) return; finished = true; clearTimeout(timer); unsubscribe(); error ? reject(error) : resolve(); };
+          const check = () => {
+            if (this.model.cards.get(card.request.params.requestId) !== card || card.state === "resolved" || card.state === "expired") finish();
+            else if (card.state === "pending" || card.state === "offline") finish(new Error(this.model.message || "审批回复尚未确认"));
+          };
+          const unsubscribe = this.model.onChange(check);
+          const timer = setTimeout(() => {
+            if (card.state === "sending") { card.state = "pending"; card.note = "审批回复超时，可重试；不会自动重发"; }
+            finish(new Error("审批回复超时，可重试；不会自动重发")); this.model.changed();
+          }, Math.min(this.client.options.requestTimeoutMs ?? 5000, 5000));
+          timer.unref(); card.state = "sending";
+          try { send(); check(); this.model.changed(); } catch (error) { if (card.state === "sending") card.state = "pending"; finish(error instanceof Error ? error : new Error(String(error))); }
+        });
+      });
+    } finally { card.replying = false; this.model.changed(); }
+  }
   private async cardKey(card: RequestCard, text: string | undefined, key: Key): Promise<void> {
     if (card.state !== "pending") return;
     const handle = this.client.pendingRequests.get(card.request.params.requestId);
@@ -259,7 +306,7 @@ export class Controller {
       // Treat the entire paste as draft text, including digits that select options when typed.
       if (key.paste) { card.draft += text ?? ""; return; }
       const question = handle.params.questions[card.question];
-      if (key.name === "escape") { handle.respond({ answers: {} }); card.state = "sending"; return; }
+      if (key.name === "escape") { await this.reply(card, () => handle.respond({ answers: {} })); return; }
       const choose = (number: number) => {
         const option = question?.options?.[number - 1]; if (!option || !question) return;
         const selected = card.answers[question.id]?.answers ?? [];
@@ -274,7 +321,7 @@ export class Controller {
         }
         card.draft = "";
         if (card.question + 1 < handle.params.questions.length) { card.question++; this.model.scroll = 0; return; }
-        handle.respond({ answers: card.answers }); card.state = "sending"; return;
+        await this.reply(card, () => handle.respond({ answers: card.answers })); return;
       }
       if (key.name === "backspace") card.draft = Array.from(card.draft).slice(0, -1).join("");
       else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) card.draft += text;
@@ -283,31 +330,23 @@ export class Controller {
     const choices = { y: "accept", s: "acceptForSession", n: "reject", a: "abort" } as const;
     const decision = key.name === "escape" ? "reject" : choices[text?.toLowerCase() as keyof typeof choices];
     if (!decision) return;
-    if (handle.method === "item/permissions/requestApproval") {
-      if (handle.params.permissions.toolName === "ExitPlanMode" && (decision === "accept" || decision === "acceptForSession")) {
-        await this.control(async () => {
-          if (card.state !== "pending" || !this.client.pendingRequests.has(handle.params.requestId)) throw new Error("审批已失效或由另一客户端处理");
-          // Only the winning, server-confirmed approval may change the mode.
-          await new Promise<void>((resolve, reject) => {
-            const disposers: Array<() => void> = [];
-            const finish = (error?: Error) => { clearTimeout(timer); disposers.forEach(fn => fn()); error ? reject(error) : resolve(); };
-            const timer = setTimeout(() => finish(new Error("退出计划审批未确认；请等待状态通知或重连")), 10_000);
-            disposers.push(this.client.onNotification("serverRequest/resolved", p => {
-              if (p.requestId === handle.params.requestId) finish(p.decidedBy.clientId === this.client.clientId ? undefined : new Error("审批已由另一客户端处理"));
-            }), this.client.onNotification("serverRequest/expired", p => {
-              if (p.requestId === handle.params.requestId) finish(new Error(`审批已过期：${p.reason}`));
-            }), this.client.onStateChange(state => { if (state !== "connected") finish(new Error("审批连接中断；等待重连快照")); }), this.client.onError((error, id) => { if (id === handle.id) finish(error); }));
-            card.state = "sending";
-            try { handle.respond({ permissions: handle.params.permissions, scope: decision === "acceptForSession" ? "session" : "turn" }); } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
-          });
-          await this.setPermission("default");
-        });
-        return;
-      }
-      handle.respond({ permissions: decision === "accept" || decision === "acceptForSession" ? handle.params.permissions : {}, scope: decision === "acceptForSession" ? "session" : "turn" });
-      // Permissions replies have no abort variant in AS v1; deny, then interrupt the turn.
-      if (decision === "abort") await this.client.request("turn/interrupt", { threadId: handle.params.threadId, turnId: handle.params.turnId });
-    } else handle.respond({ decision });
-    if (card.state === "pending") card.state = "sending";
+    const exitPlan = handle.method === "item/permissions/requestApproval" && handle.params.permissions.toolName === "ExitPlanMode" && (decision === "accept" || decision === "acceptForSession");
+    let won = false;
+    const unsubscribe = this.client.onNotification("serverRequest/resolved", p => {
+      if (p.requestId === handle.params.requestId) won = p.decidedBy.clientId === this.client.clientId;
+    });
+    let replied = false;
+    try {
+      await this.reply(card, () => {
+        if (handle.method === "item/permissions/requestApproval") handle.respond({ permissions: decision === "accept" || decision === "acceptForSession" ? handle.params.permissions : {}, scope: decision === "acceptForSession" ? "session" : "turn" });
+        else handle.respond({ decision });
+      });
+      replied = true;
+      if (exitPlan && won && this.model.thread?.id === handle.params.threadId) await this.control(() => this.setPermission("default"));
+    } finally {
+      unsubscribe();
+      // Even a denied approval lease must never disable the emergency stop.
+      if (decision === "abort" && (!replied || handle.method === "item/permissions/requestApproval")) await this.client.request("turn/interrupt", { threadId: handle.params.threadId, turnId: handle.params.turnId });
+    }
   }
 }

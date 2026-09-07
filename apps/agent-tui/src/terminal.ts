@@ -11,8 +11,8 @@ export async function runTerminal(client: AgentClient, model: TuiModel): Promise
   let stop!: () => void;
   const done = new Promise<void>(resolve => { stop = resolve; });
   const controller = new Controller(client, model, stop);
-  const draw = () => { timer = undefined; output.write("\x1b[H" + render(model, output.columns, output.rows).replace(/\n/g, "\x1b[K\r\n") + "\x1b[K"); };
-  const schedule = () => { controller.resize(output.columns, output.rows); if (!timer) timer = setTimeout(draw, 32); };
+  const draw = () => { timer = undefined; output.write("\x1b[H" + render(model, output.columns, output.rows, true).replace(/\n/g, "\x1b[K\r\n") + "\x1b[K"); };
+  const schedule = () => { controller.resize(output.columns, output.rows); if (!timer) timer = setTimeout(draw, 16); };
   // Complete each async edit before applying the next key in the same PTY chunk.
   let edits = Promise.resolve();
   const keyboard = new TerminalInput((text: string | undefined, key: Key) => {
@@ -20,7 +20,7 @@ export async function runTerminal(client: AgentClient, model: TuiModel): Promise
     edits = edits.then(() => {
       const pending = controller.key(text, key);
       // Session RPCs stay in flight so subsequent keys are rejected (or answer a scan-time card).
-      if (!controller.sessions.busy) return pending;
+      if (!controller.sessions.busy && !controller.inFlight) return pending;
       void pending;
     });
   });
@@ -32,7 +32,7 @@ export async function runTerminal(client: AgentClient, model: TuiModel): Promise
   process.on("SIGTERM", stop); process.on("SIGHUP", stop);
   try { draw(); await done; }
   finally {
-    clearTimeout(timer); dispose(); keyboard.close(); input.off("data", data); input.off("end", stop); output.off("resize", schedule);
+    clearTimeout(timer); dispose(); controller.dispose(); keyboard.close(); input.off("data", data); input.off("end", stop); output.off("resize", schedule);
     process.off("SIGTERM", stop); process.off("SIGHUP", stop);
     input.setRawMode(wasRaw); input.pause(); output.write("\x1b[?2004l\x1b[?25h\x1b[?1049l");
   }
