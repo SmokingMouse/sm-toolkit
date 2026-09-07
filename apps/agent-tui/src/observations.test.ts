@@ -39,6 +39,20 @@ test("P1-2: bounded ring retains latest 2000 events and lays out only visible en
   const start = performance.now(); for (let i = 0; i < 20; i++) render(model);
   expect((performance.now() - start) / 20).toBeLessThan(10);
 });
+test("fix2 P2-2: a scrolled log window stays anchored until explicit eviction notice or navigation", () => {
+  const model = new TuiModel(); model.logExpanded = true;
+  const ingest = (start: number, end: number) => { for (let i = start; i < end; i++) model.logs.push(classifyEvent("memory", { message: `entry-${i}` }, 0)); };
+  const entries = () => render(model, 100, 30).split("\n").filter(line => line.includes("memory: entry-"));
+  ingest(0, 2000); model.logScroll = 100;
+  const before = entries(); expect(before.at(-1)).toContain("entry-1899");
+  ingest(2000, 2500); expect(entries()).toEqual(before); expect(model.logScroll).toBe(600);
+  model.logScroll = 100_000; const oldest = entries(); expect(oldest[0]).toContain("entry-500");
+  ingest(2500, 3000);
+  expect(entries()).toEqual([]); expect(render(model)).toContain("已滚出保留窗口");
+  model.logScroll -= 5; expect(entries().length).toBeGreaterThan(0); expect(render(model)).not.toContain("已滚出保留窗口");
+  model.logScroll = 0; expect(entries().at(-1)).toContain("entry-2999");
+  ingest(3000, 3001); expect(entries().at(-1)).toContain("entry-3000");
+});
 test("P1-1: newlines and ANSI in every observation field cannot overflow a fixed-height frame", () => {
   const model = new TuiModel(), hostile = "one\ntwo\nthree\x1b[2J\x1b]52;c;clipboard\x07\r\x00";
   model.tasksVisible = true; model.logExpanded = true;

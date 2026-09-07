@@ -109,13 +109,18 @@ export function render(model: TuiModel, columns = 100, rows = 30, color = false)
     const count = Math.min(Math.floor(budget / 3), Math.max(0, budget - panels.length - (model.tasksVisible ? 1 : 0)));
     let lines: string[] = [];
     // Scroll by events, lay out only the entries needed to fill this viewport.
-    const end = model.logs.length - Math.min(model.logScroll, Math.max(0, model.logs.length - count));
-    for (let index = end - 1; index >= 0 && lines.length < count; index--) {
+    const end = model.logWindowEnd(count);
+    let index = end - 1;
+    for (; index >= 0 && lines.length < count && !model.logViewportLost; index--) {
       const entry = model.logs.at(index)!;
       const entryLines = wrap(`${new Date(entry.time).toISOString().slice(11, 23)} ${entry.error ? "[!] " : ""}${entry.subtype}: ${entry.summary.replace(/\r?\n/g, " ↵ ")}`, width);
       lines = [...entryLines.map(line => color && entry.error ? `\x1b[31m${line}\x1b[0m` : line), ...lines];
     }
-    panels.push(...lines.slice(Math.max(0, lines.length - count)));
+    if (model.logViewportLost) panels.push(...wrap("已滚出保留窗口 · PgUp/PgDn 重新定位", width).slice(0, count));
+    else {
+      if (count > 0) model.rememberLogWindowStart(index + 1);
+      panels.push(...lines.slice(Math.max(0, lines.length - count)));
+    }
   }
   if (!model.activeCard && model.tasksVisible && panels.length < budget) {
     const tasks = [...model.tasks.values()];

@@ -18,7 +18,22 @@ export class TuiModel {
   scroll = 0;
   logs = new LogBuffer();
   logExpanded = false;
-  logScroll = 0;
+  private logAnchorEnd?: number;
+  private logAnchorStart?: number;
+  get logScroll(): number { return this.logAnchorEnd === undefined ? 0 : Math.max(0, this.logs.dropped + this.logs.length - this.logAnchorEnd); }
+  set logScroll(offset: number) {
+    this.logAnchorEnd = offset <= 0 ? undefined : this.logs.dropped + this.logs.length - offset;
+    this.logAnchorStart = undefined;
+  }
+  get logViewportLost(): boolean { return this.logAnchorStart !== undefined && this.logAnchorStart < this.logs.dropped; }
+  logWindowEnd(count: number): number {
+    if (this.logAnchorEnd === undefined) return this.logs.length;
+    if (this.logAnchorStart === undefined) this.logAnchorEnd = Math.max(this.logs.dropped + Math.min(count, this.logs.length), Math.min(this.logs.dropped + this.logs.length, this.logAnchorEnd));
+    return this.logAnchorEnd - this.logs.dropped;
+  }
+  rememberLogWindowStart(index: number): void {
+    if (this.logAnchorEnd !== undefined && this.logAnchorStart === undefined) this.logAnchorStart = this.logs.dropped + index;
+  }
   logsMayBeMissing = false;
   logsStartAtAttach = false;
   tasksVisible = false;
