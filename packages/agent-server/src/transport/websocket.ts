@@ -2,11 +2,12 @@ import { ConnectionManager, type ManagedConnection } from "./connection-manager.
 import { MAX_MESSAGE_BYTES } from "./ndjson.js";
 
 interface SocketData { connection?: ManagedConnection }
-export interface WebSocketTransport { readonly url: string; readonly port: number; close(): Promise<void> }
+export interface WebSocketTransport { readonly url: string; readonly port: number; close(): void }
 
 export function listenWebSocket(manager: ConnectionManager, options: { port?: number; hostname?: string } = {}): WebSocketTransport {
   const hostname = options.hostname ?? "127.0.0.1";
   if (hostname !== "127.0.0.1" && hostname !== "::1") throw new Error("agent-server WebSocket must bind to loopback");
+  const sockets = new Set<Bun.ServerWebSocket<SocketData>>();
   const server = Bun.serve<SocketData>({
     hostname, port: options.port ?? 0,
     fetch(request, server) {
@@ -19,6 +20,7 @@ export function listenWebSocket(manager: ConnectionManager, options: { port?: nu
       closeOnBackpressureLimit: true,
       idleTimeout: 0,
       open(socket) {
+        sockets.add(socket);
         try {
           socket.data.connection = manager.accept({
             send(text) { if (socket.send(text) === 0) throw new Error("WebSocket closed or message dropped"); },
@@ -30,8 +32,14 @@ export function listenWebSocket(manager: ConnectionManager, options: { port?: nu
         if (typeof message !== "string") { socket.close(1003, "AS requires text messages"); socket.data.connection?.close(); return; }
         socket.data.connection?.receive(message);
       },
-      close(socket) { socket.data.connection?.close(); },
+      close(socket) { sockets.delete(socket); socket.data.connection?.close(); },
     },
   });
-  return { port: server.port!, url: `ws://${hostname === "::1" ? "[::1]" : hostname}:${server.port}`, close: () => server.stop(true) };
+  return { port: server.port!, url: `ws://${hostname === "::1" ? "[::1]" : hostname}:${server.port}`, close() {
+    for (const socket of sockets) { socket.data.connection?.close(); socket.terminate(); }
+    sockets.clear();
+    // Bun 1.3.14 can leave stop's promise pending after a WS close/reconnect cycle.
+    // terminate + stop synchronously release our sockets/listener; do not await that promise.
+    void server.stop(true); server.unref();
+  } };
 }
