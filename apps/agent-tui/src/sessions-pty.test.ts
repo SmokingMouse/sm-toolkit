@@ -59,6 +59,8 @@ test("sessions PTY: /new /clear /threads /fork /resume, Ctrl-N Ctrl-T, disconnec
     expect(screen).not.toContain("> /newhello world");
     expect(second.engine.sent).toHaveLength(0);
     expect(first.closed).toBe(false); expect(first.interrupted).toHaveLength(0); expect(screen).not.toContain("original history");
+    write("safe next prompt\r"); await wait(() => second.engine.sent.length === 1, "clean prompt after rapid session commands");
+    expect(second.engine.sent[0].input).toEqual([{ type: "text", text: "safe next prompt" }]);
     await create("/clear\r");
     const fourth = await create("\x0e");
     const forked = await create("/fork\r");
@@ -100,7 +102,7 @@ test("sessions PTY: /new /clear /threads /fork /resume, Ctrl-N Ctrl-T, disconnec
     resumed.emit({ type: "itemStarted", turnId: resumed.sent[0].turnId, item: { id: "resumed-answer", type: "agentMessage", payload: { text: "" } } });
     resumed.emit({ type: "itemCompleted", turnId: resumed.sent[0].turnId, item: { id: "resumed-answer", type: "agentMessage", payload: { text: "ANSWER AFTER RESTART" } } });
     await wait(() => screen.includes("ANSWER AFTER RESTART"), "resumed engine streams answer");
-    expect(requests.filter(r => r.method === "turn/start")).toHaveLength(2);
+    expect(requests.filter(r => r.method === "turn/start")).toHaveLength(3);
     expect(requests.some(r => r.method === "thread/close")).toBe(false);
     expect(requests.some(r => r.method === "thread/detach" && r.params.threadId === second.id)).toBe(true);
     proc.terminal!.write("\x03\x03"); expect(await proc.exited).toBe(0);
