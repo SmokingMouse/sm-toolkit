@@ -58,9 +58,12 @@ export function renderCard(card: RequestCard): string[] {
 // Bun.stringWidth handles CJK/emoji terminal cell widths; leave the last column unused.
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 export function wrap(line: string, width: number): string[] {
+  return plain(line).split("\n").flatMap(part => wrapLine(part, width));
+}
+function wrapLine(line: string, width: number): string[] {
   width = Math.max(1, width);
   const lines: string[] = []; let current = "", used = 0;
-  for (const { segment } of segmenter.segment(plain(line))) {
+  for (const { segment } of segmenter.segment(line)) {
     const cells = Bun.stringWidth(segment);
     if (used + cells > width && current) { lines.push(current); current = ""; used = 0; }
     if (cells <= width) { current += segment; used += cells; }

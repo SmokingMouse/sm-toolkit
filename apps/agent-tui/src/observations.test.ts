@@ -16,6 +16,19 @@ test("observation categories retain unknown JSON and highlight retries, limits a
   expect(classifyEvent("hook_started", {}).error).toBe(false);
 });
 const tool = (id: string, seq: number, name: string, input: unknown, output?: unknown): Item => ({ id, seq, turnId: "t", startedAtMs: 0, status: "completed", type: "toolCall", payload: { name, input: input as never, output: output as never } });
+test("P1-1: newlines and ANSI in every observation field cannot overflow a fixed-height frame", () => {
+  const model = new TuiModel(), hostile = "one\ntwo\nthree\x1b[2J\x1b]52;c;clipboard\x07\r\x00";
+  model.tasksVisible = true; model.logExpanded = true;
+  model.items.set("task", tool("task", 1, "TaskCreate", { id: hostile, subject: hostile, status: hostile }));
+  model.items.set("sub", { id: hostile, seq: 2, turnId: "t", startedAtMs: 0, status: "inProgress", type: "subAgent", payload: { kind: "agent", parentItemId: hostile, phase: hostile, text: hostile } });
+  model.logs.push(classifyEvent(hostile, { message: hostile })); model.message = hostile; model.input = hostile;
+  for (const rows of [4, 8, 30]) for (const columns of [20, 100]) {
+    const frame = render(model, columns, rows);
+    expect(frame.split("\n")).toHaveLength(rows);
+    expect(frame.split("\n").every(line => Bun.stringWidth(line) < columns)).toBe(true);
+    expect(frame).not.toContain("\x1b"); expect(frame).not.toContain("\x07");
+  }
+});
 test("task replay handles create/update/list/delete, duplicate snapshots and failed calls", () => {
   const items = new Map<string, Item>();
   const create = tool("create", 1, "TaskCreate", { subject: "first" });
