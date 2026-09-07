@@ -417,11 +417,22 @@ describe("Claude native frame exchange (fake child only)", () => {
     fake.send({ type: "result", is_error: true, result: "interrupted" }); await until(() => events.some(e => e.type === "turnCompleted"));
     expect(events.at(-1)).toMatchObject({ type: "turnCompleted", status: "interrupted" }); await engine.close("test"); await consuming;
   });
-  test("unknown native frame emits engine_protocol_error", async () => {
+  test("P1-2: unknown top-level frames survive idle and active turns with original payload", async () => {
     const fake = fakeProcess(() => {}); const engine = new ClaudeEngine({ spawnProcess: () => fake.child }); const events: EngineEvent[] = [];
     const consuming = (async () => { for await (const event of engine.events) events.push(event); })();
-    await engine.spawn({ threadId: "th", backend: "claude", cwd: "/tmp" }); fake.send({ type: "unrecognized" }); await until(() => events.some(e => e.type === "exit"));
-    expect(events.at(-1)).toMatchObject({ type: "exit", error: { code: -32015 } }); await engine.close("test"); await consuming;
+    try {
+      await engine.spawn({ threadId: "th", backend: "claude", cwd: "/tmp" });
+      const raw = { type: "some_future_top_level_frame", hello: { preserved: [1, null] } };
+      fake.send(raw); await until(() => events.some(e => e.type === "engineEvent"));
+      expect(events[0]).toEqual({ type: "engineEvent", backend: "claude", subtype: raw.type, payload: raw });
+      for (const turnId of ["tn1", "tn2"]) {
+        await engine.sendTurn(turnId, input("go"), { threadId: "th", input: input("go") });
+        fake.send(raw); fake.send({ type: "result", result: "survived", usage: {} });
+        await until(() => events.some(e => e.type === "turnCompleted" && e.turnId === turnId));
+        expect(events.some(e => e.type === "engineEvent" && e.turnId === turnId && e.subtype === raw.type)).toBe(true);
+      }
+      expect(events.some(e => e.type === "exit")).toBe(false); await engine.attach();
+    } finally { await engine.close("test"); await consuming; }
   });
   test("assistant text is preserved when partials and result text are absent", async () => {
     const fake = fakeProcess(send => { send({ type: "assistant", message: { content: [{ type: "text", text: "full answer" }, { type: "thinking", thinking: "" }] } }); send({ type: "result", result: "", usage: {} }); });

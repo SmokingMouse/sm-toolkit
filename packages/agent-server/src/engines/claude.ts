@@ -353,6 +353,9 @@ export class ClaudeEngine implements EngineSession {
     // 2.1.258 Ase schema emits prompt_suggestion as a top-level informational frame.
     if (t === "rate_limit_event") { this.events.push({ type: "engineEvent", ...(this.active ? { turnId: this.active } : {}), backend: this.backend, subtype: t, payload: jsonValue(obj) }); return; }
     if (["keep_alive", "tool_progress", "tool_use_summary", "auth_status", "prompt_suggestion"].includes(t)) return;
-    throw new ProtocolError(ErrorCode.engine_protocol_error, "Unknown Claude frame", { raw: JSON.stringify(raw).slice(0, 2000) });
+    if (typeof t === "string") {
+      this.events.push({ type: "engineEvent", ...(this.active ? { turnId: this.active } : {}), backend: this.backend, subtype: t, payload: jsonValue(obj) }); return;
+    }
+    this.events.push({ type: "error", error: new ProtocolError(ErrorCode.engine_protocol_error, "Claude frame has no string type", { raw: jsonValue(raw) }).toJSON(), willRetry: false });
   }
 }
