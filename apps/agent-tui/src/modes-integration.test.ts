@@ -17,6 +17,7 @@ class ModeEngine extends MockEngine {
   rejectControl = false;
   rejectPermission = false;
   permissionDelayMs = 0;
+  deferModel = false;
   assertLease = () => {};
   async setPermission(permission: Permission): Promise<void> {
     await Bun.sleep(this.permissionDelayMs);
@@ -28,7 +29,7 @@ class ModeEngine extends MockEngine {
   }
   async engineControl(subtype: string, params: JsonObject): Promise<JsonObject> {
     this.controls.push({ subtype, params });
-    if (!this.rejectControl && subtype === "set_model") { this.emit({ type: "modelChanged", model: String(params.model) }); await Bun.sleep(0); }
+    if (!this.rejectControl && !this.deferModel && subtype === "set_model") { this.emit({ type: "modelChanged", model: String(params.model) }); await Bun.sleep(0); }
     return { type: "control_response", response: this.rejectControl ? { subtype: "error", error: "control policy denied" } : { subtype: "success", response: {} } };
   }
 }
@@ -70,6 +71,30 @@ test("review2 P2-3 dontAsk launch has a current picker row and can return withou
   await a.controller.key("4"); await a.controller.key("\r", { name: "return" });
   expect(a.model.thread?.permission).toBe("dontAsk");
   expect(engine.permissions).toEqual(["default", "dontAsk"]);
+});
+
+test("review2 P2-4 model success waits for delayed authoritative notification, ignoring stale reads and unrelated metadata", async () => {
+  const { a, b, command, engine, thread } = await setup();
+  engine.deferModel = true;
+  let finished = false;
+  const pending = command("/model gpt-5").then(() => { finished = true; });
+  await wait(() => a.model.message.includes("等待 gpt-5"));
+  expect((await a.client.request("thread/read", { threadId: thread.id })).thread.model).toBeUndefined();
+  engine.emit({ type: "modelChanged", model: "sonnet" });
+  await wait(() => a.model.thread?.model === "sonnet");
+  expect(finished).toBe(false); expect(a.model.message).not.toContain("模型：");
+  engine.emit({ type: "modelChanged", model: "gpt-5" });
+  await pending;
+  expect(a.model.message).toBe("模型：gpt-5"); expect(a.model.contextWindow).toBe(400_000);
+  await wait(() => b.model.thread?.model === "gpt-5");
+});
+
+test("review2 P2-4 missing model notification does not declare success even if model already matches", async () => {
+  const { a, command, engine } = await setup();
+  await command("/model opus"); engine.deferModel = true;
+  await command("/model opus");
+  expect(a.model.message).toContain("尚未收到权威通知确认");
+  expect(a.model.input).toBe("/model opus");
 });
 
 test("P1-1 readonly cycle and picker preserve launch restrictions without any RPC", async () => {

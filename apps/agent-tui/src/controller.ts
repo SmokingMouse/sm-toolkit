@@ -257,10 +257,23 @@ export class Controller {
       if (command === "/release") { await this.lease.relinquish(threadId); this.model.message = "已释放控制权"; return; }
       if (command === "/takeover") { await this.lease.takeover(threadId); this.model.message = "已接管控制权（活跃时续期，空闲后到期）；请重试原操作 · /release 释放"; return; }
       if (command === "/model") {
-        controlSuccess(await this.client.request("thread/engineControl", { threadId, subtype: "set_model", params: { model: value } }));
-        const { thread } = await this.client.request("thread/read", { threadId });
-        this.model.thread = thread; this.model.message = `模型：${thread.model ?? "默认"}`;
-        if (this.model.contextWindowEstimated) this.model.contextWindow = estimatedContextWindow(thread.model);
+        // Subscribe before the RPC: modelChanged may precede or follow its response.
+        let confirm!: (received: boolean) => void;
+        const confirmed = new Promise<boolean>(resolve => { confirm = resolve; });
+        const unsubscribe = this.client.onNotification("thread/metadata/updated", p => {
+          if (p.threadId === threadId && p.model === value) confirm(true);
+        });
+        const offState = this.client.onStateChange(state => { if (state !== "connected") confirm(false); });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          controlSuccess(await this.client.request("thread/engineControl", { threadId, subtype: "set_model", params: { model: value } }));
+          this.model.message = `模型切换请求已接收，等待 ${value} 的模型通知确认`;
+          this.model.changed();
+          timer = setTimeout(() => confirm(false), 2000);
+          if (!await confirmed) throw new Error("模型切换尚未收到权威通知确认，请检查当前模型后重试");
+          if (this.model.thread?.id !== threadId) throw new Error("当前会话已改变，请检查目标会话模型");
+          this.model.message = `模型：${this.model.thread.model ?? "默认"}`;
+        } finally { clearTimeout(timer); unsubscribe(); offState(); }
       } else {
         if (!this.submission || this.submission.text !== text || this.submission.threadId !== threadId) this.submission = { text, threadId, id: crypto.randomUUID() };
         await this.client.request("thread/compact", { threadId, clientTurnId: this.submission.id, ...(value ? { instructions: value } : {}) });
