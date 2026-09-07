@@ -13,6 +13,16 @@
         "typescript": "^6.0.3",
       },
     },
+    "apps/agent-tui": {
+      "name": "@smokingmouse/agent-tui",
+      "version": "0.1.0",
+      "bin": {
+        "agent-tui": "./bin/agent-tui",
+      },
+      "dependencies": {
+        "@smokingmouse/agent-server": "workspace:*",
+      },
+    },
     "apps/cli": {
       "name": "@smokingmouse/cli",
       "version": "0.5.1",
@@ -70,6 +80,8 @@
     "@smokingmouse/agent": ["@smokingmouse/agent@workspace:packages/agent"],
 
     "@smokingmouse/agent-server": ["@smokingmouse/agent-server@workspace:packages/agent-server"],
+
+    "@smokingmouse/agent-tui": ["@smokingmouse/agent-tui@workspace:apps/agent-tui"],
 
     "@smokingmouse/cli": ["@smokingmouse/cli@workspace:apps/cli"],
 
