@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { dirname } from "node:path";
-import { ErrorCode, ItemSchema, NotificationSchemas, ProtocolError, type AttachResult, type Item, type MethodParams, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Turn } from "../protocol/index.js";
+import { ErrorCode, ItemSchema, NotificationMethodSchema, NotificationSchema, NotificationSchemas, ProtocolError, type AttachResult, type Item, type MethodParams, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Turn } from "../protocol/index.js";
 import type { DeltaKind, EngineItem } from "../engines/session.js";
 
 export function canonical(value: unknown): string {
@@ -208,7 +208,10 @@ export class ItemLog {
     return { snapshot: this.snapshot(threadId, sinceSeq), detach };
   }
   publish(notification: ServerNotification): void {
-    const parsed = NotificationSchemas[notification.method].safeParse(notification.params);
+    // Additive AS v1 methods have only the generic JSON params contract here.
+    const method = NotificationMethodSchema.safeParse(notification.method);
+    const schema = method.success ? NotificationSchemas[method.data] : NotificationSchema.shape.params;
+    const parsed = schema.safeParse(notification.params);
     if (!parsed.success) {
       console.error(`Dropped invalid ${notification.method} notification: ${parsed.error.message}`);
       return;
