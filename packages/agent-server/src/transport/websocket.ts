@@ -4,13 +4,20 @@ import { MAX_MESSAGE_BYTES } from "./ndjson.js";
 interface SocketData { connection?: ManagedConnection }
 export interface WebSocketTransport { readonly url: string; readonly port: number; close(): void }
 
-export function listenWebSocket(manager: ConnectionManager, options: { port?: number; hostname?: string } = {}): WebSocketTransport {
+export function listenWebSocket(manager: ConnectionManager, options: { port?: number; hostname?: string; allowedOrigins?: string[] } = {}): WebSocketTransport {
   const hostname = options.hostname ?? "127.0.0.1";
   if (hostname !== "127.0.0.1" && hostname !== "::1") throw new Error("agent-server WebSocket must bind to loopback");
+  const allowedOrigins = new Set(options.allowedOrigins ?? []);
+  for (const origin of allowedOrigins) {
+    const url = new URL(origin);
+    if (!["http:", "https:"].includes(url.protocol) || url.origin !== origin) throw new Error("WebSocket allowedOrigins requires exact HTTP(S) origins");
+  }
   const sockets = new Set<Bun.ServerWebSocket<SocketData>>();
   const server = Bun.serve<SocketData>({
     hostname, port: options.port ?? 0,
     fetch(request, server) {
+      const origin = request.headers.get("origin");
+      if (origin !== null && !allowedOrigins.has(origin)) return new Response("Origin forbidden", { status: 403 });
       if (server.upgrade(request, { data: {} })) return;
       return new Response("WebSocket upgrade required", { status: 426 });
     },

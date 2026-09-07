@@ -52,6 +52,10 @@ WS 对应 `connectWebSocket({ url, token, ... })`，其余 API 相同。连接�
 `initialize` 与 `initialized` 后返回；`initializeResult` 提供服务端能力与 clientId。
 构造 `new AgentClient(endpoint, options)` 后可先注册回调再调用 `connect()`。
 
+WS 默认拒绝带 Origin 的浏览器握手。浏览器前端需在 daemon config.toml 配置
+`ws_allowed_origins = ["https://app.example"]`（完整 origin 精确匹配）；包内传输可传
+`allowedOrigins`。无 Origin 的原生客户端可以握手，所有连接仍必须通过 token 验证。
+
 自动重连默认开启，可设置 `reconnect: false`。重连先握手，再按最高已见事件游标 sinceSeq
 重新 attach；服务端为完成分配 completedSeq，补回离线时完成的正文，无需客户端回退。
 `onSnapshot` 包含补回的 item、队列与 pendingRequests；item 以 id 覆盖，delta 只实时发送。

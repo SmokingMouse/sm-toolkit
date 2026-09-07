@@ -5,12 +5,13 @@ import { ConnectionManager, listenUnix, listenWebSocket, type UnixTransport, typ
 import { ensureParent, loadToken, resolveDaemonPaths, type DaemonPaths } from "./paths.js";
 import { claimPid, removeStaleSocket } from "./process.js";
 
-export interface DaemonOptions { paths?: DaemonPaths; graceMs?: number; wsPort?: number; serverOptions?: ServerOptions; logger?: (message: string) => void }
+export interface DaemonOptions { paths?: DaemonPaths; graceMs?: number; wsPort?: number; wsAllowedOrigins?: string[]; serverOptions?: ServerOptions; logger?: (message: string) => void }
 const ConfigSchema = z.object({
+  ws_allowed_origins: z.array(z.string()).optional(),
   allowed_roots: z.array(z.string()).optional(), maxQueuedTurns: z.number().int().nonnegative().optional(),
   orphanTimeoutMs: z.number().int().nonnegative().optional(), idleTimeoutMs: z.number().int().nonnegative().optional(),
 });
-function readConfig(path: string): ServerOptions {
+function readConfig(path: string): ServerOptions & { ws_allowed_origins?: string[] } {
   if (!existsSync(path)) return {};
   const { allowed_roots, ...options } = ConfigSchema.parse(Bun.TOML.parse(readFileSync(path, "utf8")));
   return { ...options, ...(allowed_roots ? { allowedRoots: allowed_roots } : {}) };
@@ -34,10 +35,11 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<RunningDae
     await removeStaleSocket(paths.socketPath);
     const token = loadToken(paths.tokenPath, true);
     ensureParent(paths.logPath); appendFileSync(paths.logPath, "", { mode: 0o600 }); chmodSync(paths.logPath, 0o600);
-    server = new AgentServer({ databasePath: paths.databasePath, ...readConfig(paths.configPath), ...options.serverOptions, token });
+    const { ws_allowed_origins, ...serverConfig } = readConfig(paths.configPath);
+    server = new AgentServer({ databasePath: paths.databasePath, ...serverConfig, ...options.serverOptions, token });
     const manager = new ConnectionManager(server);
     unix = listenUnix(manager, { path: paths.socketPath });
-    if (options.wsPort !== undefined) ws = listenWebSocket(manager, { port: options.wsPort });
+    if (options.wsPort !== undefined) ws = listenWebSocket(manager, { port: options.wsPort, allowedOrigins: options.wsAllowedOrigins ?? ws_allowed_origins });
     const endpoint = JSON.stringify({ pid: process.pid, socketPath: paths.socketPath, ...(ws ? { webSocketUrl: ws.url } : {}) }) + "\n";
     writeFileSync(paths.endpointPath, endpoint, { mode: 0o600 }); chmodSync(paths.endpointPath, 0o600);
     log(`agent-server ready pid=${process.pid} socket=${paths.socketPath} source=${paths.socketSource}${ws ? ` ws=${ws.url}` : ""} tokenFile=${paths.tokenPath} logFile=${paths.logPath}`);
