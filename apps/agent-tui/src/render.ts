@@ -67,32 +67,41 @@ export function wrap(line: string, width: number): string[] {
   }
   lines.push(current); return lines;
 }
-export function render(model: TuiModel, columns = 100, rows = 30): string {
+function frameLayout(model: TuiModel, columns: number, rows: number) {
   const width = Math.max(1, columns - 1), height = Math.max(4, rows);
   const thread = model.thread, usage = model.usage;
   const status = `${thread ? shortId(thread.id) : "connecting"} | cwd ${thread?.cwd ?? "—"} | model ${thread?.model ?? "unknown"}`;
   const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "unknown"}${canResume(thread) ? "（可恢复 · /resume）" : ""} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection}`);
   const notices = model.discardNote ? [wrap(model.discardNote, width)[0]] : [];
   const headers = [...wrap(status, width), ...wrap(header, width)].slice(0, Math.max(1, height - 4 - notices.length));
+  return { width, height, headers, notices, available: Math.max(0, height - headers.length - 3 - notices.length) };
+}
+function pickerLines(model: TuiModel, width: number): string[][] {
+  return model.picker?.entries.map((e, i) => wrap(`${i === model.picker!.index ? ">" : " "} ${shortId(e.thread.id)} | ${e.title} | ${e.thread.status.type} | ${e.thread.cwd} | ${new Date(e.updatedAtMs).toISOString()}`, width)) ?? [];
+}
+/** Pure measurement, applied by the controller on input/model/terminal-size changes. */
+export function pickerOffset(model: TuiModel, columns: number, rows: number): number {
+  const { width, available } = frameLayout(model, columns, rows), lines = pickerLines(model, width);
+  const index = model.picker?.index ?? 0;
+  const top = lines.slice(0, index).reduce((n, l) => n + l.length, 0);
+  const bottom = top + (lines[index]?.length ?? 0), total = lines.reduce((n, l) => n + l.length, 0);
+  let offset = model.picker?.offset ?? 0;
+  if (top < offset) offset = top;
+  else if (bottom > offset + available) offset = Math.min(top, bottom - available);
+  return Math.max(0, Math.min(offset, total - available));
+}
+export function render(model: TuiModel, columns = 100, rows = 30): string {
+  const { width, height, headers, notices, available } = frameLayout(model, columns, rows);
   const body = [...model.items.values()].sort((a, b) => a.seq - b.seq).flatMap(i => [...renderItem(i, model.expandedReasoning), ""]);
   for (const q of model.queue) body.push(`排队 #${q.position + 1}: ${q.preview}`);
   for (const c of model.cards.values()) if (c !== model.activeCard) body.push(...renderCard(c));
   const content = body.flatMap(line => wrap(line, width));
   const card = model.activeCard ? renderCard(model.activeCard).flatMap(line => wrap(line, width)) : [];
   const footer = model.sessionOperation ? `${model.sessionOperation} 进行中 · 按键将丢弃 · Esc 不取消在途操作` : model.picker ? "会话选择 · ↑/↓ 选择 · Enter 切换 · Esc 取消" : model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : "Ctrl-N 新建 · Ctrl-T 会话 · Enter 发送 · /steer 插话 · Tab 推理 · Ctrl-C 两次退出";
-  const available = Math.max(0, height - headers.length - 3 - notices.length);
   let middle: string[];
   if (model.picker) {
-    const { entries, index } = model.picker;
-    const lines = entries.map((e, i) => wrap(`${i === index ? ">" : " "} ${shortId(e.thread.id)} | ${e.title} | ${e.thread.status.type} | ${e.thread.cwd} | ${new Date(e.updatedAtMs).toISOString()}`, width));
-    const top = lines.slice(0, index).reduce((n, l) => n + l.length, 0);
-    const bottom = top + (lines[index]?.length ?? 0), all = lines.flat();
-    let offset = model.picker.offset ?? 0;
-    if (top < offset) offset = top;
-    else if (bottom > offset + available) offset = Math.min(top, bottom - available);
-    offset = Math.max(0, Math.min(offset, all.length - available));
-    model.picker.offset = offset;
-    middle = entries.length ? all.slice(offset, offset + available) : ["（daemon 中没有会话）"].slice(0, available);
+    const { entries, offset = 0 } = model.picker;
+    middle = entries.length ? pickerLines(model, width).flat().slice(offset, offset + available) : ["（daemon 中没有会话）"].slice(0, available);
   } else if (card.length) {
     const cardRows = Math.min(card.length, available);
     const offset = Math.min(model.scroll, Math.max(0, card.length - cardRows));

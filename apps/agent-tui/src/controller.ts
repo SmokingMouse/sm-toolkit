@@ -1,6 +1,7 @@
 import type { AgentClient } from "@smokingmouse/agent-server/client";
 import type { RequestCard, TuiModel } from "./model.js";
 import { Sessions } from "./sessions.js";
+import { pickerOffset } from "./render.js";
 
 export interface Key { name?: string; ctrl?: boolean; meta?: boolean; sequence?: string }
 export class Controller {
@@ -8,6 +9,12 @@ export class Controller {
   private submitting = false;
   private submission?: { text: string; threadId: string; turnId?: string; id: string };
   readonly sessions: Sessions;
+  private columns = 100;
+  private rows = 30;
+  resize(columns = this.columns, rows = this.rows): void {
+    this.columns = columns; this.rows = rows;
+    if (this.model.picker) this.model.picker.offset = pickerOffset(this.model, columns, rows);
+  }
   constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) { this.sessions = new Sessions(client, model); }
   async key(text: string | undefined, key: Key = {}): Promise<void> {
     try {
@@ -45,7 +52,7 @@ export class Controller {
       else if (key.ctrl && key.name === "u") this.model.input = "";
       else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) this.model.input += text;
     } catch (error) { this.model.message = error instanceof Error ? error.message : String(error); }
-    finally { this.model.changed(); }
+    finally { this.resize(); this.model.changed(); }
   }
   async submit(): Promise<void> {
     const text = this.model.input.trim(), thread = this.model.thread;

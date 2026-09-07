@@ -26,26 +26,34 @@ test("selector sorts recent activity first with stable id tie break without muta
   expect(entries.map(e => e.thread.id)).toEqual(["b", "a", "c"]);
 });
 test("P1-1: picker retains all short lists and scrolls only past the viewport, including wrapped entries", () => {
-  const { model } = setup();
+  const { model, controller } = setup();
+  const draw = (_model: TuiModel, columns: number, rows: number) => { controller.resize(columns, rows); return render(model, columns, rows); };
   const entries = Array.from({ length: 12 }, (_, i) => ({ thread: thread(`th_${String(i).padStart(8, "0")}`), title: `TITLE${i}`, updatedAtMs: 0 }));
   model.picker = { entries: entries.slice(0, 3), index: 1 };
-  for (const entry of entries.slice(0, 3)) expect(render(model, 120, 30)).toContain(entry.thread.id);
+  for (const entry of entries.slice(0, 3)) expect(draw(model, 120, 30)).toContain(entry.thread.id);
   expect(model.picker.offset).toBe(0);
   model.picker = { entries, index: 0 };
-  render(model, 120, 10);
+  draw(model, 120, 10);
   model.picker.index = 2;
-  expect(render(model, 120, 10)).toContain(entries[0].thread.id); expect(model.picker.offset).toBe(0);
+  expect(draw(model, 120, 10)).toContain(entries[0].thread.id); expect(model.picker.offset).toBe(0);
   model.picker.index = 7;
-  const scrolled = render(model, 120, 10);
+  const scrolled = draw(model, 120, 10);
   expect(scrolled).toContain(`> ${entries[7].thread.id}`); expect(scrolled).toContain(entries[6].thread.id);
   expect(scrolled).not.toContain(entries[0].thread.id); expect(model.picker.offset).toBeGreaterThan(0);
-  model.picker.index = 6; const offset = model.picker.offset; render(model, 120, 10); expect(model.picker.offset).toBe(offset);
-  model.picker.index = 0; expect(render(model, 120, 10)).toContain(`> ${entries[0].thread.id}`); expect(model.picker.offset).toBe(0);
+  model.picker.index = 6; const offset = model.picker.offset; draw(model, 120, 10); expect(model.picker.offset).toBe(offset);
+  model.picker.index = 0; expect(draw(model, 120, 10)).toContain(`> ${entries[0].thread.id}`); expect(model.picker.offset).toBe(0);
   model.picker.index = 8;
-  const narrow = render(model, 40, 14);
+  const narrow = draw(model, 40, 14);
   expect(narrow).toContain(`> ${entries[8].thread.id}`);
   expect(narrow.split("\n")).toHaveLength(14); expect(narrow.split("\n").every(line => Bun.stringWidth(line) < 40)).toBe(true);
-  render(model, 180, 30); expect(model.picker.offset).toBe(0);
+  draw(model, 180, 30); expect(model.picker.offset).toBe(0);
+});
+test("P2-c: rendering at different sizes never mutates picker or other model state", () => {
+  const { model } = setup();
+  model.picker = { entries: Array.from({ length: 20 }, (_, i) => ({ thread: thread(`t${i}`), title: `title${i}`, updatedAtMs: 0 })), index: 15, offset: 5 };
+  const before = JSON.stringify(model), wide = render(model, 120, 30);
+  render(model, 40, 10); render(model, 180, 40);
+  expect(JSON.stringify(model)).toBe(before); expect(render(model, 120, 30)).toBe(wide);
 });
 test("Ctrl-N starts in current cwd, attaches, detaches old and clears thread view only", async () => {
   const { model, controller, calls } = setup(); model.input = "draft"; model.activeTurnId = "old-turn";
