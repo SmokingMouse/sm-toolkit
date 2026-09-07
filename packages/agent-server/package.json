@@ -1,0 +1,26 @@
+{
+  "name": "@smokingmouse/agent-server",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "AS Protocol v1: persistent agent sessions and in-process JSON-RPC server",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./protocol": { "types": "./dist/protocol/index.d.ts", "default": "./dist/protocol/index.js" }
+  },
+  "files": ["dist", "schema"],
+  "scripts": {
+    "prepare": "tsc --build",
+    "build": "tsc --build",
+    "typecheck": "tsc --build",
+    "test": "bun test",
+    "schema": "bun run scripts/generate-schema.ts"
+  },
+  "dependencies": {
+    "@smokingmouse/agent": "workspace:*",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": { "bun-types": "^1.3.14", "typescript": "^6.0.3" }
+}

@@ -19,6 +19,7 @@
   "references": [
     { "path": "packages/llm" },
     { "path": "packages/agent" },
+    { "path": "packages/agent-server" },
     { "path": "apps/cli" },
     { "path": "scripts" }
   ]
