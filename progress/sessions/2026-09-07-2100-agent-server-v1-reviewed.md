@@ -11,3 +11,6 @@
 
 ## Next（等用户）
 - Trellis 迁移三步走（docs/agent-server/trellis-migration.md）是否开工；是否发布 @smokingmouse/agent-server 与 agent-tui；是否把 fj 起位默认改为 agent-tui。
+
+## 追记 21:10
+- as-fix2：N1 已修（mapper 无 turnId 时省略字段、引擎非 active 时早到 tool_result 降级为不带 turnId 的 error、client 畸形通知只丢弃不断线；probe12/13 转单测）。server 217 / TUI 23 全绿，HOME=/tmp hermetic。分支到此无已知缺陷。
