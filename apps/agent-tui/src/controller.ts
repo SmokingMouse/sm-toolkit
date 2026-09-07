@@ -2,9 +2,12 @@ import type { AgentClient } from "@smokingmouse/agent-server/client";
 import type { RequestCard, TuiModel } from "./model.js";
 import { Sessions } from "./sessions.js";
 import { pickerOffset } from "./render.js";
+import { imageInput, messageInput, pasteImage, unquote } from "./attachments.js";
+import { CompletionSource } from "./completion.js";
 
-export interface Key { name?: string; ctrl?: boolean; meta?: boolean; sequence?: string }
+export interface Key { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean; paste?: boolean; sequence?: string }
 export class Controller {
+  private completions = new CompletionSource();
   private interruptedAt = -Infinity;
   private submitting = false;
   private submission?: { text: string; threadId: string; turnId?: string; id: string };
@@ -66,22 +69,43 @@ export class Controller {
         return;
       }
       if (key.name === "pageup" || key.name === "pagedown") { this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? (this.model.activeCard ? -10 : 10) : (this.model.activeCard ? 10 : -10))); return; }
-      if (key.name === "tab") { this.model.expandedReasoning = !this.model.expandedReasoning; return; }
       if (this.model.activeCard) { await this.cardKey(this.model.activeCard, text, key); return; }
+      if (key.paste || (key.ctrl && key.name === "j") || (key.shift && ["return", "enter"].includes(key.name ?? ""))) {
+        this.model.input += key.paste ? (text ?? "") : "\n";
+        this.model.completion = undefined; return;
+      }
+      const completion = this.model.completion;
+      if (completion) {
+        if (key.name === "escape") { this.model.completion = undefined; return; }
+        if (key.name === "up" || key.name === "down") {
+          completion.selected = (completion.selected + (key.name === "up" ? -1 : 1) + completion.candidates.length) % completion.candidates.length; return;
+        }
+        if (["tab", "return", "enter"].includes(key.name ?? "")) {
+          const name = completion.candidates[completion.selected].name;
+          this.model.input = this.model.input.slice(0, completion.start) + completion.prefix + (/\s|["']/.test(name) ? JSON.stringify(name) : name) + " ";
+          this.model.completion = undefined; return;
+        }
+      }
+      if (key.name === "tab") { this.model.expandedReasoning = !this.model.expandedReasoning; return; }
       if (key.name === "return" || key.name === "enter") { await this.submit(); return; }
       if (key.name === "backspace") this.model.input = Array.from(this.model.input).slice(0, -1).join("");
-      else if (key.ctrl && key.name === "u") this.model.input = "";
+      else if (key.ctrl && key.name === "u") { this.model.input = ""; this.model.attachments = []; }
       else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) this.model.input += text;
+      const draft = this.model.input;
+      this.model.completion = undefined;
+      const next = await this.completions.complete(draft, this.model.thread?.cwd ?? process.cwd());
+      if (draft === this.model.input) this.model.completion = next;
     } catch (error) { this.model.message = error instanceof Error ? error.message : String(error); }
     finally { this.resize(); this.model.changed(); }
   }
   async submit(): Promise<void> {
-    const text = this.model.input.trim(), thread = this.model.thread;
+    const text = this.model.input, thread = this.model.thread;
+    const attachments = [...this.model.attachments];
     if (this.sessions.busy) { this.sessions.rejectInput(); return; }
     if (this.submitting) { this.model.message = "提交进行中，本次提交已丢弃，请稍后重试"; this.model.changed(); return; }
-    if (!text || !thread) return;
+    if ((!text.trim() && !attachments.length) || !thread) return;
     if (this.client.state !== "connected") throw new Error("连接尚未恢复，输入已保留");
-    const [command, ...args] = text.split(/\s+/);
+    const [command, ...args] = text.trim().split(/\s+/);
     if (["/new", "/clear", "/threads", "/fork", "/resume"].includes(command)) {
       if ((command !== "/resume" && args.length) || args.length > 1) throw new Error(`用法：${command}${command === "/resume" ? " [id]" : ""}`);
       this.submitting = true;
@@ -94,12 +118,21 @@ export class Controller {
     if (thread.backend === "external") throw new Error("External thread 为只读");
     this.submitting = true;
     try {
+      if (text.trim() === "/paste-image") {
+        this.model.attachments.push(await pasteImage());
+        if (this.model.input === text) this.model.input = "";
+        this.model.message = "已附加剪贴板图片；Enter 发送，可继续输入文字";
+        return;
+      }
       const steer = text.startsWith("/steer ");
-      const input = [{ type: "text" as const, text: steer ? text.slice(7).trim() : text }];
-      if (!input[0].text) return;
+      const input = /^\/image(?:\s|$)/.test(text)
+        ? [...attachments, await imageInput(unquote(text.slice(6).trim()), thread.cwd)]
+        : await messageInput(steer ? text.slice(7) : text, thread.cwd, attachments);
+      if (!input.length) return;
+      const fingerprint = JSON.stringify(input);
       const turnId = steer ? this.model.activeTurnId : undefined;
-      if (!this.submission || this.submission.text !== text || this.submission.threadId !== thread.id || this.submission.turnId !== turnId) {
-        this.submission = { text, threadId: thread.id, turnId, id: crypto.randomUUID() };
+      if (!this.submission || this.submission.text !== fingerprint || this.submission.threadId !== thread.id || this.submission.turnId !== turnId) {
+        this.submission = { text: fingerprint, threadId: thread.id, turnId, id: crypto.randomUUID() };
       }
       const clientTurnId = this.submission.id;
       if (steer) {
@@ -112,7 +145,9 @@ export class Controller {
         this.model.message = queued ? `已排队 #${queued.position + 1}` : turn.status === "queued" ? "已入队，等待队列位置" : "已发送";
       }
       // Do not erase text typed while the request was in flight.
-      if (this.model.input.trim() === text) this.model.input = "";
+      if (this.model.input === text) this.model.input = "";
+      this.model.completion = undefined;
+      this.model.attachments = this.model.attachments.filter(i => !attachments.includes(i));
       this.submission = undefined;
       this.model.scroll = 0;
     } finally { this.submitting = false; this.model.changed(); }
@@ -122,6 +157,9 @@ export class Controller {
     const handle = this.client.pendingRequests.get(card.request.params.requestId);
     if (!handle || this.client.state !== "connected") throw new Error("请求连接已失效，等待重连快照");
     if (handle.method === "item/tool/requestUserInput") {
+      // TerminalInput already normalizes pasted CR/CRLF for every input surface.
+      // Treat the entire paste as draft text, including digits that select options when typed.
+      if (key.paste) { card.draft += text ?? ""; return; }
       const question = handle.params.questions[card.question];
       if (key.name === "escape") { handle.respond({ answers: {} }); card.state = "sending"; return; }
       const choose = (number: number) => {

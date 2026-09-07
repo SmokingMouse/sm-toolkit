@@ -9,7 +9,11 @@ export const help = `agent-tui --attach <threadId> [--socket <path> | --ws <url>
 agent-tui --new --backend claude|codex --cwd <dir> [--socket <path> | --ws <url>]
 
 Enter: send / queue; /steer <text>: steer active turn; Ctrl-C: interrupt, twice: exit
-Tab: expand reasoning; PageUp/PageDown: history; approvals: y/s/n/a
+Shift-Enter / Ctrl-J: newline; bracketed paste: preserve multiline text
+@path: file completion / image attachment; /: commands and local skills
+Up/Down: select completion; Tab/Enter: insert; Esc: dismiss
+/image <path>: send image; /paste-image: attach clipboard image (macOS pngpaste)
+Tab without completion: expand reasoning; PageUp/PageDown: history; approvals: y/s/n/a
 Questions: number selects/toggles, Enter advances/submits; type a free answer
 Token and default socket use agent-server HOME/XDG resolution.`;
 

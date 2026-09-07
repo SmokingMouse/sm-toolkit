@@ -1,6 +1,8 @@
 import { AgentClient, type ClientState } from "@smokingmouse/agent-server/client";
 import { NotificationMethodSchema, type AttachResult, type Item, type PendingServerRequest, type QueuedTurn, type ServerNotification, type Thread, type Usage } from "@smokingmouse/agent-server/protocol";
 import type { ThreadEntry } from "./sessions.js";
+import type { ImageInput } from "./attachments.js";
+import type { Completion } from "./completion.js";
 
 export interface RequestCard { request: PendingServerRequest; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
 export function canResume(thread: Thread | undefined): boolean {
@@ -16,6 +18,8 @@ export class TuiModel {
   message = "";
   discardNote = "";
   input = "";
+  attachments: ImageInput[] = [];
+  completion?: Completion;
   expandedReasoning = false;
   scroll = 0;
   activeTurnId?: string;
