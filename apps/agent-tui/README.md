@@ -20,7 +20,7 @@ Enter 发 `turn/start`；运行时同样入队，显示从 1 起的排队位置�
 
 输入支持多行：Shift+Enter（终端须发送 CSI-u 或 modifyOtherKeys 编码）或 Ctrl+J 换行，Enter 发送整段。终端的 bracketed paste 模式会保留粘贴的换行、缩进和首尾空白；粘贴不会自动发送。未支持 Shift+Enter 的终端请用 Ctrl+J。输入区显示最后六行。
 
-输入 `@` 后显示当前会话 cwd 下的文件候选，使用 `rg --files` 递归扫描，遵守嵌套 `.gitignore`、排除 `.git`/`node_modules`，支持不连续字符模糊匹配，最多 50 条。需要本机安装 ripgrep（macOS：`brew install ripgrep`）。输入 `/` 显示内建命令和 `~/.claude/skills/*/SKILL.md`、`<cwd>/.claude/skills/*/SKILL.md` 的名称及一行描述；支持 symlink，项目同名 skill 优先，内建命令保留优先级。列表缓存五秒。
+输入 `@` 后显示当前会话 cwd 下的文件候选，优先用 `git ls-files --cached --others --exclude-standard`（仓库内遵守 Git 忽略规则并保留已跟踪文件）；不可用时尝试可选的 `rg --files`，再降级为纯 fs 递归，读取逐层 `.gitignore` 的 glob、目录及否定规则。三条路径均排除 `.git`/`node_modules`，不列出失效文件。无需安装 rg，git 和 rg 均不存在时也可补全。支持不连续字符模糊匹配，最多 50 条。输入 `/` 显示内建命令和 `~/.claude/skills/*/SKILL.md`、`<cwd>/.claude/skills/*/SKILL.md` 的名称及一行描述；支持 symlink，项目同名 skill 优先，内建命令保留优先级。列表缓存五秒。
 
 候选打开时，↑/↓ 切换，Tab 或 Enter 插入所选内容及尾随空格，Esc 关闭；再次 Enter 才发送。文件插入相对路径（含空格时自动加引号），普通文件引用保持 `@path` 文本；skill 插入 `/name` 文本，由后端解释。候选关闭时 Tab 仍切换 reasoning。
 
@@ -40,3 +40,5 @@ cd apps/agent-tui && bun test
 测试只用临时 Unix/WS 服务与 MockEngine，不启动真实 Claude/Codex。
 
 输入 PTY E2E 自己创建 Bun PTY，父进程无需交互式终端。每一步按引擎收包或最新屏幕状态等待（10 秒上限），失败会打印步骤、子进程退出码和末尾终端输出；每例总预算 60 秒，覆盖启动、多个 RPC/渲染步骤及清理。图片例在模拟 pngpaste 中注入 5.2 秒延迟，回归默认 5 秒总超时导致的失败；同步仍等待实际附件状态。模拟程序使用绝对系统命令，TUI 使用测试进程同一 Bun，避免父进程 PATH 中的包装脚本改变测试行为。
+
+四项输入 PTY 用例均显式构造只有 Bun 和模拟 pngpaste 的 PATH，并断言其中没有 git/rg。单测分别验证真实 Git 仓库枚举、可选 rg 命令分支（离线 fixture，不要求本机安装 rg）和无外部程序的 fs 分支。

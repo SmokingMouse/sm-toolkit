@@ -1,5 +1,5 @@
-import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readdir, readFile, stat } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { homedir } from "node:os";
 
 export interface Candidate { name: string; description: string }
@@ -24,14 +24,73 @@ export function fuzzyMatch(query: string, candidates: Candidate[], limit = 50): 
   }).filter(c => Number.isFinite(c.score)).sort((a, b) => a.score - b.score || a.candidate.name.localeCompare(b.candidate.name)).slice(0, limit).map(c => c.candidate);
 }
 
-export async function files(cwd: string): Promise<Candidate[]> {
-  // rg applies nested .gitignore rules even outside repositories. NUL supports spaces.
-  const rg = Bun.which("rg");
-  if (!rg) throw new Error("文件补全需要 ripgrep（rg）；macOS：brew install ripgrep");
-  const proc = Bun.spawn([rg, "--files", "--hidden", "--no-require-git", "--null", "-g", "!.git", "-g", "!node_modules"], { cwd, stdout: "pipe", stderr: "pipe" });
-  const [output, error, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-  if (code > 1) throw new Error(`文件补全失败：${error.trim()}`);
-  return output.split("\0").filter(name => name && !/[\r\n]/.test(name)).map(name => ({ name, description: "文件" }));
+interface FileTools { git?: string | null; rg?: string | null }
+const excluded = (name: string) => name.split("/").some(part => part === ".git" || part === "node_modules");
+
+async function listedFiles(cwd: string, executable: string | null, args: string[], emptyCode = 0): Promise<string[] | undefined> {
+  if (!executable) return;
+  try {
+    const proc = Bun.spawn([executable, ...args], { cwd, stdout: "pipe", stderr: "ignore" });
+    const [output, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    if (code === 0 || code === emptyCode) return output.split("\0").filter(Boolean);
+  } catch { /* An unavailable tool must not disable completion. */ }
+}
+
+interface IgnoreRule { base: string; glob: Bun.Glob; slash: boolean; directory: boolean; negate: boolean }
+function ignoreRules(text: string, base: string): IgnoreRule[] {
+  return text.split(/\r?\n/).flatMap(raw => {
+    let pattern = raw.replace(/(?<!\\)\s+$/, "");
+    if (!pattern || pattern.startsWith("#")) return [];
+    const negate = pattern.startsWith("!");
+    if (negate) pattern = pattern.slice(1);
+    pattern = pattern.replace(/\\([#! ])/g, "$1");
+    const directory = pattern.endsWith("/");
+    if (directory) pattern = pattern.slice(0, -1);
+    const slash = pattern.includes("/");
+    if (pattern.startsWith("/")) pattern = pattern.slice(1);
+    // Prefix keeps a literal escaped leading ! from becoming Bun.Glob negation.
+    return pattern ? [{ base, glob: new Bun.Glob(`./${pattern}`), slash, directory, negate }] : [];
+  });
+}
+
+async function walkFiles(cwd: string): Promise<string[]> {
+  const result: string[] = [];
+  async function walk(dir: string, inherited: IgnoreRule[]): Promise<void> {
+    let rules = inherited;
+    try { rules = [...rules, ...ignoreRules(await readFile(join(cwd, dir, ".gitignore"), "utf8"), dir)]; } catch { /* Optional. */ }
+    let entries;
+    try { entries = await readdir(join(cwd, dir), { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const name = dir ? `${dir}/${entry.name}` : entry.name;
+      if (excluded(name)) continue;
+      let ignored = false;
+      for (const rule of rules) {
+        if (rule.directory && !entry.isDirectory()) continue;
+        const relative = rule.base ? name.slice(rule.base.length + 1) : name;
+        if (rule.glob.match(`./${rule.slash ? relative : basename(relative)}`)) ignored = !rule.negate;
+      }
+      if (ignored) continue;
+      if (entry.isDirectory()) await walk(name, rules);
+      else result.push(name); // Do not recurse through symlinked directories/cycles.
+    }
+  }
+  await walk("", []); return result;
+}
+
+export async function files(cwd: string, tools: FileTools = {}): Promise<Candidate[]> {
+  // Git preserves tracked files and applies the repository's native ignore rules.
+  // Outside repositories, rg is optional; fs always provides a dependency-free path.
+  const git = tools.git === undefined ? Bun.which("git") : tools.git;
+  const rg = tools.rg === undefined ? Bun.which("rg") : tools.rg;
+  const names = await listedFiles(cwd, git, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
+    ?? await listedFiles(cwd, rg, ["--files", "--hidden", "--no-require-git", "--null", "-g", "!.git", "-g", "!node_modules"], 1)
+    ?? await walkFiles(cwd);
+  const candidates: Candidate[] = [];
+  for (const name of new Set(names)) {
+    if (excluded(name) || /[\r\n]/.test(name)) continue;
+    try { if ((await stat(join(cwd, name))).isFile()) candidates.push({ name, description: "文件" }); } catch { /* Deleted index entries and broken symlinks. */ }
+  }
+  return candidates;
 }
 
 export async function skills(cwd: string, home = homedir()): Promise<Candidate[]> {

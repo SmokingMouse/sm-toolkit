@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { AgentServer, MockEngine, type EngineEvent } from "@smokingmouse/agent-server";
 import { AgentClient, type ClientEndpoint } from "@smokingmouse/agent-server/client";
 import { ConnectionManager, listenUnix, listenWebSocket, type WirePeer } from "@smokingmouse/agent-server/transport";
@@ -249,12 +249,16 @@ async function inputPty(run: (h: Awaited<ReturnType<typeof setup>> & { write: (t
   writeFileSync(join(h.home, "alpha-file.ts"), ""); writeFileSync(join(h.home, "beta-file.ts"), "");
   writeFileSync(join(h.home, "test.png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9S0AAAAASUVORK5CYII=", "base64"));
   const binDir = join(h.home, "bin"); mkdirSync(binDir);
+  // All four input workflows run with neither rg nor git in PATH, even on dev machines.
+  symlinkSync(process.execPath, join(binDir, "bun"));
+  expect(Bun.which("rg", { PATH: binDir })).toBeNull();
+  expect(Bun.which("git", { PATH: binDir })).toBeNull();
   // Absolute utilities keep shell aliases/wrappers in the parent's PATH out of the fixture.
   // Delay injection is a regression probe, never a synchronization mechanism.
   writeFileSync(join(binDir, "pngpaste"), `#!/bin/sh\n/bin/sleep ${clipboardDelayMs / 1000}\nexec /bin/cp '${join(h.home, "test.png")}' "$1"\n`, { mode: 0o755 });
   let screen = ""; const decoder = new TextDecoder();
   const proc = Bun.spawn([resolve(import.meta.dir, "../bin/agent-tui"), "--attach", h.thread.id, "--socket", join(h.home, "sock")], {
-    env: { ...process.env, HOME: h.home, XDG_STATE_HOME: state, HERDR_PANE_ID: "", TERM: "xterm-256color", PATH: `${binDir}:${dirname(process.execPath)}:${process.env.PATH}` },
+    env: { ...process.env, HOME: h.home, XDG_STATE_HOME: state, HERDR_PANE_ID: "", TERM: "xterm-256color", PATH: binDir },
     terminal: { cols: 140, rows: 32, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } },
   });
   const wait = async (predicate: () => boolean, reason: string, allowExit = false) => {

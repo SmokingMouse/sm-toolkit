@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { completionToken, files, fuzzyMatch, skills } from "./completion.js";
 
@@ -20,9 +20,64 @@ test("recursive file completion honors nested gitignore, negation, dotfiles and 
     put(".gitignore", "*.log\nignored/\n!keep.log\n"); put("a.log"); put("keep.log"); put(".visible"); put("ignored/hidden.ts");
     put("node_modules/top.js"); put("src/node_modules/nested.js"); put(".git/config"); put("src/.gitignore", "secret*\n");
     put("src/secret.ts"); put("src/space name.ts"); put("src/visible.ts");
-    const result = (await files(cwd)).map(c => c.name);
-    expect(result).toEqual(expect.arrayContaining(["keep.log", ".visible", "src/space name.ts", "src/visible.ts"]));
-    for (const name of ["a.log", "ignored/hidden.ts", "node_modules/top.js", "src/node_modules/nested.js", ".git/config", "src/secret.ts"]) expect(result).not.toContain(name);
+    for (const tools of [{}, { git: null, rg: null }]) {
+      const result = (await files(cwd, tools)).map(c => c.name);
+      expect(result).toEqual(expect.arrayContaining(["keep.log", ".visible", "src/space name.ts", "src/visible.ts"]));
+      for (const name of ["a.log", "ignored/hidden.ts", "node_modules/top.js", "src/node_modules/nested.js", ".git/config", "src/secret.ts"]) expect(result).not.toContain(name);
+    }
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("git file listing takes precedence, respects ignores and cwd, and drops deleted or excluded tracked files", async () => {
+  const cwd = mkdtempSync("/tmp/tui-git-files-");
+  const git = Bun.which("git"); expect(git).not.toBeNull();
+  const run = (...args: string[]) => {
+    const result = Bun.spawnSync([git!, ...args], { cwd, stdout: "ignore", stderr: "pipe" });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+  };
+  try {
+    run("init", "--quiet");
+    mkdirSync(join(cwd, "src")); mkdirSync(join(cwd, "node_modules"));
+    writeFileSync(join(cwd, "tracked.log"), ""); writeFileSync(join(cwd, "deleted.ts"), "");
+    writeFileSync(join(cwd, "node_modules/tracked.js"), "");
+    run("add", "tracked.log", "deleted.ts", "node_modules/tracked.js");
+    rmSync(join(cwd, "deleted.ts"));
+    writeFileSync(join(cwd, ".gitignore"), "*.log\n");
+    writeFileSync(join(cwd, "hidden.log"), ""); writeFileSync(join(cwd, "src/visible.ts"), "");
+    const marker = join(cwd, "rg-called");
+    const fakeRg = join(cwd, "fake-rg");
+    writeFileSync(fakeRg, `#!${process.execPath}\nawait Bun.write(${JSON.stringify(marker)}, 'called'); process.exit(2);\n`, { mode: 0o755 });
+    const names = (await files(cwd, { git, rg: fakeRg })).map(c => c.name);
+    expect(names).toEqual(expect.arrayContaining(["tracked.log", "src/visible.ts"]));
+    for (const name of ["hidden.log", "deleted.ts", "node_modules/tracked.js"]) expect(names).not.toContain(name);
+    expect(existsSync(marker)).toBe(false);
+    expect((await files(join(cwd, "src"), { git, rg: null })).map(c => c.name)).toEqual(["visible.ts"]);
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("optional rg listing handles NUL paths and falls back to fs when the tool fails", async () => {
+  const cwd = mkdtempSync("/tmp/tui-rg-files-");
+  try {
+    writeFileSync(join(cwd, "space name.ts"), ""); writeFileSync(join(cwd, "fallback.ts"), "");
+    const argv = join(cwd, "argv.json"), fakeRg = join(cwd, "fake-rg");
+    writeFileSync(fakeRg, `#!${process.execPath}\nawait Bun.write(${JSON.stringify(argv)}, JSON.stringify(process.argv.slice(2))); process.stdout.write('space name.ts\\0node_modules/hidden.ts\\0');\n`, { mode: 0o755 });
+    expect((await files(cwd, { git: Bun.which("git"), rg: fakeRg })).map(c => c.name)).toEqual(["space name.ts"]);
+    expect(JSON.parse(readFileSync(argv, "utf8"))).toEqual(["--files", "--hidden", "--no-require-git", "--null", "-g", "!.git", "-g", "!node_modules"]);
+    writeFileSync(fakeRg, `#!${process.execPath}\nprocess.exit(2);\n`, { mode: 0o755 });
+    expect((await files(cwd, { git: "/absent/git", rg: fakeRg })).map(c => c.name)).toContain("fallback.ts");
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("fs fallback needs no executables and handles anchored ignores, directory rules and symlink cycles", async () => {
+  const cwd = mkdtempSync("/tmp/tui-fs-files-");
+  try {
+    mkdirSync(join(cwd, "src")); mkdirSync(join(cwd, "cache"));
+    writeFileSync(join(cwd, ".gitignore"), "/root.txt\ncache/\n*.tmp\n!keep.tmp\n\\!literal\n\\#literal\n");
+    for (const name of ["root.txt", "src/root.txt", "cache/drop.ts", "keep.tmp", "drop.tmp", "src/visible.ts", "!literal", "#literal"]) writeFileSync(join(cwd, name), "");
+    symlinkSync(cwd, join(cwd, "src/cycle"));
+    const names = (await files(cwd, { git: null, rg: null })).map(c => c.name);
+    expect(names).toEqual(expect.arrayContaining(["src/root.txt", "keep.tmp", "src/visible.ts"]));
+    for (const name of ["root.txt", "cache/drop.ts", "drop.tmp", "src/cycle", "!literal", "#literal"]) expect(names).not.toContain(name);
   } finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
