@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server native ingress 已修复官方 TUI 冷启动 config 分流，双后端新建会话通过，正在完成升级回归与发布交接。
+agent-server 官方 TUI 冷启动修复已提交并开 PR，升级中断问题三次复现后按契约停机，待主控接管。
 
 ## Goals
 

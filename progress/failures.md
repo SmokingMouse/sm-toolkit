@@ -2,7 +2,12 @@
 
 ## 待查
 
-无。
+### 升级冒烟的目标 turn 在 TUI interrupt 前结束（blocked）
+
+- 症状：中断阶段出现 completed 而无匹配 TUI turn/interrupt；长输出拒绝、200 句输出、重按物理 Esc 的三次尝试均未稳定通过，触发 fj-ingress-fresh-start-01bb 停机条款。
+- 可证伪假设：wire 首个 delta 早于 TUI 当前任务可接收 Escape 的状态，或 Claude/显示端终局时序存在差异；尚未定位。重按 Escape 也失败，未保留该实验改动。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude`；扩展混合线程路径会检查同一 thread/turn 的请求、回执、interrupted 终局。失败证据在本契约 out/proof/upgrade-release-failure.log 和 upgrade-verified-failure.log。
+- 已确认：D1–D4 单独复跑通过，默认升级矩阵有失败；PR #17 保留待验收，未合并或重启生产。需主控接管，不宣称已修复中断稳定性。
 
 ## 已结案
 
