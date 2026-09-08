@@ -17,6 +17,8 @@ export interface ServerOptions {
   orphanTimeoutMs?: number;
   approvalTimeoutMs?: number;
   idleTimeoutMs?: number;
+  readonlyAutoAllow?: boolean;
+  readonlyCommands?: string[];
 }
 export interface InProcessClient {
   readonly clientId: string;
@@ -145,7 +147,7 @@ export class AgentServer {
     this.threads = new ThreadManager(this.log, options.engineFactory ?? (backend => {
       if (backend === "codex") return new CodexEngine();
       if (backend !== "claude") throw new ProtocolError(ErrorCode.unsupported_capability, `backend ${backend} is not installed`);
-      return new ClaudeEngine();
+      return new ClaudeEngine({ readonlyAutoAllow: options.readonlyAutoAllow, readonlyCommands: options.readonlyCommands });
     }), options);
     this.approvals = new ApprovalBroker(this.log, () => this.connections, this.leases, { orphanTimeoutMs: options.orphanTimeoutMs, timeoutMs: options.approvalTimeoutMs, onDeliveryError: (threadId, error) => this.threads.engineDied(threadId, rpcError(error)) });
     this.threads.approvals = this.approvals;

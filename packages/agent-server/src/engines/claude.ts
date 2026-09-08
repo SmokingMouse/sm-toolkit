@@ -5,6 +5,7 @@ import { ClaudeEffortSchema, ErrorCode, PermissionSchema, ProtocolError, type Js
 import { AsyncQueue, sessionEnvironment, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
 import { ClaudeEventMapper, jsonValue, mapPermissionDecision, mapPermissionRequest, record, type ToolPermissionRequest } from "./claude-mapper.js";
 import { historyMessages } from "./fork-history.js";
+import { classifyReadonlyCommand, DEFAULT_READONLY_COMMANDS } from "./readonly-commands.js";
 
 // Local Claude Code 2.1.258 bin/claude.exe: print.ts d.request.subtype dispatch.
 // Default deny: auth, initialization, settings, remote plumbing and lifecycle controls
@@ -71,6 +72,10 @@ export interface ClaudeEngineOptions {
   executable?: string;
   handshakeTimeoutMs?: number;
   spawnProcess?: (command: string, args: string[], options: { cwd?: string; env: NodeJS.ProcessEnv }) => ChildProcessWithoutNullStreams;
+  /** Auto-allow readonly Bash commands under default/plan/acceptEdits without an approval round trip. Default true. */
+  readonlyAutoAllow?: boolean;
+  /** Overrides the default readonly command allowlist entirely (not merged). */
+  readonlyCommands?: readonly string[];
 }
 export class ClaudeEngine implements EngineSession {
   readonly backend = "claude" as const;
@@ -96,7 +101,12 @@ export class ClaudeEngine implements EngineSession {
   private bash?: { itemId: string };
   private lastAssistantUuid?: string;
   private seeding?: { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
-  constructor(private readonly config: ClaudeEngineOptions = {}) {}
+  private readonly readonlyAutoAllow: boolean;
+  private readonly readonlyCommandSet: ReadonlySet<string>;
+  constructor(private readonly config: ClaudeEngineOptions = {}) {
+    this.readonlyAutoAllow = config.readonlyAutoAllow ?? true;
+    this.readonlyCommandSet = new Set(config.readonlyCommands ?? DEFAULT_READONLY_COMMANDS);
+  }
   async spawn(options: SessionOptions): Promise<void> {
     this.options = options; this.mapper = new ClaudeEventMapper(options.cwd);
     const launch = buildClaudeLaunch(options);
@@ -297,6 +307,8 @@ export class ClaudeEngine implements EngineSession {
         if ("decision" in decision && decision.decision === "abort" && this.active) void this.interrupt(this.active).catch(error => this.fail(new ProtocolError(ErrorCode.engine_unavailable, String(error))));
       };
       const permission = claudePermission(this.options.permission);
+      const readonlyCommand = req.toolName === "Bash" && this.readonlyAutoAllow ? String(record(req.input).command ?? "") : undefined;
+      const readonlyMatch = readonlyCommand !== undefined ? classifyReadonlyCommand(readonlyCommand, this.readonlyCommandSet) : undefined;
       if (permission === "bypassPermissions" || permission === "dontAsk") {
         const decision = permission === "bypassPermissions" ? "accept" : "reject";
         respond({ decision });
@@ -305,6 +317,11 @@ export class ClaudeEngine implements EngineSession {
         this.events.push({ type: "engineEvent", turnId: this.active, backend: this.backend, subtype: "permission_auto_response", payload: { requestId: req.requestId, toolUseId: req.toolUseId, toolName: req.toolName, permission, behavior: decision === "accept" ? "allow" : "deny", reason: "permission_mode" } });
       }
       else if (this.sessionGrants.has(grantKey)) respond({ decision: "accept" });
+      else if (readonlyMatch?.readonly) {
+        respond({ decision: "accept" });
+        // Not enqueued as an approval: readonly_auto_allow is audited purely via engineEvent, no pendingRequests row.
+        this.events.push({ type: "engineEvent", turnId: this.active, backend: this.backend, subtype: "readonly_auto_allow", payload: { requestId: req.requestId, toolUseId: req.toolUseId, toolName: req.toolName, permission, behavior: "allow", reason: "readonly_command", command: readonlyCommand!, matchedRules: readonlyMatch.matchedRules } });
+      }
       else {
         const requestId = `ar_${crypto.randomUUID()}`;
         this.nativeRequests.set(req.requestId, { requestId, turnId: this.active, cancel: () => { cancelled = true; } });
