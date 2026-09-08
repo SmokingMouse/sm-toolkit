@@ -7,6 +7,8 @@ const threadId = z.object({ threadId: IdSchema });
 const limit = z.number().int().positive().max(10000).optional();
 export const EngineCapabilitiesSchema = z.strictObject({ engineEvents: z.boolean().optional(), engineControl: z.boolean().optional(), permissionSet: z.boolean().optional(), effortSet: z.boolean().optional(), subAgentText: z.boolean().optional(), bashInput: z.boolean().optional(), compact: z.boolean().optional() });
 export const ThreadOptionsSchema = z.strictObject({
+  // model is wire-optional only for daemon default_model or persisted resume/fork options.
+  // ThreadManager enforces the effective model before spawning Claude or Codex.
   fjContext: z.strictObject({ root: AbsolutePathSchema, cid: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/), seat: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/).optional() }).optional(),
   serviceTier: z.literal("default").optional(),
   cwd: AbsolutePathSchema.optional(), model: z.string().optional(), effort: z.string().min(1).optional(), permission: PermissionSchema.optional(),

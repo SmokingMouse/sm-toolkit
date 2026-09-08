@@ -3,8 +3,9 @@ import type { EngineEvent, EngineFactory, EngineSession, SessionOptions } from "
 import { ItemLog } from "./item-log.js";
 import { TurnQueue } from "./turn-queue.js";
 import type { ApprovalBroker } from "./approval-broker.js";
+import { executionModel, type ModelPolicyOptions } from "./model-policy.js";
 
-export interface ThreadManagerOptions { maxQueuedTurns?: number; idleTimeoutMs?: number; now?: () => number }
+export interface ThreadManagerOptions extends ModelPolicyOptions { maxQueuedTurns?: number; idleTimeoutMs?: number; now?: () => number }
 const transitions: Record<ThreadStatus["type"], ThreadStatus["type"][]> = {
   spawning: ["idle", "systemError", "closed"], idle: ["running", "closed", "systemError"],
   running: ["idle", "interrupted", "systemError", "closed"], interrupted: ["idle", "systemError", "closed"],
@@ -23,7 +24,7 @@ export class ThreadManager {
   readonly maxQueuedTurns: number;
   readonly idleTimeoutMs: number;
   private now: () => number;
-  constructor(readonly log: ItemLog, private readonly factory: EngineFactory, options: ThreadManagerOptions = {}) {
+  constructor(readonly log: ItemLog, private readonly factory: EngineFactory, private readonly options: ThreadManagerOptions = {}) {
     this.maxQueuedTurns = options.maxQueuedTurns ?? 8; this.idleTimeoutMs = options.idleTimeoutMs ?? 30 * 60_000; this.now = options.now ?? Date.now;
     // The database outlives engines. No process survives this owner restarting.
     for (const thread of log.allThreads()) if (!["closed", "systemError"].includes(thread.status.type)) {
@@ -47,9 +48,13 @@ export class ThreadManager {
   engineControl(params: MethodParams<"thread/engineControl">): Promise<MethodResult<"thread/engineControl">> {
     const thread = this.get(params.threadId);
     if (thread.backend !== "claude") throw new ProtocolError(ErrorCode.backend_unsupported, `${thread.backend} does not support Claude engine controls`);
+    if (params.subtype === "set_model") params = { ...params, params: { ...params.params, model: this.model(params.params.model, thread.backend, thread.id) } };
     const engine = this.session(thread.id);
     if (!engine.engineControl) throw new ProtocolError(ErrorCode.backend_unsupported, "engine controls unavailable");
     return engine.engineControl(params.subtype, params.params);
+  }
+  model(value: unknown, backend: Thread["backend"], threadId: string): string {
+    return executionModel(value, backend, this.options, threadId);
   }
   session(threadId: string): EngineSession {
     const session = this.live.get(threadId);
@@ -71,9 +76,11 @@ export class ThreadManager {
   }
   async start(params: StartThreadParams, onCreated?: (thread: Thread) => void, internal?: { resume?: string; fork?: boolean; request?: unknown; prefix?: Item[]; forkedFrom?: Thread["forkedFrom"]; forkPoint?: string; seedHistory?: Item[] }): Promise<MethodResult<"thread/start">> {
     const request = internal?.request ?? params;
+    const id = `th_${crypto.randomUUID()}`;
+    if (params.backend !== "external") params = { ...params, model: this.model(params.model, params.backend, id) };
     const existing = this.log.deduplicate<Thread>("threads", params.clientThreadId, request);
     if (existing) { onCreated?.(existing); await this.opening.get(existing.id); return { thread: this.get(existing.id), deduplicated: true }; }
-    const thread: Thread = { id: `th_${crypto.randomUUID()}`, backend: params.backend, engineThreadId: internal?.fork ? null : internal?.resume ?? null, cwd: params.cwd ?? process.cwd(), status: { type: "spawning" }, createdAtMs: this.now(), ...(params.model ? { model: params.model } : {}), ...(params.meta ? { meta: params.meta } : {}), ...(params.clientThreadId ? { clientThreadId: params.clientThreadId } : {}) };
+    const thread: Thread = { id, backend: params.backend, engineThreadId: internal?.fork ? null : internal?.resume ?? null, cwd: params.cwd ?? process.cwd(), status: { type: "spawning" }, createdAtMs: this.now(), ...(params.model ? { model: params.model } : {}), ...(params.meta ? { meta: params.meta } : {}), ...(params.clientThreadId ? { clientThreadId: params.clientThreadId } : {}) };
     if (internal?.forkedFrom) thread.forkedFrom = internal.forkedFrom;
     const options = { ...params, cwd: thread.cwd, ...(internal?.seedHistory ? { seedHistory: internal.seedHistory } : {}), ...(internal?.fork ? { engineThreadId: internal.resume, forkSession: true, forkPoint: internal.forkPoint } : {}) };
     if (params.fjContext) thread.meta = { ...thread.meta, fjContext: params.fjContext };
@@ -140,6 +147,7 @@ export class ThreadManager {
     thread = this.get(thread.id);
     const { threadId: _, engineThreadId: __, ...overrides } = params;
     const options = { ...this.log.options<SessionOptions>(thread.id), ...overrides, backend: thread.backend };
+    if (thread.backend !== "external") options.model = this.model(options.model, thread.backend, thread.id);
     this.log.saveOptions(thread.id, options); thread.cwd = options.cwd ?? thread.cwd; thread.model = options.model; thread.permission = options.permission ?? "default"; delete thread.closedAtMs; this.log.saveThread(thread);
     // Claude replay frames are only durably flushed by a subsequent turn. Before
     // that, recreate the seeded process instead of resuming an incomplete file.

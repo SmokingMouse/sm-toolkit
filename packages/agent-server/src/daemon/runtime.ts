@@ -7,6 +7,7 @@ import { claimPid, removeStaleSocket } from "./process.js";
 
 export interface DaemonOptions { paths?: DaemonPaths; graceMs?: number; wsPort?: number; wsAllowedOrigins?: string[]; serverOptions?: ServerOptions; logger?: (message: string) => void }
 const ConfigSchema = z.object({
+  default_model: z.string().trim().min(1).refine(model => model.toLowerCase() !== "default", "default_model must name an explicit model").optional(),
   ws_allowed_origins: z.array(z.string()).optional(),
   allowed_roots: z.array(z.string()).optional(), maxQueuedTurns: z.number().int().nonnegative().optional(),
   orphanTimeoutMs: z.number().int().nonnegative().optional(), idleTimeoutMs: z.number().int().nonnegative().optional(),
@@ -14,9 +15,10 @@ const ConfigSchema = z.object({
 });
 export function readConfig(path: string): ServerOptions & { ws_allowed_origins?: string[] } {
   if (!existsSync(path)) return {};
-  const { allowed_roots, readonly_auto_allow, readonly_commands, ...options } = ConfigSchema.parse(Bun.TOML.parse(readFileSync(path, "utf8")));
+  const { allowed_roots, readonly_auto_allow, readonly_commands, default_model, ...options } = ConfigSchema.parse(Bun.TOML.parse(readFileSync(path, "utf8")));
   return {
     ...options,
+    ...(default_model !== undefined ? { defaultModel: default_model } : {}),
     ...(allowed_roots ? { allowedRoots: allowed_roots } : {}),
     ...(readonly_auto_allow !== undefined ? { readonlyAutoAllow: readonly_auto_allow } : {}),
     ...(readonly_commands ? { readonlyCommands: readonly_commands } : {}),

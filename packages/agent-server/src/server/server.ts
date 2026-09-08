@@ -19,6 +19,7 @@ export interface ServerOptions {
   idleTimeoutMs?: number;
   readonlyAutoAllow?: boolean;
   readonlyCommands?: string[];
+  defaultModel?: string;
 }
 export interface InProcessClient {
   readonly clientId: string;
