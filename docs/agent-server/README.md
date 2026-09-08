@@ -289,15 +289,15 @@ Trellis 今天自己 spawn 引擎（`lib/llm/claude.ts` / `codex.ts` → `Backen
 
 ## 9. 分阶段路线
 
-| 阶段 | 交付 | 完成判据 |
-|---|---|---|
-| **P0 协议冻结** | `protocol.md` 的方法 / 通知 / item 表 + TypeScript 类型包 `@smokingmouse/agent-protocol` + JSON schema 导出 | 类型包能被 Trellis 与 TUI 同时 import；schema 与 codex v2 的差异表逐条有理由 |
-| **P1 单后端 daemon** | Session Registry + Item Log + Turn Queue + unix socket 传输；只支持 `backend:"codex"`（app-server 协议映射最短） + TUI 客户端 | TUI 能开 thread、连发三轮不重启进程、断开重连补齐、`turn/interrupt` 生效 |
-| **P2 Claude 长会话** | `ClaudeSession`：stdin 常开跨轮、control protocol 复用、`can_use_tool` 接进 Approval Broker | 同一进程跑完五轮；审批在两个客户端同时弹、先答生效另一个撤卡 |
-| **P3 WebSocket + 鉴权 + 多客户端** | WS 传输、token、`serverRequest/resolved`、可选 input lease | 手机 + TUI 同时 attach 同一 thread，双方看到同一份日志 |
-| **P4 Trellis 迁移第一步** | Trellis 的 project 模式改走 agent-server（chat 保持原路） | 见 `trellis-migration.md` 第一步验收 |
-| **P5 外部提供者** | `ExternalSession` + Herdr 桥审批回写 | pane 里的 codex 会话在手机上可读、可批 |
-| **P6 飞书 / 手机客户端切换** | 飞书 handler 与手机 PWA 改走协议 | Trellis 侧不再有第二个 `startRun` 调用点 |
+| 阶段 | 交付 | 完成判据 | 状态 |
+|---|---|---|---|
+| **P0 协议冻结** | `protocol.md` 的方法 / 通知 / item 表 + TypeScript 类型包 `@smokingmouse/agent-protocol` + JSON schema 导出 | 类型包能被 Trellis 与 TUI 同时 import；schema 与 codex v2 的差异表逐条有理由 | 已完成 |
+| **P1 单后端 daemon** | Session Registry + Item Log + Turn Queue + unix socket 传输；只支持 `backend:"codex"`（app-server 协议映射最短） + TUI 客户端 | TUI 能开 thread、连发三轮不重启进程、断开重连补齐、`turn/interrupt` 生效 | 已完成 |
+| **P2 Claude 长会话** | `ClaudeSession`：stdin 常开跨轮、control protocol 复用、`can_use_tool` 接进 Approval Broker | 同一进程跑完五轮；审批在两个客户端同时弹、先答生效另一个撤卡 | 已完成（`engines/claude.ts` 常驻单进程 + 测试覆盖） |
+| **P3 WebSocket + 鉴权 + 多客户端** | WS 传输、token、`serverRequest/resolved`、可选 input lease | 手机 + TUI 同时 attach 同一 thread，双方看到同一份日志 | 已完成（`transport/websocket.ts` + `LeaseManager`/`ApprovalBroker` 已接线，见[包 README](../../packages/agent-server/README.md)） |
+| **P4 Trellis 迁移第一步** | Trellis 的 project 模式改走 agent-server（chat 保持原路） | 见 `trellis-migration.md` 第一步验收 | 进行中（Trellis 分支实测，细节见 `trellis-migration.md`） |
+| **P5 外部提供者** | `ExternalSession` + Herdr 桥审批回写 | pane 里的 codex 会话在手机上可读、可批 | 未开始 |
+| **P6 飞书 / 手机客户端切换** | 飞书 handler 与手机 PWA 改走协议 | Trellis 侧不再有第二个 `startRun` 调用点 | 未开始 |
 
 **顺序理由**：先 codex 不是因为它更重要，而是因为它的原生协议就是目标形状，
 P1 能用最少的映射代码把 daemon 的骨架（登记表 / 日志 / 队列 / 重连）压出来；
@@ -305,11 +305,10 @@ Claude 的长会话改造是真正的新代码，放在骨架稳定之后。
 
 ## 10. 已知风险
 
-1. **Claude 跨轮 stdin 常开未实测**。今天 `ClaudeBackend` 在 result 后关 stdin
-   让进程退出（`backends/claude.ts` 交互模式分支）。「不关 stdin、发第二条 user
-   message、拿到第二个 result」这条路径必须在 P2 开工前先做一次真机验证，失败
-   则退化为「进程复用只在 codex 上做，claude 仍每轮 spawn + `--resume`」——协议
-   不变，只是 claude 的成本收益少一块。
+1. ~~**Claude 跨轮 stdin 常开未实测**~~ **已解决**：`engines/claude.ts` 的
+   `ClaudeEngine` 是常驻单进程架构，`spawn()` 只调用一次，`steer()` 与队列里的
+   后续轮次都直接 `write()` 到同一个 `stdin`，`close()` 才 `stdin.end()`；该
+   路径已随 fj dogfood（agent-tui ready/首轮交接）投入真机验证，不再是未验证假设。
 2. **codex app-server 协议无兼容承诺**。锁 schema 版本 + check-codex-alignment
    检查协议名字和必填字段差异；启动时核对版本，未知 item/request 发 -32015 并保留 thread。
    当前没有 exec 路径自动兜底。

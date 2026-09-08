@@ -117,9 +117,15 @@ AS 通知翻译成现有的 `RunEvent` 形状再发 SSE。
 | 今天 | 迁移后 |
 |---|---|
 | claude 原生 `--fork-session`（chat B-fork） | `thread/fork{threadId}`（不带 `fromItemId`） |
-| `cli-fork.ts` 前缀 jsonl 截断（project per-lineage 隔离） | `thread/fork{threadId, fromItemId}` |
+| `cli-fork.ts` 前缀 jsonl 截断（project per-lineage 隔离） | 显式 fork：最新节点（tip）→ `thread/fork{threadId}`（不带 `fromItemId`）；非 tip 节点 → 上游暂不支持带 `fromItemId` 的分叉，明确拒绝，保留旧节点数据与绑定 |
+| project 模式非 tip 节点的**普通续聊**（非显式分叉） | 用祖先历史播种（seed）一个新 thread，不经协议原生 `fromItemId` 分叉 |
 | `codex-fork.ts` rollout copy | codex 原生 `thread/fork`（2026-08-18 决策已认定原生 fork 上位） |
 | `backfillNativeTurnUuid` / `backfillCodexTurnOrdinal` | **可以删** —— 「下刀坐标」在协议里就是 `itemId`，不需要事后回填 |
+
+**实测收窄**（Trellis `feat-agent-server-step2` 分支）：协议设计上 `thread/fork` 支持任意
+`fromItemId`（见 `protocol.md` §3.1），但落地时上游对非 tip 节点的 `fromItemId` 分叉
+明确拒绝；因此 Trellis 侧把「任意 item 分叉」收窄为「tip 显式分叉（不带 fromItemId）+
+非 tip 普通续聊走播种回退」，任意 item 原生分叉留作上游 backlog、不阻塞迁移。
 
 这是迁移收益最大的一块：两套后端特有的分叉 hack 收敛成一个方法。
 
@@ -177,7 +183,10 @@ reap 逻辑不变，**另加**一条：启动时对每个 `running` 的 task_run
 **做什么**
 
 1. daemon 补齐 `ClaudeSession`（`README.md` §9 P2），审批接进 Approval Broker。
-2. `app/api/chat/route.ts` 加一个开关 `AS_PROJECT=1`：project 模式的
+2. `app/api/chat/route.ts` 加一个开关 `TRELLIS_AS_PROJECT=on`（`off`/`on`，见
+   Trellis 分支 `.env.example`；`TRELLIS_AS=off` 时整条 AS 路径关闭，覆盖
+   `TRELLIS_AS_PROJECT`；`TRELLIS_AS_SOCKET`/`TRELLIS_AS_TOKEN_PATH` 指向
+   daemon 的 socket 与 token 文件）：project 模式的
    `startRun` 改走 `asClient`；**chat / enhanced chat 保持原路**。
 3. `lib/server/as-client.ts` 把 AS 通知翻译成现有 `RunEvent` 形状，直接喂
    给现有 SSE 编码器 → **前端零改动**。
@@ -194,9 +203,13 @@ reap 逻辑不变，**另加**一条：启动时对每个 `running` 的 task_run
   （`fts-search`）、导出、`cli-import` 对账全部不受影响。
 
 **验收**
-- 同一个 project session 连发五轮，daemon 侧只有一个引擎进程（`ps` 核对）。
-- 网页 + TUI 同时 attach，两边看到同一份流；网页刷新后 catchup 正确。
-- 审批：网页与 TUI 同时弹卡，一边点批准，另一边卡片变「已由 X 处理」。
+- 同一个 project session 连发 N（≥3）轮，daemon 侧只有一个引擎进程（`ps` 核对）；
+  实测记录（`mobile-as-project`）验证到三轮单引擎，未复测五轮。
+- 网页 + 第二个 AS client（实测为网页刷新 + 第二端/mobile）同时 attach，两边
+  看到同一份流；网页刷新后 catchup 正确。**TUI（`apps/agent-tui`）同时 attach
+  这条路径当前未见实测证据，待补测**。
+- 审批：两个 AS client 同时弹卡，一边点批准，另一边卡片变「已由 X 处理」
+  （实测记录为网页 + 第二端，非网页 + TUI）。
 - 中断（⏹）、重试、分叉、@提及 ephemeral、自定义 agent 五条老路径回归通过。
 - DB 行内容与走旧路时逐字节可比（同一 prompt 的 `nodes.response` 结构一致）。
 

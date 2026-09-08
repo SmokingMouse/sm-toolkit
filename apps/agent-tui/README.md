@@ -31,6 +31,13 @@ Enter 发 `turn/start`；运行时同样入队，显示从 1 起的排队位置�
 | Ctrl-P、Ctrl-R | 分别折叠/展开 plan（默认展开）和 reasoning（默认折叠）；plan 保留正文和每一步状态 |
 | `/takeover`、`/release` | 手动获取独占输入 lease / 释放；活跃时续期，空闲后到期 |
 | `/context <窗口 token 数>` | 覆盖当前 TUI 的上下文窗口估算 |
+| `/diff` | 工作区差异（原生引擎，`get_workspace_diff`） |
+| `/usage` | 用量与限额表格（`get_usage`） |
+| `/cost` | 本会话费用（`get_session_cost`） |
+| `/mcp` | MCP 服务器状态（`mcp_status`） |
+| `/rewind <原生消息 UUID>` | 回滚会话（`rewind_conversation`），y/N 确认 |
+| `/btw <question>` | 侧问（`side_question`），不打断当前 turn |
+| `/help` | 显示命令与快捷键帮助；内容与本表同源自 `completion.ts` 的命令面板 |
 | `/new`、`/clear`（Ctrl+N） | 沿用当前 thread 的 cwd、backend、model 起新 thread 并切换；旧 thread 继续运行 |
 | `/threads`（Ctrl+T） | 列出 daemon 全部会话，按最近活动降序，分叉会话显示 forkedFrom 父 thread 与 item 短 id；↑/↓ 选择、Enter attach、Esc 取消 |
 | `/resume` | 打开同一会话选择器 |

@@ -97,7 +97,7 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 | 方法 | params | result | 说明 |
 |---|---|---|---|
 | `initialize` | 见 §1 | 见 §1 | 握手 |
-| `thread/start` | `{backend, cwd?, model?, effort?, permission?, serviceTier?, fjContext?, autocompact?, sandbox?, systemPrompt?, tools?, meta?, clientThreadId?}` | `{thread: Thread}` | 新建 thread 并 spawn 引擎 |
+| `thread/start` | `{backend, cwd?, model?, effort?, permission?, serviceTier?, fjContext?, autocompact?, sandbox?, systemPrompt?, tools?, meta?, clientThreadId?}` | `{thread: Thread, deduplicated?: true}` | 新建 thread 并 spawn 引擎；`deduplicated` 见 §8.1 |
 | `thread/resume` | `{threadId?, engineThreadId?, backend?, cwd?, …同 start 的覆盖字段}` | `{thread: Thread, attached: boolean}` | **命中活进程即 attach**（`attached:true`，不 spawn）；否则按 `engineThreadId` 重启引擎并续接 |
 | `thread/attach` | `{threadId, sinceSeq?}` | `{thread, items: Item[], nextSeq, queue: QueuedTurn[], pendingRequests: PendingServerRequest[]}` | 拿全量后缀快照并开始收该 thread 的通知；翻历史分页用 thread/items/list |
 | `thread/detach` | `{threadId}` | `{}` | 只退订，不影响 thread |
@@ -110,9 +110,12 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 | `thread/lease/acquire` | `{threadId, ttlMs?}` | `{lease: Lease}` | 可选：独占输入权 |
 | `thread/lease/release` | `{threadId}` | `{}` | 释放 |
 | `thread/engineControl` | `{threadId, subtype: string, params: JsonObject}` | `JsonObject`（完整原生 control_response） | Claude 白名单控制；原生错误保留在 response.subtype |
-| `thread/permission/set` | `{threadId, permission: Permission}` | `{thread: Thread}` | Claude 热切；提升类请求必须持 lease |
+| `thread/permission/set` | `{threadId, permission: Permission}` | `{thread: Thread}`\* | Claude 热切；提升类请求必须持 lease |
 | `thread/effort/set` | `{threadId, maxThinkingTokens: number\|null, thinkingDisplay?: "summarized"\|"omitted"\|null}` | `JsonObject`（完整原生 control_response） | 非负整数预算，null 重置 |
 | `thread/compact` | `{threadId, instructions?: string, clientTurnId?: string}` | `{turn: Turn, deduplicated?: true}` | 入正常 turn 队列发送 /compact |
+
+\* `thread/permission/set` 复用了 `thread/start` 共用的 result 类型（zod 层面允许可选
+`deduplicated`），但该方法没有幂等键，`deduplicated` 字段对它恒为 `undefined`，不代表协议赋予了幂等语义。
 
 `thread/start` / `thread/resume` 不接受 `env`（未知字段返回 `-32602`）。
 
@@ -298,10 +301,12 @@ Claude 不支持的反向 control request 会保守拒绝或取消，并发 `err
 
 | 方法 | params 关键字段 | response |
 |---|---|---|
-| `item/commandExecution/requestApproval` | `{requestId, threadId, turnId, itemId, command, cwd, reason?, startedAtMs}` | `{decision: "accept" \| "acceptForSession" \| "reject" \| "abort"}` |
-| `item/fileChange/requestApproval` | `{requestId, threadId, turnId, itemId, changes, grantRoot?, reason?, startedAtMs}` | `{decision: 同上}` |
-| `item/permissions/requestApproval` | `{requestId, threadId, turnId, itemId, cwd, permissions, reason?, startedAtMs}` | `{permissions: GrantedPermissions, scope:"turn"\|"thread"\|"session"}` |
-| `item/tool/requestUserInput` | `{requestId, threadId, turnId, itemId, questions, isBlocking}` | `{answers: {[questionId]: Answer}}` |
+| `item/commandExecution/requestApproval` | `{requestId, threadId, turnId, itemId, command, cwd, reason?, startedAtMs, data?}` | `{decision: "accept" \| "acceptForSession" \| "reject" \| "abort"}` |
+| `item/fileChange/requestApproval` | `{requestId, threadId, turnId, itemId, changes, grantRoot?, reason?, startedAtMs, data?}` | `{decision: 同上}` |
+| `item/permissions/requestApproval` | `{requestId, threadId, turnId, itemId, cwd, permissions, reason?, startedAtMs, data?}` | `{permissions: GrantedPermissions, scope:"turn"\|"thread"\|"session"}` |
+| `item/tool/requestUserInput` | `{requestId, threadId, turnId, itemId, questions, isBlocking, data?}` | `{answers: {[questionId]: Answer}}` |
+
+`data?: {raw: any}` 是四个反向请求共用的可选字段，透传引擎原生请求的未建模原始 payload；当前无调用方读取，仅供排障/未来扩展。
 
 **竞答规则（规范性）**：
 
@@ -423,8 +428,9 @@ type Autocompact = "auto" | number; // 整数 token 数，100000–1000000
 | `-32015` | `engine_protocol_error` | 引擎回了不认识的东西（`data.raw` 截断） | 报错，建议看 trace |
 | `-32016` | `backend_unsupported` | 后端不支持所请求原生能力 | 检查 capabilities / backend |
 
-`error.data` 约定：`{threadId?, turnId?, itemId?, retryable: boolean, detail?, reason?: string}`。
+`error.data` 约定：`{threadId?, turnId?, itemId?, retryable: boolean, detail?, reason?: string, stderr?: string, raw?: any, holder?: {clientId, label}}`。
 提权缺少有效租约时 `reason` 为 `lease_required`；客户端按此字段区分其他 unauthorized 原因，不解析消息文案。该字段可选，旧客户端可忽略。
+`stderr`/`raw`/`holder` 仅特定错误码使用：`-32004 engine_unavailable` 带 `stderr`（尾部日志），`-32015 engine_protocol_error` 带 `raw`（截断的原始帧），`-32012 lease_held` 带 `holder`（持锁者身份）。
 
 ## 8. 幂等与重放
 
