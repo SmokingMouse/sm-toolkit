@@ -18,14 +18,18 @@ export const CLAUDE_CONTROL_ALLOWLIST = new Set([
   "reload_plugins", "reload_skills", "side_question",
 ]);
 export function claudePermission(permission: SessionOptions["permission"] = "default"): string {
-  return permission === "full" ? "bypassPermissions" : permission === "auto-edit" ? "acceptEdits" : permission === "readonly" ? "default" : permission;
+  return permission === "full" ? "bypassPermissions" : permission === "auto-edit" ? "acceptEdits" : permission === "readonly" ? "plan" : permission;
 }
 
 export function buildClaudeLaunch(options: SessionOptions): { args: string[]; env: NodeJS.ProcessEnv } {
   validateClaudeEffort(options.effort);
   if (options.sandbox !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Claude sandbox override is not supported");
   const resolved = resolveClaudeModel(options.model);
-  const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--settings", JSON.stringify({ permissions: { ask: ["*"] } })];
+  const permission = claudePermission(options.permission);
+  // Keep stdio on every mode for live switches and unexpected native requests.
+  // Only default forces broker review; ask rules override native mode decisions.
+  const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio"];
+  if (permission === "default") args.push("--settings", JSON.stringify({ permissions: { ask: ["*"] } }));
   if (resolved.model) args.push("--model", resolved.model);
   if (options.effort !== undefined) args.push("--effort", options.effort);
   if (options.autocompact !== undefined) args.push("--autocompact", String(options.autocompact));
@@ -35,13 +39,12 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   if (options.forkPoint && options.forkSession && options.engineThreadId) args.push("--resume-session-at", options.forkPoint);
   if (options.systemPrompt) args.push("--system-prompt", options.systemPrompt);
   if (options.tools && options.tools !== "all") args.push("--tools", options.tools.join(","));
-  const permission = options.permission ?? "default";
-  if (permission === "full" || permission === "bypassPermissions") args.push("--dangerously-skip-permissions");
-  args.push("--permission-mode", claudePermission(permission));
+  args.push("--permission-mode", permission);
   // 2.1.258 PLe checks isBypassPermissionsModeAvailable on a live switch.
   // This flag permits switching later; it does not select bypass at launch.
-  if (permission === "full" || permission === "bypassPermissions") args.push("--allow-dangerously-skip-permissions");
-  if (permission === "readonly") args.push("--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit");
+  // 2.1.258 accepts bypassPermissions as the mode itself; the dangerous flag
+  // selects that same mode, so it is redundant. Keep availability for live re-entry.
+  if (permission === "bypassPermissions") args.push("--allow-dangerously-skip-permissions");
   const env = { ...process.env };
   delete env.CLAUDECODE;
   // The shared resolver owns endpoint routing; ambient proxy settings cannot override it.
@@ -170,7 +173,7 @@ export class ClaudeEngine implements EngineSession {
   async setPermission(permission: NonNullable<SessionOptions["permission"]>): Promise<void> {
     if (permission === "readonly") {
       if (this.options?.permission === "readonly") return;
-      throw new ProtocolError(ErrorCode.unsupported_capability, "readonly is a launch-time tool restriction; use a native permission mode for hot switching");
+      throw new ProtocolError(ErrorCode.unsupported_capability, "readonly is a launch-time alias for plan; use plan for hot switching");
     }
     const response = await this.engineControl("set_permission_mode", { mode: claudePermission(permission) });
     if (record(response.response).subtype !== "success") throw new ProtocolError(ErrorCode.unsupported_capability, String(record(response.response).error ?? "Claude rejected permission mode"), { raw: response });
