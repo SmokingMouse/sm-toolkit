@@ -748,7 +748,8 @@ AS turn id 只用于内部队列，interrupt 必须匹配当前 native turn id�
 read/list/resume 使用最新 AS 标题，空名称返回 `-32600 / thread name must not be empty`。
 等待 native turn 启动确认最多 30 秒；若超时时仍在 AS 队列中，通过 as/1 turn/cancel 撤销后报错，避免报错后悄悄执行。
 resume 只恢复 AS 已登记的 UUID；live resume 不允许静默覆盖已生效的设置。
-thread/list 从 AS 库提供 data/nextCursor，展示字段使用 native 启动快照；thread/loaded/list 从 AS health 取 live UUID。
+thread/list 从 AS 全库聚合，遍历全部 as/1 分页，提供 data/nextCursor/backwardsCursor；native 启动/恢复元数据持久化到 Thread.meta.nativeThreadData，as/1 创建的线程也适用。
+thread/loaded/list 从 AS health 取 live UUID，排序、cursor 与 limit 规则见 §13.3。
 thread/read、thread/turns/list、thread/items/list 通过 owning Codex 进程只读查询，历史分页保留 native cursor；
 原生“首条消息前尚未 materialize”的明确错误转换为空历史。thread/unsubscribe 映射 AS detach。
 
@@ -801,9 +802,10 @@ Claude 线程的 native UUID 是 AS threadId 去掉 `th_`，与 Claude CLI sessi
 fj 仍可通过 as/1 建好 Claude 线程，再在官方 TUI 用 `resume <uuid>` 进入，包括尚无 turn 的线程。
 
 Claude 通知由 `claude-projection.ts` 单向合成；AS 是历史与治理真相源，不提供 native→AS Item 的逆变换。
-AS turnId / itemId 原样保留。thread/start、read、resume、fork 使用同一 Thread/Turn 视图，完整历史标记 `historyMode: legacy`。
+AS turnId / itemId 原样保留。thread/start、read、resume、fork 使用同一 Thread/Turn 视图，历史标记 `historyMode: paginated`。
 历史分页通过 as/1 `thread/items/list` 读取，native 返回 `data`、`nextCursor`、`backwardsCursor`；游标绑定线程、方法和 turn 过滤，
-不直接暴露或接受 AS seq cursor；反向游标包含页首锚点。turns 的 `notLoaded` 不返回 items，`full` / `summary` 当前返回标为 `full` 的完整项。
+不直接暴露或接受 AS seq cursor；反向游标包含页首锚点。turns 的 `notLoaded` 不返回 items，`summary` 只返回首条 userMessage 和末条 agentMessage，`full` 返回全部项。
+Claude 的呈现 source 为 `cli`：官方 resume picker 固定请求 cli/vscode，使用 appServer 会让已有 Claude 线程从 picker 消失；backend 身份仍由 modelProvider=claude 保留。
 
 | AS Item | native 呈现及流 | 已知转换 |
 |---|---|---|
@@ -883,3 +885,45 @@ unsupported_method_errors 由同一隔离 daemon 的独立 native WebSocket 探�
 同时核对 broker decided_by、隔离 proof 文件、resolved 帧、fresh/普通/Read 回复的终端渲染。
 两种后端都检查 TUI 自动标题的 name/set 请求及 AS 落库；Codex 冒烟仍使用原有本地 Responses fixture 路径。
 模型 init、native wire、PTY 输出、summary 保留在 artifact_dir；该目录的隔离 HOME 含登录文件，不应整体复制为公开证据。
+
+### 13.3 多线程、fork、分页与断线恢复（slice 3）
+
+一个 TUI 主连接可交替 resume/start 多条线程；各线程的订阅独立，所有 turn、审批和历史仍按 §13 的 UUID 规则路由到 owning engine。
+官方 picker 另开短命只读连接查询列表，选择后复用原主连接发 turn。`thread/unsubscribe` 只 detach 指定订阅，既不关闭线程也不终止进程。
+
+`thread/list` 默认 created_at 倒序、25 条，limit 按上游夹到 1–100；支持 updated_at/recency_at、asc/desc、cwd（单路径或数组）、
+modelProviders、sourceKinds、searchTerm、parentThreadId/ancestorThreadId（互斥）、archived。archived 空/false 只返未关闭线程；true 只返关闭线程。
+sourceKinds 空/缺省只返交互来源 cli/vscode；显式关系查询未带 sourceKinds 时允许其他来源。project、section 和 originator 筛选明确拒绝。
+按排序字段及 UUID 稳定排序，cursor 携带排序锚点并绑定过滤范围；backwardsCursor 在反向查询时包含页首锚点，空页两游标为 null。
+`thread/loaded/list` UUID 字典序，缺省不限条数；limit=0 按 1 处理。cursor 不要求线程仍 loaded，使用严格大于锚点的下一条，返回 data/nextCursor。
+列表只从 AS 聚合，不从 control 进程的线程库读取；标题和当前状态以 AS 为准，原生 parent/source/session 等展示字段来自持久快照。
+
+`thread/turns/list` 缺省 desc/summary，`thread/items/list` 缺省 asc；两者默认 25、最大 100、limit=0 取 1，返回 data/nextCursor/backwardsCursor。
+反向游标包含页首项，也允许同向使用；普通 nextCursor 排除锚点。items 的 turnId 过滤参与游标 scope，不能跨线程、方法或 turn 复用。
+`thread/resume{excludeTurns:true}` 不填 thread.turns；initialTurnsPage 按 turns/list 的同一规则返回；两个恢复游标取最新 turn/item 的包含式锚点，空历史为 null。
+标准 Codex 历史及游标原样交给 owning app-server；Claude 从 AS 记录投影，AS seq cursor 不离开 ingress。
+
+`thread/fork` 两种后端均调用 as/1 thread/fork，继承已保存的后端、模型、cwd 和权限；请求不同的继承设置会报错。
+fromItemId 是包含式边界；lastTurnId 转换为 AS 已保存的 turn 末尾 checkpoint，两者互斥。不支持 beforeTurnId 或覆盖指令。
+有完整 native checkpoint 时使用引擎原生 fork；turn 中间位置走 AS 有界 seed，绝不带入后续项。
+Codex seed fork 另存 nativeInheritedTurns 展示前缀，保留原生项形状；其历史页使用 ingress 游标合并该前缀与新 native 历史。
+fork 响应、后续 read/resume/list 的 forkedFromId 指向父 native UUID；新线程立即可 resume/start turn，父线程保持独立。
+
+连接关闭只关闭对应 AS client，AS 自动释放该 client 的租约，线程及 owning 进程继续存在。
+同 bearer 的下一次 initialized 接管已断开连接的订阅集合，在线连接不被替换；显式 unsubscribe 的线程不会被恢复。
+这是 daemon 生命周期内的重连记录，不是 daemon 重启恢复协议；同 token 代表同一授权 audience，不能区分其下多个已断开的 TUI。
+恢复通过 as/1 attach 让 broker 重发尚未决定的请求，使用新连接 wire id；旧 wire id 先收到 resolved（reason=reconnected），避免重复卡片。
+离线期间已决定/过期的旧请求只重放 resolved，不再次提交决策。broker 的 120 秒/30 分钟超时规则不变。
+重连接管订阅不占租约；下一次 full 输入/升权再按需获取，其他在线持有人仍可拒绝该输入。正常输入继续依赖 assertInput。
+
+扩展冒烟命令（两种 backend 各连续运行三次）：
+
+```sh
+python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,multi_thread_ok,fork_ok,reconnect_ok
+python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,multi_thread_ok,fork_ok,reconnect_ok
+```
+
+multi_thread_ok 要求真实 picker 包含两条线程、同主连接四轮交替输入及匹配回复；fork_ok 要求真实 `/fork`、切回父线程再 resume 子线程并完成新 turn。
+reconnect_ok 在真实审批未决时终止 TUI，验证线程未 closed、engine UUID 未变、新卡片参数不变且旧卡片 resolved，随后真实按键决定并经 broker 收口。
+Codex fork 冒烟还生成 200+ 原生 items，由 `codex-remote-history.ts` 独立 WebSocket 校验双向分页、摘要、游标、空页、恢复与 fromItemId 中间 fork；证据单独保存为 history-proof.json。
+Claude 单测覆盖 240 项、60 turns 的相同边界；另有断线期间其他客户端决定审批、按需重新获取租约和跨后端 UUID 路由测试。

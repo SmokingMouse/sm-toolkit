@@ -54,7 +54,7 @@ export function claudeThread(thread: Thread, turns: NativeObject[] = []): Native
   const id = thread.id.slice(3);
   return { id, sessionId: id, model: thread.model ?? null, modelProvider: "claude", cwd: thread.cwd, name: thread.title ?? null, preview: thread.title ?? "",
     createdAt: Math.floor(thread.createdAtMs / 1000), updatedAt: Math.floor((thread.closedAtMs ?? thread.createdAtMs) / 1000),
-    cliVersion: "", source: "appServer", status: claudeStatus(thread.status.type), turns, historyMode: "legacy", ephemeral: false,
+    cliVersion: "", source: "cli", status: claudeStatus(thread.status.type), turns, historyMode: "paginated", ephemeral: false,
     projectId: null, path: null, parentThreadId: null, forkedFromId: thread.forkedFrom?.threadId.slice(3) ?? null, gitInfo: null };
 }
 export function claudeSettings(thread: Thread): NativeObject {

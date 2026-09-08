@@ -113,7 +113,7 @@ test("native UUID routes across connections; AS mutations own turn IDs, resume, 
   expect(b.frames.find(frame => frame.id === "missing-turn")?.error).toEqual({ code: -32600, message: "Invalid request: missing field `turnId`" });
   const resumed = await b.request("thread/resume", { threadId: first.thread.id }); expect(resumed.thread.id).toBe(first.thread.id);
   expect(f.engines).toHaveLength(2);
-  const list = await a.request("thread/list", { limit: 1 }); expect(list.data).toHaveLength(1); expect(list.nextCursor).toBe(list.data[0].id);
+  const list = await a.request("thread/list", { limit: 1 }); expect(list.data).toHaveLength(1); expect(list.nextCursor).toBeString();
   expect((await a.request("thread/list", { cursor: list.nextCursor, limit: 1 })).data[0].id).not.toBe(list.data[0].id);
   await a.session.client.request("thread/lease/acquire", { threadId: asThread.id });
   await expect(b.request("thread/name/set", { threadId: first.thread.id, name: "blocked title" })).rejects.toThrow(`codex-tui:${a.session.client.clientId}`);
@@ -322,6 +322,94 @@ test("engine UUID lookup survives daemon restart without an ingress mapping tabl
   expect(resolveThread(reopened, thread.id).id).toBe(original);
   expect(resolveThread(reopened, thread.id).title).toBe("survives restart");
   expect(resolveThread(reopened, thread.id).meta?.nativeThreadData).toHaveProperty("id", thread.id);
+});
+
+test("one native connection alternates two owning processes and detached threads stop streaming", async () => {
+  const f = setup(), c = connection(f); await c.initialize();
+  const ids = [];
+  for (let n = 0; n < 2; n++) ids.push((await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" })).thread.id);
+  for (const id of [ids[0], ids[1], ids[0], ids[1]]) {
+    const offset = c.frames.length;
+    const turn = await c.request("turn/start", { threadId: id, input: [{ type: "text", text: id }] });
+    await until(() => c.frames.slice(offset).some(f => f.method === "turn/completed"));
+    const events = c.frames.slice(offset).filter(f => f.method?.startsWith("turn/") || f.method?.startsWith("item/"));
+    expect(events.length).toBeGreaterThan(0);
+    for (const event of events) { expect(event.params.threadId).toBe(id); if (event.method === "turn/completed") expect(event.params.turn.id).toBe(turn.turn.id); }
+  }
+  const loaded = await c.request("thread/loaded/list", { limit: 1 });
+  expect(loaded.data).toEqual([...ids].sort().slice(0, 1));
+  expect((await c.request("thread/loaded/list", { cursor: loaded.nextCursor, limit: 0 })).data).toEqual([...ids].sort().slice(1));
+  expect((await c.request("thread/loaded/list", { cursor: "ffffffff-ffff-ffff-ffff-ffffffffffff" })).data).toEqual([]);
+  await c.request("thread/unsubscribe", { threadId: ids[1] });
+  c.session.close();
+  const reconnected = connection(f); await reconnected.initialize();
+  expect([...reconnected.session.router.attached]).toEqual([resolveThread(f.server, ids[0]).id]);
+  expect(f.engines).toHaveLength(2);
+});
+
+test("disconnect releases full lease, replays pending and offline resolved cards without killing either engine", async () => {
+  const f = setup("conversation"), a = connection(f); await a.initialize();
+  const { thread } = await a.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });
+  const as = resolveThread(f.server, thread.id);
+  await a.session.client.request("thread/lease/acquire", { threadId: as.id });
+  await a.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "approval" }] });
+  await until(() => a.frames.some(f => f.method === "item/commandExecution/requestApproval"));
+  const original = a.frames.find(f => f.method === "item/commandExecution/requestApproval")!;
+  a.session.close();
+  expect(f.server.leases.read(as.id)).toBeUndefined(); expect(f.server.threads.live.has(as.id)).toBe(true);
+  const b = connection(f); await b.initialize();
+  const pending = b.frames.find(f => f.method === "item/commandExecution/requestApproval")!;
+  expect(pending.params).toEqual(original.params); expect(pending.id).not.toBe(original.id);
+  expect(b.frames.some(f => f.method === "serverRequest/resolved" && f.params.requestId === original.id)).toBe(true);
+  // An already-online observer decides after b disconnects, then the next
+  // native connection must receive resolved, not a duplicate approval.
+  const observer = connection(f); await observer.initialize(); await observer.request("thread/resume", { threadId: thread.id });
+  b.session.close();
+  const card = observer.frames.find(f => f.method === "item/commandExecution/requestApproval")!;
+  await observer.session.receive({ id: card.id, result: { decision: "acceptForSession" } });
+  await until(() => observer.frames.some(f => f.method === "item/fileChange/requestApproval"));
+  const d = connection(f); await d.initialize();
+  expect(d.frames.some(f => f.method === "serverRequest/resolved" && f.params.requestId === pending.id && f.params.reason === "decided")).toBe(true);
+  expect(d.frames.some(f => f.method === "item/commandExecution/requestApproval")).toBe(false);
+  expect(d.frames.some(f => f.method === "item/fileChange/requestApproval")).toBe(true);
+  await d.session.client.request("thread/lease/acquire", { threadId: as.id });
+  expect(f.server.leases.read(as.id)?.holder.clientId).toBe(d.session.client.clientId);
+  expect(f.engines).toHaveLength(1);
+});
+
+test("reconnected full-permission input reacquires a lease only on demand", async () => {
+  const f = setup(), a = connection(f); await a.initialize();
+  const { thread } = await a.request("thread/start", { cwd: f.root, model: "gpt-6-astra", approvalPolicy: "never", sandbox: "danger-full-access" });
+  const as = resolveThread(f.server, thread.id);
+  expect(f.server.leases.read(as.id)).toBeUndefined();
+  await a.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "first" }] });
+  await until(() => f.server.threads.get(as.id).status.type === "idle");
+  expect(f.server.leases.read(as.id)?.holder.clientId).toBe(a.session.client.clientId);
+  a.session.close(); expect(f.server.leases.read(as.id)).toBeUndefined();
+  const b = connection(f); await b.initialize();
+  expect(f.server.leases.read(as.id)).toBeUndefined();
+  await b.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "second" }] });
+  expect(f.server.leases.read(as.id)?.holder.clientId).toBe(b.session.client.clientId);
+  expect(f.engines).toHaveLength(1);
+});
+
+test("thread aggregation traverses every AS page, excludes archived by default, and resumes reverse anchors", async () => {
+  const f = setup(), c = connection(f); await c.initialize();
+  // Real durable rows beyond the as/1 page limit; no thousands of processes.
+  f.server.log.transaction(() => { for (let n = 0; n < 10003; n++) {
+    const id = `th_${crypto.randomUUID()}`;
+    f.server.log.insertThread({ id, backend: "codex", engineThreadId: crypto.randomUUID(), cwd: f.root, createdAtMs: n * 1000,
+      status: { type: n === 10002 ? "closed" : "idle" }, meta: { nativeThreadData: { createdAt: n, modelProvider: "test" } } }, {}, {});
+  } });
+  const first = await c.request("thread/list", { limit: 2 });
+  expect(first.data.map((t: NativeObject) => t.createdAt)).toEqual([10001, 10000]);
+  const second = await c.request("thread/list", { limit: 2, cursor: first.nextCursor });
+  expect(second.data.map((t: NativeObject) => t.createdAt)).toEqual([9999, 9998]);
+  const back = await c.request("thread/list", { limit: 2, sortDirection: "asc", cursor: second.backwardsCursor });
+  expect(back.data.map((t: NativeObject) => t.createdAt)).toEqual([9999, 10000]);
+  expect((await c.request("thread/list", { archived: true })).data.map((t: NativeObject) => t.createdAt)).toEqual([10002]);
+  expect((await c.request("thread/list", { limit: 10000 })).data).toHaveLength(100);
+  expect((await c.request("thread/list", { modelProviders: ["missing"] }))).toEqual({ data: [], nextCursor: null, backwardsCursor: null });
 });
 
 test("codex_ingress defaults off, validates config, and disabled endpoint bytes stay unchanged", async () => {

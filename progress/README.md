@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server native ingress 已完成 Claude 回退开关及权限问答、多选与 effort 投影返工，双后端冒烟通过，待主控独立验收。
+agent-server native ingress 多线程、fork、历史分页和断线恢复已通过双后端各三次冒烟与全量测试，待主控独立验收。
 
 ## Goals
 

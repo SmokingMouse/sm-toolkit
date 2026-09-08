@@ -75,7 +75,7 @@ await as1.notifyInitialized();
 const fresh = await as1.request("thread/start", { backend, cwd: join(root, "workspace"), model: backend === "claude" ? "sonnet" : "gpt-5.6-sol", permission: "auto-edit" });
 if (daemon.server.log.turns(fresh.thread.id).length !== 0) throw new Error("fresh thread already has turns");
 as1.close();
-writeFileSync(join(root, "smoke-endpoint.json"), JSON.stringify({ url: `ws://127.0.0.1:${proxy.port}`, tokenPath: daemon.paths.tokenPath, databasePath: daemon.paths.databasePath, freshThreadId: backend === "claude" ? fresh.thread.id.slice(3) : fresh.thread.engineThreadId, freshAsThreadId: fresh.thread.id }));
+writeFileSync(join(root, "smoke-endpoint.json"), JSON.stringify({ url: `ws://127.0.0.1:${proxy.port}`, nativeUrl: daemon.codexIngressUrl, tokenPath: daemon.paths.tokenPath, databasePath: daemon.paths.databasePath, freshThreadId: backend === "claude" ? fresh.thread.id.slice(3) : fresh.thread.engineThreadId, freshAsThreadId: fresh.thread.id }));
 let closing = false;
 async function shutdown() {
   if (closing) return; closing = true;

@@ -27,12 +27,12 @@ import traceback
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=["codex", "claude"], default="codex")
-    parser.add_argument("--expect", default="thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok")
+    parser.add_argument("--expect", default="thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,multi_thread_ok,fork_ok,reconnect_ok")
     parser.add_argument("--timeout", type=float, default=180)
     args = parser.parse_args()
     expected = set(args.expect.split(","))
     known = {"thread_started", "turn_completed", "approval_roundtrip", "resume_ok", "interrupt_ok", "resume_fresh_ok",
-             "agent_message_delta", "command_execution_output", "user_input_question", "unsupported_method_errors"}
+             "agent_message_delta", "command_execution_output", "user_input_question", "unsupported_method_errors", "multi_thread_ok", "fork_ok", "reconnect_ok"}
     if not expected <= known:
         parser.error("unknown expectation: " + str(expected - known))
     root = Path(tempfile.mkdtemp(prefix="as-codex-remote-")).resolve()
@@ -103,7 +103,12 @@ def main():
             response_id = "smoke-response-" + str(count)
             events = [{"type": "response.created", "response": {"id": response_id}}]
             tool_returned = any(entry.get("type") in {"function_call_output", "custom_tool_call_output"} and entry.get("call_id") == "call_smoke" for entry in body.get("input", []))
-            if user_inputs and fresh_marker in json.dumps(user_inputs[-1]):
+            latest = json.dumps(user_inputs[-1]) if user_inputs else ""
+            if "S3_REPLY_" in latest:
+                import re
+                marker = re.search(r"S3_REPLY_[A-Z0-9_]+", latest).group(0)
+                item = {"type": "message", "id": "msg_s3_" + str(count), "role": "assistant", "status": "completed", "phase": "final_answer", "content": [{"type": "output_text", "text": marker, "annotations": []}]}
+            elif user_inputs and fresh_marker in latest:
                 item = {"type": "message", "id": "msg_fresh", "role": "assistant", "status": "completed", "phase": "final_answer", "content": [{"type": "output_text", "text": fresh_response, "annotations": []}]}
             elif not tool_returned:
                 names = [t.get("name") for t in body.get("tools", [])]
@@ -122,14 +127,18 @@ def main():
                     item = {"type": "custom_tool_call", "id": "fc_smoke", "call_id": "call_smoke", "name": "exec", "namespace": "functions", "input": "text(await tools.exec_command(" + json.dumps(arguments) + "));"}
             else:
                 item = {"type": "message", "id": "msg_smoke", "role": "assistant", "status": "completed", "phase": "final_answer", "content": [{"type": "output_text", "text": "INGRESS_SMOKE_COMPLETED", "annotations": []}]}
-            if item["type"] == "message":
-                events.append({"type": "response.output_item.added", "output_index": 0, "item": {**item, "content": [], "status": "in_progress"}})
-                events.append({"type": "response.content_part.added", "output_index": 0, "item_id": item["id"], "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}})
-                events.append({"type": "response.output_text.delta", "output_index": 0, "item_id": item["id"], "content_index": 0, "delta": item["content"][0]["text"]})
-                events.append({"type": "response.output_text.done", "output_index": 0, "item_id": item["id"], "content_index": 0, "text": item["content"][0]["text"]})
-                events.append({"type": "response.content_part.done", "output_index": 0, "item_id": item["id"], "content_index": 0, "part": item["content"][0]})
-            events.append({"type": "response.output_item.done", "output_index": 0, "item": item})
-            events.append({"type": "response.completed", "response": {"id": response_id, "status": "completed", "output": [item], "usage": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}}})
+            output_items = [item]
+            if "S3_REPLY_LONG_HISTORY" in latest:
+                output_items = [{**item, "id": "long_" + str(n), "phase": "commentary", "content": [{"type": "output_text", "text": "History item " + str(n), "annotations": []}]} for n in range(210)] + [item]
+            for index, item in enumerate(output_items):
+                if item["type"] == "message":
+                    events.append({"type": "response.output_item.added", "output_index": index, "item": {**item, "content": [], "status": "in_progress"}})
+                    events.append({"type": "response.content_part.added", "output_index": index, "item_id": item["id"], "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}})
+                    events.append({"type": "response.output_text.delta", "output_index": index, "item_id": item["id"], "content_index": 0, "delta": item["content"][0]["text"]})
+                    events.append({"type": "response.output_text.done", "output_index": index, "item_id": item["id"], "content_index": 0, "text": item["content"][0]["text"]})
+                    events.append({"type": "response.content_part.done", "output_index": index, "item_id": item["id"], "content_index": 0, "part": item["content"][0]})
+                events.append({"type": "response.output_item.done", "output_index": index, "item": item})
+            events.append({"type": "response.completed", "response": {"id": response_id, "status": "completed", "output": output_items, "usage": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}}})
             data = "".join("data: " + json.dumps(event) + "\n\n" for event in events).encode()
             try:
                 self.send_response(200)
@@ -269,6 +278,42 @@ trust_level = "trusted"
             pump()
         os.write(master, b"\r")
 
+    def settle(seconds=0.6):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            pump()
+
+    def response_to(method, offset, thread=None):
+        current = frames()[offset:]
+        requests = [f for f in current if f.get("direction") == "TUI>AS" and f.get("method") == method and (thread is None or f.get("params", {}).get("threadId") == thread)]
+        return next((f["result"] for r in requests for f in current if f.get("direction") == "AS>TUI" and f.get("id") == r["id"] and f.get("connection") == r.get("connection") and "result" in f), None)
+
+    def switch(thread, picker=False):
+        offset = len(frames())
+        prompt("/resume" if picker else "/resume " + thread)
+        if picker:
+            wait(lambda: response_to("thread/list", offset) is not None, "real resume picker listed threads")
+            listed = response_to("thread/list", offset)["data"]
+            assert {fresh_id, thread_id} <= {t["id"] for t in listed}, "picker missing managed threads"
+            settle()
+            os.write(master, b"S3-FRESH")
+            # The picker filters already-fetched rows locally before requesting
+            # further pages, so a search does not necessarily issue another RPC.
+            settle()
+            os.write(master, b"\r")
+        wait(lambda: response_to("thread/resume", offset, thread) is not None, "same connection switched " + thread)
+        settle()
+
+    def small_turn(thread, marker):
+        offset, output_offset = len(frames()), len(output)
+        prompt("Do not use tools. Reply with exactly: " + marker)
+        wait(lambda: any(f.get("method") == "turn/completed" and f["params"].get("threadId") == thread and f["params"]["turn"]["status"] == "completed" for f in frames()[offset:]), "alternating turn completed on " + thread)
+        requests = [f for f in frames()[offset:] if f.get("direction") == "TUI>AS" and f.get("method") == "turn/start"]
+        assert len(requests) == 1 and requests[0]["params"]["threadId"] == thread, "turn routed to wrong thread"
+        assert any(f.get("method") == "item/completed" and f["params"].get("threadId") == thread and marker in f["params"].get("item", {}).get("text", "") for f in frames()[offset:]), "wrong response/thread association"
+        wait(lambda: marker.encode() in output[output_offset:], "TUI rendered alternating response")
+        settle(0.3)
+
     try:
         version = subprocess.check_output(["codex", "--version"], env=env, text=True).strip()
         summary["codex_version"] = version
@@ -298,6 +343,10 @@ trust_level = "trusted"
         wait(fresh_completed, "first real turn completed on as/1 fresh thread")
         wait(lambda: fresh_response.encode() in output, "TUI rendered fresh response")
         proof["resume_fresh_ok"] = True
+        if "multi_thread_ok" in expected:
+            name_offset = len(frames())
+            prompt("/rename S3-FRESH")
+            wait(lambda: response_to("thread/name/set", name_offset, fresh_id) is not None, "fresh picker name")
         stop_tui(graceful=True)
         initial_offset = len(frames())
         launch()
@@ -312,6 +361,22 @@ trust_level = "trusted"
             pump()
         prompt("Please run the requested smoke command and report completion." if args.backend == "codex" else "Use only Bash to run exactly: " + smoke_command + " . Do not read any files or use other tools. After Bash succeeds reply exactly INGRESS_SMOKE_COMPLETED.")
         wait(lambda: any(f.get("method") == "item/commandExecution/requestApproval" for f in frames()), "approval card")
+        if "reconnect_ok" in expected:
+            original = next(f for f in frames() if f.get("method") == "item/commandExecution/requestApproval")
+            stop_tui()
+            with sqlite3.connect(endpoint["databasePath"]) as db:
+                row = db.execute("SELECT status, engine_thread_id FROM threads WHERE " + ("id" if args.backend == "claude" else "engine_thread_id") + " = ?", (("th_" + thread_id) if args.backend == "claude" else thread_id,)).fetchone()
+                assert row and row[0] != "closed", "disconnect closed the thread"
+                engine_id = row[1]
+            reconnect_offset = len(frames())
+            launch(["resume", thread_id])
+            wait(lambda: response_to("thread/resume", reconnect_offset, thread_id) is not None and any(f.get("method") == "item/commandExecution/requestApproval" for f in frames()[reconnect_offset:]), "reconnect pending replay")
+            replay = next(f for f in frames()[reconnect_offset:] if f.get("method") == "item/commandExecution/requestApproval")
+            assert replay["id"] != original["id"] and replay["params"] == original["params"], "pending replay changed payload or reused connection ID"
+            assert any(f.get("method") == "serverRequest/resolved" and f["params"]["requestId"] == original["id"] for f in frames()[reconnect_offset:]), "old card was not retired"
+            with sqlite3.connect(endpoint["databasePath"]) as db:
+                assert db.execute("SELECT count(*) FROM threads WHERE engine_thread_id = ? AND status != 'closed'", (engine_id,)).fetchone()[0] == 1, "reconnect replaced the engine thread"
+            summary["reconnect"] = {"old_wire_id": original["id"], "new_wire_id": replay["id"], "engine_thread_id": engine_id}
         # This is the actual terminal approval interaction, not a protocol response.
         until = time.monotonic() + 2.0
         while time.monotonic() < until:
@@ -333,6 +398,8 @@ trust_level = "trusted"
         summary["persisted_title"] = persisted["title"]
         summary["approvals"] = approvals
         proof["approval_roundtrip"] = any(row["status"] == "decided" and json.loads(row["decided_by"] or "{}").get("label", "").startswith("codex-tui:") for row in approvals) and (workspace / "ingress-proof.txt").read_text() == "ingress-approved" and any(f.get("method") == "serverRequest/resolved" for f in frames())
+        if "reconnect_ok" in expected:
+            proof["reconnect_ok"] = proof["approval_roundtrip"] and any(f.get("method") == "serverRequest/resolved" and f["params"]["requestId"] == replay["id"] for f in frames())
         wait(lambda: b"INGRESS_SMOKE_COMPLETED" in output, "TUI rendered completed response")
         if args.backend == "claude":
             question_offset = len(frames())
@@ -355,6 +422,43 @@ trust_level = "trusted"
             assert proof["user_input_question"], "Read permission did not close through AS broker"
             assert any(f.get("method") == "item/completed" and f.get("params", {}).get("item", {}).get("tool") == "Read" and f["params"]["item"].get("success") is True for f in frames()[question_offset:]), "Read tool did not execute successfully"
             wait(lambda: b"INGRESS_READ_COMPLETED" in output, "TUI rendered Read completion")
+        if "multi_thread_ok" in expected:
+            multi_offset = len(frames())
+            switch(fresh_id, picker=True)
+            small_turn(fresh_id, "S3_REPLY_FIRST_A")
+            switch(thread_id)
+            small_turn(thread_id, "S3_REPLY_SECOND_A")
+            switch(fresh_id)
+            small_turn(fresh_id, "S3_REPLY_FIRST_B")
+            switch(thread_id)
+            small_turn(thread_id, "S3_REPLY_SECOND_B")
+            connections = {f["connection"] for f in frames()[multi_offset:] if f.get("direction") == "TUI>AS" and f.get("method") == "turn/start"}
+            assert len(connections) == 1, "multi-thread test used multiple TUI connections"
+            proof["multi_thread_ok"] = True
+        if "fork_ok" in expected:
+            fork_offset = len(frames())
+            prompt("/fork")
+            # Outside a git repository, the official checkout picker offers
+            # only the existing directory. Select it if no RPC was sent yet.
+            settle()
+            if not any(f.get("method") == "thread/fork" for f in frames()[fork_offset:]):
+                os.write(master, b"\r")
+            wait(lambda: response_to("thread/fork", fork_offset, thread_id) is not None, "official TUI fork")
+            fork_id = response_to("thread/fork", fork_offset, thread_id)["thread"]["id"]
+            assert fork_id != thread_id, "fork reused parent UUID"
+            settle()
+            small_turn(fork_id, "S3_REPLY_FORK_A")
+            switch(thread_id)
+            switch(fork_id)
+            small_turn(fork_id, "S3_REPLY_FORK_B")
+            if args.backend == "codex":
+                small_turn(fork_id, "S3_REPLY_LONG_HISTORY")
+                history = subprocess.Popen(["bun", str(Path(__file__).with_name("codex-remote-history.ts")), endpoint["nativeUrl"], fork_id, str(root / "history-proof.json")], env=env, stdout=log, stderr=log)
+                wait(lambda: history.poll() is not None, "long native history pagination probe")
+                assert history.returncode == 0, "long history probe failed; see daemon-output.log"
+                summary["history"] = json.loads((root / "history-proof.json").read_text())["summary"]
+            summary["fork_thread_id"] = fork_id
+            proof["fork_ok"] = True
         stop_tui(graceful=True)
         before = len(frames())
         launch(["resume", thread_id])

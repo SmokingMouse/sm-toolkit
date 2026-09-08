@@ -6,6 +6,20 @@
 
 ## 已结案
 
+### codex-ingress slice 3：分页错误被包装为引擎不可用（resolved）
+
+- 症状：真实 0.153.4 的无效 items cursor 原本返回 -32600，ingress 返回 -32004，并附引擎 stderr；活进程被错误描述为 unavailable。
+- 可证伪假设：CodexEngine 的统一 AS 错误包装遮住了只读 native RPC 的 code/message。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex`；history-proof.json 中 invalid cursor 断言必须严格等于 -32600 与上游原文。
+- 修复：nativeResult 解包 read/history 原始错误，保留 code/message/data；Claude 无效 opaque cursor 同样使用 -32600。223 项、双向 28 页、空页、resume 与中间 fork 的真实探针已通过。
+
+### codex-ingress slice 3：picker 搜索被误认为必发 RPC（resolved）
+
+- 症状：首轮扩展冒烟在 picker search 超时，真实屏幕已经筛出 S3-FRESH。
+- 可证伪假设：官方 picker 优先本地过滤已取回的行，只有需要更多页时才再请求 thread/list。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex`；要求真实 picker 列出目标后选择，随后主连接发匹配 UUID 的 resume/turn。
+- 修复：不等待不存在的搜索 RPC；以选中后的 resume 和对应线程 turn 为判据。picker 自己另开的列表连接不计入主连接的 turn/start 同连接断言。
+
 ### codex-ingress：主控复跑揭露恢复冒烟时序依赖（resolved）
 
 - 症状：初次自跑通过，但主控连续两次复跑 resume_ok/interrupt_ok=false；迟到的具名 turn/interrupt 被 ingress 自造 -32011 拒绝，thread/name/set 未实现。

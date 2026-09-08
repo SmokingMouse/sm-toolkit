@@ -6,7 +6,7 @@ export type EngineEvent =
   | { type: "modelChanged"; model: string }
   | { type: "permissionChanged"; permission: NonNullable<StartThreadParams["permission"]> }
   | { type: "engineEvent"; turnId?: string; backend: Backend; subtype: string; payload: import("../protocol/index.js").JsonObject }
-  | { type: "metadata"; engineThreadId: string }
+  | { type: "metadata"; engineThreadId: string; nativeThreadData?: import("../protocol/index.js").JsonObject }
   | { type: "status"; status: ThreadStatus }
   | { type: "usage"; usage: Usage }
   | { type: "error"; turnId?: string; error: RpcError; willRetry: boolean }

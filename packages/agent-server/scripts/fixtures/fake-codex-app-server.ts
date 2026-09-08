@@ -91,7 +91,7 @@ function handle(frame: any) {
     if (frame.method === "thread/start" && p.developerInstructions) threadId = `native-seed-${process.pid}`;
     assert.equal(p.serviceTier, "default"); assert.equal(p.approvalsReviewer, "user");
     cwd = p.cwd ?? cwd;
-    const thread = { id: threadId, sessionId: threadId, cliVersion: version.cliVersion, cwd, ephemeral: false, createdAt: 1, updatedAt: 1, modelProvider: "fake", preview: "", projectId: null, source: "appServer", status: { type: "idle" }, turns: [] };
+    const thread = { id: threadId, sessionId: threadId, cliVersion: version.cliVersion, cwd, ephemeral: false, createdAt: 1, updatedAt: 1, modelProvider: "fake", preview: "", projectId: null, source: "vscode", status: { type: "idle" }, turns: [] };
     threadData = thread;
     reply(frame.id, { thread, model: p.model ?? "model-from-config", modelProvider: "fake", cwd, reasoningEffort: p.config?.model_reasoning_effort ?? null, approvalPolicy: p.approvalPolicy ?? "untrusted", approvalsReviewer: "user", sandbox: { type: "workspaceWrite" } });
     notify("thread/started", { thread }); notify("thread/status/changed", { threadId, status: { type: "idle" } }); return;
