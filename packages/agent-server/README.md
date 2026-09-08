@@ -12,7 +12,7 @@ Trellis 迁移：确认 `initializeResult.capabilities.pendingRequests` 后，�
 
 ```ts
 const { thread } = await client.request("thread/start", {
-  backend: "claude", permission: "plan", effort: "high", autocompact: "auto",
+  backend: "claude", model: "sonnet", permission: "plan", effort: "high", autocompact: "auto",
 });
 client.onNotification("thread/engineEvent", event => observe(event.subtype, event.payload));
 await client.setPermission({ threadId: thread.id, permission: "acceptEdits" });
@@ -64,8 +64,34 @@ token 首次生成 32 字节随机值，之后复用；token、socket、pid、en
 
 `config.toml` 支持 `allowed_roots`、`maxQueuedTurns`、`orphanTimeoutMs`、
 `idleTimeoutMs`、`readonly_auto_allow`（布尔，默认 true）、`readonly_commands`
-（字符串数组，整体替换默认只读名单）。默认只允许 HOME 内的 cwd。
+（字符串数组，整体替换默认只读名单）、`default_model` 和 `denied_models`。默认只允许 HOME 内的 cwd。
 SIGTERM / SIGINT 先广播 `server/shuttingDown`，等待 graceMs，再关闭引擎与连接并移除 pid/socket。
+
+Claude 和 Codex 的执行模型必须明确：`thread/start` 和导入未知原生会话的
+`thread/resume` 需要 `model`；已知会话重启和 `thread/fork` 继承持久化模型并重新校验。
+缺省仅能来自显式配置的 `default_model`，默认不配置，禁止落到引擎或环境默认模型。
+缺失、空白或无法解析为明确模型时返回 `-32602`，`data.reason = model_required`，
+`data.detail.hint` 给出处理提示；拒绝发生在 spawn 前，不新增线程记录。
+
+```toml
+# 默认值；普通字符串按前缀匹配，* 匹配任意长度，? 匹配单字符；忽略大小写。
+denied_models = ["fable", "claude-fable*"]
+# 可选，省略即要求调用方显式传 model：
+# default_model = "sonnet"
+```
+
+`denied_models` 整体替换默认名单，`[]` 关闭名单限制；默认模型也受名单约束。
+校验输入名以及 Claude 解析后的模型名，命中返回 `-32602`、
+`data.reason = model_denied`，并发送 `thread/engineEvent`（subtype=`model_denied`，
+payload 含 backend/model/resolvedModel/pattern/hint，需协商 engineEvents）。
+新建被拒时事件只发请求连接，threadId 是本次尝试的 ID，并无对应持久化线程；
+已有线程的事件发订阅连接，未订阅的请求连接也会收到。事件为实时通知，不重放。
+
+`thread/engineControl set_model` 和 `turn/start.model` 同样受守卫约束。
+`set_model` 省略/null/`"default"` 只可重置为 daemon 配置的明确模型，无配置即拒绝；
+拒绝不调用引擎、不修改当前模型或恢复选项。程序内嵌对应 `ServerOptions.defaultModel/deniedModels`。
+TUI 无界面改动：普通 `--new` 仍可省略 `--model`，此时由服务端拒绝或采用配置默认值；
+`/new` 继承当前 thread.model，`/fork` 使用服务端保存的模型。
 
 ```ts
 import { connectUnix } from "@smokingmouse/agent-server/client";

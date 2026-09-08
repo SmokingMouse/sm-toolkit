@@ -119,10 +119,31 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 
 `thread/start` / `thread/resume` 不接受 `env`（未知字段返回 `-32602`）。
 
+**执行模型守卫（Claude / Codex）**：`model?` 在 wire schema 中保留可选，是为了支持
+daemon `config.toml` 的显式 `default_model`，不允许使用引擎/环境的隐式默认模型。
+默认不配置 `default_model`，所以 `thread/start` 与导入未知 engineThreadId 的 resume
+必须传非空 model。已知线程重启按「请求覆盖 → 持久化模型 → 配置默认」取值；fork
+继承源线程持久化模型（旧数据缺失时可用配置默认）。每次新建/重启均在 spawn 前校验。
+无法得到明确模型（含空白、无配置的 `"default"`）返回 `-32602`，
+`data.reason = "model_required"`、`data.detail.hint` 提示传 model 或配置 default_model。
+新建被拒时不写线程记录、不 spawn、不触发 thread/started。
+
+`denied_models` 默认 `["fable", "claude-fable*"]`；忽略大小写，去掉首尾空白，
+无通配符条目按前缀匹配，`*` 匹配任意长度、`?` 匹配单字符（通配模式匹配全名）。
+自定义数组整体替换默认名单，`[]` 关闭名单；`default_model` 本身也受名单约束。
+Claude 同时检查输入名及解析后的模型名，避免模型别名绕过。
+命中返回 `-32602`、`data.reason = "model_denied"`，detail 包含
+`backend/model/resolvedModel/pattern/hint`；同时发 `thread/engineEvent`，
+subtype=`model_denied`，payload 为该 detail。通知遵守 engineEvents 能力协商及 optOut。
+已有线程通知订阅者和未订阅的请求连接；新建被拒只通知请求连接，
+`data.threadId` 和事件 threadId 是同一个尝试 ID，并无对应持久化线程。事件实时发送，不重放。
+`set_model`、显式 resume.model（包括活进程 attach 请求）及 `turn/start.model`
+同样检查名单，拒绝不会改变线程模型、恢复选项或 turn 队列。
+
 `serviceTier?: "default"` 仅用于 Codex，持久化并传入引擎的 start/resume 与后续 turn；缺省仍选择 default 普通档。Claude start/resume 显式传该参数会返回 unsupported_capability，不能静默忽略。
 `fjContext?: {root: absolutePath, cid: string, seat?: string}` 是受限坐席身份，禁止任意键。
 cid 匹配 `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`，seat 另允许点号。root 经 realpath 与 allowed_roots 校验。
-携带 fjContext 时必须显式 model（非空、非 fable）和 permission；Codex 必须 gpt-6-astra + serviceTier default。
+携带 fjContext 时 model 同样经守卫解析为明确模型（默认拒绝 fable），并必须显式 permission；Codex 必须 gpt-6-astra + serviceTier default。
 上下文随 thread options 持久化，resume 使用原值，禁止覆盖 fjContext。引擎环境清除继承的 HERDR_* 与 FENJUE_*，仅映射 FENJUE_ROOT、FENJUE_CID、可选 FENJUE_SEAT；不改变 permission 或凭证路由。
 thread.meta.fjContext 返回规范化后的身份（覆盖调用方同名 meta 键），供显示与身份核对。thread/close 尊重输入 lease，他端持有时返回 lease_held。
 `thread/attach` 永远返回完整后缀，不接受 `limit`（`-32602`）；有界历史读取用 `thread/items/list`。
@@ -226,7 +247,7 @@ readonly-auto-allow 名单同样发生在这一步，且只对 default/plan/acce
 对已有 thread，请求 full/bypassPermissions/dontAsk（或原生 ultraplan:true）必须由有效 lease 的持有者发起，覆盖 permission/set、engineControl.set_permission_mode、turn/start.permission 和 resume.permission；无 lease/已过期返回 unauthorized (-32005)，他人持有返回 lease_held (-32012)。持有 lease 不绕过原生 bypass availability/组织策略。普通输入和非提升模式继续使用可选 lease。
 
 `thread/engineControl` 请求 `{threadId, subtype, params}`，向 Claude 发送 `{type:"control_request", request_id, request:{...params,subtype}}`，result 是完整原生 control_response 帧（包括原生 error response），不拆解 response；调用方必须检查 response.subtype。params 不得包含 subtype。该方法遵守输入 lease；Codex/external 返回 backend_unsupported，未知或不允许的子类型返回 unsupported_capability。传输超时仍为 RPC 错误。
-set_model 成功时同步 thread.model 与持久化恢复选项，并发 thread/metadata/updated.model；失败不更新，resume 使用最后一次成功设置的模型。按 2.1.258 Tf/Im 契约，model 省略或 null 表示重置为 default，AS 将该规范值持久化。
+set_model 成功时同步 thread.model 与持久化恢复选项，并发 thread/metadata/updated.model；失败不更新，resume 使用最后一次成功设置的模型。原生 2.1.258 Tf/Im 的省略/null 会重置引擎 default；AS 模型守卫拦截省略/null/`"default"`，仅在 daemon 配置 default_model 时替换成该明确模型再调用原生控制，无配置返回 `-32602`（model_required）。不会把隐式 `"default"` 持久化。
 
 本机 Claude Code 2.1.258 `bin/claude.exe` 的 print.ts `d.request.subtype` 分派是白名单证据。允许：set_model、set_permission_mode、set_max_thinking_tokens、list_models、file_suggestions、read_file、get_workspace_diff、get_plan、get_context_usage、get_session_cost、get_usage、get_settings、get_binary_version、mcp_status、mcp_reconnect、mcp_toggle、interrupt、rewind_conversation、rewind_files、seed_read_state、background_tasks、stop_task、reload_plugins、reload_skills、side_question。参数语义由对应 Claude 版本定义；rewind_files 会修改工作区。interrupt 的 cancel_queued 只作用于 CLI 队列，AS 队列仍由 turn/cancel 管理。
 
