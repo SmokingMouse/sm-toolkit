@@ -11,7 +11,7 @@ import { NativeRpcError, nativeResult } from "./native-error.js";
 export { NativeRpcError } from "./native-error.js";
 
 export const isClaudeModel = (model: string): boolean => /^(claude-|sonnet(?:$|-)|opus(?:$|-)|haiku(?:$|-)|fable(?:$|-))/i.test(model);
-const claudeModels = ["sonnet", "opus"].map(model => ({ id: model, model, displayName: `Claude · ${model}`, description: `Claude ${model} via Agent Server`, hidden: false,
+const claudeModels = ["sonnet", "opus"].map(model => ({ id: model, model, displayName: `Claude · ${model}`, description: `Claude ${model} via Agent Server; readonly auto-allow requires a trusted PATH executable (rg without ripgrep always requires approval)`, hidden: false,
   isDefault: false, supportedReasoningEfforts: [], defaultReasoningEffort: "medium", inputModalities: ["text", "image"] }));
 
 export function nativeThreadId(thread: Thread): string {

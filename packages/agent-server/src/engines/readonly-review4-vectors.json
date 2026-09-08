@@ -1,0 +1,1445 @@
+{
+  "rows": [
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "bundle",
+      "command": "grep -rl foo .",
+      "originalExpected": false,
+      "expected": true,
+      "reason": "P2-3 all letters are exact no-value flags"
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "bundle",
+      "command": "grep -rn foo .",
+      "originalExpected": false,
+      "expected": true,
+      "reason": "P2-3 all letters are exact no-value flags"
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "bundle",
+      "command": "grep -il foo .",
+      "originalExpected": false,
+      "expected": true,
+      "reason": "P2-3 all letters are exact no-value flags"
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "bundle",
+      "command": "rg -in foo .",
+      "originalExpected": false,
+      "expected": true,
+      "reason": "P2-3 all letters are exact no-value flags"
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "bundle",
+      "command": "rg -nl foo .",
+      "originalExpected": false,
+      "expected": true,
+      "reason": "P2-3 all letters are exact no-value flags"
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "bundle",
+      "command": "file -bi /etc/hosts",
+      "originalExpected": false,
+      "expected": true,
+      "reason": "P2-3 all letters are exact no-value flags"
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "bundle",
+      "command": "grep -r -l foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "bundle-smuggle",
+      "command": "file -bC /etc/hosts",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "bundle-smuggle",
+      "command": "file -bm /tmp/x",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "bundle-smuggle",
+      "command": "grep -rZf /etc/passwd foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "bundle-smuggle",
+      "command": "rg -nP0 foo .",
+      "originalExpected": false,
+      "expected": true,
+      "reason": "P2-3 all letters are exact no-value flags"
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "rg --max-depth=2 foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "rg --color=always foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "rg --color=bogus foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "rg --color=always=never foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "rg --pre=rm foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "rg --pre-glob=* --pre=rm foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "rg --hostname-bin=rm foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "grep --color=always foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "grep --colour=never foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "grep --exclude-dir=.git foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "grep --binary-files=text foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "grep --binary-files=exec foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "grep --devices=recurse foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "grep --directories=recurse foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "grep -m=5 foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "rg -m=5 foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "find . -maxdepth=1",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "find . -name=x",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "find . -delete=1",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "file --separator=: /etc/hosts",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "file --magic-file=/tmp/x /etc/hosts",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "file --files-from=/tmp/list",
+      "originalExpected": true,
+      "expected": false,
+      "reason": "P2-4 input outside test allowed_roots (or missing)"
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "rg --files=x foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "grep --recursive=yes foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "equals",
+      "command": "grep --line-number=1 foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "repeat",
+      "command": "grep -i -i foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "repeat",
+      "command": "rg -n -n foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "repeat",
+      "command": "find . -name a -name b",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "repeat",
+      "command": "file -b -b /etc/hosts",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "repeat",
+      "command": "rg -m 1 -m 2 foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "repeat",
+      "command": "rg --pre cat --pre rm foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "repeat",
+      "command": "grep --include a --include b foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "repeat",
+      "command": "find . -maxdepth 1 -maxdepth 2 -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "ddash",
+      "command": "find . -- -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "ddash",
+      "command": "find -- . -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "ddash",
+      "command": "rg -- --pre rm foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "ddash",
+      "command": "rg -- foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "ddash",
+      "command": "grep -- --include=/tmp/x foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "ddash",
+      "command": "grep -- -f /etc/passwd .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "ddash",
+      "command": "file -- -C",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "ddash",
+      "command": "find . -name x -- -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "abbrev",
+      "command": "grep --rec foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "abbrev",
+      "command": "grep --inc=/etc/passwd foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "abbrev",
+      "command": "grep --col=always foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "abbrev",
+      "command": "grep --fil=/etc/passwd .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "abbrev",
+      "command": "grep --exclude-di=.git foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "abbrev",
+      "command": "rg --pr=rm foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "abbrev",
+      "command": "rg --hostname=rm foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "abbrev",
+      "command": "rg --max-dep=2 foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "abbrev",
+      "command": "file --sep=: /etc/hosts",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "abbrev",
+      "command": "file --mim /etc/hosts",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "abbrev",
+      "command": "find . -maxdept 1",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "abbrev",
+      "command": "grep --file /etc/passwd .",
+      "originalExpected": true,
+      "expected": false,
+      "reason": "P2-4 input outside test allowed_roots (or missing)"
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "abbrev",
+      "command": "rg --file /etc/passwd .",
+      "originalExpected": true,
+      "expected": false,
+      "reason": "P2-4 input outside test allowed_roots (or missing)"
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "abbrev",
+      "command": "grep --color foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -exec rm {} ;",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -exec rm {} +",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -execdir rm {} ;",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -ok rm {} ;",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -okdir rm {} ;",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -name x -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -delete -print",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find -delete .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -o -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . ! -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -print -o -exec rm {} ;",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -fprint /tmp/x",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -fprint0 /tmp/x",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -fprintf /tmp/x %p",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -fls /tmp/x",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find -H . -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find -L -P . -type f -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -type f -exec chmod 777 {} ;",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -newer x -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "find-exec",
+      "command": "find . -size +0 -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "swallow",
+      "command": "find . -maxdepth -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "swallow",
+      "command": "find . -name -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "swallow",
+      "command": "find . -type -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "swallow",
+      "command": "find . -newer -delete -print",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "swallow",
+      "command": "rg -e --pre rm foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "swallow",
+      "command": "rg -g --pre rm foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "swallow",
+      "command": "rg -A --pre rm foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "swallow",
+      "command": "grep -m --include=/tmp/x foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "swallow",
+      "command": "grep -f -f /etc/passwd .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "swallow",
+      "command": "file -F -C /etc/hosts",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "swallow",
+      "command": "file -f -C",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "missing",
+      "command": "rg -e",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "missing",
+      "command": "find . -name",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "missing",
+      "command": "grep --include",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "missing",
+      "command": "file -F",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "missing",
+      "command": "rg -m foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "missing",
+      "command": "rg -m -1 foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "missing",
+      "command": "find . -maxdepth -1",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "missing",
+      "command": "find . -maxdepth 1x",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "missing",
+      "command": "find . -size 1x",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "missing",
+      "command": "find . -size +1G",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "missing",
+      "command": "find . -mtime -7",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "missing",
+      "command": "find . -type z",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "missing",
+      "command": "grep -d recurse foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "missing",
+      "command": "grep -d delete foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "file",
+      "command": "file -C -m /tmp/x",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "file",
+      "command": "file -C",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "file",
+      "command": "file -C=x",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "file",
+      "command": "file -m /tmp/x /etc/hosts",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "file",
+      "command": "file -m/tmp/x /etc/hosts",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "file",
+      "command": "file --compile -m /tmp/x",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "file",
+      "command": "file -f /tmp/list",
+      "originalExpected": true,
+      "expected": false,
+      "reason": "P2-4 input outside test allowed_roots (or missing)"
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "file",
+      "command": "file -s /dev/null",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "file",
+      "command": "file -b -i /etc/hosts",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "glob",
+      "command": "find . -name *.ts",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "glob",
+      "command": "find . -name '*.ts'",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "glob",
+      "command": "find . -name \\*.ts",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "glob",
+      "command": "find . -type f -{a,b}",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "glob",
+      "command": "find ~ -name x",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "glob",
+      "command": "grep foo *",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "glob",
+      "command": "rg foo *",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "glob",
+      "command": "file *",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "glob",
+      "command": "find . -name ?",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "glob",
+      "command": "grep --include=*.c foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "glob",
+      "command": "grep --include='*.c' foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "glob",
+      "command": "git log *",
+      "originalExpected": true,
+      "expected": false,
+      "reason": "P0-1 parser-wide expansion ban"
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "glob",
+      "command": "ls *",
+      "originalExpected": true,
+      "expected": false,
+      "reason": "P0-1 parser-wide expansion ban"
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "position",
+      "command": "find -name x .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "position",
+      "command": "find . -print /etc",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "position",
+      "command": "find -H . -name x",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "position",
+      "command": "find . -H -name x",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "position",
+      "command": "find . -name x -H",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "position",
+      "command": "find -P -L .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "position",
+      "command": "find . -X -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "position",
+      "command": "find -f /tmp/x .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "position",
+      "command": "find . -name x -o -name y -print",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "unknown",
+      "command": "find . -zzz",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "unknown",
+      "command": "find . --zzz",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "unknown",
+      "command": "find . -perm 777",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "unknown",
+      "command": "find . -newermt yesterday",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "unknown",
+      "command": "rg --zzz foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "unknown",
+      "command": "rg -Z foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "unknown",
+      "command": "rg --search-zip foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "unknown",
+      "command": "rg --type-add zzz:*.q foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "unknown",
+      "command": "grep --zzz foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "unknown",
+      "command": "grep --label=x foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "unknown",
+      "command": "grep -J foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "unknown",
+      "command": "file --zzz /etc/hosts",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "unknown",
+      "command": "file -p /etc/hosts",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "unknown",
+      "command": "file -z /etc/hosts",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "chain",
+      "command": "ls && find . -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "chain",
+      "command": "find . -name x || rm -rf /tmp/x",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "chain",
+      "command": "find . -name x ; find . -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "chain",
+      "command": "grep -i foo . | rg --pre rm bar .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "chain",
+      "command": "find . -name '*.ts' && grep -i foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "chain",
+      "command": "FIND . -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "chain",
+      "command": "Rg foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "chain",
+      "command": "./find . -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/vectors-new.ts",
+      "label": "chain",
+      "command": "/usr/bin/find . -delete",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --pre rm foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --pre-glob '*' --pre rm foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --hostname-bin rm foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg -n foo src",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --json --stats -e foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --no-config -F foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg -t ts foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg -g '!node_modules' foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --max-depth 2 -j 4 foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --color ansi foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --color=ansi foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg -U --multiline-dotall foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --files",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --files --pre rm",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg -e foo -e bar .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg -f /etc/passwd .",
+      "originalExpected": true,
+      "expected": false,
+      "reason": "P2-4 input outside test allowed_roots (or missing)"
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --engine=pcre2 foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --sort=path foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --no-ignore --hidden foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg -l -0 foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --binary foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg -z foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --debug foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --generate man",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg -A5 foo .",
+      "originalExpected": false,
+      "expected": false
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg -A 5 foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --context=3 foo .",
+      "originalExpected": true,
+      "expected": true
+    },
+    {
+      "source": "review-d2fb/probe-rg.ts",
+      "label": "rg extra",
+      "command": "rg --context=-3 foo .",
+      "originalExpected": false,
+      "expected": false
+    }
+  ],
+  "differential": [
+    "grep -r -l foo .",
+    "grep --color=always foo .",
+    "grep --colour=never foo .",
+    "grep --exclude-dir=.git foo .",
+    "grep --binary-files=text foo .",
+    "grep --directories=recurse foo .",
+    "file --separator=: /etc/hosts",
+    "file --files-from=/tmp/list",
+    "grep -i -i foo .",
+    "find . -name a -name b",
+    "file -b -b /etc/hosts",
+    "grep --include a --include b foo .",
+    "grep --file /etc/passwd .",
+    "find . -size +1G",
+    "find . -mtime -7",
+    "grep -d recurse foo .",
+    "file -f /tmp/list",
+    "file -s /dev/null",
+    "file -b -i /etc/hosts",
+    "find . -name '*.ts'",
+    "find . -name \\*.ts",
+    "grep --include='*.c' foo .",
+    "git log *",
+    "ls *",
+    "find -H . -name x",
+    "find -P -L .",
+    "find . -name x -o -name y -print",
+    "find . -name '*.ts' && grep -i foo .",
+    "ls",
+    "ls -la /tmp",
+    "git status && ls",
+    "ls \\> /tmp/pwn",
+    "echo \"a | b\"",
+    "grep -r 'foo' .",
+    "ls -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l -l ",
+    "\tls",
+    "\nls",
+    "ls\n",
+    "ls \"a > /tmp/ro-review2/PWN_RD\"",
+    "git log --ext-diff",
+    "git branch --list",
+    "git branch -a",
+    "git rev-parse HEAD",
+    "ls -la && git status",
+    "ls\ngit status\ncat /etc/hosts",
+    "grep -r x . | wc -l",
+    "tail -f /var/log/x",
+    "echo hi",
+    "\\ls",
+    "file /etc/hosts",
+    "which git",
+    "tail -n 5 /etc/hosts",
+    "ls \\; rm -rf /tmp/x",
+    "ls \"a\\\"; rm -rf /tmp/x\"",
+    "echo 'a ; rm -rf /'",
+    "ls \\\n-la",
+    "echo \"a\\\nb\"",
+    "ls -la\r",
+    "echo \"a\rb\"",
+    "ls ;",
+    "ls &&",
+    "; ls",
+    "| ls",
+    "ls ;; git status",
+    "git branch -a -a",
+    "\"ls\"",
+    "'l's"
+  ]
+}

@@ -1,5 +1,5 @@
 import { accessSync, constants as fsConstants, realpathSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 // Default allowlist for the readonly-auto-allow gate: pure inspection commands only.
 // `env` is deliberately absent: it is a program launcher (see HARD_BANNED_HEADS) and can never be
@@ -34,19 +34,103 @@ function isGitWriteToFile(arg: string): boolean { return arg === "--output" || a
 // names) and only flags that list/inspect. Anything else (create/delete/rename/move/set-upstream) mutates refs.
 const BRANCH_READONLY_FLAGS = new Set(["-a", "-l", "-r", "--list", "--show-current", "-v"]);
 
-function isFindWriteFlag(arg: string): boolean {
-  // Prefix families so unlisted GNU/BSD variants (e.g. a future -fprintNN) still get caught.
-  return arg === "-delete" || /^-f(ls|print0?|printf)$/.test(arg) || /^-(exec|execdir|ok|okdir)/.test(arg);
+// Exact spellings only, except bundles consisting entirely of known no-value short flags.
+// No abbreviation, attached short values, or `--`.
+// Values are consumed once and validated, never reinterpreted as another option. Keep rg and
+// grep separate: the same short letter can have different semantics in different programs.
+type ValueCheck = (value: string) => boolean;
+interface ReadonlyOptions { flags: ReadonlySet<string>; values: ReadonlyMap<string, ValueCheck> }
+const textValue: ValueCheck = value => value.length > 0 && !value.startsWith("-");
+const countValue: ValueCheck = value => /^\d+$/.test(value);
+const choice = (...values: string[]): ValueCheck => value => values.includes(value);
+function optionValues(...groups: [string, ValueCheck][]): ReadonlyMap<string, ValueCheck> {
+  return new Map(groups.flatMap(([names, check]) => names.split(" ").map(name => [name, check] as const)));
+}
+const RG_READONLY_OPTIONS: ReadonlyOptions = {
+  flags: new Set([
+    "-i", "--ignore-case", "-s", "--case-sensitive", "-S", "--smart-case", "-F", "--fixed-strings",
+    "-w", "--word-regexp", "-x", "--line-regexp", "-v", "--invert-match", "-n", "--line-number",
+    "-N", "--no-line-number", "-H", "--with-filename", "-I", "--no-filename", "-l", "--files-with-matches",
+    "--files-without-match", "-c", "--count", "--count-matches", "-o", "--only-matching", "-q", "--quiet",
+    "-a", "--text", "-U", "--multiline", "--multiline-dotall", "-P", "--pcre2", "--hidden", "--no-ignore",
+    "--no-ignore-vcs", "--files", "--type-list", "--heading", "--no-heading", "--column", "--json",
+    "-0", "--null", "--null-data", "--no-config", "--stats", "--help", "-h", "--version", "-V",
+  ]),
+  values: optionValues(
+    ["-e --regexp -f --file -g --glob --iglob -t --type -T --type-not", textValue],
+    ["-A --after-context -B --before-context -C --context -m --max-count --max-depth -j --threads", countValue],
+    ["--color", choice("never", "auto", "always", "ansi")],
+  ),
+};
+const GREP_READONLY_OPTIONS: ReadonlyOptions = {
+  flags: new Set([
+    "-E", "--extended-regexp", "-F", "--fixed-strings", "-G", "--basic-regexp", "-P", "--perl-regexp",
+    "-i", "--ignore-case", "-w", "--word-regexp", "-x", "--line-regexp", "-v", "--invert-match",
+    "-n", "--line-number", "-H", "--with-filename", "-h", "--no-filename", "-l", "--files-with-matches",
+    "-L", "--files-without-match", "-c", "--count", "-o", "--only-matching", "-q", "--quiet", "--silent",
+    "-s", "--no-messages", "-r", "--recursive", "-R", "--dereference-recursive", "-a", "--text",
+    "-I", "-b", "--byte-offset", "-Z", "--null", "-z", "--null-data", "--help", "-V", "--version",
+  ]),
+  values: optionValues(
+    ["-e --regexp -f --file --include --exclude --exclude-dir", textValue],
+    ["-A --after-context -B --before-context -C --context -m --max-count", countValue],
+    ["--color --colour", choice("never", "auto", "always")],
+    ["--binary-files", choice("binary", "text", "without-match")],
+    ["-d --directories", choice("read", "recurse", "skip")],
+    ["-D --devices", choice("read", "skip")],
+  ),
+};
+const FILE_READONLY_OPTIONS: ReadonlyOptions = {
+  flags: new Set([
+    "-b", "--brief", "-i", "--mime", "--mime-type", "--mime-encoding", "--extension", "--apple",
+    "-h", "--no-dereference", "-L", "--dereference", "-k", "--keep-going", "-N", "--no-pad",
+    "-n", "--no-buffer", "-r", "--raw", "-s", "--special-files", "-E", "--error", "-0", "--print0",
+    "--help", "-v", "--version",
+  ]),
+  values: optionValues(["-F --separator -f --files-from", textValue]),
+};
+const FIND_PREFIX_FLAGS = new Set(["-H", "-L", "-P"]);
+const FIND_READONLY_OPTIONS: ReadonlyOptions = {
+  flags: new Set([
+    "-print", "-print0", "-ls", "-prune", "-quit", "-depth", "-xdev", "-mount", "-noleaf",
+    "-empty", "-readable", "-writable", "-executable", "-true", "-false",
+    "!", "(", ")", "-a", "-and", "-o", "-or", "-not",
+  ]),
+  values: optionValues(
+    ["-name -iname -path -ipath -wholename -iwholename -lname -ilname -regex -iregex -user -group -newer", textValue],
+    ["-maxdepth -mindepth", countValue],
+    ["-type -xtype", choice("b", "c", "d", "p", "f", "l", "s")],
+    ["-mtime -atime -ctime -mmin -amin -cmin -uid -gid -inum -links", value => /^[+-]?\d+$/.test(value)],
+    ["-size", value => /^[+-]?\d+[bcwkMG]?$/.test(value)],
+  ),
+};
+
+function readonlyOptionArgs(args: string[], options: ReadonlyOptions, find = false, inputFile?: ValueCheck): boolean {
+  let expression = false;
+  let paths = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (find && !paths && !expression && FIND_PREFIX_FLAGS.has(arg)) continue;
+    if (options.flags.has(arg)) { expression = true; continue; }
+    if (!find && /^-[A-Za-z0-9]{2,}$/.test(arg) && [...arg.slice(1)].every(letter => options.flags.has(`-${letter}`))) continue;
+    // Only long search/file options support =value; find primaries require a separate token.
+    const equals = !find && arg.startsWith("--") ? arg.indexOf("=") : -1;
+    const name = equals < 0 ? arg : arg.slice(0, equals);
+    const check = options.values.get(name);
+    if (check) {
+      const value = equals < 0 ? args[++i] : arg.slice(equals + 1);
+      if (value === undefined || !check(value)) return false;
+      if (!find && ["-f", "--file", "--files-from"].includes(name) && !inputFile?.(value)) return false;
+      expression = true;
+      continue;
+    }
+    if (!textValue(arg) || (find && (expression || ["!", "(", ")", ","].includes(arg)))) return false;
+    paths = true;
+  }
+  return true;
 }
 
-// ripgrep's --pre/--pre-glob and --hostname-bin all exec an attacker-influenceable command per
-// matched file; grep has no such flags today but is checked identically for defense in depth.
-function isSearchExecFlag(arg: string): boolean {
-  return arg === "--pre" || arg.startsWith("--pre=") || arg === "--pre-glob" || arg.startsWith("--pre-glob=") ||
-    arg === "--hostname-bin" || arg.startsWith("--hostname-bin=");
-}
-
-interface ParsedScript { commands: string[][] }
+interface ParsedScript { commands: { words: string[] }[] }
 
 /**
  * Fail-closed shell tokenizer for the readonly-auto-allow gate. See out/result.md for the BNF and
@@ -67,14 +151,18 @@ function parseScript(command: string): ParsedScript | null {
   // context, rather than trying to prove a specific occurrence is inert.
   if (/[`$]/.test(command)) return null;
 
-  const commands: string[][] = [];
+  const commands: ParsedScript["commands"] = [];
   let words: string[] = [];
   let word = "";
   let hasWord = false;
   let quote: '"' | "'" | null = null;
 
   const pushWord = () => { if (hasWord) { words.push(word); word = ""; hasWord = false; } };
-  const pushCommand = () => { pushWord(); if (words.length) commands.push(words); words = []; };
+  const pushCommand = () => {
+    pushWord();
+    if (words.length) commands.push({ words });
+    words = [];
+  };
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -97,6 +185,9 @@ function parseScript(command: string): ParsedScript | null {
     if (ch === "'" || ch === '"') { quote = ch; hasWord = true; continue; }
     if (ch === "\\") {
       if (i + 1 >= command.length) return null; // dangling escape
+      // A shell removes backslash-newline before tokenization. Retaining the newline would
+      // disguise an option as a positional path, e.g. find . <continuation>-delete.
+      if (command[i + 1] === "\n") { i++; continue; }
       word += command[i + 1]; hasWord = true; i++; continue;
     }
     // Redirection, heredoc (a doubled '<'), subshell grouping, and process substitution (`<(`/`>(`)
@@ -117,6 +208,10 @@ function parseScript(command: string): ParsedScript | null {
       pushCommand(); continue;
     }
     if (ch === ";") { pushCommand(); continue; }
+    // Parser-wide invariant: no unquoted expansion characters in ANY argv, including argv[0].
+    // Reject characters, not recognized patterns, independently of shell options or matches.
+    // ^/# cover zsh EXTENDED_GLOB too; quoted/escaped patterns remain literal.
+    if ("*?[]{}~^#".includes(ch)) return null;
     word += ch; hasWord = true;
   }
   if (quote) return null; // unterminated quote
@@ -180,6 +275,10 @@ export function unresolvableReadonlyCommands(
 }
 
 export interface ReadonlyClassificationOptions {
+  /** Trusted server roots for -f/--file/--files-from inputs. Missing scope fails closed. */
+  allowedRoots?: readonly string[];
+  /** Execution cwd used to resolve relative input paths. */
+  cwd?: string;
   /** Directories a resolved executable must live in. Defaults to DEFAULT_SYSTEM_BIN_DIRS. */
   systemDirs?: readonly string[];
   /** Overrides the directories searched to resolve argv[0]. Defaults to process.env.PATH. Exists
@@ -188,6 +287,22 @@ export interface ReadonlyClassificationOptions {
 }
 
 export interface ReadonlyClassification { readonly: boolean; matchedRules: string[] }
+
+function inputWithinRoots(value: string, options: ReadonlyClassificationOptions): boolean {
+  try {
+    // Bun/Node realpath can normalize .. before following symlinks. Walk components so
+    // link/../secret means the real target's parent, as it does when the tool opens it.
+    let path = isAbsolute(value) ? "/" : realpathSync(options.cwd ?? process.cwd());
+    for (const part of value.split("/")) {
+      if (!part || part === ".") continue;
+      path = part === ".." ? dirname(path) : realpathSync(join(path, part));
+    }
+    return (options.allowedRoots ?? []).some(root => {
+      const child = relative(realpathSync(resolve(root)), path);
+      return child === "" || (child !== ".." && !child.startsWith("../") && !isAbsolute(child));
+    });
+  } catch { return false; } // missing, unreadable or unresolvable input requires approval
+}
 
 /**
  * Classifies a Bash command as readonly-auto-allowable. The command must parse under the strict
@@ -224,7 +339,7 @@ export function classifyReadonlyCommand(
   };
 
   const rules: string[] = [];
-  for (const tokens of parsed.commands) {
+  for (const { words: tokens } of parsed.commands) {
     if (!tokens.length) continue;
     const [head, ...args] = tokens as [string, ...string[]];
     // A path (relative or absolute) can resolve to an attacker-planted same-named binary
@@ -247,16 +362,15 @@ export function classifyReadonlyCommand(
       rules.push(`git ${sub}`); continue;
     }
     if (name === "find") {
-      if (args.some(isFindWriteFlag)) return deny;
+      if (!readonlyOptionArgs(args, FIND_READONLY_OPTIONS, true)) return deny;
       rules.push("find"); continue;
     }
     if (name === "grep" || name === "rg") {
-      if (args.some(isSearchExecFlag)) return deny;
+      if (!readonlyOptionArgs(args, name === "rg" ? RG_READONLY_OPTIONS : GREP_READONLY_OPTIONS, false, value => inputWithinRoots(value, options))) return deny;
       rules.push(name); continue;
     }
     if (name === "file") {
-      // `-C` compiles a magic file to <path>.mgc; `-m` selects the (writable-if-compiled) magic path.
-      if (args.some(a => a === "-C" || a === "-m")) return deny;
+      if (!readonlyOptionArgs(args, FILE_READONLY_OPTIONS, false, value => inputWithinRoots(value, options))) return deny;
       rules.push("file"); continue;
     }
     // ls/cat/head/tail/wc/pwd/echo/stat/which: no flags of theirs write or execute anything, and
