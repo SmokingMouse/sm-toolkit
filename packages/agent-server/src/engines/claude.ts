@@ -319,7 +319,8 @@ export class ClaudeEngine implements EngineSession {
       else if (this.sessionGrants.has(grantKey)) respond({ decision: "accept" });
       else if (readonlyMatch?.readonly) {
         respond({ decision: "accept" });
-        // Not enqueued as an approval: readonly_auto_allow is audited purely via engineEvent, no pendingRequests row.
+        // Not enqueued as an approval (no pendingRequests row): audited via engineEvent and, per
+        // ItemLog.recordReadonlyAutoAllow (see thread-manager.ts), a row in the approvals table.
         this.events.push({ type: "engineEvent", turnId: this.active, backend: this.backend, subtype: "readonly_auto_allow", payload: { requestId: req.requestId, toolUseId: req.toolUseId, toolName: req.toolName, permission, behavior: "allow", reason: "readonly_command", command: readonlyCommand!, matchedRules: readonlyMatch.matchedRules } });
       }
       else {
