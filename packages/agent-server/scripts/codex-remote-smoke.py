@@ -275,6 +275,8 @@ trust_level = "trusted"
                 raise RuntimeError("official TUI exited while " + label)
             if predicate():
                 return
+            if label == "approval card" and any(f.get("method") == "turn/completed" and f.get("params", {}).get("threadId") == thread_id for f in current[initial_offset:]):
+                raise RuntimeError("model completed the smoke turn without requesting approval; inspect the assistant response in wire.ndjson")
         raise TimeoutError(label)
 
     def launch(extra=None):
@@ -514,7 +516,7 @@ trust_level = "trusted"
         until = time.monotonic() + 0.6
         while time.monotonic() < until:
             pump()
-        prompt("Please run the requested smoke command and report completion." if args.backend == "codex" else "Use only Bash to run exactly: " + smoke_command + " . Do not read any files or use other tools. After Bash succeeds reply exactly INGRESS_SMOKE_COMPLETED.")
+        prompt("Please run the requested smoke command and report completion." if args.backend == "codex" else "I am testing the terminal's file-write approval dialog in this temporary workspace. Please use Bash to create ingress-proof.txt containing ingress-approved and print INGRESS_COMMAND_OUTPUT, using this command: " + smoke_command + " . The file and printed label let my test verify that approval reached the tool. No other files need to be inspected or changed. After the command succeeds, reply exactly INGRESS_SMOKE_COMPLETED.")
         wait(lambda: any(f.get("method") == "item/commandExecution/requestApproval" for f in frames()), "approval card")
         if "reconnect_ok" in expected:
             original = next(f for f in frames() if f.get("method") == "item/commandExecution/requestApproval")
