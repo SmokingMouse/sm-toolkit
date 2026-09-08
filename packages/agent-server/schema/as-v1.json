@@ -4809,6 +4809,7 @@
         "thread/items/list",
         "thread/list",
         "thread/read",
+        "thread/name/set",
         "thread/fork",
         "thread/close",
         "thread/interrupt",
@@ -5819,6 +5820,22 @@
               "type": "string",
               "const": "default"
             },
+            "personality": {
+              "type": "string",
+              "enum": [
+                "none",
+                "friendly",
+                "pragmatic"
+              ]
+            },
+            "webSearch": {
+              "type": "string",
+              "enum": [
+                "disabled",
+                "cached",
+                "live"
+              ]
+            },
             "cwd": {
               "type": "string",
               "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
@@ -5935,6 +5952,22 @@
             "serviceTier": {
               "type": "string",
               "const": "default"
+            },
+            "personality": {
+              "type": "string",
+              "enum": [
+                "none",
+                "friendly",
+                "pragmatic"
+              ]
+            },
+            "webSearch": {
+              "type": "string",
+              "enum": [
+                "disabled",
+                "cached",
+                "live"
+              ]
             },
             "cwd": {
               "type": "string",
@@ -6327,6 +6360,22 @@
           "type": "string",
           "const": "default"
         },
+        "personality": {
+          "type": "string",
+          "enum": [
+            "none",
+            "friendly",
+            "pragmatic"
+          ]
+        },
+        "webSearch": {
+          "type": "string",
+          "enum": [
+            "disabled",
+            "cached",
+            "live"
+          ]
+        },
         "cwd": {
           "type": "string",
           "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
@@ -6608,6 +6657,22 @@
         "serviceTier": {
           "type": "string",
           "const": "default"
+        },
+        "personality": {
+          "type": "string",
+          "enum": [
+            "none",
+            "friendly",
+            "pragmatic"
+          ]
+        },
+        "webSearch": {
+          "type": "string",
+          "enum": [
+            "disabled",
+            "cached",
+            "live"
+          ]
         },
         "cwd": {
           "type": "string",
@@ -8047,6 +8112,22 @@
         "serviceTier": {
           "type": "string",
           "const": "default"
+        },
+        "personality": {
+          "type": "string",
+          "enum": [
+            "none",
+            "friendly",
+            "pragmatic"
+          ]
+        },
+        "webSearch": {
+          "type": "string",
+          "enum": [
+            "disabled",
+            "cached",
+            "live"
+          ]
         },
         "cwd": {
           "type": "string",
@@ -9558,6 +9639,22 @@
               "type": "string",
               "const": "default"
             },
+            "personality": {
+              "type": "string",
+              "enum": [
+                "none",
+                "friendly",
+                "pragmatic"
+              ]
+            },
+            "webSearch": {
+              "type": "string",
+              "enum": [
+                "disabled",
+                "cached",
+                "live"
+              ]
+            },
             "cwd": {
               "type": "string",
               "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
@@ -9674,6 +9771,22 @@
             "serviceTier": {
               "type": "string",
               "const": "default"
+            },
+            "personality": {
+              "type": "string",
+              "enum": [
+                "none",
+                "friendly",
+                "pragmatic"
+              ]
+            },
+            "webSearch": {
+              "type": "string",
+              "enum": [
+                "disabled",
+                "cached",
+                "live"
+              ]
             },
             "cwd": {
               "type": "string",
@@ -14749,6 +14862,31 @@
           ]
         }
       }
+    },
+    "method:thread/name/set:params": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "threadId",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "method:thread/name/set:result": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
     },
     "method:thread/fork:params": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",

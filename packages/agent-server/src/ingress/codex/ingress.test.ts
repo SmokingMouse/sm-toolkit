@@ -422,6 +422,31 @@ test("model, cwd, reviewer, service tier, readonly and side-effect guards are fa
   expect((await c.request("thread/resume", { threadId: thread.id, approvalPolicy: "never", sandbox: "read-only" })).thread.id).toBe(thread.id);
 });
 
+test("cold-start config uses AS guards, persists thread options and audits ignored keys without values", async () => {
+  const f = setup("simple", undefined, true), c = connection(f); await c.initialize();
+  const events: NativeObject[] = [];
+  const publish = f.server.log.publish.bind(f.server.log);
+  f.server.log.publish = frame => { events.push(frame); publish(frame); };
+  for (const model of ["gpt-6-astra", "sonnet"]) {
+    const { thread } = await c.request("thread/start", { config: { model, cwd: f.root, sandbox_mode: "read-only", approval_policy: "never", model_reasoning_effort: "high", personality: "friendly", tui: { status_line: ["SECRET"] }, web_search: "cached" } });
+    const as = resolveThread(f.server, thread.id);
+    expect(as).toMatchObject({ model, permission: "readonly", cwd: f.root, backend: model === "sonnet" ? "claude" : "codex" });
+    expect(f.server.log.options(as.id)).toMatchObject({ effort: "high", personality: "friendly" });
+    const audit = events.find(f => f.method === "thread/engineEvent" && f.params.threadId === as.id && f.params.subtype === "native_config_ignored");
+    expect(audit?.params.payload.keys).toContain("tui");
+    expect(JSON.stringify(audit)).not.toContain("SECRET");
+    const persisted = f.server.log.db.query("SELECT reason FROM ingress_audit WHERE thread_id=? AND method='config/ignore'").get(as.id);
+    expect(JSON.stringify(persisted)).toContain("tui");
+    expect(JSON.stringify(persisted)).not.toContain("SECRET");
+    await expect(c.request("thread/resume", { threadId: thread.id, config: { sandbox_mode: "danger-full-access", approval_policy: "never" } })).rejects.toThrow("readonly");
+    await expect(c.request("thread/resume", { threadId: thread.id, config: { model_reasoning_effort: "medium", personality: "pragmatic", web_search: "cached" } })).resolves.toHaveProperty("thread.id", thread.id);
+  }
+  const count = f.engines.length;
+  for (const config of [{ model: "fable" }, { cwd: "/" }, { service_tier: "priority" }, { approvals_reviewer: "auto_review" }, { "config/value/write": {} }, { personality: "invalid" }])
+    await expect(c.request("thread/start", { model: "gpt-6-astra", cwd: f.root, ...("model" in config ? { model: null } : {}), ...("cwd" in config ? { cwd: null } : {}), config })).rejects.toThrow();
+  expect(f.engines.length).toBe(count);
+});
+
 test("listener requires bearer on loopback upgrade, refuses origins and owns AS disconnect", async () => {
   const f = setup();
   expect(() => listenCodex(f.server, { token: "secret", hostname: "0.0.0.0" })).toThrow("loopback");

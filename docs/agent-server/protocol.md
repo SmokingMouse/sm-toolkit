@@ -97,7 +97,7 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 | 方法 | params | result | 说明 |
 |---|---|---|---|
 | `initialize` | 见 §1 | 见 §1 | 握手 |
-| `thread/start` | `{backend, cwd?, model?, effort?, permission?, serviceTier?, fjContext?, autocompact?, sandbox?, systemPrompt?, tools?, meta?, clientThreadId?}` | `{thread: Thread, deduplicated?: true}` | 新建 thread 并 spawn 引擎；`deduplicated` 见 §8.1 |
+| `thread/start` | `{backend, cwd?, model?, effort?, personality?, webSearch?, permission?, serviceTier?, fjContext?, autocompact?, sandbox?, systemPrompt?, tools?, meta?, clientThreadId?}` | `{thread: Thread, deduplicated?: true}` | 新建 thread 并 spawn 引擎；`deduplicated` 见 §8.1 |
 | `thread/resume` | `{threadId?, engineThreadId?, backend?, cwd?, …同 start 的覆盖字段}` | `{thread: Thread, attached: boolean}` | **命中活进程即 attach**（`attached:true`，不 spawn）；否则按 `engineThreadId` 重启引擎并续接 |
 | `thread/attach` | `{threadId, sinceSeq?}` | `{thread, items: Item[], nextSeq, queue: QueuedTurn[], pendingRequests: PendingServerRequest[]}` | 拿全量后缀快照并开始收该 thread 的通知；翻历史分页用 thread/items/list |
 | `thread/detach` | `{threadId}` | `{}` | 只退订，不影响 thread |
@@ -142,6 +142,8 @@ subtype=`model_denied`，payload 为该 detail。通知遵守 engineEvents 能�
 同样检查名单，拒绝不会改变线程模型、恢复选项或 turn 队列。
 
 `serviceTier?: "default"` 仅用于 Codex，持久化并传入引擎的 start/resume 与后续 turn；缺省仍选择 default 普通档。Claude start/resume 显式传该参数会返回 unsupported_capability，不能静默忽略。
+
+`personality?: "none" | "friendly" | "pragmatic"` 为线程启动选项：Codex 原生传入，Claude 在非 none 时追加沟通风格说明。`webSearch?: "disabled" | "cached" | "live"` 在 Codex 映射为 web_search；Claude disabled 禁用 WebSearch，live 沿用原生搜索和 AS 权限检查，cached 不受支持。两项均随线程持久化，live resume 不允许更改。
 `fjContext?: {root: absolutePath, cid: string, seat?: string}` 是受限坐席身份，禁止任意键。
 cid 匹配 `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`，seat 另允许点号。root 经 realpath 与 allowed_roots 校验。
 携带 fjContext 时 model 同样经守卫解析为明确模型（默认拒绝 fable），并必须显式 permission；Codex 必须 gpt-6-astra + serviceTier default。
@@ -791,9 +793,9 @@ availableDecisions 只保留 AS 支持的四种；扩展策略修改决策返回
 未实现的副作用方法默认返回 -32601，message 前缀 `as-ingress: `，不返回伪成功。
 包括恢复时 thread/goal/get（可见的非阻断拒绝）、配置写入、command/exec、fs 写入、插件安装、账户写入、
 review、realtime、goal、memory。slice 4 的 codex_tui 动态工具直通例外见下文治理表。
-原生 dynamicTools、historyMode 和 UI personality/web_search 提示不传入 engine；以 daemon 的 native 配置为准。
+原生 dynamicTools、historyMode 不作为 AS thread options 传入 engine。
 仅支持 default collaboration mode，其 model/effort 进入 AS guard，TUI 的模式说明不覆盖引擎说明。
-拒绝原生权限 profiles、任意 config overrides、auto_review、非 default serviceTier/serviceTierForTurn。
+拒绝原生权限 profiles、auto_review、非 default serviceTier/serviceTierForTurn。thread/start 的 config 按项映射 model、model_reasoning_effort、sandbox_mode、approval_policy、cwd、personality、web_search，经 AS 原有守卫；显式 native 字段优先于 config 默认值。纯本地展示项忽略并发 native_config_ignored engineEvent，持久审计只含键名；未知/全局写项报出 config 键名。Claude 的 cached 搜索偏好在 ingress 忽略并审计；resume/fork 沿用保存的 effort、personality、webSearch，不应用 TUI 重复的启动默认值。
 readonly thread 不能通过 resume/turn sandbox 或 permission override 升权。resume/attach 和普通 full 输入不获取租约；重复当前 permission 时 ingress 省略 AS permission override，沿用已保存权限。live resume 使用 AS attach，冷恢复使用 AS resume；实际权限 override 仍受 AS 升权检查。他人持输入租约时普通输入仍返回 lease_held 与 holder.label。
 fjContext 只能由 as/1 创建，native 入口拒绝写入；已有 fj Codex 线程维持 gpt-6-astra/default 约束。
 

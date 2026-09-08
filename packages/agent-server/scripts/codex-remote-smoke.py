@@ -23,18 +23,36 @@ import termios
 import threading
 import time
 import traceback
+import uuid
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=["codex", "claude"], default="codex")
+    parser.add_argument("--backend", choices=["codex", "claude", "both"], help="prod defaults to both; isolated defaults to codex")
+    parser.add_argument("--mode", choices=["isolated", "prod"], default="isolated")
+    parser.add_argument("--endpoint", type=Path, help="production daemon endpoint.json; never launches/restarts a daemon")
+    parser.add_argument("--runs", type=int, default=3, help="fresh TUI sessions per backend")
+    parser.add_argument("--out", type=Path)
     parser.add_argument("--transport", choices=["ws", "unix"], default="ws")
     parser.add_argument("--allow-version-mismatch", action="store_true", help="upgrade regression only; record candidate version")
-    parser.add_argument("--expect", default="thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,multi_thread_ok,fork_ok,reconnect_ok,external_client_reply_while_attached_ok,list_contains_both_backends,cross_backend_model_override_tolerated,wire_schema_clean,display_disconnect_ok")
+    parser.add_argument("--expect", help="comma-separated required criteria (prod supports fresh_tui_session_ok)")
     parser.add_argument("--timeout", type=float, default=360)
     args = parser.parse_args()
+    args.backend = args.backend or ("both" if args.mode == "prod" else "codex")
+    args.expect = args.expect or ("fresh_tui_session_ok" if args.mode == "prod" else "thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,fresh_tui_session_ok,multi_thread_ok,fork_ok,reconnect_ok,external_client_reply_while_attached_ok,list_contains_both_backends,cross_backend_model_override_tolerated,wire_schema_clean,display_disconnect_ok")
+    if args.runs < 1:
+        parser.error("runs must be positive")
+    if args.mode == "prod":
+        if not args.endpoint:
+            parser.error("--mode prod requires --endpoint")
+        if args.expect != "fresh_tui_session_ok":
+            parser.error("prod supports only --expect fresh_tui_session_ok")
+        from codex_remote_prod import run_prod
+        return run_prod(args)
+    if args.backend == "both":
+        parser.error("--backend both requires --mode prod")
     expected = set(args.expect.split(","))
-    known = {"thread_started", "turn_completed", "approval_roundtrip", "resume_ok", "interrupt_ok", "resume_fresh_ok",
+    known = {"fresh_tui_session_ok", "thread_started", "turn_completed", "approval_roundtrip", "resume_ok", "interrupt_ok", "resume_fresh_ok",
              "agent_message_delta", "command_execution_output", "user_input_question", "tool_permission_question", "display_disconnect_ok", "unsupported_method_errors", "multi_thread_ok", "fork_ok", "reconnect_ok", "external_client_reply_while_attached_ok", "list_contains_both_backends", "cross_backend_model_override_tolerated", "wire_schema_clean"}
     if not expected <= known:
         parser.error("unknown expectation: " + str(expected - known))
@@ -68,6 +86,7 @@ def main():
     held_stream = threading.Event()
     release_stream = threading.Event()
     hold_marker = "INGRESS_SMOKE_HOLD_UNTIL_INTERRUPT"
+    claude_hold_prompt = "For a terminal streaming and cancellation test, write a numbered list of 200 short sentences about software testing, one per line. Do not use tools. I will press Escape after the stream starts to verify cancellation; a complete document is not needed."
     fresh_marker = "INGRESS_SMOKE_FRESH_TURN"
     fresh_response = "INGRESS_SMOKE_FRESH_COMPLETED"
     offline_marker = "INGRESS_SMOKE_OFFLINE"
@@ -165,6 +184,7 @@ def main():
     threading.Thread(target=model.serve_forever, daemon=True).start()
     (codex_home / "config.toml").write_text('''model = %s
 model_provider = "smoke"
+model_reasoning_effort = "medium"
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
 check_for_update_on_startup = false
@@ -256,6 +276,8 @@ trust_level = "trusted"
                 raise RuntimeError("official TUI exited while " + label)
             if predicate():
                 return
+            if label == "approval card" and any(f.get("method") == "turn/completed" and f.get("params", {}).get("threadId") == thread_id for f in current[initial_offset:]):
+                raise RuntimeError("model completed the smoke turn without requesting approval; inspect the assistant response in wire.ndjson")
         raise TimeoutError(label)
 
     def launch(extra=None):
@@ -311,6 +333,15 @@ trust_level = "trusted"
         requests = [f for f in current if f.get("direction") == "TUI>AS" and f.get("method") == method and (thread is None or f.get("params", {}).get("threadId") == thread)]
         return next((f["result"] for r in requests for f in current if f.get("direction") == "AS>TUI" and f.get("id") == r["id"] and f.get("connection") == r.get("connection") and "result" in f), None)
 
+    def interrupt_result(thread, turn, offset):
+        current = frames()[offset:]
+        terminal = [f for f in current if f.get("method") == "turn/completed" and f["params"].get("threadId") == thread and f["params"]["turn"]["id"] == turn]
+        if any(f["params"]["turn"]["status"] != "interrupted" for f in terminal):
+            raise RuntimeError("target turn ended before TUI interrupt; inspect the assistant response in wire.ndjson")
+        requests = [f for f in current if f.get("method") == "turn/interrupt" and f.get("direction") == "TUI>AS" and f["params"].get("threadId") == thread and f["params"].get("turnId") == turn]
+        ack = any(f.get("connection") == r.get("connection") and f.get("id") == r["id"] and "result" in f and f.get("direction") == "AS>TUI" for r in requests for f in current)
+        return bool(requests) and ack and bool(terminal)
+
     def switch(thread, picker=False, title="S3-FRESH"):
         nonlocal selected_thread
         if selected_thread == thread and not picker:
@@ -351,6 +382,25 @@ trust_level = "trusted"
         wait(lambda: (root / "smoke-endpoint.json").exists(), "daemon startup")
         endpoint = json.loads((root / "smoke-endpoint.json").read_text())
         env["SMOKE_BEARER"] = Path(endpoint["tokenPath"]).read_text().strip()
+        if "fresh_tui_session_ok" in expected:
+            summary["fresh_tui_runs"] = []
+            for index in range(args.runs):
+                offset = len(frames())
+                launch()
+                wait(lambda: response_to("thread/start", offset) is not None, "fresh TUI thread/start")
+                response = response_to("thread/start", offset)
+                native_id = response["thread"]["id"]
+                assert not any(f.get("method") == "thread/resume" for f in frames()[offset:])
+                settle(1)
+                marker = "S3_REPLY_FRESH_" + uuid.uuid4().hex.upper()
+                small_turn(native_id, marker)
+                with sqlite3.connect(endpoint["databasePath"]) as db:
+                    row = db.execute("SELECT id,backend FROM threads WHERE id=? OR engine_thread_id=?", ("th_" + native_id, native_id)).fetchone()
+                    assert row and row[1] == args.backend
+                    assert db.execute("SELECT count(*) FROM turns WHERE thread_id=? AND status='completed'", (row[0],)).fetchone()[0] == 1
+                stop_tui(graceful=True)
+                summary["fresh_tui_runs"].append({"thread": native_id, "backend": row[1], "marker": marker, "tui_exit": 0})
+            proof["fresh_tui_session_ok"] = len({r["thread"] for r in summary["fresh_tui_runs"]}) == args.runs
         fresh_id = endpoint["freshThreadId"]
         summary["fresh_thread_id"] = fresh_id
         with sqlite3.connect(endpoint["databasePath"]) as db:
@@ -476,7 +526,7 @@ trust_level = "trusted"
         until = time.monotonic() + 0.6
         while time.monotonic() < until:
             pump()
-        prompt("Please run the requested smoke command and report completion." if args.backend == "codex" else "Use only Bash to run exactly: " + smoke_command + " . Do not read any files or use other tools. After Bash succeeds reply exactly INGRESS_SMOKE_COMPLETED.")
+        prompt("Please run the requested smoke command and report completion." if args.backend == "codex" else "I am testing the terminal's file-write approval dialog in this temporary workspace. Please use Bash to create ingress-proof.txt containing ingress-approved and print INGRESS_COMMAND_OUTPUT, using this command: " + smoke_command + " . The file and printed label let my test verify that approval reached the tool. No other files need to be inspected or changed. After the command succeeds, reply exactly INGRESS_SMOKE_COMPLETED.")
         wait(lambda: any(f.get("method") == "item/commandExecution/requestApproval" for f in frames()), "approval card")
         if "reconnect_ok" in expected:
             original = next(f for f in frames() if f.get("method") == "item/commandExecution/requestApproval")
@@ -578,11 +628,11 @@ trust_level = "trusted"
                 offset = len(frames())
                 held_stream.clear()
                 release_stream.clear()
-                prompt(hold_marker if backend == "codex" else "Do not use tools. Write a very long numbered list from 1 to 10000, spelling out each number in English. Start immediately and keep writing until 10000.")
+                prompt(hold_marker if backend == "codex" else claude_hold_prompt)
                 wait(lambda: held_stream.is_set() if backend == "codex" else any(f.get("method") == "item/agentMessage/delta" and f["params"].get("threadId") == target for f in frames()[offset:]), "mixed backend active stream")
                 active = next(f["params"]["turn"]["id"] for f in frames()[offset:] if f.get("method") == "turn/started" and f["params"].get("threadId") == target)
                 os.write(master, b"\x1b")
-                wait(lambda: response_to("turn/interrupt", offset, target) is not None and any(f.get("method") == "turn/completed" and f["params"].get("threadId") == target and f["params"]["turn"]["id"] == active and f["params"]["turn"]["status"] == "interrupted" for f in frames()[offset:]), "mixed interrupt isolated to active thread")
+                wait(lambda: interrupt_result(target, active, offset), "mixed interrupt isolated to active thread")
                 assert not any(f.get("method") in {"turn/completed", "turn/interrupt"} and f.get("params", {}).get("threadId") == peer for f in frames()[offset:]), "interrupt affected other backend"
                 interrupts.append({"thread_id": target, "turn_id": active, "backend": backend})
                 release_stream.set()
@@ -652,7 +702,7 @@ trust_level = "trusted"
         until = time.monotonic() + 0.7
         while time.monotonic() < until:
             pump()
-        prompt(hold_marker if args.backend == "codex" else "Do not use tools. Write a very long numbered list from 1 to 10000, spelling out each number in English. Start immediately and keep writing until 10000.")
+        prompt(hold_marker if args.backend == "codex" else claude_hold_prompt)
         if args.backend == "codex":
             wait(lambda: held_stream.is_set() and any(f.get("method") == "turn/started" for f in frames()[before:]), "resumed model stream open and held")
         else:
@@ -663,13 +713,7 @@ trust_level = "trusted"
         assert not any(f.get("method") == "turn/completed" and f["params"]["turn"]["id"] == turn_id for f in resumed_frames), "held turn completed before interrupt"
         proof["resume_ok"] = True # resumed TUI loaded history and submitted another real turn
         os.write(master, b"\x1b")
-        def interrupted():
-            current = frames()[before:]
-            requests = [f for f in current if f.get("method") == "turn/interrupt" and f.get("direction") == "TUI>AS" and f["params"].get("turnId") == turn_id]
-            ack = any(f.get("connection") == r.get("connection") and f.get("id") == r["id"] and "result" in f and f["direction"] == "AS>TUI" for r in requests for f in current)
-            terminal = any(f.get("method") == "turn/completed" and f["params"]["turn"]["id"] == turn_id and f["params"]["turn"]["status"] == "interrupted" for f in current)
-            return bool(requests) and ack and terminal
-        wait(interrupted, "matching interrupt request, acknowledgement and terminal notification")
+        wait(lambda: interrupt_result(thread_id, turn_id, before), "matching interrupt request, acknowledgement and terminal notification")
         proof["interrupt_ok"] = True
         if args.backend == "claude" or mixed:
             init_frames = [json.loads(line)["params"]["payload"] for line in (root / "claude-init.ndjson").read_text().splitlines()]

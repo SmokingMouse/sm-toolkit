@@ -2,9 +2,28 @@
 
 ## 待查
 
-无。
+### 升级冒烟的目标 turn 在 TUI interrupt 前结束（blocked）
+
+- 症状：中断阶段出现 completed 而无匹配 TUI turn/interrupt；长输出拒绝、200 句输出、重按物理 Esc 的三次尝试均未稳定通过，触发 fj-ingress-fresh-start-01bb 停机条款。
+- 可证伪假设：wire 首个 delta 早于 TUI 当前任务可接收 Escape 的状态，或 Claude/显示端终局时序存在差异；尚未定位。重按 Escape 也失败，未保留该实验改动。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude`；扩展混合线程路径会检查同一 thread/turn 的请求、回执、interrupted 终局。失败证据在本契约 out/proof/upgrade-release-failure.log 和 upgrade-verified-failure.log。
+- 已确认：D1–D4 单独复跑通过，默认升级矩阵有失败；PR #17 保留待验收，未合并或重启生产。需主控接管，不宣称已修复中断稳定性。
 
 ## 已结案
+
+### Claude 冒烟已结束却继续等待审批或中断（resolved）
+
+- 症状：Claude 把诊断命令误判为注入而直接回复，或拒绝生成 10000 行；turn 已 completed，脚本仍等审批或 interrupted 直到总超时。
+- 可证伪假设：等待审批的 oracle 没检查无审批的终局，而非审批 broker 丢卡；wire 明确只有 userMessage/agentMessage 与 completed，无工具请求。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,fresh_tui_session_ok`。
+- 修复：等待审批或中断时检查目标 turn 终局，缺审批或非 interrupted 立即失败并指向 wire；明确临时测试文件目的，中断改用 200 句流式测试。保留真实审批/工具输出及同 thread/turn 的中断请求、回执、终局三重校验，不把模型拒绝当成功。D4 复跑通过；模型将来仍可能拒绝，脚本会明确报失败。
+
+### 官方 TUI 冷启动 config 被整体拒绝（resolved）
+
+- 症状：生产不带 resume 的 codex --remote 在 thread/start bootstrap 报 native config overrides are not supported；as/1 创建再 resume 正常。
+- 可证伪假设：TUI 默认注入 model_reasoning_effort 不在原两项白名单。真实 wire 记录同时携带 web_search=cached、personality=pragmatic、model_reasoning_effort=medium。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --expect fresh_tui_session_ok`；Claude 替换 backend。
+- 修复：按项分流至 AS 线程选项和既有 guards；本地偏好审计忽略，未知项指名拒绝。初版仅处理 start 导致 resume/fork 拒绝重复 config，已补保留原线程启动偏好的分流，真实 TUI 回归覆盖。
 
 ### codex-ingress slice 3 再审：启动模型覆盖与权限卡 schema（resolved）
 

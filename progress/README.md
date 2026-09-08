@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server native ingress 已集成多线程兼容、Unix 传输与只读治理，双后端双传输各三轮和全量回归通过，待主控验收。
+agent-server 官方 TUI 冷启动修复已提交并开 PR，升级中断问题三次复现后按契约停机，待主控接管。
 
 ## Goals
 

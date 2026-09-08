@@ -8,6 +8,7 @@ import { claudeItems, claudeSettings, claudeThread, claudeTurn } from "./claude-
 import { methodPolicy } from "./method-policy.js";
 import { nativePage, pageLimit, turnItemsView } from "./pagination.js";
 import { NativeRpcError, nativeResult } from "./native-error.js";
+import { splitConfigOverrides } from "./config-overrides.js";
 export { NativeRpcError } from "./native-error.js";
 
 export const isClaudeModel = (model: string): boolean => /^(claude-|sonnet(?:$|-)|opus(?:$|-)|haiku(?:$|-)|fable(?:$|-))/i.test(model);
@@ -58,6 +59,8 @@ export function nativeOptions(p: NativeObject, current: Partial<StartThreadParam
   return {
     ...(p.model != null ? { model: p.model } : {}), ...(p.cwd != null ? { cwd: p.cwd } : {}),
     ...(p.effort != null ? { effort: p.effort } : {}), ...(sandbox ? { sandbox } : {}), ...(permission ? { permission } : {}),
+    ...(p.personality != null ? { personality: p.personality } : {}),
+    ...(p.webSearch != null ? { webSearch: p.webSearch } : {}),
   };
 }
 
@@ -100,8 +103,25 @@ export class CodexRouter {
       if (settings?.reasoning_effort != null && p.effort != null && settings.reasoning_effort !== p.effort) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: conflicting collaboration effort");
       p.model ??= settings?.model; p.effort ??= settings?.reasoning_effort;
     }
-    if (p.config != null && (typeof p.config !== "object" || Array.isArray(p.config) || Object.keys(p.config).some(k => !["web_search", "personality"].includes(k)))) throw new ProtocolError(ErrorCode.unauthorized, "as-ingress: native config overrides are not supported");
+    if (p.config != null) throw new ProtocolError(ErrorCode.unsupported_capability, `as-ingress: config overrides require thread/start (${Object.keys(p.config).join(", ")})`);
     if (p.ephemeral === true) throw new ProtocolError(ErrorCode.unsupported_capability, "as-ingress: ephemeral threads are unsupported");
+  }
+  private auditIgnored(thread: Thread, keys: string[]): void {
+    if (!keys.length) return;
+    this.server.log.db.query("INSERT INTO ingress_audit(created_at,client_id,method,thread_id,code,reason) VALUES (?,?,?,?,?,?)")
+      .run(Date.now(), this.client.clientId, "config/ignore", thread.id, 0, JSON.stringify(keys));
+    this.server.log.publish({ jsonrpc: "2.0", method: "thread/engineEvent", params: {
+      threadId: thread.id, backend: thread.backend, subtype: "native_config_ignored", payload: { keys, clientId: this.client.clientId },
+    } });
+  }
+  private inheritedConfig(original: NativeObject): ReturnType<typeof splitConfigOverrides> {
+    const split = splitConfigOverrides(original);
+    // TUI repeats local startup defaults on resume/fork. Keep the existing
+    // thread's launch-only preferences; permission/model/path still pass guards.
+    for (const [field, key] of [["effort", "model_reasoning_effort"], ["personality", "personality"], ["webSearch", "web_search"]] as const) {
+      if (original[field] == null && split.params[field] != null) { delete split.params[field]; split.ignored.push(key); }
+    }
+    return split;
   }
   private async guardThread(thread: Thread, options: Partial<StartThreadParams>): Promise<void> {
     const saved = this.server.log.options<StartThreadParams>(thread.id);
@@ -216,13 +236,18 @@ export class CodexRouter {
     }
     switch (method) {
       case "thread/start": {
+        const split = splitConfigOverrides(p); p = split.params;
         this.rejectExtras(p); const options = nativeOptions(p); await this.paths(p);
         if (!options.cwd && p.runtimeWorkspaceRoots?.length) options.cwd = p.runtimeWorkspaceRoots[0];
         const model = this.server.threads.model(options.model, "codex", `ingress_${this.client.clientId}`), backend = isClaudeModel(model) ? "claude" : "codex";
         if (backend === "claude" && !this.claudeThreads) throw new ProtocolError(ErrorCode.method_not_found, "as-ingress: Claude threads are disabled by codex_ingress.claude_threads");
+        // cached is Codex's search-provider preference; Claude has no cache mode.
+        // Keep its native search behavior governed by the AS approval broker.
+        if (backend === "claude" && options.webSearch === "cached") { delete options.webSearch; split.ignored.push("web_search"); }
         const selected = backend === "claude" ? this.claudeOptions(options) : options;
         const { thread } = await this.client.request("thread/start", { ...selected, model, backend, ...(backend === "codex" ? { serviceTier: "default" as const } : {}), permission: selected.permission ?? "default", ...(p.baseInstructions != null ? { systemPrompt: p.baseInstructions } : {}) });
         this.attached.add(thread.id);
+        this.auditIgnored(thread, split.ignored);
         if (backend === "claude") return this.claudeResponse(thread);
         const result = this.engine(thread).nativeThreadStart();
         // The ID mapping stays in the existing durable engine index. This shadow
@@ -231,6 +256,7 @@ export class CodexRouter {
         return result;
       }
       case "thread/resume": {
+        const split = this.inheritedConfig(p); p = split.params;
         this.rejectExtras(p); const thread = resolveThread(this.server, p.threadId);
         const saved = this.server.log.options<StartThreadParams>(thread.id);
         const options = nativeOptions(p, { ...saved, permission: thread.permission }); await this.paths(p);
@@ -239,7 +265,7 @@ export class CodexRouter {
         // AS attach to a live thread intentionally keeps its saved settings.
         if (this.server.threads.live.has(thread.id)) {
           const effective = { ...saved, model: thread.model, cwd: thread.cwd, permission: thread.permission, sandbox: effectiveSandbox({ ...saved, permission: thread.permission }) };
-          for (const key of ["model", "cwd", "sandbox", "permission", "effort"] as const) if (options[key] != null && options[key] !== effective[key]) throw new ProtocolError(ErrorCode.invalid_params, `as-ingress: live resume cannot override ${key}`);
+          for (const key of ["model", "cwd", "sandbox", "permission", "effort", "personality", "webSearch"] as const) if (options[key] != null && options[key] !== effective[key]) throw new ProtocolError(ErrorCode.invalid_params, `as-ingress: live resume cannot override ${key}`);
         }
         // Repeating the saved permission is an attachment, not an escalation.
         const selected = thread.backend === "claude" ? this.claudeOptions(options) : { ...options };
@@ -247,6 +273,7 @@ export class CodexRouter {
         if (this.server.threads.live.has(thread.id)) await this.client.request("thread/attach", { threadId: thread.id });
         else await this.client.request("thread/resume", { ...selected, threadId: thread.id, backend: thread.backend });
         this.attached.add(thread.id);
+        this.auditIgnored(thread, split.ignored);
         if (thread.backend === "claude") return this.claudeResume(thread, p);
         const engine = this.engine(thread), response = engine.nativeThreadStart();
         const result: NativeObject = { ...response, ...await this.codexRead(thread, p.excludeTurns !== true), initialTurnsPage: null, turnsBackwardsCursor: null, itemsBackwardsCursor: null };
@@ -410,11 +437,12 @@ export class CodexRouter {
         await this.client.request("thread/compact", { threadId: thread.id }); return {};
       }
       case "thread/fork": {
+        const split = this.inheritedConfig(p); p = split.params;
         const thread = resolveThread(this.server, p.threadId); this.rejectExtras(p); await this.paths(p);
         const saved = this.server.log.options<StartThreadParams>(thread.id), options = nativeOptions(p, { ...saved, permission: thread.permission });
         await this.guardThread(thread, options);
         const effective = { ...saved, model: thread.model, cwd: thread.cwd, permission: thread.permission, sandbox: effectiveSandbox({ ...saved, permission: thread.permission }) };
-        for (const key of ["model", "cwd", "permission", "sandbox", "effort"] as const) if (options[key] != null && options[key] !== effective[key]) throw new ProtocolError(ErrorCode.invalid_params, `as-ingress: fork inherits saved ${key}`);
+        for (const key of ["model", "cwd", "permission", "sandbox", "effort", "personality", "webSearch"] as const) if (options[key] != null && options[key] !== effective[key]) throw new ProtocolError(ErrorCode.invalid_params, `as-ingress: fork inherits saved ${key}`);
         for (const key of ["beforeTurnId", "baseInstructions"]) if (p[key] != null) throw new ProtocolError(ErrorCode.method_not_found, `as-ingress: unsupported fork option ${key}`);
         if (p.fromItemId != null && p.lastTurnId != null) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: fork boundaries are mutually exclusive");
         let fromItemId = p.fromItemId;
@@ -425,6 +453,7 @@ export class CodexRouter {
         }
         const result = await this.client.request("thread/fork", { threadId: thread.id, ...(fromItemId != null ? { fromItemId } : {}) });
         this.attached.add(result.thread.id);
+        this.auditIgnored(result.thread, split.ignored);
         if (thread.backend === "claude") return this.claudeResponse(result.thread, p.excludeTurns !== true);
         if (this.server.log.options<import("../../engines/session.js").SessionOptions>(result.thread.id).seedHistory !== undefined) {
           const prefix = new Set(this.server.log.snapshot(result.thread.id).items.map(i => i.id));
