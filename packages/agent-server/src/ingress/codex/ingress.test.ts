@@ -62,7 +62,7 @@ test("native handshake gates requests and tolerates a pipelined initialized star
   await expect(c.request("model/list")).rejects.toThrow("initialize");
   const initialized = c.session.receive({ method: "initialized" });
   const models = c.request("model/list");
-  await initialized; expect((await models).data.map((m: NativeObject) => m.model)).toEqual(["gpt-6-astra", "sonnet", "opus"]);
+  await initialized; expect((await models).data.map((m: NativeObject) => m.model)).toEqual(["gpt-6-astra"]);
   await expect(c.request("initialize", { clientInfo: { name: "test", version: "1" } })).rejects.toThrow("already initialized");
   const other = connection(f); await other.initialize(); expect(c.session.client.clientId).not.toBe(other.session.client.clientId);
   for (const frame of c.frames) expect(frame.jsonrpc).toBeUndefined();
@@ -326,7 +326,7 @@ test("engine UUID lookup survives daemon restart without an ingress mapping tabl
 
 test("codex_ingress defaults off, validates config, and disabled endpoint bytes stay unchanged", async () => {
   const root = temporary(), paths = resolveDaemonPaths({ HOME: root, AGENT_SERVER_SOCKET_PATH: join(root, "sock") });
-  const path = join(root, "config"); writeFileSync(path, "[codex_ingress]\n"); expect(readConfig(path).codex_ingress).toEqual({ enabled: false, port: 0 });
+  const path = join(root, "config"); writeFileSync(path, "[codex_ingress]\n"); expect(readConfig(path).codex_ingress).toEqual({ enabled: false, port: 0, claude_threads: false });
   writeFileSync(path, "[codex_ingress]\nenabled = true\nport = -1\n"); expect(() => readConfig(path)).toThrow();
   const daemon = await runDaemon({ paths, logger: () => {}, serverOptions: { allowedRoots: [root] } }); cleanups.push(() => daemon.shutdown());
   expect(daemon.codexIngressUrl).toBeUndefined();

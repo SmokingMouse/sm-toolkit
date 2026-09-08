@@ -31,7 +31,8 @@ def main():
     parser.add_argument("--timeout", type=float, default=180)
     args = parser.parse_args()
     expected = set(args.expect.split(","))
-    known = {"thread_started", "turn_completed", "approval_roundtrip", "resume_ok", "interrupt_ok", "resume_fresh_ok"}
+    known = {"thread_started", "turn_completed", "approval_roundtrip", "resume_ok", "interrupt_ok", "resume_fresh_ok",
+             "agent_message_delta", "command_execution_output", "user_input_question", "unsupported_method_errors"}
     if not expected <= known:
         parser.error("unknown expectation: " + str(expected - known))
     root = Path(tempfile.mkdtemp(prefix="as-codex-remote-")).resolve()
@@ -52,7 +53,7 @@ def main():
         shutil.copyfile(credentials, home / ".claude" / ".credentials.json")
         os.chmod(home / ".claude" / ".credentials.json", 0o600)
         (home / ".claude.json").write_text(json.dumps({"hasCompletedOnboarding": True}))
-        (home / ".claude" / "settings.json").write_text(json.dumps({"permissions": {"ask": ["Bash"]}}))
+        (home / ".claude" / "settings.json").write_text(json.dumps({"permissions": {"ask": ["Bash", "Read"]}}))
     wire = root / "wire.ndjson"
     wire.write_text("")
     model_calls = []
@@ -63,6 +64,7 @@ def main():
     fresh_marker = "INGRESS_SMOKE_FRESH_TURN"
     fresh_response = "INGRESS_SMOKE_FRESH_COMPLETED"
     stop_model = threading.Event()
+    smoke_command = "printf ingress-approved > ingress-proof.txt; printf INGRESS_COMMAND_OUTPUT"
 
     class Model(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -106,20 +108,26 @@ def main():
             elif not tool_returned:
                 names = [t.get("name") for t in body.get("tools", [])]
                 if "exec_command" in names:
-                    name, arguments = "exec_command", {"cmd": "printf ingress-approved > ingress-proof.txt", "workdir": str(workspace), "yield_time_ms": 1000}
+                    name, arguments = "exec_command", {"cmd": smoke_command, "workdir": str(workspace), "yield_time_ms": 1000}
                 elif "shell_command" in names:
-                    name, arguments = "shell_command", {"command": "printf ingress-approved > ingress-proof.txt", "workdir": str(workspace)}
+                    name, arguments = "shell_command", {"command": smoke_command, "workdir": str(workspace)}
                 else:
-                    name, arguments = "shell", {"command": ["/bin/sh", "-c", "printf ingress-approved > ingress-proof.txt"], "workdir": str(workspace)}
+                    name, arguments = "shell", {"command": ["/bin/sh", "-c", smoke_command], "workdir": str(workspace)}
                 arguments.update({"sandbox_permissions": "require_escalated", "justification": "Approve the isolated ingress smoke proof file?"})
                 item = {"type": "function_call", "id": "fc_smoke", "call_id": "call_smoke", "name": name, "arguments": json.dumps(arguments)}
                 # 0.153.4 may expose tools only via code-mode additional_tools.
                 namespaces = [tool for entry in body.get("input", []) if entry.get("type") == "additional_tools" for tool in entry.get("tools", [])]
                 if any(t.get("name") == "functions" and any(x.get("name") == "exec" for x in t.get("tools", [])) for t in namespaces):
-                    arguments = {"cmd": "printf ingress-approved > ingress-proof.txt", "workdir": str(workspace), "sandbox_permissions": "require_escalated", "justification": "Approve the isolated ingress smoke proof file?"}
+                    arguments = {"cmd": smoke_command, "workdir": str(workspace), "sandbox_permissions": "require_escalated", "justification": "Approve the isolated ingress smoke proof file?"}
                     item = {"type": "custom_tool_call", "id": "fc_smoke", "call_id": "call_smoke", "name": "exec", "namespace": "functions", "input": "text(await tools.exec_command(" + json.dumps(arguments) + "));"}
             else:
                 item = {"type": "message", "id": "msg_smoke", "role": "assistant", "status": "completed", "phase": "final_answer", "content": [{"type": "output_text", "text": "INGRESS_SMOKE_COMPLETED", "annotations": []}]}
+            if item["type"] == "message":
+                events.append({"type": "response.output_item.added", "output_index": 0, "item": {**item, "content": [], "status": "in_progress"}})
+                events.append({"type": "response.content_part.added", "output_index": 0, "item_id": item["id"], "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}})
+                events.append({"type": "response.output_text.delta", "output_index": 0, "item_id": item["id"], "content_index": 0, "delta": item["content"][0]["text"]})
+                events.append({"type": "response.output_text.done", "output_index": 0, "item_id": item["id"], "content_index": 0, "text": item["content"][0]["text"]})
+                events.append({"type": "response.content_part.done", "output_index": 0, "item_id": item["id"], "content_index": 0, "part": item["content"][0]})
             events.append({"type": "response.output_item.done", "output_index": 0, "item": item})
             events.append({"type": "response.completed", "response": {"id": response_id, "status": "completed", "output": [item], "usage": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}}})
             data = "".join("data: " + json.dumps(event) + "\n\n" for event in events).encode()
@@ -147,7 +155,7 @@ requires_openai_auth = false
 [projects.%s]
 trust_level = "trusted"
 ''' % (model.server_port, json.dumps(str(workspace))))
-    (state / "config.toml").write_text('allowed_roots = [%s]\ndefault_model = %s\n[codex_ingress]\nenabled = true\nport = 0\n' % (json.dumps(str(workspace)), json.dumps("sonnet" if args.backend == "claude" else "gpt-5.6-sol")))
+    (state / "config.toml").write_text('allowed_roots = [%s]\ndefault_model = %s\n[codex_ingress]\nenabled = true\nclaude_threads = %s\nport = 0\n' % (json.dumps(str(workspace)), json.dumps("sonnet" if args.backend == "claude" else "gpt-5.6-sol"), "true" if args.backend == "claude" else "false"))
     env = {"PATH": os.environ["PATH"], "HOME": str(home), "CODEX_HOME": str(codex_home), "TERM": "xterm-256color", "LANG": "en_US.UTF-8", "TMPDIR": str(root), "NO_PROXY": "*", "no_proxy": "*", "CODEX_SMOKE_ROOT": str(root), "AGENT_SERVER_SOCKET_PATH": str(root / "as.sock")}
     env["CODEX_SMOKE_BACKEND"] = args.backend
     runner = Path(__file__).with_name("codex-remote-smoke-daemon.ts").resolve()
@@ -302,7 +310,7 @@ trust_level = "trusted"
         until = time.monotonic() + 0.6
         while time.monotonic() < until:
             pump()
-        prompt("Please run the requested smoke command and report completion." if args.backend == "codex" else "Use only Bash to run exactly: printf ingress-approved > ingress-proof.txt . Do not read any files or use other tools. After Bash succeeds reply exactly INGRESS_SMOKE_COMPLETED.")
+        prompt("Please run the requested smoke command and report completion." if args.backend == "codex" else "Use only Bash to run exactly: " + smoke_command + " . Do not read any files or use other tools. After Bash succeeds reply exactly INGRESS_SMOKE_COMPLETED.")
         wait(lambda: any(f.get("method") == "item/commandExecution/requestApproval" for f in frames()), "approval card")
         # This is the actual terminal approval interaction, not a protocol response.
         until = time.monotonic() + 2.0
@@ -326,6 +334,27 @@ trust_level = "trusted"
         summary["approvals"] = approvals
         proof["approval_roundtrip"] = any(row["status"] == "decided" and json.loads(row["decided_by"] or "{}").get("label", "").startswith("codex-tui:") for row in approvals) and (workspace / "ingress-proof.txt").read_text() == "ingress-approved" and any(f.get("method") == "serverRequest/resolved" for f in frames())
         wait(lambda: b"INGRESS_SMOKE_COMPLETED" in output, "TUI rendered completed response")
+        if args.backend == "claude":
+            question_offset = len(frames())
+            prompt("Use the Read tool to read " + str(workspace / "ingress-proof.txt") + ". Do not use Bash or any other tool. Then reply exactly INGRESS_READ_COMPLETED.")
+            wait(lambda: any(f.get("method") == "item/tool/requestUserInput" for f in frames()[question_offset:]), "Read permission projected as requestUserInput")
+            card = next(f for f in frames()[question_offset:] if f.get("method") == "item/tool/requestUserInput")
+            assert card["params"]["questions"][0]["header"] == "权限请求：Read"
+            until = time.monotonic() + 1
+            while time.monotonic() < until:
+                pump()
+            # The first option is allow; submit through the real TUI question UI.
+            os.write(master, b"\r")
+            wait(lambda: any(f.get("direction") == "TUI>AS" and f.get("id") == card["id"] and f.get("connection") == card["connection"] and "result" in f for f in frames()[question_offset:]), "TUI submitted Read permission answer")
+            wait(lambda: any(f.get("method") == "turn/completed" and f["params"].get("threadId") == thread_id and f["params"]["turn"]["status"] == "completed" for f in frames()[question_offset:]), "Read completed through broker")
+            with sqlite3.connect(endpoint["databasePath"]) as db:
+                db.row_factory = sqlite3.Row
+                reads = [dict(row) for row in db.execute("SELECT id,kind,status,decided_by,decision_json FROM approvals WHERE kind = 'item/permissions/requestApproval'")]
+            summary["read_permission_approvals"] = reads
+            proof["user_input_question"] = any(row["status"] == "decided" and json.loads(row["decision_json"])["permissions"].get("toolName") == "Read" and json.loads(row["decided_by"]).get("label", "").startswith("codex-tui:") for row in reads) and any(f.get("method") == "serverRequest/resolved" and f["params"]["requestId"] == card["id"] for f in frames()[question_offset:])
+            assert proof["user_input_question"], "Read permission did not close through AS broker"
+            assert any(f.get("method") == "item/completed" and f.get("params", {}).get("item", {}).get("tool") == "Read" and f["params"]["item"].get("success") is True for f in frames()[question_offset:]), "Read tool did not execute successfully"
+            wait(lambda: b"INGRESS_READ_COMPLETED" in output, "TUI rendered Read completion")
         stop_tui(graceful=True)
         before = len(frames())
         launch(["resume", thread_id])
@@ -380,6 +409,14 @@ trust_level = "trusted"
         model.server_close()
         (root / "tui-output.bin").write_bytes(output)
         current = frames()
+        proof["agent_message_delta"] = any(f.get("method") == "item/agentMessage/delta" and f.get("params", {}).get("delta") for f in current)
+        # Claude Bash reports a terminal aggregate, not stdout/stderr deltas.
+        proof["command_execution_output"] = any(f.get("method") == "item/completed" and f.get("params", {}).get("item", {}).get("type") == "commandExecution" and "INGRESS_COMMAND_OUTPUT" in f["params"]["item"].get("aggregatedOutput", "") for f in current)
+        summary["command_output_semantics"] = "completed commandExecution.aggregatedOutput contains INGRESS_COMMAND_OUTPUT"
+        unsupported = root / "unsupported-methods.json"
+        if unsupported.exists():
+            summary["unsupported_methods"] = json.loads(unsupported.read_text())
+            proof["unsupported_method_errors"] = all(f.get("error", {}).get("code") == -32601 and f["error"]["message"].startswith("as-ingress: ") for f in summary["unsupported_methods"]) and len(summary["unsupported_methods"]) == 2
         summary["wire_frames"] = len(current)
         summary["client_methods"] = list(dict.fromkeys(f["method"] for f in current if f.get("direction") == "TUI>AS" and "method" in f))
         summary["rpc_errors"] = [f for f in current if "error" in f]

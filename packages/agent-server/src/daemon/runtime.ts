@@ -8,7 +8,7 @@ import { listenCodex, type CodexListener } from "../ingress/codex/listener.js";
 
 export interface DaemonOptions { paths?: DaemonPaths; graceMs?: number; wsPort?: number; wsAllowedOrigins?: string[]; serverOptions?: ServerOptions; logger?: (message: string) => void }
 const ConfigSchema = z.object({
-  codex_ingress: z.object({ enabled: z.boolean().default(false), port: z.number().int().min(0).max(65535).default(0) }).optional(),
+  codex_ingress: z.object({ enabled: z.boolean().default(false), port: z.number().int().min(0).max(65535).default(0), claude_threads: z.boolean().default(false) }).optional(),
   denied_models: z.array(z.string().trim().min(1)).optional(),
   default_model: z.string().trim().min(1).refine(model => model.toLowerCase() !== "default", "default_model must name an explicit model").optional(),
   ws_allowed_origins: z.array(z.string()).optional(),
@@ -16,7 +16,7 @@ const ConfigSchema = z.object({
   orphanTimeoutMs: z.number().int().nonnegative().optional(), idleTimeoutMs: z.number().int().nonnegative().optional(),
   readonly_auto_allow: z.boolean().optional(), readonly_commands: z.array(z.string()).optional(),
 });
-export function readConfig(path: string): ServerOptions & { ws_allowed_origins?: string[]; codex_ingress?: { enabled: boolean; port: number } } {
+export function readConfig(path: string): ServerOptions & { ws_allowed_origins?: string[]; codex_ingress?: { enabled: boolean; port: number; claude_threads: boolean } } {
   if (!existsSync(path)) return {};
   const { allowed_roots, readonly_auto_allow, readonly_commands, default_model, denied_models, ...options } = ConfigSchema.parse(Bun.TOML.parse(readFileSync(path, "utf8")));
   return {
@@ -54,7 +54,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<RunningDae
     const manager = new ConnectionManager(server);
     unix = listenUnix(manager, { path: paths.socketPath });
     if (options.wsPort !== undefined) ws = listenWebSocket(manager, { port: options.wsPort, allowedOrigins: options.wsAllowedOrigins ?? ws_allowed_origins });
-    if (codex_ingress?.enabled) codexIngress = listenCodex(server, { port: codex_ingress.port, token, audit: log });
+    if (codex_ingress?.enabled) codexIngress = listenCodex(server, { port: codex_ingress.port, claudeThreads: codex_ingress.claude_threads, token, audit: log });
     const endpoint = JSON.stringify({ pid: process.pid, socketPath: paths.socketPath, ...(ws ? { webSocketUrl: ws.url } : {}), ...(codexIngress ? { codexIngressUrl: codexIngress.url } : {}) }) + "\n";
     writeFileSync(paths.endpointPath, endpoint, { mode: 0o600 }); chmodSync(paths.endpointPath, 0o600);
     log(`agent-server ready pid=${process.pid} socket=${paths.socketPath} source=${paths.socketSource}${ws ? ` ws=${ws.url}` : ""} tokenFile=${paths.tokenPath} logFile=${paths.logPath}`);

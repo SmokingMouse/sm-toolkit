@@ -22,9 +22,18 @@ export function nativeThreadId(thread: Thread): string {
 }
 export function resolveThread(server: AgentServer, id: unknown): Thread {
   if (typeof id !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: native thread UUID required");
-  const thread = server.log.findEngine(id, "codex") ?? server.log.allThreads().find(t => t.backend === "claude" && t.id === `th_${id}`);
+  const thread = server.log.findEngine(id, "codex") ?? findClaudeThread(server, `th_${id}`);
   if (!thread) throw new ProtocolError(ErrorCode.thread_not_found, "as-ingress: unknown thread");
   return thread;
+}
+export function findClaudeThread(server: AgentServer, asId: string): Thread | undefined {
+  try {
+    const thread = server.log.thread(asId);
+    return thread.backend === "claude" ? thread : undefined;
+  } catch (error) {
+    if (error instanceof ProtocolError && error.code === ErrorCode.thread_not_found) return undefined;
+    throw error;
+  }
 }
 function effectiveSandbox(options: Pick<StartThreadParams, "sandbox" | "permission">): string | undefined {
   return options.sandbox ?? (options.permission === "readonly" ? "read-only" : options.permission === "full" ? "danger-full-access" : options.permission ? "workspace-write" : undefined);
@@ -55,7 +64,7 @@ export function nativeOptions(p: NativeObject, current: Partial<StartThreadParam
 
 /** The durable engine UUID index plus ThreadManager.live are the routing table. */
 export class CodexRouter {
-  constructor(readonly server: AgentServer, readonly client: InProcessClient, readonly control: ControlClient, private readonly signal?: AbortSignal) {}
+  constructor(readonly server: AgentServer, readonly client: InProcessClient, readonly control: ControlClient, private readonly signal?: AbortSignal, readonly claudeThreads = false) {}
   private engine(thread: Thread): CodexEngine {
     const engine = this.server.threads.session(thread.id);
     if (!(engine instanceof CodexEngine)) throw new ProtocolError(ErrorCode.backend_unsupported, "as-ingress: native Codex engine required");
@@ -129,7 +138,7 @@ export class CodexRouter {
     const { sandbox, ...rest } = options;
     if (sandbox === "read-only") rest.permission = "readonly";
     if (thread && rest.effort !== undefined && rest.effort !== this.server.log.options<StartThreadParams>(thread.id).effort)
-      throw new ProtocolError(ErrorCode.method_not_found, "as-ingress: live Claude effort labels are unavailable; thinking budgets require thread/effort/set");
+      throw new ProtocolError(ErrorCode.method_not_found, "as-ingress: Claude 线程 effort 只在新建时生效");
     return rest;
   }
   private async claudeHistory(thread: Thread, method: string, p: NativeObject): Promise<NativeObject> {
@@ -165,11 +174,14 @@ export class CodexRouter {
     return { data: page.map(r => r.value), nextCursor: rows.length > limit ? cursor(page.at(-1)!.ordinal, false) : null, backwardsCursor: page.length ? cursor(page[0]!.ordinal, true) : null };
   }
   async request(method: string, p: NativeObject = {}): Promise<NativeObject> {
+    if (!this.claudeThreads && typeof p.threadId === "string" && !this.server.log.findEngine(p.threadId, "codex") && findClaudeThread(this.server, `th_${p.threadId}`))
+      throw new ProtocolError(ErrorCode.method_not_found, "as-ingress: Claude threads are disabled by codex_ingress.claude_threads");
     if (CONTROL_METHODS.has(method)) {
       await this.paths(p);
       if (method === "account/read" && p.refreshToken === true) throw new ProtocolError(ErrorCode.unauthorized, "as-ingress: token refresh is unsupported");
       const result = await this.control.request(method, p);
-      if (method === "model/list") return { ...result, data: [...result.data, ...(result.nextCursor == null ? claudeModels : [])].filter((model: NativeObject) => {
+      if (method === "model/list") return { ...result, data: [...result.data, ...(this.claudeThreads && result.nextCursor == null ? claudeModels : [])].filter((model: NativeObject) => {
+        if (!this.claudeThreads && isClaudeModel(model.model)) return false;
         try { this.server.threads.model(model.model, isClaudeModel(model.model) ? "claude" : "codex", `ingress_${this.client.clientId}`); return true; } catch { return false; }
       }).map((model: NativeObject) => ({ ...model, serviceTiers: [], additionalSpeedTiers: [], defaultServiceTier: null })) };
       return result;
@@ -179,6 +191,7 @@ export class CodexRouter {
         this.rejectExtras(p); const options = nativeOptions(p); await this.paths(p);
         if (!options.cwd && p.runtimeWorkspaceRoots?.length) options.cwd = p.runtimeWorkspaceRoots[0];
         const model = this.server.threads.model(options.model, "codex", `ingress_${this.client.clientId}`), backend = isClaudeModel(model) ? "claude" : "codex";
+        if (backend === "claude" && !this.claudeThreads) throw new ProtocolError(ErrorCode.method_not_found, "as-ingress: Claude threads are disabled by codex_ingress.claude_threads");
         const selected = backend === "claude" ? this.claudeOptions(options) : options;
         const { thread } = await this.client.request("thread/start", { ...selected, model, backend, ...(backend === "codex" ? { serviceTier: "default" as const } : {}), permission: selected.permission ?? "default", ...(p.baseInstructions != null ? { systemPrompt: p.baseInstructions } : {}) });
         if (backend === "claude") return this.claudeResponse(thread);
@@ -192,6 +205,7 @@ export class CodexRouter {
         this.rejectExtras(p); const thread = resolveThread(this.server, p.threadId);
         const saved = this.server.log.options<StartThreadParams>(thread.id);
         const options = nativeOptions(p, { ...saved, permission: thread.permission }); await this.paths(p);
+        if (thread.backend === "claude") this.claudeOptions(options, thread);
         await this.guardThread(thread, options);
         // AS attach to a live thread intentionally keeps its saved settings.
         if (this.server.threads.live.has(thread.id)) {
@@ -286,7 +300,7 @@ export class CodexRouter {
       case "thread/list": {
         await this.paths(p);
         const result = await this.client.request("thread/list", { limit: 10000, ...(p.cwd ? { cwd: p.cwd } : {}) });
-        let data = result.threads.filter(t => (t.backend === "claude" || t.backend === "codex" && t.engineThreadId) && (p.archived == null || (t.status.type === "closed") === p.archived)).map(t => this.threadView(t));
+        let data = result.threads.filter(t => (this.claudeThreads && t.backend === "claude" || t.backend === "codex" && t.engineThreadId) && (p.archived == null || (t.status.type === "closed") === p.archived)).map(t => this.threadView(t));
         if (p.modelProviders?.length) data = data.filter(t => p.modelProviders.includes(t.modelProvider));
         if (p.sourceKinds?.length) data = data.filter(t => p.sourceKinds.includes(typeof t.source === "string" ? t.source : "subAgent"));
         if (p.searchTerm) data = data.filter(t => `${t.name ?? ""} ${t.preview}`.toLowerCase().includes(String(p.searchTerm).toLowerCase()));
@@ -301,7 +315,7 @@ export class CodexRouter {
       }
       case "thread/loaded/list": {
         const health = await this.client.request("server/health", {});
-        return { data: health.engines.filter(e => e.backend === "claude" || e.backend === "codex" && e.engineThreadId).map(e => e.backend === "claude" ? e.threadId.slice(3) : e.engineThreadId) };
+        return { data: health.engines.filter(e => this.claudeThreads && e.backend === "claude" || e.backend === "codex" && e.engineThreadId).map(e => e.backend === "claude" ? e.threadId.slice(3) : e.engineThreadId) };
       }
       case "turn/steer": {
         const thread = resolveThread(this.server, p.threadId); this.claudeOnly(thread, method);

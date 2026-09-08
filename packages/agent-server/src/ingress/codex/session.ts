@@ -2,8 +2,8 @@ import { CODEX_SCHEMA_VERSION } from "../../engines/codex-version.js";
 import { ErrorCode, ProtocolError, rpcError, ServerRequestMethodSchema, ServerRequestSchemas, type Frame, type RpcId, type ServerRequestMethod } from "../../protocol/index.js";
 import type { AgentServer, InProcessClient } from "../../server/server.js";
 import type { ControlClient, NativeObject } from "./control-process.js";
-import { CodexRouter, NativeRpcError, nativeThreadId } from "./router.js";
-import { claudeApproval, claudeNotification } from "./claude-projection.js";
+import { CodexRouter, NativeRpcError, nativeThreadId, findClaudeThread } from "./router.js";
+import { claudeApproval, claudeNotification, claudeToolPermission, claudeAnswer } from "./claude-projection.js";
 
 export function nativeDecision(method: ServerRequestMethod, result: NativeObject): unknown {
   if (!result || typeof result !== "object" || Array.isArray(result)) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: decision object required");
@@ -25,14 +25,14 @@ export class CodexSession {
   readonly router: CodexRouter;
   private state: "new" | "initializing" | "initialized" | "ready" | "closed" = "new";
   private abort = new AbortController();
-  private reverse = new Map<RpcId, { requestId: string; method: ServerRequestMethod }>();
+  private reverse = new Map<RpcId, { requestId: string; method: ServerRequestMethod; claudeParams?: NativeObject }>();
   private logical = new Map<string, RpcId>();
   private optOut = new Set<string>();
   private unsubscribe: () => void;
   private unclose: () => void;
-  constructor(server: AgentServer, private readonly control: ControlClient, private readonly options: { token: string; send: (frame: NativeObject) => void; end?: () => void; audit?: (message: string) => void }) {
+  constructor(server: AgentServer, private readonly control: ControlClient, private readonly options: { token: string; send: (frame: NativeObject) => void; end?: () => void; audit?: (message: string) => void; claudeThreads?: boolean }) {
     this.client = server.connectInProcess();
-    this.router = new CodexRouter(server, this.client, control, this.abort.signal);
+    this.router = new CodexRouter(server, this.client, control, this.abort.signal, options.claudeThreads ?? false);
     this.unsubscribe = this.client.onFrame(frame => this.fromAS(frame));
     this.unclose = this.client.onClose(() => { this.close(); options.end?.(); });
   }
@@ -51,7 +51,8 @@ export class CodexSession {
         if (this.state !== "ready") throw new ProtocolError(ErrorCode.not_initialized, "as-ingress: initialize and initialized required");
         const pending = id === null ? undefined : this.reverse.get(id);
         if (!pending || !("result" in f) || "error" in f) throw new ProtocolError(ErrorCode.invalid_request, "as-ingress: unknown approval or missing decision");
-        await this.client.respond(id!, nativeDecision(pending.method, f.result)); return;
+        const result = pending.claudeParams ? claudeAnswer(pending.method, pending.claudeParams, f.result) : f.result;
+        await this.client.respond(id!, nativeDecision(pending.method, result)); return;
       }
       if (typeof f.method !== "string" || "result" in f || "error" in f) throw new ProtocolError(ErrorCode.invalid_request, "as-ingress: invalid request");
       const p = f.params ?? {};
@@ -98,6 +99,9 @@ export class CodexSession {
       return;
     }
     const p = frame.params as NativeObject;
+    if (!this.router.claudeThreads && p.threadId) {
+      if (p.backend === "claude" || findClaudeThread(this.router.server, p.threadId)) return;
+    }
     if ("id" in frame) {
       const method = ServerRequestMethodSchema.safeParse(frame.method); if (!method.success) return;
       const thread = this.router.server.threads.get(p.threadId);
@@ -111,13 +115,13 @@ export class CodexSession {
         return;
       }
       if (!raw || typeof raw !== "object") return;
-      this.reverse.set(frame.id, { method: method.data, requestId: p.requestId }); this.logical.set(p.requestId, frame.id);
+      this.reverse.set(frame.id, { method: method.data, requestId: p.requestId, ...(thread.backend === "claude" ? { claudeParams: structuredClone(p) } : {}) }); this.logical.set(p.requestId, frame.id);
       const params = structuredClone(raw);
       if (method.data === "item/commandExecution/requestApproval" || method.data === "item/fileChange/requestApproval") {
         const supported = ["accept", "acceptForSession", "decline", "cancel"];
         params.availableDecisions = Array.isArray(raw.availableDecisions) ? raw.availableDecisions.filter((d: unknown) => typeof d === "string" && supported.includes(d)) : supported;
       }
-      this.send({ id: frame.id, method: method.data, params }); return;
+      this.send({ id: frame.id, method: thread.backend === "claude" && claudeToolPermission(method.data, p) ? "item/tool/requestUserInput" : method.data, params }); return;
     }
     if (frame.method === "thread/engineEvent" && p.backend === "codex" && typeof p.payload?.method === "string") {
       // Broker owns card closure; engine request IDs are process-local and collide.

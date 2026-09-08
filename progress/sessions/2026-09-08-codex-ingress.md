@@ -23,3 +23,13 @@
 - 真实 Claude CLI 显式 sonnet，init 三次均确认 claude-sonnet-5；最终三连六判据全过（24.11 / 24.11 / 22.11s），包含 approval_roundtrip、resume_fresh_ok、真实流中 Esc。Codex 六项再过（8.91s），保留原 fixture 与自动标题判据。旧的缺时间戳三连归档到 out/pre-schema，不作为最终证据。
 - 方案差异已上报主控：AS Claude generic permissions={toolName,input} 不符合 native network/fileSystem profile（schema 明确拒绝）；当前向 TUI 报错并保留 broker 待决，交 as/1 客户端或超时处理。live effort 标签仅 launch 生效，AS live 接口是 maxThinkingTokens，未擅自换算。native 问题无 multiSelect 字段，协议文档列明呈现限制。
 - 证据：`/Users/smokingmouse/python/learning/trellis/.fenjue/tasks/fj-tui-ingress-slice2-6772/out/result.md`。Next：主控裁决上述协议差异并独立验收；不变更 Trellis Goals。未委派、未 push、未操作生产 daemon。
+
+## slice 2 返工（fj-tui-ingress-slice2-fix-d5b8）
+
+- 接手指定 stash；默认关闭的 claude_threads 开关贯通 daemon/listener/session/router，隔离冒烟按 backend 自动开启。
+- 依主控三条投影裁决：通用工具权限改为 requestUserInput allow/deny，经原 permissions broker 决策；多选题改编号自由文本并还原 answers 数组；live effort 变更明确说明仅新建生效。
+- P2：command_execution_output 检查真实 aggregatedOutput；缺失退出码保留 null 并入协议限制；线程回退闸与 Claude UUID 解析改主键查询。
+- 最终全量测试 511 pass / 0 fail / 3066 expect、typecheck exit 0；契约原样命令 Claude/Codex 各 3/3 通过，Claude 三轮同时十项全绿（包含真实 Read 权限问答）。方案 slice 2 七项命令另跑一次通过。
+- 冒烟探针修正：审批表 kind 实际为完整 method，原 permissions 简称查询漏报；改成 item/permissions/requestApproval 后真实 Read 审计可证（/tmp/ingress-fix-claude-all.json）。
+- 证据：`/Users/smokingmouse/python/learning/trellis/.fenjue/tasks/fj-tui-ingress-slice2-fix-d5b8/out/result.md` 及 read-permission-proof.json、双方 runs.json、bun-test.log、typecheck.log。
+- Next：交主控独立复跑验收；Trellis Goals 不变，未 push、未委派、未操作生产 daemon。

@@ -7,7 +7,7 @@ export const MAX_NATIVE_FRAME_BYTES = 128 * 1024 * 1024;
 interface SocketData { session?: CodexSession }
 export interface CodexListener { readonly url: string; readonly port: number; close(): Promise<void> }
 export function listenCodex(server: AgentServer, options: {
-  token: string; port?: number; hostname?: string; control?: ControlClient; audit?: (message: string) => void;
+  token: string; port?: number; hostname?: string; control?: ControlClient; audit?: (message: string) => void; claudeThreads?: boolean;
   trace?: (direction: "TUI>AS" | "AS>TUI", frame: NativeObject) => void;
 }): CodexListener {
   const hostname = options.hostname ?? "127.0.0.1";
@@ -28,7 +28,7 @@ export function listenCodex(server: AgentServer, options: {
     websocket: { maxPayloadLength: MAX_NATIVE_FRAME_BYTES, backpressureLimit: MAX_NATIVE_FRAME_BYTES * 2, closeOnBackpressureLimit: true, idleTimeout: 0,
       open(socket) {
         sockets.add(socket);
-        try { socket.data.session = new CodexSession(server, control, { token: options.token, audit: options.audit,
+        try { socket.data.session = new CodexSession(server, control, { token: options.token, audit: options.audit, claudeThreads: options.claudeThreads,
           send(frame) { options.trace?.("AS>TUI", frame); if (socket.send(JSON.stringify(frame)) === 0) throw new Error("native socket closed"); },
           end() { socket.close(1000, "connection closed"); },
         }); } catch { socket.close(1011, "server unavailable"); }

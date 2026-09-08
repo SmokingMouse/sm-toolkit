@@ -69,14 +69,47 @@ export function claudeSettingsUpdated(thread: Thread): NativeObject {
     activePermissionProfile: null, effort: reasoningEffort, summary: null, personality: null, multiAgentMode: "explicitRequestOnly",
     collaborationMode: { mode: "default", settings: { model: thread.model, reasoning_effort: reasoningEffort, developer_instructions: null } } } } };
 }
+export function claudeToolPermission(method: ServerRequestMethod, p: NativeObject): boolean {
+  return method === "item/permissions/requestApproval" && typeof p.permissions?.toolName === "string";
+}
+export function claudeAnswer(method: ServerRequestMethod, p: NativeObject, result: NativeObject): NativeObject {
+  if (claudeToolPermission(method, p)) {
+    const answers = result?.answers?.permission?.answers;
+    if (!Array.isArray(answers) || answers.length !== 1 || !["allow", "deny"].includes(answers[0]))
+      throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: permission answer must be allow or deny");
+    return { permissions: answers[0] === "allow" ? p.permissions : {}, scope: "turn" };
+  }
+  if (method !== "item/tool/requestUserInput") return result;
+  const decoded = structuredClone(result);
+  for (const q of p.questions) {
+    if (!q.multiSelect) continue;
+    const answer = decoded?.answers?.[q.id];
+    if (!Array.isArray(answer?.answers) || answer.answers.some((s: unknown) => typeof s !== "string"))
+      throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: multiSelect answers must be strings");
+    answer.answers = [...new Set(answer.answers.flatMap((s: string) => s.split(/[,，]/)).map((s: string) => {
+      const value = s.trim();
+      if (!/^\d+$/.test(value)) return value;
+      const option = q.options?.[Number(value) - 1];
+      if (!option) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: multiSelect option number out of range");
+      return option.label;
+    }).filter(Boolean))];
+  }
+  return decoded;
+}
 export function claudeApproval(method: ServerRequestMethod, p: NativeObject, thread: Thread): NativeObject {
+  if (claudeToolPermission(method, p)) return {
+    threadId: thread.id.slice(3), turnId: p.turnId, itemId: p.itemId,
+    questions: [{ id: "permission", header: `权限请求：${p.permissions.toolName}`, question: JSON.stringify(p.permissions.input, null, 2)?.slice(0, 4000) ?? "无输入",
+      isOther: false, isSecret: false, options: [{ label: "allow", description: "允许本次工具调用" }, { label: "deny", description: "拒绝本次工具调用" }] }],
+  };
   if (method === "item/permissions/requestApproval" && Object.keys(p.permissions).some(k => !["network", "fileSystem"].includes(k)))
-    throw new ProtocolError(ErrorCode.method_not_found, "as-ingress: Claude tool permissions are not representable by native network/fileSystem permissions; answer this pending request through as/1");
+    throw new ProtocolError(ErrorCode.method_not_found, "as-ingress: unsupported Claude permission shape");
   const { data: _data, requestId: _requestId, ...params } = p;
   params.threadId = thread.id.slice(3);
   if (method === "item/fileChange/requestApproval") params.changes = nativeChanges(p.changes);
-  if (method === "item/tool/requestUserInput") params.questions = p.questions.map((q: NativeObject) => ({ ...q, header: q.header ?? "Question", isOther: true, isSecret: false,
-    options: q.options?.map((o: NativeObject) => ({ ...o, description: o.description ?? "" })) ?? null }));
+  if (method === "item/tool/requestUserInput") params.questions = p.questions.map((q: NativeObject) => ({ id: q.id, header: q.header ?? "Question", isOther: true, isSecret: false,
+    question: q.multiSelect ? `${q.question}\n${(q.options ?? []).map((o: NativeObject, i: number) => `${i + 1}. ${o.label}${o.description ? ` — ${o.description}` : ""}`).join("\n")}\n可多选，逗号分隔（填写编号或选项文字）` : q.question,
+    options: q.multiSelect ? null : q.options?.map((o: NativeObject) => ({ ...o, description: o.description ?? "" })) ?? null }));
   return params;
 }
 

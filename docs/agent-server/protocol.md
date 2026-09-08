@@ -721,6 +721,7 @@ item 的 `type` 取值取 codex `ThreadItem` 的子集，字段名一致（`aggr
 ```toml
 [codex_ingress]
 enabled = true
+claude_threads = false # 默认关闭；设 true 才向 native TUI 暴露 Claude 线程
 port = 0 # 随机 loopback 端口，endpoint.json 的 codexIngressUrl 给出实际地址
 ```
 
@@ -788,6 +789,10 @@ TUI 自动标题生成的临时 system thread 带禁止的 provider/config overr
 
 ### 13.1 Claude 线程（slice 2）
 
+需开启 `codex_ingress.claude_threads`（默认 false）。关闭时 model/list 不展示 Claude 模型，thread/list、loaded/list 不展示 Claude 线程，
+start 选择 Claude 模型及直接进入已有 Claude 线程均明确返回 -32601；Claude 通知也不投递。as/1 线程与客户端不受影响。
+单线程回退闸及 UUID 解析按主键查询，不扫描线程全表。
+
 `model/list` 在 control 最后一页追加显式 `sonnet` / `opus`，显示名为 `Claude · sonnet` / `Claude · opus`。
 列表和执行入口都过 model guard；`fable` / `claude-fable*` 默认禁止。native 没有 backend 字段：
 `thread/start` 的 model 是 Claude tier 或 `claude-*` 时创建 Claude 引擎，否则创建 Codex 引擎。
@@ -836,13 +841,18 @@ native sandbox 在 Claude 上是权限选择器，不是 Codex OS sandbox；不�
 readonly 线程不能通过 settings/resume/turn 升权；full 按需获取租约，所有执行路径仍经过 AS model guard、allowed_roots 与 broker。
 Claude CLI 无法热切进入 readonly，实际调用会明确失败，必须新建 readonly 线程。`serviceTier` / `serviceTierForTurn` 仅接受空或 default。
 
-四类审批沿用原 method、连接 wire id、AS broker audience/租约/首次决策检查和 resolved 收口，不依赖 Codex 的 data.raw。
+四类审批沿用连接 wire id、AS broker audience/租约/首次决策检查和 resolved 收口，不依赖 Codex 的 data.raw。
 command/fileChange 的四个 decision 和原生 network/fileSystem permissions profile 可 1:1 往返，permissions session→AS thread；
-requestUserInput 补齐 native header/isOther/isSecret/options.description，answers 原样返回。
-**协议限制**：Claude 通用工具审批的 AS permissions 是 `{toolName,input}`，而官方 0.153.4 RequestPermissionProfile 仅允许 network/fileSystem
-（schema `additionalProperties:false`）。这不是可无损改名的结构。ingress 不伪造网络/文件授权，向 TUI 发明确 error（details 标记 `-32601`），
-原审批仍在 AS broker 待决，可由其他 as/1 客户端回答或由 broker 超时；不代其他客户端批准/过期该请求。
-native 问题 schema 没有 multiSelect 字段，Claude 的多选 UI 也不具备 1:1 呈现保证，不能把 answers 数组类型等同于多选界面支持。
+requestUserInput 补齐 native header/isOther/isSecret/options.description，单选与自由答案原样返回。
+Claude 通用工具审批 `{toolName,input}` 投影为 `item/tool/requestUserInput`：标题「权限请求：<toolName>」，正文为 input JSON 摘要（最多 4000 字符），
+仅提供 allow / deny。答案必须恰好为一个 allow 或 deny；allow 返回原请求 permissions，deny 返回空 permissions，scope 固定 turn，
+再由原 AS permissions broker 决策、审计、通知 resolved。无效答案明确报错并保留待决，不伪造 network/fileSystem 授权，不提供整会话授权。
+native 没有 multiSelect 字段：多选问题移除该字段，options=null，题干列出编号、选项及描述，并提示「可多选，逗号分隔」。
+返回答案按中英文逗号拆分、去空白、将编号还原成选项文字并去重，保留自由文本，回传 AS answers 数组；越界编号报错并保留待决。
+
+**已知有损**：Claude Bash 通过 ToolCallDone 一次性提供 aggregatedOutput，不产生 stdout/stderr outputDelta；
+因此 `command_execution_output` 冒烟判据验证终态 aggregatedOutput 包含命令实际输出。Claude CLI 没提供结构化退出码时 exitCode=null，
+不从成功状态臆造 0；如果 AS payload 带退出码则原样投影。Codex native 输出与退出码透传不变。
 
 ### 13.2 Claude 不支持的方法与设置
 
@@ -859,12 +869,17 @@ native 问题 schema 没有 multiSelect 字段，Claude 的多选 UI 也不具�
 | 全局 config/fs 写入、command/exec、插件/账户写操作 | 继承 ingress 默认拒绝白名单策略 |
 
 `thread/start{effort}` 的 Claude launch 标签仍可用；live token budget 仍由 as/1 `thread/effort/set` 操作。
+TUI 改 effort 的错误文案为 `as-ingress: Claude 线程 effort 只在新建时生效`，不做标签到 token 数的换算。
 官方 TUI 0.153.4 CLI/config 已移除 untrusted 选项，虽然 native 协议仍有该枚举；正常 TUI 使用 on-request。
 
 Claude 冒烟：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok`。
 使用真实 Claude CLI 与真实模型，显式 `--model sonnet`，读取实际 system/init 帧并断言每个 model 包含 sonnet；不调用本地模型 fixture。
-只复用已有 Claude 登录文件，隔离 HOME/settings，并要求 Bash 审批；不存在登录文件时明确 blocker，不申请新凭证。
+脚本按 `--backend claude` 自动设置隔离 daemon 的 `claude_threads=true`；Codex 冒烟保持 false。
+只复用已有 Claude 登录文件，隔离 HOME/settings，并要求 Bash/Read 审批；不存在登录文件时明确 blocker，不申请新凭证。
 真实 PTY 执行审批按键、`/quit`、恢复和 Esc 中断；中断前确认真实 agentMessage delta 且该 turn 尚未完成。
-六判据之外同时核对 broker decided_by、隔离 proof 文件、resolved 帧、fresh 响应和普通回复的终端渲染。
+六判据之外支持 `agent_message_delta,command_execution_output,user_input_question,unsupported_method_errors`。
+Claude 用真实 Read 工具触发权限问答，官方 TUI Enter 选择 allow，验证 Read 成功、AS permissions 审计与 broker resolved。
+unsupported_method_errors 由同一隔离 daemon 的独立 native WebSocket 探测 review/start、thread/realtime/start，逐条要求 -32601 与 as-ingress 前缀。
+同时核对 broker decided_by、隔离 proof 文件、resolved 帧、fresh/普通/Read 回复的终端渲染。
 两种后端都检查 TUI 自动标题的 name/set 请求及 AS 落库；Codex 冒烟仍使用原有本地 Responses fixture 路径。
 模型 init、native wire、PTY 输出、summary 保留在 artifact_dir；该目录的隔离 HOME 含登录文件，不应整体复制为公开证据。

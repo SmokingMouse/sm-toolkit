@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server native ingress 已接入 Claude 显示、模型选择与治理交互，双后端冒烟通过；Claude 审批与 live effort 的协议差异待主控裁决。
+agent-server native ingress 已完成 Claude 回退开关及权限问答、多选与 effort 投影返工，双后端冒烟通过，待主控独立验收。
 
 ## Goals
 

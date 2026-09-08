@@ -17,6 +17,30 @@ daemon.server.log.publish = frame => {
 };
 if (!daemon.codexIngressUrl) throw new Error("codex_ingress.enabled missing");
 const token = loadToken(daemon.paths.tokenPath);
+// Separate real native connection: explicit unsupported methods must fail,
+// without asking the PTY to enter an unsupported UI mode.
+const probe = new WebSocket(daemon.codexIngressUrl, { headers: { Authorization: `Bearer ${token}` } });
+await new Promise<void>((resolve, reject) => { probe.onopen = () => resolve(); probe.onerror = () => reject(new Error("native probe connect failed")); });
+let probeId = 0;
+async function probeRequest(method: string, params = {}): Promise<Record<string, any>> {
+  const id = ++probeId;
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`native probe timeout: ${method}`)), 10000);
+    probe.onmessage = event => {
+      const f = JSON.parse(String(event.data));
+      if (f.id !== id) return;
+      clearTimeout(timeout); resolve(f);
+    };
+    probe.send(JSON.stringify({ id, method, params }));
+  });
+}
+const initialized = await probeRequest("initialize", { clientInfo: { name: "smoke-probe", version: "1" } });
+if (initialized.error) throw new Error(JSON.stringify(initialized.error));
+probe.send(JSON.stringify({ method: "initialized" }));
+const unsupported = [];
+for (const method of ["review/start", "thread/realtime/start"]) unsupported.push({ method, ...await probeRequest(method) });
+writeFileSync(join(root, "unsupported-methods.json"), JSON.stringify(unsupported));
+probe.close();
 interface ProxyData { connection: number; upstream?: WebSocket; queue: string[] }
 let connections = 0;
 const sockets = new Set<Bun.ServerWebSocket<ProxyData>>();

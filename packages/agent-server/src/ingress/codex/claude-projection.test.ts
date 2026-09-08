@@ -3,7 +3,7 @@ import { AgentServer } from "../../server/server.js";
 import { MockEngine } from "../../engines/mock.js";
 import { until } from "../../test-helpers.test.js";
 import { ErrorCode, type Item, type Thread, type Turn, type ServerRequestMethod } from "../../protocol/index.js";
-import { claudeApproval, claudeItems, claudeNotification, claudeThread, claudeTurn } from "./claude-projection.js";
+import { claudeApproval, claudeAnswer, claudeItems, claudeNotification, claudeThread, claudeTurn } from "./claude-projection.js";
 import { CodexSession } from "./session.js";
 import { nativeThreadId, resolveThread } from "./router.js";
 import type { NativeObject } from "./control-process.js";
@@ -71,13 +71,13 @@ test("Claude stream deltas, rejected states, secondary items, and turn/status/us
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const f of cleanup.splice(0).reverse()) await f(); });
-async function setup(deniedModels?: string[]) {
+async function setup(deniedModels?: string[], claudeThreads = true) {
   const engines: MockEngine[] = [];
   const server = new AgentServer({ databasePath: ":memory:", token: "secret", allowedRoots: [process.cwd()], idleTimeoutMs: 0, deniedModels,
     engineFactory: () => { const e = new MockEngine(); e.controlResponse = (subtype, params) => { if (subtype === "set_model") e.emit({ type: "modelChanged", model: String(params.model) }); return {}; }; engines.push(e); return e; } });
   cleanup.push(() => server.close());
   const frames: NativeObject[] = [];
-  const c = new CodexSession(server, { initialize: async () => ({ userAgent: "codex-tui/0.153.4" }), request: async () => ({ data: [], nextCursor: null }), close: async () => {} }, { token: "secret", send: f => frames.push(f) });
+  const c = new CodexSession(server, { initialize: async () => ({ userAgent: "codex-tui/0.153.4" }), request: async () => ({ data: [], nextCursor: null }), close: async () => {} }, { token: "secret", claudeThreads, send: f => frames.push(f) });
   cleanup.push(() => c.close()); let id = 0;
   async function rpc(method: string, params: NativeObject = {}) {
     const key = ++id; await c.receive({ id: key, method, params }); return frames.find(f => f.id === key && ("result" in f || "error" in f))!;
@@ -101,6 +101,11 @@ test("Claude model routing, persisted UUID, settings guards and explicit unsuppo
   expect(f.engines[0]?.controls.at(-1)).toEqual({ subtype: "set_model", params: { model: "opus" } });
   expect((await f.rpc("thread/settings/update", { threadId: id, model: "gpt-6-astra" })).error.code).toBe(ErrorCode.invalid_params);
   expect((await f.rpc("thread/settings/update", { threadId: id, effort: "high" })).error.code).toBe(-32601);
+  expect((await f.rpc("thread/settings/update", { threadId: id, effort: "high" })).error.message).toContain("Claude 线程 effort 只在新建时生效");
+  for (const method of ["thread/resume", "turn/start"]) {
+    const error = (await f.rpc(method, { threadId: id, effort: "high", input: [{ type: "text", text: "hello" }] })).error;
+    expect(error.code).toBe(-32601); expect(error.message).toContain("Claude 线程 effort 只在新建时生效");
+  }
   for (const method of ["review/start", "thread/realtime/start", "thread/goal/set", "thread/memory/reset", "thread/inject_items", "thread/queue/add", "thread/backgroundTerminals/clean", "thread/delete"]) {
     const result = await f.rpc(method, { threadId: id }); expect(result.error.code).toBe(-32601); expect(result.error.message).toStartWith("as-ingress: ");
   }
@@ -153,7 +158,7 @@ test("four Claude approvals without raw traverse the actual AS broker and close 
     ["item/commandExecution/requestApproval", { command: "pwd", cwd: process.cwd(), startedAtMs: 1 }, { decision: "decline" }, { decision: "reject" }],
     ["item/fileChange/requestApproval", { changes: [{ path: "a", kind: "add" }], startedAtMs: 1 }, { decision: "acceptForSession" }, { decision: "acceptForSession" }],
     ["item/permissions/requestApproval", { cwd: process.cwd(), permissions: { network: { enabled: true } }, startedAtMs: 1 }, { permissions: { network: { enabled: true } }, scope: "session" }, { permissions: { network: { enabled: true } }, scope: "thread" }],
-    ["item/tool/requestUserInput", { isBlocking: true, questions: [{ id: "q", question: "Pick", options: [{ label: "one" }] }] }, { answers: { q: { answers: ["one"] } } }, { answers: { q: { answers: ["one"] } } }],
+    ["item/tool/requestUserInput", { isBlocking: true, questions: [{ id: "q", question: "Pick", multiSelect: true, options: [{ label: "one" }, { label: "two" }] }] }, { answers: { q: { answers: ["1, 2"] } } }, { answers: { q: { answers: ["one", "two"] } } }],
   ];
   for (const [method, extra, answer, expected] of cases) {
     const requestId = `ar_${crypto.randomUUID()}`, decisions: unknown[] = [];
@@ -172,7 +177,7 @@ test("four Claude approvals without raw traverse the actual AS broker and close 
   }
 });
 
-test("generic Claude permissions cannot masquerade as native filesystem/network grants", async () => {
+for (const choice of ["allow", "deny"]) test(`generic Claude permissions: ${choice} via user input and broker`, async () => {
   const f = await setup(), id = (await f.rpc("thread/start", { model: "sonnet", cwd: process.cwd() })).result.thread.id;
   const as = resolveThread(f.server, id), e = f.engines[0]!;
   const t = (await f.rpc("turn/start", { threadId: id, input: [{ type: "text", text: "read" }] })).result.turn;
@@ -180,16 +185,51 @@ test("generic Claude permissions cannot masquerade as native filesystem/network 
   e.emit({ type: "itemStarted", turnId: t.id, item: { id: "read", type: "toolCall", payload: { name: "Read", input: { path: "/tmp/a" } }, status: "inProgress" } });
   const decisions: unknown[] = [];
   e.emit({ type: "approval", request: { method: "item/permissions/requestApproval", params: { requestId: "generic", threadId: as.id, turnId: t.id, itemId: "read", cwd: process.cwd(), startedAtMs: Date.now(), permissions: { toolName: "Read", input: { path: "/tmp/a" } } } }, respond: d => { decisions.push(d); } });
-  await until(() => f.frames.some(x => x.method === "error"));
-  expect(f.frames.find(x => x.method === "error")?.params.error.additionalDetails).toContain("-32601");
+  await until(() => f.frames.some(x => x.method === "item/tool/requestUserInput"));
+  const card = f.frames.find(x => x.method === "item/tool/requestUserInput")!;
+  expect(card.params.questions[0]).toMatchObject({ header: "权限请求：Read", isOther: false, options: [{ label: "allow" }, { label: "deny" }] });
+  expect(card.params.questions[0].question).toContain("/tmp/a");
   expect(f.frames.some(x => x.method === "item/permissions/requestApproval")).toBe(false);
   expect(f.server.log.approval("generic")?.status).toBe("pending"); expect(decisions).toEqual([]);
-  const other = f.server.connectInProcess(), received: NativeObject[] = [];
-  other.onFrame(frame => received.push(frame)); cleanup.push(() => other.close());
-  await other.request("initialize", { protocolVersion: "as/1", token: "secret", client: { name: "as1", version: "1", kind: "test", label: "as1" }, capabilities: { serverRequests: ["item/permissions/requestApproval"] } });
-  await other.notifyInitialized(); await other.request("thread/attach", { threadId: as.id });
-  const approval = received.find(x => x.method === "item/permissions/requestApproval")!;
-  expect(approval.params.permissions).toEqual({ toolName: "Read", input: { path: "/tmp/a" } });
-  await other.respond(approval.id, { permissions: {}, scope: "turn" });
-  expect(decisions).toEqual([{ permissions: {}, scope: "turn" }]);
+  await f.c.receive({ id: card.id, result: { answers: { permission: { answers: ["maybe"] } } } });
+  expect(f.server.log.approval("generic")?.status).toBe("pending"); expect(decisions).toEqual([]);
+  const result = { answers: { permission: { answers: [choice] } } };
+  await f.c.receive({ id: card.id, result });
+  expect(decisions).toEqual([{ permissions: choice === "allow" ? { toolName: "Read", input: { path: "/tmp/a" } } : {}, scope: "turn" }]);
+  expect(JSON.parse(f.server.log.approval("generic")!.decided_by!).label).toStartWith("codex-tui:");
+  expect(f.frames.filter(x => x.method === "serverRequest/resolved" && x.params.requestId === card.id)).toHaveLength(1);
+  await f.c.receive({ id: card.id, result }); expect(decisions).toHaveLength(1);
+});
+
+test("Claude multiSelect uses numbered free text and decodes selected labels without changing single answers", () => {
+  const p = { questions: [{ id: "multi", question: "Pick", multiSelect: true, options: [{ label: "red", description: "warm" }, { label: "blue" }] }, { id: "single", question: "Name" }] };
+  const projected = claudeApproval("item/tool/requestUserInput", p, thread);
+  expect(projected.questions[0].options).toBeNull(); expect(projected.questions[0].multiSelect).toBeUndefined();
+  expect(projected.questions[0].question).toContain("1. red — warm\n2. blue\n可多选，逗号分隔");
+  const result = { answers: { multi: { answers: ["2, 1，blue, custom"] }, single: { answers: ["a,b"] } } };
+  expect(claudeAnswer("item/tool/requestUserInput", p, result)).toEqual({ answers: { multi: { answers: ["blue", "red", "custom"] }, single: { answers: ["a,b"] } } });
+  expect(result.answers.multi.answers).toEqual(["2, 1，blue, custom"]);
+  expect(() => claudeAnswer("item/tool/requestUserInput", p, { answers: { multi: { answers: ["3"] } } })).toThrow("out of range");
+});
+
+test("Claude rollback switch hides models and existing threads, rejects direct entry and suppresses projection", async () => {
+  const f = await setup(undefined, false);
+  const { thread } = await f.c.client.request("thread/start", { backend: "claude", model: "sonnet", cwd: process.cwd() });
+  const id = nativeThreadId(thread);
+  expect((await f.rpc("model/list")).result.data).toEqual([]);
+  expect((await f.rpc("thread/list")).result.data).toEqual([]);
+  expect((await f.rpc("thread/loaded/list")).result.data).toEqual([]);
+  expect(f.frames.some(x => x.method === "thread/started")).toBe(false);
+  const allThreads = f.server.log.allThreads;
+  f.server.log.allThreads = () => { throw new Error("full table scan forbidden for direct requests"); };
+  try {
+    expect(resolveThread(f.server, id).id).toBe(thread.id);
+    expect((await f.rpc("thread/read", { threadId: id })).error.code).toBe(-32601);
+    expect((await f.rpc("thread/read", { threadId: crypto.randomUUID() })).error.code).toBe(ErrorCode.thread_not_found);
+  } finally { f.server.log.allThreads = allThreads; }
+  for (const method of ["thread/resume", "thread/read", "thread/items/list", "turn/start", "turn/steer", "thread/settings/update"])
+    expect((await f.rpc(method, { threadId: id })).error.code).toBe(-32601);
+  expect((await f.rpc("thread/start", { model: "sonnet", cwd: process.cwd() })).error.code).toBe(-32601);
+  expect(f.server.log.allThreads()).toHaveLength(1);
+  expect((await f.c.client.request("thread/list", {})).threads[0]?.id).toBe(thread.id);
 });
