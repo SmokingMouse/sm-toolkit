@@ -54,7 +54,11 @@ export class ThreadManager {
     return engine.engineControl(params.subtype, params.params);
   }
   model(value: unknown, backend: Thread["backend"], threadId: string): string {
-    return executionModel(value, backend, this.options, threadId);
+    try { return executionModel(value, backend, this.options, threadId); }
+    catch (error) {
+      if (error instanceof ProtocolError && error.data.reason === "model_denied") this.log.publish({ jsonrpc: "2.0", method: "thread/engineEvent", params: { threadId, backend, subtype: "model_denied", payload: error.data.detail as Record<string, string> } });
+      throw error;
+    }
   }
   session(threadId: string): EngineSession {
     const session = this.live.get(threadId);
@@ -136,6 +140,7 @@ export class ThreadManager {
       return { ...result, attached: false };
     }
     if ((params.engineThreadId && thread.engineThreadId !== params.engineThreadId) || (params.backend && thread.backend !== params.backend)) throw new ProtocolError(ErrorCode.invalid_params, "thread identity does not match");
+    if (params.model !== undefined && thread.backend !== "external") this.model(params.model, thread.backend, thread.id);
     onAttach?.(thread);
     await this.closing.get(thread.id);
     const pending = this.opening.get(thread.id);

@@ -20,6 +20,7 @@ export interface ServerOptions {
   readonlyAutoAllow?: boolean;
   readonlyCommands?: string[];
   defaultModel?: string;
+  deniedModels?: string[];
 }
 export interface InProcessClient {
   readonly clientId: string;
@@ -207,6 +208,12 @@ export class AgentServer {
       connection.emit({ jsonrpc: "2.0", id: frame.id, result: validated });
     } catch (error) {
       const rpc = rpcError(error);
+      // A rejected start has no subscription or stored thread. Deliver its audit
+      // event to the requester using the attempted thread ID from error.data.
+      if (rpc.data?.reason === "model_denied" && rpc.data.threadId && !connection.attached.has(rpc.data.threadId)) {
+        const detail = rpc.data.detail as { backend: "claude" | "codex"; [key: string]: string };
+        connection.notification({ jsonrpc: "2.0", method: "thread/engineEvent", params: { threadId: rpc.data.threadId, backend: detail.backend, subtype: "model_denied", payload: detail } });
+      }
       connection.emit({ jsonrpc: "2.0", id: "id" in frame ? frame.id : null, error: rpc });
       if (rpc.code === ErrorCode.unsupported_protocol_version || ("method" in frame && frame.method === "initialize" && rpc.code === ErrorCode.unauthorized)) connection.close();
     }
@@ -241,7 +248,7 @@ export class AgentServer {
         if (p.fjContext) {
           p.fjContext.root = this.cwd(p.fjContext.root);
           if (!statSync(p.fjContext.root).isDirectory()) throw new ProtocolError(ErrorCode.invalid_params, "fjContext.root must be a directory");
-          if (!p.model?.trim() || /fable/i.test(p.model)) throw new ProtocolError(ErrorCode.invalid_params, "fjContext requires an explicit non-fable model");
+          p.model = this.threads.model(p.model, p.backend, `th_${crypto.randomUUID()}`);
           if (!p.permission) throw new ProtocolError(ErrorCode.invalid_params, "fjContext requires explicit permission");
           if (p.backend === "codex" && (p.model !== "gpt-6-astra" || p.serviceTier !== "default")) throw new ProtocolError(ErrorCode.invalid_params, "fj Codex requires gpt-6-astra and serviceTier default");
         }
@@ -274,7 +281,8 @@ export class AgentServer {
           const saved = this.log.options(existing.id);
           if (saved.fjContext) {
             this.cwd(saved.fjContext.root);
-            if (p.model !== undefined && (!p.model.trim() || /fable/i.test(p.model) || (existing.backend === "codex" && p.model !== "gpt-6-astra"))) throw new ProtocolError(ErrorCode.invalid_params, "fj resume requires an explicit compatible model");
+            if (p.model !== undefined) p.model = this.threads.model(p.model, existing.backend, existing.id);
+            if (p.model !== undefined && existing.backend === "codex" && p.model !== "gpt-6-astra") throw new ProtocolError(ErrorCode.invalid_params, "fj resume requires an explicit compatible model");
           }
         }
         if ((existing?.backend ?? p.backend ?? "claude") === "claude") {
@@ -310,7 +318,7 @@ export class AgentServer {
       case "thread/fork": { const p = params(method); this.cwd(this.threads.get(p.threadId).cwd); return this.threads.fork(p, thread => this.attach(connection, thread.id)); }
       case "thread/close": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.close(p.threadId, p.reason).then(() => { this.leases.clear(p.threadId); return {}; }); }
       case "thread/interrupt": return this.threads.queue(params(method).threadId).interrupt().then(interruptedTurnId => ({ interruptedTurnId }));
-      case "turn/start": { const p = params(method); permissionInput(p.threadId, p.permission); if (p.cwd) this.cwd(p.cwd); return this.threads.queue(p.threadId).enqueue(p); }
+      case "turn/start": { const p = params(method); permissionInput(p.threadId, p.permission); if (p.cwd) this.cwd(p.cwd); if (p.model !== undefined) p.model = this.threads.model(p.model, this.threads.get(p.threadId).backend, p.threadId); return this.threads.queue(p.threadId).enqueue(p); }
       case "turn/steer": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.queue(p.threadId).steer(p).then(() => ({})); }
       case "turn/interrupt": { const p = params(method); return this.threads.queue(p.threadId).interrupt(p.turnId).then(() => ({})); }
       case "turn/cancel": { const p = params(method); this.threads.queue(p.threadId).cancel(p.turnId); return {}; }
