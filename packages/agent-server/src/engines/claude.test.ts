@@ -7,7 +7,8 @@ import { ClaudeEngine, buildClaudeLaunch, claudeUserMessage } from "./claude.js"
 import { ClaudeEventMapper, mapPermissionDecision, mapPermissionRequest } from "./claude-mapper.js";
 import { ItemSchema, NotificationSchemas, PendingServerRequestSchema } from "../protocol/index.js";
 import type { EngineEvent } from "./session.js";
-import { input, until } from "../test-helpers.test.js";
+import { client, input, until } from "../test-helpers.test.js";
+import { AgentServer } from "../server/index.js";
 
 const event = (type: AgentEvent["type"], data: Record<string, unknown> = {}): AgentEvent => ({ type, data, backend: "claude", sessionId: "sid" });
 test("S3: stale persisted env cannot override daemon launch environment", () => {
@@ -163,15 +164,46 @@ describe("Claude native frame exchange (fake child only)", () => {
       expect(events.some(e => e.type === "modelChanged")).toBe(false); await engine.attach();
     } finally { await engine.close("test"); await consuming; }
   });
-  test("P1-1: bypass availability flag requires explicit launch permission", async () => {
-    for (const permission of ["readonly", "default", "plan", "acceptEdits", "dontAsk", "full", "bypassPermissions"] as const) {
+  test("permission argv: five native modes, readonly and legacy aliases use mode-specific settings", async () => {
+    for (const permission of ["readonly", "default", "plan", "acceptEdits", "dontAsk", "full", "auto-edit", "bypassPermissions"] as const) {
       const fake = fakeProcess(() => {}); let args: string[] = [];
       const engine = new ClaudeEngine({ spawnProcess: (_command, argv) => { args = argv; return fake.child; } });
       try {
         await engine.spawn({ backend: "claude", threadId: "th", permission });
         expect(args.includes("--allow-dangerously-skip-permissions")).toBe(permission === "full" || permission === "bypassPermissions");
+        expect(args[args.indexOf("--permission-mode") + 1]).toBe(permission === "readonly" ? "plan" : permission === "full" ? "bypassPermissions" : permission === "auto-edit" ? "acceptEdits" : permission);
+        expect(args[args.indexOf("--permission-prompt-tool") + 1]).toBe("stdio");
+        expect(args).not.toContain("--dangerously-skip-permissions");
+        expect(args).not.toContain("--disallowedTools");
+        expect(args.includes("--settings")).toBe(permission === "default");
+        if (permission === "default") expect(JSON.parse(args[args.indexOf("--settings") + 1])).toEqual({ permissions: { ask: ["*"] } });
       } finally { await engine.close("test"); }
     }
+  });
+  test.each(["bypassPermissions", "full", "dontAsk", "default"] as const)("permission broker: %s native can_use_tool fallback and audit", async permission => {
+    const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-permission", request: { subtype: "can_use_tool", tool_use_id: "bash", tool_name: "Bash", input: { command: "ls" } } }));
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
+    const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
+    const published: any[] = [];
+    let unsubscribe = () => {};
+    try {
+      const c = await client(server);
+      const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd(), permission });
+      unsubscribe = server.log.subscribe(thread.id, frame => published.push(frame));
+      await c.request("turn/start", { threadId: thread.id, input: input("go") });
+      if (permission === "default") {
+        await until(() => server.log.pendingRequests(thread.id).length === 1);
+        expect(published.some(f => f.method === "thread/pendingRequests")).toBe(true);
+        expect(fake.written.some(f => f.type === "control_response")).toBe(false);
+      } else {
+        await until(() => published.some(f => f.method === "thread/engineEvent" && f.params.subtype === "permission_auto_response"));
+        expect(server.log.pendingRequests(thread.id)).toEqual([]);
+        expect(published.some(f => f.method === "thread/pendingRequests")).toBe(false);
+        const behavior = permission === "dontAsk" ? "deny" : "allow";
+        expect(fake.written.find(f => f.type === "control_response")).toMatchObject({ response: { request_id: "native-permission", subtype: "success", response: { behavior, ...(behavior === "allow" ? { updatedInput: { command: "ls" } } : {}) } } });
+        expect(published.find(f => f.method === "thread/engineEvent").params).toMatchObject({ backend: "claude", subtype: "permission_auto_response", payload: { toolName: "Bash", behavior, permission: permission === "full" ? "bypassPermissions" : permission } });
+      }
+    } finally { unsubscribe(); await server.close(); }
   });
   test("foundation bash: native replay completes standalone turns, decodes output and leaves next turn usable", async () => {
     const fake = fakeProcess((send, frame) => {
