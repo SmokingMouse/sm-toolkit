@@ -115,6 +115,45 @@ test("Claude model routing, persisted UUID, settings guards and explicit unsuppo
   const denied = await setup(["sonnet"]); expect((await denied.rpc("model/list")).result.data.map((m: NativeObject) => m.model)).toEqual(["opus"]);
 });
 
+for (const fail of [false, true]) test(`Claude permission escalation holds only a short operation lease and releases on ${fail ? "failure" : "success"}`, async () => {
+  const f = await setup(), id = (await f.rpc("thread/start", { model: "sonnet", cwd: process.cwd() })).result.thread.id;
+  const as = resolveThread(f.server, id), engine = f.engines[0]!;
+  const peer = f.server.connectInProcess(); cleanup.push(() => peer.close());
+  await peer.request("initialize", { protocolVersion: "as/1", token: "secret", client: { name: "peer", version: "1", kind: "test", label: "peer" } }); await peer.notifyInitialized();
+  let calls = 0;
+  Object.assign(engine, { setPermission: async (permission: string) => {
+    calls++;
+    const lease = f.server.leases.read(as.id)!;
+    expect(lease.holder.clientId).toBe(f.c.client.clientId);
+    expect(lease.expiresAtMs - Date.now()).toBeGreaterThan(0);
+    expect(lease.expiresAtMs - Date.now()).toBeLessThanOrEqual(10_000);
+    await expect(peer.request("turn/start", { threadId: as.id, input: [{ type: "text", text: "blocked during escalation" }] })).rejects.toMatchObject({ code: ErrorCode.lease_held });
+    if (fail) throw new Error("permission update failed");
+    engine.emit({ type: "permissionChanged", permission: permission as Thread["permission"] });
+  } });
+  const full = { threadId: id, approvalPolicy: "never", sandbox: "danger-full-access" };
+  const updated = await f.rpc("thread/settings/update", full);
+  if (fail) expect(updated.error.message).toContain("permission update failed");
+  else expect(updated.result).toEqual({});
+  expect(calls).toBe(1); expect(f.server.leases.read(as.id)).toBeUndefined();
+  expect(f.server.log.pendingRequests(as.id)).toEqual([]);
+  if (!fail) {
+    expect((await f.rpc("thread/resume", full)).result.thread.id).toBe(id);
+    expect(f.server.log.db.query("SELECT count(*) AS n FROM approvals WHERE thread_id = ?").get(as.id)).toEqual({ n: 0 });
+    expect((await f.rpc("thread/settings/update", full)).result).toEqual({});
+    expect(calls).toBe(1); expect(f.server.leases.read(as.id)).toBeUndefined();
+    const started = await f.rpc("turn/start", { ...full, input: [{ type: "text", text: "full input" }] });
+    expect(started.result.turn.id).toBeDefined(); expect(f.server.leases.read(as.id)).toBeUndefined();
+    await f.rpc("turn/interrupt", { threadId: id, turnId: started.result.turn.id });
+  }
+  await peer.request("thread/lease/acquire", { threadId: as.id });
+  if (fail) expect((await f.rpc("thread/settings/update", full)).error.code).toBe(ErrorCode.lease_held);
+  else expect((await f.rpc("thread/resume", full)).result.thread.id).toBe(id);
+  expect((await f.rpc("turn/start", { threadId: id, input: [{ type: "text", text: "blocked by peer" }] })).error.code).toBe(ErrorCode.lease_held);
+  expect(f.server.leases.read(as.id)?.holder.clientId).toBe(peer.clientId);
+  expect(calls).toBe(1);
+});
+
 test("Claude real AS turns synthesize stream, resume history, paging, steer, compact and interrupt", async () => {
   const f = await setup(), id = (await f.rpc("thread/start", { model: "sonnet", cwd: process.cwd() })).result.thread.id;
   const as = resolveThread(f.server, id), e = f.engines[0]!;

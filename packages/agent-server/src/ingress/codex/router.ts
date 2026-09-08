@@ -111,7 +111,6 @@ export class CodexRouter {
       if (isClaudeModel(options.model) !== (thread.backend === "claude")) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: changing backend requires a new thread");
     }
     if (thread.backend === "codex" && saved.fjContext && options.model != null && options.model !== "gpt-6-astra") throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: fj Codex requires gpt-6-astra");
-    if (options.permission === "full") await this.client.request("thread/lease/acquire", { threadId: thread.id });
   }
   private threadView(thread: Thread): NativeObject {
     if (thread.backend === "claude") return { ...claudeThread(thread), ...this.threadActivity(thread) };
@@ -235,7 +234,11 @@ export class CodexRouter {
           const effective = { ...saved, model: thread.model, cwd: thread.cwd, permission: thread.permission, sandbox: effectiveSandbox({ ...saved, permission: thread.permission }) };
           for (const key of ["model", "cwd", "sandbox", "permission", "effort"] as const) if (options[key] != null && options[key] !== effective[key]) throw new ProtocolError(ErrorCode.invalid_params, `as-ingress: live resume cannot override ${key}`);
         }
-        await this.client.request("thread/resume", { ...(thread.backend === "claude" ? this.claudeOptions(options) : options), threadId: thread.id, backend: thread.backend });
+        // Repeating the saved permission is an attachment, not an escalation.
+        const selected = thread.backend === "claude" ? this.claudeOptions(options) : { ...options };
+        if (selected.permission === thread.permission) delete selected.permission;
+        if (this.server.threads.live.has(thread.id)) await this.client.request("thread/attach", { threadId: thread.id });
+        else await this.client.request("thread/resume", { ...selected, threadId: thread.id, backend: thread.backend });
         this.attached.add(thread.id);
         if (thread.backend === "claude") return this.claudeResume(thread, p);
         const engine = this.engine(thread), response = engine.nativeThreadStart();
@@ -262,7 +265,10 @@ export class CodexRouter {
         for (const part of input) if (part.type === "image" || part.type === "file") await this.allowedPath(part.path);
         const engine = thread.backend === "codex" ? this.engine(thread) : undefined;
         const selected = thread.backend === "claude" ? this.claudeOptions(options, thread) : { ...options, sandbox: options.sandbox ?? saved.sandbox };
-        const { turn } = await this.client.request("turn/start", { ...selected, threadId: thread.id, input, permission: selected.permission ?? thread.permission, ...(p.clientUserMessageId ? { clientTurnId: p.clientUserMessageId } : {}) });
+        // Omit an unchanged permission so AS applies its ordinary input rule.
+        // Actual overrides still pass through AS escalation checks.
+        if (selected.permission === thread.permission) delete selected.permission;
+        const { turn } = await this.client.request("turn/start", { ...selected, threadId: thread.id, input, ...(p.clientUserMessageId ? { clientTurnId: p.clientUserMessageId } : {}) });
         if (!engine) return { turn: claudeTurn(turn, this.server.log.snapshot(thread.id).items, nativeThreadId(thread)) };
         try { return await engine.waitNativeTurn(turn.id, this.signal); }
         catch (error) {
@@ -379,7 +385,17 @@ export class CodexRouter {
           const result = await this.client.request("thread/engineControl", { threadId: thread.id, subtype: "set_model", params: { model: selected.model } });
           if ((result.response as NativeObject)?.subtype === "error") throw new ProtocolError(ErrorCode.method_not_found, `as-ingress: Claude rejected model update: ${(result.response as NativeObject).error}`);
         }
-        if (selected.permission !== undefined) await this.client.request("thread/permission/set", { threadId: thread.id, permission: selected.permission });
+        if (selected.permission !== undefined && selected.permission !== thread.permission) {
+          const elevate = selected.permission === "full";
+          if (elevate) await this.client.request("thread/lease/acquire", { threadId: thread.id, ttlMs: 10_000 });
+          try { await this.client.request("thread/permission/set", { threadId: thread.id, permission: selected.permission }); }
+          finally {
+            // A disconnect clears our lease; an expired lease may already have
+            // a new owner. Never release that owner's lease or mask the error.
+            if (elevate && this.server.leases.read(thread.id)?.holder.clientId === this.client.clientId)
+              await this.client.request("thread/lease/release", { threadId: thread.id });
+          }
+        }
         return {};
       }
       case "thread/compact/start": {

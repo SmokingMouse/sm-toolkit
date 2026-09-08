@@ -323,7 +323,8 @@ export class AgentServer {
         const more = threads.length > limit; threads = threads.slice(0, limit); return { threads, nextCursor: more ? threads.at(-1)!.id : null };
       }
       case "thread/fork": { const p = params(method); this.cwd(this.threads.get(p.threadId).cwd); return this.threads.fork(p, thread => this.attach(connection, thread.id)); }
-      case "thread/close": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.close(p.threadId, p.reason).then(() => { this.leases.clear(p.threadId); return {}; }); }
+      // Lifecycle operations, like interrupt, must remain available to peers.
+      case "thread/close": { const p = params(method); return this.threads.close(p.threadId, p.reason).then(() => { this.leases.clear(p.threadId); return {}; }); }
       case "thread/interrupt": return this.threads.queue(params(method).threadId).interrupt().then(interruptedTurnId => ({ interruptedTurnId }));
       case "turn/start": { const p = params(method); permissionInput(p.threadId, p.permission); if (p.cwd) this.cwd(p.cwd); if (p.model !== undefined) p.model = this.threads.model(p.model, this.threads.get(p.threadId).backend, p.threadId); return this.threads.queue(p.threadId).enqueue(p); }
       case "turn/steer": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.queue(p.threadId).steer(p).then(() => ({})); }

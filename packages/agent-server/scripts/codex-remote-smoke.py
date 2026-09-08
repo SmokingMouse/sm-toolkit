@@ -14,6 +14,7 @@ import pty
 import select
 import shutil
 import signal
+import socket
 import sqlite3
 import struct
 import subprocess
@@ -27,12 +28,12 @@ import traceback
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=["codex", "claude"], default="codex")
-    parser.add_argument("--expect", default="thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,multi_thread_ok,fork_ok,reconnect_ok")
+    parser.add_argument("--expect", default="thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,multi_thread_ok,fork_ok,reconnect_ok,external_client_reply_while_attached_ok,list_contains_both_backends")
     parser.add_argument("--timeout", type=float, default=180)
     args = parser.parse_args()
     expected = set(args.expect.split(","))
     known = {"thread_started", "turn_completed", "approval_roundtrip", "resume_ok", "interrupt_ok", "resume_fresh_ok",
-             "agent_message_delta", "command_execution_output", "user_input_question", "unsupported_method_errors", "multi_thread_ok", "fork_ok", "reconnect_ok"}
+             "agent_message_delta", "command_execution_output", "user_input_question", "unsupported_method_errors", "multi_thread_ok", "fork_ok", "reconnect_ok", "external_client_reply_while_attached_ok", "list_contains_both_backends"}
     if not expected <= known:
         parser.error("unknown expectation: " + str(expected - known))
     root = Path(tempfile.mkdtemp(prefix="as-codex-remote-")).resolve()
@@ -109,7 +110,7 @@ def main():
                 marker = re.search(r"S3_REPLY_[A-Z0-9_]+", latest).group(0)
                 item = {"type": "message", "id": "msg_s3_" + str(count), "role": "assistant", "status": "completed", "phase": "final_answer", "content": [{"type": "output_text", "text": marker, "annotations": []}]}
             elif user_inputs and fresh_marker in latest:
-                item = {"type": "message", "id": "msg_fresh", "role": "assistant", "status": "completed", "phase": "final_answer", "content": [{"type": "output_text", "text": fresh_response, "annotations": []}]}
+                item = {"type": "message", "id": "msg_fresh_" + str(count), "role": "assistant", "status": "completed", "phase": "final_answer", "content": [{"type": "output_text", "text": fresh_response, "annotations": []}]}
             elif not tool_returned:
                 names = [t.get("name") for t in body.get("tools", [])]
                 if "exec_command" in names:
@@ -215,6 +216,8 @@ trust_level = "trusted"
             # These optional startup UI features are explicitly denied in slice 1.
             requests, errors = {}, []
             for frame in current:
+                if frame.get("method") == "error" and not frame.get("params", {}).get("willRetry", False):
+                    raise RuntimeError("native execution error while " + label + ": " + json.dumps(frame["params"]["error"]))
                 key = (frame.get("connection"), frame.get("id"))
                 if frame.get("direction") == "TUI>AS" and "method" in frame:
                     requests[key] = frame
@@ -326,12 +329,14 @@ trust_level = "trusted"
         summary["fresh_thread_id"] = fresh_id
         with sqlite3.connect(endpoint["databasePath"]) as db:
             assert db.execute("SELECT count(*) FROM turns WHERE thread_id = ?", (endpoint["freshAsThreadId"],)).fetchone()[0] == 0, "as/1 thread is not fresh"
-        launch(["resume", fresh_id])
+        launch(["-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"', "resume", fresh_id])
         def fresh_resumed():
             current = frames()
             requests = [f for f in current if f.get("direction") == "TUI>AS" and f.get("method") == "thread/resume" and f["params"]["threadId"] == fresh_id]
             return any(f.get("connection") == r.get("connection") and f.get("id") == r["id"] and f.get("direction") == "AS>TUI" and f.get("result", {}).get("thread", {}).get("id") == fresh_id and f["result"]["thread"]["turns"] == [] for r in requests for f in current)
         wait(fresh_resumed, "as/1 fresh thread resume with empty history")
+        with sqlite3.connect(endpoint["databasePath"]) as db:
+            assert db.execute("SELECT count(*) FROM approvals WHERE thread_id = ?", (endpoint["freshAsThreadId"],)).fetchone()[0] == 0, "full resume created an approval row"
         until = time.monotonic() + 0.7
         while time.monotonic() < until:
             pump()
@@ -343,6 +348,59 @@ trust_level = "trusted"
         wait(fresh_completed, "first real turn completed on as/1 fresh thread")
         wait(lambda: fresh_response.encode() in output, "TUI rendered fresh response")
         proof["resume_fresh_ok"] = True
+        # A second process speaks real as/1 over the daemon's Unix socket while
+        # the official full-permission TUI stays attached. Keep every frame.
+        full_resumes = [f for f in frames() if f.get("direction") == "TUI>AS" and f.get("method") == "thread/resume" and f["params"].get("threadId") == fresh_id]
+        assert full_resumes and full_resumes[-1]["params"].get("approvalPolicy") == "never" and full_resumes[-1]["params"].get("sandbox") == "danger-full-access", "TUI did not resume with explicit full permission"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as external:
+            external.connect(env["AGENT_SERVER_SOCKET_PATH"])
+            external_id, pending_bytes = 0, b""
+
+            def external_rpc(method, params):
+                nonlocal external_id, pending_bytes
+                external_id += 1
+                request = {"jsonrpc": "2.0", "id": external_id, "method": method, "params": params}
+                with open(root / "external-as1.ndjson", "a") as stream:
+                    stream.write(json.dumps({"direction": "client>AS", **request, "params": {k: v for k, v in params.items() if k != "token"}}) + "\n")
+                external.sendall((json.dumps(request) + "\n").encode())
+                response = None
+
+                def received():
+                    nonlocal pending_bytes, response
+                    if select.select([external], [], [], 0)[0]:
+                        chunk = external.recv(65536)
+                        if not chunk:
+                            raise RuntimeError("external as/1 disconnected")
+                        pending_bytes += chunk
+                    while b"\n" in pending_bytes:
+                        line, pending_bytes = pending_bytes.split(b"\n", 1)
+                        frame = json.loads(line)
+                        with open(root / "external-as1.ndjson", "a") as stream:
+                            stream.write(json.dumps({"direction": "AS>client", **frame}) + "\n")
+                        if frame.get("id") == external_id:
+                            if "error" in frame:
+                                raise RuntimeError("external " + method + ": " + json.dumps(frame["error"]))
+                            response = frame["result"]
+                    return response is not None
+
+                wait(received, "external as/1 " + method + " while full TUI attached")
+                return response
+
+            external_rpc("initialize", {"protocolVersion": "as/1", "token": env["SMOKE_BEARER"], "client": {"name": "external-smoke", "version": "1", "kind": "cli", "label": "external-smoke"}, "capabilities": {}})
+            external.sendall(b'{"jsonrpc":"2.0","method":"initialized","params":{}}\n')
+            attached = external_rpc("thread/attach", {"threadId": endpoint["freshAsThreadId"]})
+            assert attached["thread"]["permission"] == "full"
+            external_before = len(frames())
+            reply = external_rpc("turn/start", {"threadId": endpoint["freshAsThreadId"], "input": [{"type": "text", "text": fresh_marker if args.backend == "codex" else "Do not use tools. Reply with exactly: " + fresh_response}]})
+            wait(lambda: any(f.get("method") == "turn/completed" and f["params"].get("threadId") == fresh_id and f["params"]["turn"]["status"] == "completed" for f in frames()[external_before:]), "TUI observed external reply completion")
+            with sqlite3.connect(endpoint["databasePath"]) as db:
+                assert json.loads(db.execute("SELECT data_json FROM turns WHERE id = ?", (reply["turn"]["id"],)).fetchone()[0])["status"] == "completed", "external reply did not complete"
+            assert tui.poll() is None
+            closed = external_rpc("thread/close", {"threadId": endpoint["freshAsThreadId"]})
+            assert closed == {} and tui.poll() is None
+            assert external_rpc("thread/read", {"threadId": endpoint["freshAsThreadId"]})["thread"]["status"]["type"] == "closed"
+            summary["external_client"] = {"permission": "full", "turn_id": reply["turn"]["id"], "close_ack": closed, "tui_alive_after_close": True}
+            proof["external_client_reply_while_attached_ok"] = True
         if "multi_thread_ok" in expected:
             name_offset = len(frames())
             prompt("/rename S3-FRESH")

@@ -33,3 +33,11 @@
 - 冒烟探针修正：审批表 kind 实际为完整 method，原 permissions 简称查询漏报；改成 item/permissions/requestApproval 后真实 Read 审计可证（/tmp/ingress-fix-claude-all.json）。
 - 证据：`/Users/smokingmouse/python/learning/trellis/.fenjue/tasks/fj-tui-ingress-slice2-fix-d5b8/out/result.md` 及 read-permission-proof.json、双方 runs.json、bun-test.log、typecheck.log。
 - Next：交主控独立复跑验收；Trellis Goals 不变，未 push、未委派、未操作生产 daemon。
+
+## 输入租约返工（fj-tui-ingress-lease-fix-400a）
+
+- 按主控裁决去掉 guardThread 的 full 自动租约；live resume 走 attach，冷恢复和普通输入省略与当前相同的 permission override。AS 输入门控保留，权限设置升 full 仅持十秒短租约，成功/失败均 finally 释放；重复权限不重设。CodexSession 既有 disconnect 清理沿用。
+- AS close 去掉输入租约检查并保留关闭后清租约；interrupt 本来已不检查。回归验证跨客户端生命周期操作、full 冷/热恢复无租约与零审批行、升权调用期间持锁且成功/失败后释放、他端输入仍被 -32012 拒绝。
+- 冒烟新增 external_client_reply_while_attached_ok：官方 TUI full resume 后持续附着，独立 Python as/1 Unix 客户端完成 reply 与 close，SQLite 确认指定 turn completed 和 thread closed。Codex fixture 修复固定 item ID 不能用于第二轮的问题。
+- 验证：agent-server 全量 514 pass / 0 fail / 3117 expect，typecheck exit 0；Codex 与真实 Claude sonnet 最终各三次七判据通过。原 fixture 失败保留在 failures.md 与契约 codex-1.log，不计最终证据。
+- 证据：`/Users/smokingmouse/python/learning/trellis/.fenjue/tasks/fj-tui-ingress-lease-fix-400a/out/result.md`、runs.json、六组 wire/external-as1/summary。Next：主控独立验收；Trellis Goals 不变，未 push、未委派、未操作生产 daemon。
