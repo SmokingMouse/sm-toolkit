@@ -15,14 +15,17 @@ test("fj full permission maps to native bypass and Codex ordinary tier on start/
   expect(launch.args).toContain("--allow-dangerously-skip-permissions");
   expect(launch.args).not.toContain("--dangerously-skip-permissions");
 });
-test("close cannot bypass another client's input lease", async () => {
+test("interrupt and close remain available while another client holds an input lease", async () => {
   const { server } = setup(); servers.push(server); const a = await client(server), b = await client(server);
   const { thread } = await a.request("thread/start", { model: "gpt-6-astra", backend: "codex", cwd: process.cwd() });
   await a.request("thread/lease/acquire", { threadId: thread.id });
-  await expect(b.request("thread/close", { threadId: thread.id })).rejects.toMatchObject({ code: -32012 });
-  expect(server.threads.get(thread.id).status.type).toBe("idle");
-  await a.request("thread/lease/release", { threadId: thread.id });
-  await b.request("thread/close", { threadId: thread.id });
+  await expect(b.request("turn/start", { threadId: thread.id, input: input("blocked") })).rejects.toMatchObject({ code: -32012 });
+  const { turn } = await a.request("turn/start", { threadId: thread.id, input: input("go") });
+  expect(await b.request("turn/interrupt", { threadId: thread.id, turnId: turn.id })).toEqual({});
+  expect(server.leases.read(thread.id)?.holder.clientId).toBe(a.clientId);
+  expect(await b.request("thread/close", { threadId: thread.id })).toEqual({});
+  expect(server.threads.get(thread.id).status.type).toBe("closed");
+  expect(server.leases.read(thread.id)).toBeUndefined();
 });
 afterEach(async () => { for (const s of servers.splice(0)) await s.close(); });
 test("serviceTier is Codex-only and cannot silently disappear on Claude start/resume", async () => {

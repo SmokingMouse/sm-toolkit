@@ -146,7 +146,7 @@ subtype=`model_denied`，payload 为该 detail。通知遵守 engineEvents 能�
 cid 匹配 `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`，seat 另允许点号。root 经 realpath 与 allowed_roots 校验。
 携带 fjContext 时 model 同样经守卫解析为明确模型（默认拒绝 fable），并必须显式 permission；Codex 必须 gpt-6-astra + serviceTier default。
 上下文随 thread options 持久化，resume 使用原值，禁止覆盖 fjContext。引擎环境清除继承的 HERDR_* 与 FENJUE_*，仅映射 FENJUE_ROOT、FENJUE_CID、可选 FENJUE_SEAT；不改变 permission 或凭证路由。
-thread.meta.fjContext 返回规范化后的身份（覆盖调用方同名 meta 键），供显示与身份核对。thread/close 尊重输入 lease，他端持有时返回 lease_held。
+thread.meta.fjContext 返回规范化后的身份（覆盖调用方同名 meta 键），供显示与身份核对。thread/close 与 turn/interrupt 是生命周期操作，不受他端输入 lease 门控；close 完成后清除该线程租约。
 `thread/attach` 永远返回完整后缀，不接受 `limit`（`-32602`）；有界历史读取用 `thread/items/list`。
 `thread/resume` 导入未知 engineThreadId 时必须显式传 cwd（缺失返回 `-32602`）；
 恢复已知 thread 可以省略 cwd，沿用已保存的工作目录。
@@ -379,7 +379,7 @@ Claude 不支持的反向 control request 会保守拒绝或取消，并发 `err
 **输入租约（可选）**：持有 `thread/lease/acquire` 的客户端在租约期内是唯一
 可以 `turn/start` / `turn/steer` / 回答反向请求的连接；其余得到
 `-32012 lease_held`（`data.holder` 带持锁者 label）。租约 TTL 默认 5 min，
-心跳续期，断线即释放。普通输入默认**不启用**；权限提升操作必须先取得 lease，见 §3.4 的权限语义说明。
+心跳续期，断线即释放。普通输入默认**不启用**；权限提升操作必须先取得 lease，见 §3.4 的权限语义说明。thread/close 与 turn/interrupt 不检查输入租约。
 
 **只读请求状态（规范性）**：`thread/pendingRequests` 是单请求增量，不携带整个 thread 或审批正文，也不授予答复权限。创建时 status=pending、decidedBy=null；首个合法回答落库后 status=resolved、decidedBy 为答复者的 clientId 与 label。超时、原生撤回、引擎退出或 thread 关闭统一 status=expired、decidedBy=null，reason 保留原因（如 timeout / orphan_timeout / engine_gone）。时间戳为服务端 Unix 毫秒；createdAtMs 固定为请求创建时间，updatedAtMs 为本次状态变更时间。
 
@@ -774,10 +774,12 @@ review、realtime、goal、memory、动态 TUI 工具；这些不在 slice 1 中
 原生 dynamicTools、historyMode 和 UI personality/web_search 提示不传入 engine；以 daemon 的 native 配置为准。
 仅支持 default collaboration mode，其 model/effort 进入 AS guard，TUI 的模式说明不覆盖引擎说明。
 拒绝原生权限 profiles、任意 config overrides、auto_review、非 default serviceTier/serviceTierForTurn。
-readonly thread 不能通过 resume/turn sandbox 或 permission override 升权。full 输入按需获取 AS 租约；他人持租约时返回 holder.label。
+readonly thread 不能通过 resume/turn sandbox 或 permission override 升权。resume/attach 和普通 full 输入不获取租约；重复当前 permission 时 ingress 省略 AS permission override，沿用已保存权限。live resume 使用 AS attach，冷恢复使用 AS resume；实际权限 override 仍受 AS 升权检查。他人持输入租约时普通输入仍返回 lease_held 与 holder.label。
 fjContext 只能由 as/1 创建，native 入口拒绝写入；已有 fj Codex 线程维持 gpt-6-astra/default 约束。
 
-冒烟：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok`。
+冒烟：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,external_client_reply_while_attached_ok`。
+
+`external_client_reply_while_attached_ok`：as/1 创建 full 零 turn 线程，官方 TUI 显式以 never + danger-full-access resume 并完成首轮；TUI 持续附着时，独立 Python as/1 Unix 客户端完成 turn/start，TUI 收到完成通知，随后该客户端 thread/close 成功且 read 确认为 closed。保存 external-as1.ndjson（不含 token）、native wire 与 summary；Codex Responses fixture 每轮使用唯一 item ID，Claude 使用已有登录态与真实 sonnet。
 使用真实官方 TUI（PTY 交互、能力查询应答）和真实官方 app-server；仅模型 Responses HTTP 端点为本地确定性 fixture，
 不请求外部模型或凭证。HOME、CODEX_HOME、socket、DB、配置和随机端口全在 mktemp 下，wire.ndjson、终端输出、
 model-requests.json、summary.json 留在打印的 artifact_dir。approval_roundtrip 同时检查真实 TUI 回答、broker decided_by、
@@ -838,7 +840,7 @@ model/permission 变更合成 thread/settings/updated，不把 Claude 的原始 
 | thread/name/set | AS 持久化标题；官方 TUI `/rename <name>` 可用 |
 
 native sandbox 在 Claude 上是权限选择器，不是 Codex OS sandbox；不会向 Claude CLI 传入不支持的 sandbox override。
-readonly 线程不能通过 settings/resume/turn 升权；full 按需获取租约，所有执行路径仍经过 AS model guard、allowed_roots 与 broker。
+readonly 线程不能通过 settings/resume/turn 升权。只有 settings/update 将权限改为 full 时，ingress 在 AS thread/permission/set 前获取 10 秒短租约，调用成功或失败后立即释放；相同权限不重复设置或取租约，连接关闭仍由 AS 清理。resume/attach 与普通 full 输入不取租约，所有执行路径仍经过 AS model guard、allowed_roots 与 broker。
 Claude CLI 无法热切进入 readonly，实际调用会明确失败，必须新建 readonly 线程。`serviceTier` / `serviceTierForTurn` 仅接受空或 default。
 
 四类审批沿用连接 wire id、AS broker audience/租约/首次决策检查和 resolved 收口，不依赖 Codex 的 data.raw。
@@ -872,7 +874,7 @@ native 没有 multiSelect 字段：多选问题移除该字段，options=null，
 TUI 改 effort 的错误文案为 `as-ingress: Claude 线程 effort 只在新建时生效`，不做标签到 token 数的换算。
 官方 TUI 0.153.4 CLI/config 已移除 untrusted 选项，虽然 native 协议仍有该枚举；正常 TUI 使用 on-request。
 
-Claude 冒烟：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok`。
+Claude 冒烟：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,external_client_reply_while_attached_ok`。
 使用真实 Claude CLI 与真实模型，显式 `--model sonnet`，读取实际 system/init 帧并断言每个 model 包含 sonnet；不调用本地模型 fixture。
 脚本按 `--backend claude` 自动设置隔离 daemon 的 `claude_threads=true`；Codex 冒烟保持 false。
 只复用已有 Claude 登录文件，隔离 HOME/settings，并要求 Bash/Read 审批；不存在登录文件时明确 blocker，不申请新凭证。

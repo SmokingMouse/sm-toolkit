@@ -122,6 +122,29 @@ test("native UUID routes across connections; AS mutations own turn IDs, resume, 
   await b.request("thread/resume", { threadId: first.thread.id });
 });
 
+test("full Codex resume and input never acquire a lease; a peer lease still blocks input", async () => {
+  const f = setup("hold"), a = connection(f), b = connection(f); await a.initialize(); await b.initialize();
+  const { thread } = await a.request("thread/start", { cwd: f.root, model: "gpt-6-astra", approvalPolicy: "never", sandbox: "danger-full-access" });
+  const as = resolveThread(f.server, thread.id), full = { threadId: thread.id, approvalPolicy: "never", sandbox: "danger-full-access" };
+  for (const c of [a, b]) {
+    expect((await c.request("thread/resume", full)).thread.id).toBe(thread.id);
+    expect(f.server.leases.read(as.id)).toBeUndefined();
+    expect(f.server.log.pendingRequests(as.id)).toEqual([]);
+    expect(f.server.log.db.query("SELECT count(*) AS n FROM approvals WHERE thread_id = ?").get(as.id)).toEqual({ n: 0 });
+  }
+  const { turn } = await b.request("turn/start", { ...full, input: [{ type: "text", text: "ordinary full input" }] });
+  expect(f.server.leases.read(as.id)).toBeUndefined();
+  await a.session.client.request("thread/lease/acquire", { threadId: as.id });
+  expect((await b.request("thread/resume", full)).thread.id).toBe(thread.id);
+  await expect(b.request("turn/start", { ...full, input: [{ type: "text", text: "blocked" }] })).rejects.toThrow(`codex-tui:${a.session.client.clientId}`);
+  expect(await b.request("turn/interrupt", { threadId: thread.id, turnId: turn.id })).toEqual({});
+  expect(await b.session.client.request("thread/close", { threadId: as.id })).toEqual({});
+  expect(f.server.leases.read(as.id)).toBeUndefined();
+  // A cold native resume must also omit the unchanged full permission.
+  expect((await b.request("thread/resume", full)).thread.id).toBe(thread.id);
+  expect(f.server.leases.read(as.id)).toBeUndefined();
+});
+
 test("native thread names are trimmed, persisted and projected through read, list and resume", async () => {
   const f = setup(), c = connection(f); await c.initialize();
   const { thread } = await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });

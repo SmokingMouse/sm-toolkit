@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server native ingress 已完成 Claude 回退开关及权限问答、多选与 effort 投影返工，双后端冒烟通过，待主控独立验收。
+agent-server native ingress 已修 full 附着误占输入租约，权限设置改用短租约，生命周期 close 放开输入门控，待主控独立验收。
 
 ## Goals
 

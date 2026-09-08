@@ -6,6 +6,14 @@
 
 ## 已结案
 
+### codex-ingress：full 附着长期占用输入租约（resolved）
+
+- 症状：TUI full resume 后独立 as/1 reply / close 返回 -32012；扩展冒烟首轮另发现 Responses fixture 重复 msg_fresh 导致 items 唯一键冲突。
+- 可证伪假设：guardThread 把 full 权限等同于每次取默认五分钟输入租约；AS close 也误用输入门控。fixture 固定 item ID 无法覆盖同线程第二轮。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --expect external_client_reply_while_attached_ok`。
+- 修复：full resume/普通输入不取租约，重复权限省略 override；仅 permission/set 升权持十秒短租约并在 finally 释放；close 与 interrupt 均不检查输入租约。fixture 逐响应唯一 ID，并对不可重试执行错误立即失败。
+- 证据：fj-tui-ingress-lease-fix-400a/out/result.md、codex-1.log（原失败）、final-codex-1..3.log（修复后）；单测同时覆盖他人持租约时输入仍拒绝。
+
 ### codex-ingress：主控复跑揭露恢复冒烟时序依赖（resolved）
 
 - 症状：初次自跑通过，但主控连续两次复跑 resume_ok/interrupt_ok=false；迟到的具名 turn/interrupt 被 ingress 自造 -32011 拒绝，thread/name/set 未实现。
