@@ -18,6 +18,17 @@ test("P2-1 requests without local cards neither count nor replace the current st
     expect(model.pendingCount).toBe(1);
   }
 });
+test("P2-2 offline badge requires a local unresolved card and disappears on termination", () => {
+  for (const connection of ["disconnected", "connecting", "connected"] as const) {
+    const model = new TuiModel(); model.connection = connection;
+    expect(render(model, 180, 24)).not.toContain("离线待确认");
+    model.request(request); model.cards.get("request")!.state = "offline";
+    expect(render(model, 180, 24).includes("待处理 1（离线待确认）")).toBe(connection !== "connected");
+    model.notification({ jsonrpc: "2.0", method: "thread/pendingRequests", params: { ...pendingRequestState(request, 1), status: "expired", reason: "timeout" } });
+    expect(render(model, 180, 24)).toContain("待处理 0");
+    expect(render(model, 180, 24)).not.toContain("离线待确认");
+  }
+});
 test("pending notification resolves card and count without legacy notifications, label falls back to clientId", () => {
   for (const label of ["phone", ""]) {
     const model = new TuiModel(); model.request(request);
