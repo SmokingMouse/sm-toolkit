@@ -6,6 +6,7 @@ import { imageInput, messageInput, pasteImage, unquote } from "./attachments.js"
 import { CompletionSource } from "./completion.js";
 import { controlError, controlSuccess, effortBudgets, efforts, estimatedContextWindow, nativePermission, nextEffort, nextPermission, permissionModes, type Effort, type Permission } from "./modes.js";
 import { InputLease } from "./lease.js";
+import { bashInput } from "./bash-input.js";
 
 export interface Key { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean; paste?: boolean; sequence?: string }
 export class Controller {
@@ -183,9 +184,9 @@ export class Controller {
         return;
       }
       const steer = text.startsWith("/steer ");
-      const input = /^\/image(?:\s|$)/.test(text)
+      const input = bashInput(text, attachments) ?? (/^\/image(?:\s|$)/.test(text)
         ? [...attachments, await imageInput(unquote(text.slice(6).trim()), thread.cwd)]
-        : await messageInput(steer ? text.slice(7) : text, thread.cwd, attachments);
+        : await messageInput(steer ? text.slice(7) : text, thread.cwd, attachments));
       if (!input.length) return;
       const fingerprint = JSON.stringify(input);
       const turnId = steer ? this.model.activeTurnId : undefined;
