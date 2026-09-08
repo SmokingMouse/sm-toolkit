@@ -62,7 +62,7 @@ test("native handshake gates requests and tolerates a pipelined initialized star
   await expect(c.request("model/list")).rejects.toThrow("initialize");
   const initialized = c.session.receive({ method: "initialized" });
   const models = c.request("model/list");
-  await initialized; expect((await models).data.map((m: NativeObject) => m.model)).toEqual(["gpt-6-astra"]);
+  await initialized; expect((await models).data.map((m: NativeObject) => m.model)).toEqual(["gpt-6-astra", "sonnet", "opus"]);
   await expect(c.request("initialize", { clientInfo: { name: "test", version: "1" } })).rejects.toThrow("already initialized");
   const other = connection(f); await other.initialize(); expect(c.session.client.clientId).not.toBe(other.session.client.clientId);
   for (const frame of c.frames) expect(frame.jsonrpc).toBeUndefined();

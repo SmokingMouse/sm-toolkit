@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server Codex native ingress 已修复零 turn 线程恢复与中断启动竞态，交主控复验；Trellis 迁移与后续 TUI 切片待推进。
+agent-server native ingress 已接入 Claude 显示、模型选择与治理交互，双后端冒烟通过；Claude 审批与 live effort 的协议差异待主控裁决。
 
 ## Goals
 

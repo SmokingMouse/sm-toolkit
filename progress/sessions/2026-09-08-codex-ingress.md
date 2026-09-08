@@ -15,3 +15,11 @@
 - 新冒烟先由 as/1 建零 turn 线程，官方 TUI resume 后发送首轮、收到匹配完成通知并渲染响应；resume_fresh_ok 纳入默认六判据。最终全量 487 pass / 0 fail，typecheck exit 0，连续五次六项通过。真实三轮分页 193 断言通过；140 条读/恢复/分页响应通过官方 0.153.4 生成 schema 校验。
 - 原 41 项探针逐项比基线零回归，唯一变化是 P1 false→true。probe1 仍有原报告已知的两项失败，修正 fixture 的 probe2 全过；readonly 审计缺口、既有 name/set 方法净增与无 AS 活动 turn 的保守拒绝均逐条记录在 result，未伪造审计或绕过 as/1 治理。
 - 证据：`/Users/smokingmouse/python/learning/trellis/.fenjue/tasks/fj-tui-ingress-slice1-fix-cf4c/out/result.md`。Next：交主控独立复验；不变更 Trellis Goals。
+
+## Claude 线程显示与交互（fj-tui-ingress-slice2-6772）
+
+- 注入 sonnet/opus，Claude UUID 使用 AS 去前缀 ID；单向 Item/流式 delta、线程/turn 状态、历史分页和 settings 通知投影 native。交互仍走 as/1 队列、租约、model guard 和 broker；不支持的方法明确报错。
+- 官方 schema 找到并修复 item/started、item/completed 漏必需时间戳的呈现缺陷；修复后真实 TUI 自动标题恢复。最终 508 pass / 0 fail / 3023 expect，typecheck exit 0；368 条合成样本与真实 native 帧/响应通过官方 0.153.4 experimental schema。
+- 真实 Claude CLI 显式 sonnet，init 三次均确认 claude-sonnet-5；最终三连六判据全过（24.11 / 24.11 / 22.11s），包含 approval_roundtrip、resume_fresh_ok、真实流中 Esc。Codex 六项再过（8.91s），保留原 fixture 与自动标题判据。旧的缺时间戳三连归档到 out/pre-schema，不作为最终证据。
+- 方案差异已上报主控：AS Claude generic permissions={toolName,input} 不符合 native network/fileSystem profile（schema 明确拒绝）；当前向 TUI 报错并保留 broker 待决，交 as/1 客户端或超时处理。live effort 标签仅 launch 生效，AS live 接口是 maxThinkingTokens，未擅自换算。native 问题无 multiSelect 字段，协议文档列明呈现限制。
+- 证据：`/Users/smokingmouse/python/learning/trellis/.fenjue/tasks/fj-tui-ingress-slice2-6772/out/result.md`。Next：主控裁决上述协议差异并独立验收；不变更 Trellis Goals。未委派、未 push、未操作生产 daemon。

@@ -6,8 +6,15 @@ import { loadToken } from "../src/daemon/paths.js";
 // A transparent recording transport in front of the actual configured daemon.
 // Never substitutes an engine or manufactures a native protocol frame.
 const root = process.env.CODEX_SMOKE_ROOT!;
+const backend = process.env.CODEX_SMOKE_BACKEND === "claude" ? "claude" : "codex";
 if (!root || process.env.HOME !== join(root, "home")) throw new Error("isolated smoke HOME required");
 const daemon = await runDaemon({ graceMs: 0 });
+// Record the actual CLI init events before the native projection filters them.
+const publish = daemon.server.log.publish.bind(daemon.server.log);
+daemon.server.log.publish = frame => {
+  if (frame.method === "thread/engineEvent" && frame.params.backend === "claude" && frame.params.subtype === "init") appendFileSync(join(root, "claude-init.ndjson"), JSON.stringify(frame) + "\n");
+  publish(frame);
+};
 if (!daemon.codexIngressUrl) throw new Error("codex_ingress.enabled missing");
 const token = loadToken(daemon.paths.tokenPath);
 interface ProxyData { connection: number; upstream?: WebSocket; queue: string[] }
@@ -41,10 +48,10 @@ const as1 = daemon.server.connectInProcess();
 as1.onFrame(frame => appendFileSync(join(root, "fresh-as1.ndjson"), JSON.stringify(frame) + "\n"));
 await as1.request("initialize", { protocolVersion: "as/1", token, client: { name: "smoke-as1", version: "1", kind: "cli", label: "smoke-as1" }, capabilities: {} });
 await as1.notifyInitialized();
-const fresh = await as1.request("thread/start", { backend: "codex", cwd: join(root, "workspace"), model: "gpt-5.6-sol", permission: "auto-edit" });
+const fresh = await as1.request("thread/start", { backend, cwd: join(root, "workspace"), model: backend === "claude" ? "sonnet" : "gpt-5.6-sol", permission: "auto-edit" });
 if (daemon.server.log.turns(fresh.thread.id).length !== 0) throw new Error("fresh thread already has turns");
 as1.close();
-writeFileSync(join(root, "smoke-endpoint.json"), JSON.stringify({ url: `ws://127.0.0.1:${proxy.port}`, tokenPath: daemon.paths.tokenPath, databasePath: daemon.paths.databasePath, freshThreadId: fresh.thread.engineThreadId, freshAsThreadId: fresh.thread.id }));
+writeFileSync(join(root, "smoke-endpoint.json"), JSON.stringify({ url: `ws://127.0.0.1:${proxy.port}`, tokenPath: daemon.paths.tokenPath, databasePath: daemon.paths.databasePath, freshThreadId: backend === "claude" ? fresh.thread.id.slice(3) : fresh.thread.engineThreadId, freshAsThreadId: fresh.thread.id }));
 let closing = false;
 async function shutdown() {
   if (closing) return; closing = true;

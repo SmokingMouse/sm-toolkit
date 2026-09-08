@@ -714,7 +714,7 @@ item 的 `type` 取值取 codex `ThreadItem` 的子集，字段名一致（`aggr
   cachedTokens/cacheCreation/estimated/contextTokens`）。倾向复用，只把 `usd`
   标为可空。
 
-## 13. codex-ingress（slice 1：Codex 官方 TUI）
+## 13. codex-ingress（Codex 官方 TUI）
 
 独立 native WebSocket listener，不改变 as/1 帧、端口或客户端握手。默认不启动；daemon TOML 显式开启：
 
@@ -738,7 +738,7 @@ account/rateLimits/read、hooks/list、skills/list、plugin/list、experimentalF
 environment/info、config/read、permissionProfile/list、mcpServerStatus/list。携带 cwd/cwds 的查询检查 allowed_roots。
 model/list 过滤 daemon 拒绝的模型，并移除非 default 服务档位选项；执行时仍经 AS model guard 二次检查。
 
-线程 UUID 是原生 engineThreadId，反查现有 SQLite engine 索引，再由 ThreadManager.live 定位独占进程；不另存 ID 映射。
+Codex 线程 UUID 是原生 engineThreadId，反查现有 SQLite engine 索引，再由 ThreadManager.live 定位独占进程；不另存 ID 映射。
 thread/start、thread/resume、turn/start、turn/interrupt 全经 as/1。启动响应和 turn/start 响应保留 native 原始对象；
 AS turn id 只用于内部队列，interrupt 必须匹配当前 native turn id，防止迟到 Esc 打断新轮次。
 与官方 0.153.4 一致：无活动 turn 时空 turnId 成功 `{}`；具名 turnId 返回
@@ -746,7 +746,7 @@ AS turn id 只用于内部队列，interrupt 必须匹配当前 native turn id�
 这些 native 错误不加 as-ingress 前缀。thread/name/set 经 AS 持久化 trim 后的标题，发布 thread/name/updated；
 read/list/resume 使用最新 AS 标题，空名称返回 `-32600 / thread name must not be empty`。
 等待 native turn 启动确认最多 30 秒；若超时时仍在 AS 队列中，通过 as/1 turn/cancel 撤销后报错，避免报错后悄悄执行。
-resume 只恢复 AS 已登记的 Codex UUID；live resume 不允许静默覆盖已生效的设置。
+resume 只恢复 AS 已登记的 UUID；live resume 不允许静默覆盖已生效的设置。
 thread/list 从 AS 库提供 data/nextCursor，展示字段使用 native 启动快照；thread/loaded/list 从 AS health 取 live UUID。
 thread/read、thread/turns/list、thread/items/list 通过 owning Codex 进程只读查询，历史分页保留 native cursor；
 原生“首条消息前尚未 materialize”的明确错误转换为空历史。thread/unsubscribe 映射 AS detach。
@@ -785,3 +785,86 @@ resolved 帧及被批准命令生成的隔离 proof 文件；不把单测 fake a
 直到匹配的 turn/interrupt 请求、成功响应和 interrupted 终态全部出现才释放。请求次数和模型响应速度不参与判定。
 TUI 自动标题生成的临时 system thread 带禁止的 provider/config overrides，仍拒绝；冒烟只豁免这一明确可选请求与 goal/get，
 所有普通 thread/name/set、resume 和 interrupt 错误都会导致失败。
+
+### 13.1 Claude 线程（slice 2）
+
+`model/list` 在 control 最后一页追加显式 `sonnet` / `opus`，显示名为 `Claude · sonnet` / `Claude · opus`。
+列表和执行入口都过 model guard；`fable` / `claude-fable*` 默认禁止。native 没有 backend 字段：
+`thread/start` 的 model 是 Claude tier 或 `claude-*` 时创建 Claude 引擎，否则创建 Codex 引擎。
+已有线程不隐式更换后端；跨后端 `/model` 或 turn override 返回 `-32602`，需要新建线程。
+Claude 线程的 native UUID 是 AS threadId 去掉 `th_`，与 Claude CLI session_id 无关；重连、关闭后恢复、列表都用该持久 UUID。
+fj 仍可通过 as/1 建好 Claude 线程，再在官方 TUI 用 `resume <uuid>` 进入，包括尚无 turn 的线程。
+
+Claude 通知由 `claude-projection.ts` 单向合成；AS 是历史与治理真相源，不提供 native→AS Item 的逆变换。
+AS turnId / itemId 原样保留。thread/start、read、resume、fork 使用同一 Thread/Turn 视图，完整历史标记 `historyMode: legacy`。
+历史分页通过 as/1 `thread/items/list` 读取，native 返回 `data`、`nextCursor`、`backwardsCursor`；游标绑定线程、方法和 turn 过滤，
+不直接暴露或接受 AS seq cursor；反向游标包含页首锚点。turns 的 `notLoaded` 不返回 items，`full` / `summary` 当前返回标为 `full` 的完整项。
+
+| AS Item | native 呈现及流 | 已知转换 |
+|---|---|---|
+| userMessage | userMessage | image→localImage；bash→`!cmd` 文本，文件引用→路径文本 |
+| agentMessage | agentMessage + agentMessage/delta | commentary/final_answer phase 保留，其余 phase→null |
+| reasoning | reasoning + textDelta / summaryTextDelta | summary/content 各一个 part；原数组边界已在 AS 丢失，index 固定 0 |
+| commandExecution | commandExecution + outputDelta | stdout/stderr 合并；rejected→declined |
+| fileChange | fileChange + patchUpdated | kind→`{type}`，缺 diff→空串；AS rename 本来就是 delete+add |
+| toolCall | dynamicToolCall | input→arguments，任意 JSON output→inputText，保留 namespace |
+| mcpToolCall | mcpToolCall | 原生 content result 原样；其余结果包装 content+structuredContent，任意 error 转 message |
+| subAgent agent | collabAgentToolCall + subAgentActivity | parentItemId→agentThreadId；未知 phase→running |
+| subAgent bash/workflow | as namespace dynamicToolCall | 不冒充 collab agent；报告/进度随工具输出保留 |
+| webSearch | webSearch | 非数组结果包装为单元素数组 |
+| imageOutput | imageGeneration + agentMessage | 首图 savedPath，其余路径合并成一条文本项 |
+| plan | plan + turn/plan/updated | text 在 item，steps 在 turn 通知 |
+| contextCompaction | contextCompaction + thread/compacted | 完成时发送 compacted |
+| error | error 通知 | 不造 native 不存在的 error item |
+| 未知类型 | `dynamicToolCall{namespace:"as",tool:"unknown"}` | 保留原 type/payload，不静默丢弃 |
+
+线程 spawning/running→active，interrupted/closed→idle，systemError 保留；关闭另发 thread/closed。
+usage 合成 last，并从持久化 turns 累加 total；cacheCreation 进入 cacheWriteInputTokens，未知 reasoning tokens 为 0。
+model/permission 变更合成 thread/settings/updated，不把 Claude 的原始 system/engineEvent 混入 native 通知。
+
+| native 交互 | Claude 落点 |
+|---|---|
+| turn/start、turn/interrupt | AS 队列与 interrupt；具名 turnId 必须匹配活动 AS turn |
+| turn/steer | AS turn/steer；补 native 响应 `{turnId}` |
+| thread/settings/update model | AS thread/engineControl set_model；CLI 明确拒绝时返回错误 |
+| thread/settings/update approvalPolicy/sandbox | AS thread/permission/set；never+read-only→readonly，on-request→auto-edit，never+danger-full-access→full，untrusted→default |
+| thread/compact/start | AS thread/compact 排入 `/compact` 文本轮次 |
+| thread/fork、thread/archive、thread/unsubscribe | AS fork、close、detach |
+| thread/name/set | AS 持久化标题；官方 TUI `/rename <name>` 可用 |
+
+native sandbox 在 Claude 上是权限选择器，不是 Codex OS sandbox；不会向 Claude CLI 传入不支持的 sandbox override。
+readonly 线程不能通过 settings/resume/turn 升权；full 按需获取租约，所有执行路径仍经过 AS model guard、allowed_roots 与 broker。
+Claude CLI 无法热切进入 readonly，实际调用会明确失败，必须新建 readonly 线程。`serviceTier` / `serviceTierForTurn` 仅接受空或 default。
+
+四类审批沿用原 method、连接 wire id、AS broker audience/租约/首次决策检查和 resolved 收口，不依赖 Codex 的 data.raw。
+command/fileChange 的四个 decision 和原生 network/fileSystem permissions profile 可 1:1 往返，permissions session→AS thread；
+requestUserInput 补齐 native header/isOther/isSecret/options.description，answers 原样返回。
+**协议限制**：Claude 通用工具审批的 AS permissions 是 `{toolName,input}`，而官方 0.153.4 RequestPermissionProfile 仅允许 network/fileSystem
+（schema `additionalProperties:false`）。这不是可无损改名的结构。ingress 不伪造网络/文件授权，向 TUI 发明确 error（details 标记 `-32601`），
+原审批仍在 AS broker 待决，可由其他 as/1 客户端回答或由 broker 超时；不代其他客户端批准/过期该请求。
+native 问题 schema 没有 multiSelect 字段，Claude 的多选 UI 也不具备 1:1 呈现保证，不能把 answers 数组类型等同于多选界面支持。
+
+### 13.2 Claude 不支持的方法与设置
+
+以下返回 JSON-RPC `-32601`，message 前缀固定 `as-ingress: `，不返回空成功；参数/模型错误是 `-32602`，治理拒绝沿用 AS unauthorized。
+
+| 方法/设置 | 原因 |
+|---|---|
+| review/start、thread/realtime/* | Claude 无对应 review/语音面 |
+| thread/goal/*、memory/*、thread/memory/* | AS 无对应状态模型 |
+| thread/inject_items、thread/queue/add、backgroundTerminals | 不绕过 AS 队列与执行治理 |
+| thread/delete | AS 只 close，不删除审计 |
+| live effort 标签变化 | TUI 发 low/medium/high 等标签；Claude 的 AS thread/effort/set 接受 maxThinkingTokens，CLI effort labels 仅 launch 时生效；不臆造换算 |
+| summary/personality 等未映射设置、fork overrides | 没有可确认生效的 Claude 映射 |
+| 全局 config/fs 写入、command/exec、插件/账户写操作 | 继承 ingress 默认拒绝白名单策略 |
+
+`thread/start{effort}` 的 Claude launch 标签仍可用；live token budget 仍由 as/1 `thread/effort/set` 操作。
+官方 TUI 0.153.4 CLI/config 已移除 untrusted 选项，虽然 native 协议仍有该枚举；正常 TUI 使用 on-request。
+
+Claude 冒烟：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok`。
+使用真实 Claude CLI 与真实模型，显式 `--model sonnet`，读取实际 system/init 帧并断言每个 model 包含 sonnet；不调用本地模型 fixture。
+只复用已有 Claude 登录文件，隔离 HOME/settings，并要求 Bash 审批；不存在登录文件时明确 blocker，不申请新凭证。
+真实 PTY 执行审批按键、`/quit`、恢复和 Esc 中断；中断前确认真实 agentMessage delta 且该 turn 尚未完成。
+六判据之外同时核对 broker decided_by、隔离 proof 文件、resolved 帧、fresh 响应和普通回复的终端渲染。
+两种后端都检查 TUI 自动标题的 name/set 请求及 AS 落库；Codex 冒烟仍使用原有本地 Responses fixture 路径。
+模型 init、native wire、PTY 输出、summary 保留在 artifact_dir；该目录的隔离 HOME 含登录文件，不应整体复制为公开证据。

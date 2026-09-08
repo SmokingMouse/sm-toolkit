@@ -2,7 +2,8 @@ import { CODEX_SCHEMA_VERSION } from "../../engines/codex-version.js";
 import { ErrorCode, ProtocolError, rpcError, ServerRequestMethodSchema, ServerRequestSchemas, type Frame, type RpcId, type ServerRequestMethod } from "../../protocol/index.js";
 import type { AgentServer, InProcessClient } from "../../server/server.js";
 import type { ControlClient, NativeObject } from "./control-process.js";
-import { CodexRouter, NativeRpcError } from "./router.js";
+import { CodexRouter, NativeRpcError, nativeThreadId } from "./router.js";
+import { claudeApproval, claudeNotification } from "./claude-projection.js";
 
 export function nativeDecision(method: ServerRequestMethod, result: NativeObject): unknown {
   if (!result || typeof result !== "object" || Array.isArray(result)) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: decision object required");
@@ -99,7 +100,16 @@ export class CodexSession {
     const p = frame.params as NativeObject;
     if ("id" in frame) {
       const method = ServerRequestMethodSchema.safeParse(frame.method); if (!method.success) return;
-      const raw = p.data?.raw;
+      const thread = this.router.server.threads.get(p.threadId);
+      let raw: NativeObject;
+      try { raw = thread.backend === "claude" ? claudeApproval(method.data, p, thread) : p.data?.raw; }
+      catch (error) {
+        const rpc = rpcError(error);
+        this.send({ method: "error", params: { threadId: nativeThreadId(thread), turnId: p.turnId, error: { message: rpc.message, codexErrorInfo: null, additionalDetails: `JSON-RPC ${rpc.code}; requestId=${p.requestId}` }, willRetry: false } });
+        // This connection cannot display the request. Do not decide/expire it
+        // on behalf of other attached clients; the AS broker remains authority.
+        return;
+      }
       if (!raw || typeof raw !== "object") return;
       this.reverse.set(frame.id, { method: method.data, requestId: p.requestId }); this.logical.set(p.requestId, frame.id);
       const params = structuredClone(raw);
@@ -115,17 +125,24 @@ export class CodexSession {
     } else if (frame.method === "serverRequest/resolved" || frame.method === "serverRequest/expired") {
       const id = this.logical.get(p.requestId); if (id === undefined) return;
       const thread = this.router.server.threads.get(p.threadId);
-      this.send({ method: "serverRequest/resolved", params: { threadId: thread.engineThreadId, requestId: id, ...(p.decidedBy ? { decidedBy: p.decidedBy } : {}), ...(p.reason ? { reason: p.reason } : {}) } });
+      this.send({ method: "serverRequest/resolved", params: { threadId: nativeThreadId(thread), requestId: id, ...(p.decidedBy ? { decidedBy: p.decidedBy } : {}), ...(p.reason ? { reason: p.reason } : {}) } });
       this.logical.delete(p.requestId); this.reverse.delete(id);
     } else if (frame.method === "thread/metadata/updated" && typeof p.title === "string") {
       const thread = this.router.server.threads.get(p.threadId);
-      this.send({ method: "thread/name/updated", params: { threadId: thread.engineThreadId, threadName: p.title } });
+      this.send({ method: "thread/name/updated", params: { threadId: nativeThreadId(thread), threadName: p.title } });
     } else if (frame.method === "error") {
       // CodexEventMapper also projects each native error into AS. Its raw error
       // object identifies that projection; the original frame was sent above.
       if (p.error.code === ErrorCode.engine_unavailable && p.error.data?.raw?.message === p.error.message) return;
+      const thread = p.threadId ? this.router.server.threads.get(p.threadId) : undefined;
+      this.send({ method: "error", params: { ...(thread ? { threadId: nativeThreadId(thread) } : {}), ...(p.turnId ? { turnId: p.turnId } : {}), error: { message: p.error.message, codexErrorInfo: null, additionalDetails: null }, willRetry: p.willRetry } });
+    } else if (p.threadId && frame.method !== "thread/engineEvent") {
       const thread = this.router.server.threads.get(p.threadId);
-      this.send({ method: "error", params: { threadId: thread.engineThreadId, error: { message: p.error.message, codexErrorInfo: null, additionalDetails: null }, willRetry: p.willRetry } });
+      if (thread.backend === "claude") {
+        const needsItems = ["turn/started", "turn/completed", "item/subAgent/progress"].includes(frame.method);
+        const frames = claudeNotification(frame.method, p, thread, frame.method === "thread/tokenUsage/updated" ? this.router.server.log.turns(thread.id) : [], needsItems ? this.router.server.log.snapshot(thread.id).items : []);
+        for (const native of frames) this.send(native);
+      }
     }
   }
   parseError(): void { this.send({ id: null, error: { code: ErrorCode.parse, message: "as-ingress: invalid JSON" } }); }

@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import pty
 import select
+import shutil
 import signal
 import sqlite3
 import struct
@@ -25,9 +26,9 @@ import traceback
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=["codex"], default="codex")
+    parser.add_argument("--backend", choices=["codex", "claude"], default="codex")
     parser.add_argument("--expect", default="thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok")
-    parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument("--timeout", type=float, default=180)
     args = parser.parse_args()
     expected = set(args.expect.split(","))
     known = {"thread_started", "turn_completed", "approval_roundtrip", "resume_ok", "interrupt_ok", "resume_fresh_ok"}
@@ -40,6 +41,18 @@ def main():
     workspace = root / "workspace"
     for directory in [home, codex_home, state, workspace]:
         directory.mkdir(parents=True, exist_ok=True)
+    if args.backend == "claude":
+        # Reuse existing login only; never request or create credentials. Keep
+        # global allowlists/hooks out of the isolated approval smoke.
+        config = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+        credentials = config / ".credentials.json"
+        if not credentials.is_file():
+            raise RuntimeError("blocker: existing Claude credentials unavailable")
+        (home / ".claude").mkdir(mode=0o700)
+        shutil.copyfile(credentials, home / ".claude" / ".credentials.json")
+        os.chmod(home / ".claude" / ".credentials.json", 0o600)
+        (home / ".claude.json").write_text(json.dumps({"hasCompletedOnboarding": True}))
+        (home / ".claude" / "settings.json").write_text(json.dumps({"permissions": {"ask": ["Bash"]}}))
     wire = root / "wire.ndjson"
     wire.write_text("")
     model_calls = []
@@ -134,8 +147,9 @@ requires_openai_auth = false
 [projects.%s]
 trust_level = "trusted"
 ''' % (model.server_port, json.dumps(str(workspace))))
-    (state / "config.toml").write_text('allowed_roots = [%s]\ndefault_model = "gpt-5.6-sol"\n[codex_ingress]\nenabled = true\nport = 0\n' % json.dumps(str(workspace)))
+    (state / "config.toml").write_text('allowed_roots = [%s]\ndefault_model = %s\n[codex_ingress]\nenabled = true\nport = 0\n' % (json.dumps(str(workspace)), json.dumps("sonnet" if args.backend == "claude" else "gpt-5.6-sol")))
     env = {"PATH": os.environ["PATH"], "HOME": str(home), "CODEX_HOME": str(codex_home), "TERM": "xterm-256color", "LANG": "en_US.UTF-8", "TMPDIR": str(root), "NO_PROXY": "*", "no_proxy": "*", "CODEX_SMOKE_ROOT": str(root), "AGENT_SERVER_SOCKET_PATH": str(root / "as.sock")}
+    env["CODEX_SMOKE_BACKEND"] = args.backend
     runner = Path(__file__).with_name("codex-remote-smoke-daemon.ts").resolve()
     log = open(root / "daemon-output.log", "wb")
     daemon = subprocess.Popen(["bun", str(runner)], cwd=workspace, env=env, stdout=log, stderr=log, start_new_session=True)
@@ -143,7 +157,7 @@ trust_level = "trusted"
     master = None
     output = bytearray()
     proof = {name: False for name in known}
-    summary = {"artifact_dir": str(root), "model": "local deterministic Responses fixture", "proof": proof}
+    summary = {"artifact_dir": str(root), "backend": args.backend, "model": "real Claude CLI --model sonnet" if args.backend == "claude" else "local deterministic Responses fixture", "proof": proof}
     started = time.monotonic()
 
     def frames():
@@ -211,7 +225,10 @@ trust_level = "trusted"
         nonlocal tui, master
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 150, 0, 0))
-        command = ["codex", "--remote", endpoint["url"], "--remote-auth-token-env", "SMOKE_BEARER", "--no-alt-screen"] + (extra or [])
+        command = ["codex", "--remote", endpoint["url"], "--remote-auth-token-env", "SMOKE_BEARER", "--no-alt-screen"]
+        if args.backend == "claude":
+            command += ["--model", "sonnet"]
+        command += extra or []
         tui = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, cwd=workspace, env=env, start_new_session=True)
         os.close(slave)
 
@@ -265,7 +282,7 @@ trust_level = "trusted"
         until = time.monotonic() + 0.7
         while time.monotonic() < until:
             pump()
-        prompt(fresh_marker)
+        prompt(fresh_marker if args.backend == "codex" else "Do not use tools. Reply with exactly: " + fresh_response)
         def fresh_completed():
             current = frames()
             started_ids = {f["params"]["turn"]["id"] for f in current if f.get("method") == "turn/started" and f["params"].get("threadId") == fresh_id}
@@ -285,7 +302,7 @@ trust_level = "trusted"
         until = time.monotonic() + 0.6
         while time.monotonic() < until:
             pump()
-        prompt("Please run the requested smoke command and report completion.")
+        prompt("Please run the requested smoke command and report completion." if args.backend == "codex" else "Use only Bash to run exactly: printf ingress-approved > ingress-proof.txt . Do not read any files or use other tools. After Bash succeeds reply exactly INGRESS_SMOKE_COMPLETED.")
         wait(lambda: any(f.get("method") == "item/commandExecution/requestApproval" for f in frames()), "approval card")
         # This is the actual terminal approval interaction, not a protocol response.
         until = time.monotonic() + 2.0
@@ -294,10 +311,12 @@ trust_level = "trusted"
         os.write(master, b"y")
         wait(lambda: any(f.get("method") == "turn/completed" and f["params"].get("threadId") == thread_id and f["params"]["turn"]["status"] == "completed" for f in frames()), "completed turn after approval")
         proof["turn_completed"] = True
+        wait(lambda: b"INGRESS_SMOKE_COMPLETED" in output, "TUI rendered completed response")
+        wait(lambda: any(f.get("direction") == "TUI>AS" and f.get("method") == "thread/name/set" and f["params"]["threadId"] == thread_id for f in frames()), "TUI assigned thread title")
         with sqlite3.connect(endpoint["databasePath"]) as db:
             db.row_factory = sqlite3.Row
             approvals = [dict(row) for row in db.execute("SELECT id,thread_id,kind,status,decided_by,decision_json FROM approvals")]
-            persisted = json.loads(db.execute("SELECT data_json FROM threads WHERE engine_thread_id = ?", (thread_id,)).fetchone()[0])
+            persisted = json.loads(db.execute("SELECT data_json FROM threads WHERE " + ("id" if args.backend == "claude" else "engine_thread_id") + " = ?", (("th_" + thread_id) if args.backend == "claude" else thread_id,)).fetchone()[0])
         current = frames()
         names = [f for f in current if f.get("direction") == "TUI>AS" and f.get("method") == "thread/name/set" and f["params"]["threadId"] == thread_id]
         assert names, "real TUI did not request a thread name"
@@ -318,8 +337,11 @@ trust_level = "trusted"
         until = time.monotonic() + 0.7
         while time.monotonic() < until:
             pump()
-        prompt(hold_marker)
-        wait(lambda: held_stream.is_set() and any(f.get("method") == "turn/started" for f in frames()[before:]), "resumed model stream open and held")
+        prompt(hold_marker if args.backend == "codex" else "Do not use tools. Write a very long numbered list from 1 to 10000, spelling out each number in English. Start immediately and keep writing until 10000.")
+        if args.backend == "codex":
+            wait(lambda: held_stream.is_set() and any(f.get("method") == "turn/started" for f in frames()[before:]), "resumed model stream open and held")
+        else:
+            wait(lambda: any(f.get("method") == "item/agentMessage/delta" for f in frames()[before:]), "real Claude resumed stream producing text")
         resumed_frames = frames()[before:]
         turn_id = next(f["params"]["turn"]["id"] for f in resumed_frames if f.get("method") == "turn/started")
         summary["interrupted_turn_id"] = turn_id
@@ -334,7 +356,12 @@ trust_level = "trusted"
             return bool(requests) and ack and terminal
         wait(interrupted, "matching interrupt request, acknowledgement and terminal notification")
         proof["interrupt_ok"] = True
-        summary["model_stream_held_until_interrupt"] = not release_stream.is_set()
+        if args.backend == "claude":
+            init_frames = [json.loads(line)["params"]["payload"] for line in (root / "claude-init.ndjson").read_text().splitlines()]
+            summary["claude_init_models"] = [f.get("model") for f in init_frames]
+            assert init_frames and all("sonnet" in f.get("model", "").lower() for f in init_frames), "Claude init did not confirm sonnet"
+        else:
+            summary["model_stream_held_until_interrupt"] = not release_stream.is_set()
         release_stream.set()
     except Exception as error:
         summary["error"] = str(error)
