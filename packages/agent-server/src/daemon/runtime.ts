@@ -10,11 +10,17 @@ const ConfigSchema = z.object({
   ws_allowed_origins: z.array(z.string()).optional(),
   allowed_roots: z.array(z.string()).optional(), maxQueuedTurns: z.number().int().nonnegative().optional(),
   orphanTimeoutMs: z.number().int().nonnegative().optional(), idleTimeoutMs: z.number().int().nonnegative().optional(),
+  readonly_auto_allow: z.boolean().optional(), readonly_commands: z.array(z.string()).optional(),
 });
-function readConfig(path: string): ServerOptions & { ws_allowed_origins?: string[] } {
+export function readConfig(path: string): ServerOptions & { ws_allowed_origins?: string[] } {
   if (!existsSync(path)) return {};
-  const { allowed_roots, ...options } = ConfigSchema.parse(Bun.TOML.parse(readFileSync(path, "utf8")));
-  return { ...options, ...(allowed_roots ? { allowedRoots: allowed_roots } : {}) };
+  const { allowed_roots, readonly_auto_allow, readonly_commands, ...options } = ConfigSchema.parse(Bun.TOML.parse(readFileSync(path, "utf8")));
+  return {
+    ...options,
+    ...(allowed_roots ? { allowedRoots: allowed_roots } : {}),
+    ...(readonly_auto_allow !== undefined ? { readonlyAutoAllow: readonly_auto_allow } : {}),
+    ...(readonly_commands ? { readonlyCommands: readonly_commands } : {}),
+  };
 }
 export interface RunningDaemon {
   readonly server: AgentServer; readonly manager: ConnectionManager; readonly paths: DaemonPaths;

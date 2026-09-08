@@ -212,15 +212,17 @@ Claude 启动权限映射（本机 CLI 2.1.258）：所有模式保留 `--permis
 
 | permission | `--permission-mode` | 注入 settings | daemon 收到 `can_use_tool` |
 | --- | --- | --- | --- |
-| default（省略时同） | default（原生 manual 兼容名） | `{"permissions":{"ask":["*"]}}`，显式要求经纪人审批，覆盖本机 allow 规则 | 创建审批 |
-| acceptEdits / auto-edit | acceptEdits | 无；由原生模式允许编辑 | 创建审批 |
-| plan / readonly | plan | 无；使用原生只读规划模式 | 创建审批 |
+| default（省略时同） | default（原生 manual 兼容名） | `{"permissions":{"ask":["*"]}}`，显式要求经纪人审批，覆盖本机 allow 规则 | 创建审批（只读 Bash 命令按 readonly_auto_allow 名单自动放行，见下） |
+| acceptEdits / auto-edit | acceptEdits | 无；由原生模式允许编辑 | 创建审批（只读 Bash 命令按 readonly_auto_allow 名单自动放行，见下） |
+| plan / readonly | plan | 无；使用原生只读规划模式 | 创建审批（只读 Bash 命令按 readonly_auto_allow 名单自动放行，见下） |
 | bypassPermissions / full | bypassPermissions | 无，尤其不注入 ask | 自动 allow，保留原始 input；不创建审批 |
 | dontAsk | dontAsk | 无；原生允许已授权工具，拒绝需要询问的操作 | 自动 deny；不创建审批 |
 
 readonly 是 AS 启动别名，对应原生 plan，不是 OS 文件系统沙箱；只读访问、规划及需要退出规划的操作由原生 CLI 控制，不再使用不完整的 Write/Edit 禁用列表。新增 readonly 仍只接受 thread/start；热切请使用 plan。旧值 full / auto-edit 分别映射 bypassPermissions / acceptEdits。只有启动 permission 显式为 full/bypassPermissions 才添加 `--allow-dangerously-skip-permissions`，允许之后重新进入 bypass；`--permission-mode bypassPermissions` 已选择绕过模式，不需要重复传 `--dangerously-skip-permissions`。其他会话不预先开放 bypass，CLI/组织策略仍可拒绝切换。
 
 自动答复发生在 Claude adapter 将请求交给审批经纪人之前，因此 bypass/dontAsk 的意外原生请求不会写入 pendingRequests，也不会发审批通知；发送 `thread/engineEvent`，subtype=`permission_auto_response`，payload 含 requestId、toolUseId、toolName、permission（规范值）、behavior（allow/deny）、reason=`permission_mode`，可按现有 engineEvents 协商查看。权限模式热切会清除 daemon 会话审批缓存，自动答复使用当前已确认的模式。启动注入的 settings 属于进程配置，热切不移除它；从 default 热切到 acceptEdits/plan 仍可能因 ask 规则要求审批，需要纯原生设置时新建相应模式线程。bypass 自动放行和 dontAsk 自动拒绝不受遗留 ask 规则影响。Codex 保持旧 permission 别名语义，新增 Claude 模式返回 backend_unsupported。
+
+readonly-auto-allow 名单同样发生在这一步，且只对 default/plan/acceptEdits 生效（bypass/dontAsk 已经在上一段自动应答，不会再走到这里；`fileChange`/`item/permissions/requestApproval` 类请求不受影响，仍走原有审批路径）。仅当 `tool_name === "Bash"` 且命令判定为只读时才自动 allow：默认名单为 `ls cat head tail wc find grep rg pwd echo stat file which env git`，其中 `git` 只认 `status/log/diff/show/rev-parse/branch` 子命令，`find` 遇到 `-delete/-exec/-execdir/-fprint*/-ok*` 等写标志判非只读，`env` 仅裸调用或全部参数为 flag（否则视为借 env 启动其他程序）；命令用 `&&`、`||`、`|`、`;` 串联时逐段判定，任一段不在名单内则整条判非只读；命令中出现重定向 `>`、`>>`、`<`、反引号、`$(...)`、`<(...)`、`>(...)` 或裸 `(`/`)`（子 shell/分组）一律判非只读，回退到正常审批；引号内的这些字符不触发判定（如 `echo "a | b"` 仍判只读）。命中时直接 allow 并回填原始 input，发 `thread/engineEvent`，subtype=`readonly_auto_allow`，payload 含 requestId、toolUseId、toolName、permission、behavior=`allow`、reason=`readonly_command`、command、matchedRules（命中的子命令列表，如 `["git status","ls"]`），同样不创建 pendingRequests、不占审批队列。daemon `config.toml` 可配 `readonly_auto_allow`（布尔，默认 true，关闭后全部回退正常审批）与 `readonly_commands`（字符串数组，整体替换默认名单，不是追加）。
 对已有 thread，请求 full/bypassPermissions/dontAsk（或原生 ultraplan:true）必须由有效 lease 的持有者发起，覆盖 permission/set、engineControl.set_permission_mode、turn/start.permission 和 resume.permission；无 lease/已过期返回 unauthorized (-32005)，他人持有返回 lease_held (-32012)。持有 lease 不绕过原生 bypass availability/组织策略。普通输入和非提升模式继续使用可选 lease。
 
 `thread/engineControl` 请求 `{threadId, subtype, params}`，向 Claude 发送 `{type:"control_request", request_id, request:{...params,subtype}}`，result 是完整原生 control_response 帧（包括原生 error response），不拆解 response；调用方必须检查 response.subtype。params 不得包含 subtype。该方法遵守输入 lease；Codex/external 返回 backend_unsupported，未知或不允许的子类型返回 unsupported_capability。传输超时仍为 RPC 错误。

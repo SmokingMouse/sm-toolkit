@@ -36,6 +36,8 @@ Claude 权限启动映射：
 
 所有模式保留 `--permission-prompt-tool stdio`。bypass 启动另加 `--allow-dangerously-skip-permissions` 支持以后重新进入该模式；无需重复 `--dangerously-skip-permissions`。自动答复通过 `thread/engineEvent` 的 `permission_auto_response` 留痕（需协商 engineEvents），不经过审批队列。readonly/plan 是 CLI 权限模式，不是 OS 沙箱。热切保留启动 settings：从 default 热切后仍可能出现 ask 规则审批，但 bypass/dontAsk 会自动处理；需要原生 acceptEdits/plan 行为请直接以该模式新建线程。完整语义与 lease 要求见 [协议](../../docs/agent-server/protocol.md)。
 
+default/plan/acceptEdits 下，`Bash` 的 `can_use_tool` 若命令判定为只读（默认名单 `ls cat head tail wc find grep rg pwd echo stat file which env git`；`git` 仅 `status/log/diff/show/rev-parse/branch`、`find` 拒绝 `-delete/-exec` 等写标志、`env` 仅裸调用或纯 flag；管道/`&&`/`||`/`;` 串联要求每一段都在名单内；含重定向 `>` `>>` `<`、反引号、`$(...)`、`<(...)`、子 shell `(...)` 一律不判只读），daemon 直接 allow 并以 `thread/engineEvent`（subtype=`readonly_auto_allow`，payload 含 requestId/toolUseId/toolName/command/matchedRules）留痕，不写入 pendingRequests、不占审批队列；bypass/dontAsk 已有自己的自动应答路径，不受影响，`fileChange`/`item/permissions/requestApproval` 类请求也不受影响。可用 `readonly_auto_allow = false` 整体关闭，或 `readonly_commands = [...]`（整体替换默认名单，非追加）自定义，见下方 `config.toml`。
+
 ```sh
 bun run typecheck
 packages/agent-server/bin/agent-server run --ws-port 0 --grace-ms 1000
@@ -61,7 +63,8 @@ token 首次生成 32 字节随机值，之后复用；token、socket、pid、en
 启动日志记录解析后的路径及来源，绝不记录 token 内容。
 
 `config.toml` 支持 `allowed_roots`、`maxQueuedTurns`、`orphanTimeoutMs`、
-`idleTimeoutMs`。默认只允许 HOME 内的 cwd。
+`idleTimeoutMs`、`readonly_auto_allow`（布尔，默认 true）、`readonly_commands`
+（字符串数组，整体替换默认只读名单）。默认只允许 HOME 内的 cwd。
 SIGTERM / SIGINT 先广播 `server/shuttingDown`，等待 graceMs，再关闭引擎与连接并移除 pid/socket。
 
 ```ts
