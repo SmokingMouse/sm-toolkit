@@ -148,6 +148,20 @@ test("full Codex resume and input never acquire a lease; a peer lease still bloc
   expect(f.server.leases.read(as.id)).toBeUndefined();
 });
 
+test("cold resume discards cross-backend defaults but applies same-backend models", async () => {
+  const f = setup(), c = connection(f); await c.initialize();
+  const { thread } = await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });
+  const asId = resolveThread(f.server, thread.id).id;
+  await c.session.client.request("thread/close", { threadId: asId });
+  const resumed = await c.request("thread/resume", { threadId: thread.id, model: "sonnet" });
+  expect(resumed.model).toBe("gpt-6-astra");
+  expect(resumed.thread.id).toBe(thread.id);
+  expect(resolveThread(f.server, thread.id).backend).toBe("codex");
+  await c.session.client.request("thread/close", { threadId: asId });
+  expect((await c.request("thread/resume", { threadId: thread.id, model: "gpt-5.6-sol" })).model).toBe("gpt-5.6-sol");
+  expect(c.frames.filter(f => f.method === "warning")).toHaveLength(1);
+});
+
 test("native thread names are trimmed, persisted and projected through read, list and resume", async () => {
   const f = setup(), c = connection(f); await c.initialize();
   const { thread } = await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });
@@ -283,7 +297,7 @@ test("model, cwd, reviewer, service tier, readonly and side-effect guards are fa
   for (const options of [{ serviceTier: "priority" }, { approvalsReviewer: "auto_review" }, { config: { approval_policy: "never" } }, { model: "fable" }, { cwd: "/" }]) await expect(c.request("thread/start", { model: "gpt-6-astra", cwd: f.root, ...options })).rejects.toThrow();
   expect(f.engines).toHaveLength(0);
   const { thread } = await c.request("thread/start", { model: "gpt-6-astra", cwd: f.root, approvalPolicy: "never", sandbox: "read-only" });
-  for (const options of [{ sandboxPolicy: { type: "workspaceWrite" } }, { approvalsReviewer: "auto_review" }, { serviceTier: "fast" }, { cwd: "/" }, { model: "fable" }, { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }]) await expect(c.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "bad" }], ...options })).rejects.toThrow();
+  for (const options of [{ sandboxPolicy: { type: "workspaceWrite" } }, { approvalsReviewer: "auto_review" }, { serviceTier: "fast" }, { cwd: "/" }, { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }]) await expect(c.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "bad" }], ...options })).rejects.toThrow();
   await expect(c.request("thread/resume", { threadId: thread.id, approvalPolicy: "never", sandbox: "danger-full-access" })).rejects.toThrow("readonly");
   expect(f.server.log.turns(resolveThread(f.server, thread.id).id)).toHaveLength(0);
   for (const method of ["hooks/list", "skills/list", "plugin/list"]) await expect(c.request(method, { cwds: ["/"] })).rejects.toThrow("allowed_roots");
@@ -382,13 +396,19 @@ test("mixed Codex and Claude share a connection with independent pending approva
   expect(list.find((t: NativeObject) => t.id === claude)).toMatchObject({ modelProvider: "claude", model: "sonnet" });
   expect((await c.request("thread/loaded/list")).data).toEqual([codex, claude].sort());
   const asClaude = resolveThread(f.server, claude);
-  await expect(c.request("thread/resume", { threadId: codex, model: "sonnet" })).rejects.toThrow("changing backend requires a new thread");
-  await expect(c.request("thread/resume", { threadId: claude, model: "gpt-6-astra" })).rejects.toThrow("changing backend requires a new thread");
+  expect((await c.request("thread/resume", { threadId: codex, model: "sonnet" })).model).toBe("gpt-6-astra");
+  expect((await c.request("thread/resume", { threadId: claude, model: "gpt-6-astra" })).model).toBe("sonnet");
+  for (const [id, backend, model] of [[codex, "codex", "gpt-6-astra"], [claude, "claude", "sonnet"]])
+    expect(c.frames).toContainEqual({ method: "warning", params: { threadId: id, message: `该线程为 ${backend}，已沿用 ${model}` } });
   for (const interrupted of [codex, claude]) {
     const offset = c.frames.length, decisions: unknown[] = [];
-    const ct = (await c.request("turn/start", { threadId: codex, input: [{ type: "text", text: "codex approval" }] })).turn.id;
-    const at = (await c.request("turn/start", { threadId: claude, input: [{ type: "text", text: "claude approval" }] })).turn.id;
+    const ct = (await c.request("turn/start", { threadId: codex, model: "sonnet", input: [{ type: "text", text: "codex approval" }] })).turn.id;
+    const at = (await c.request("turn/start", { threadId: claude, collaborationMode: { mode: "default", settings: { model: "gpt-6-astra" } }, input: [{ type: "text", text: "claude approval" }] })).turn.id;
     await until(() => f.claude.sent.some(t => t.turnId === at));
+    expect(f.claude.sent.find(t => t.turnId === at)!.options.model).not.toBe("gpt-6-astra");
+    expect(resolveThread(f.server, codex).model).toBe("gpt-6-astra");
+    expect(resolveThread(f.server, claude).model).toBe("sonnet");
+    expect(c.frames.slice(offset).filter(f => f.method === "warning")).toHaveLength(2);
     const requestId = `ar_${crypto.randomUUID()}`;
     f.claude.emit({ type: "itemStarted", turnId: at, item: { id: `item-${at}`, type: "commandExecution", payload: { command: "pwd", cwd: f.root }, status: "inProgress" } });
     f.claude.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { threadId: asClaude.id, turnId: at, itemId: `item-${at}`, requestId, command: "pwd", cwd: f.root, startedAtMs: 1 } }, respond: d => { decisions.push(d); } });

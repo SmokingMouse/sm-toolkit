@@ -99,7 +99,9 @@ test("Claude model routing, persisted UUID, settings guards and explicit unsuppo
   expect((await f.rpc("thread/settings/update", { threadId: id, model: "opus" })).result).toEqual({});
   expect(f.frames.findLast(x => x.method === "thread/settings/updated")?.params.threadSettings.model).toBe("opus");
   expect(f.engines[0]?.controls.at(-1)).toEqual({ subtype: "set_model", params: { model: "opus" } });
-  expect((await f.rpc("thread/settings/update", { threadId: id, model: "gpt-6-astra" })).error.code).toBe(ErrorCode.invalid_params);
+  expect((await f.rpc("thread/settings/update", { threadId: id, model: "gpt-6-astra" })).result).toEqual({});
+  expect(f.engines[0]?.controls.at(-1)).toEqual({ subtype: "set_model", params: { model: "opus" } });
+  expect(f.frames.findLast(x => x.method === "warning")?.params).toEqual({ threadId: id, message: "该线程为 claude，已沿用 opus" });
   expect((await f.rpc("thread/settings/update", { threadId: id, effort: "high" })).error.code).toBe(-32601);
   expect((await f.rpc("thread/settings/update", { threadId: id, effort: "high" })).error.message).toContain("Claude 线程 effort 只在新建时生效");
   for (const method of ["thread/resume", "turn/start"]) {
@@ -113,6 +115,17 @@ test("Claude model routing, persisted UUID, settings guards and explicit unsuppo
   for (const method of ["thread/settings/update", "turn/start", "thread/resume"]) expect((await f.rpc(method, { threadId: ro, approvalPolicy: "never", sandbox: "danger-full-access", ...(method === "turn/start" ? { input: [{ type: "text", text: "write" }] } : {}) })).error.code).toBe(ErrorCode.unauthorized);
   expect(f.engines[1]?.controls).toEqual([]);
   const denied = await setup(["sonnet"]); expect((await denied.rpc("model/list")).result.data.map((m: NativeObject) => m.model)).toEqual(["opus"]);
+});
+
+test("same-backend turn model overrides still reach Claude and denied models still fail", async () => {
+  const f = await setup(["haiku"]);
+  const id = (await f.rpc("thread/start", { model: "sonnet", cwd: process.cwd() })).result.thread.id;
+  expect((await f.rpc("turn/start", { threadId: id, model: "haiku", input: [{ type: "text", text: "denied" }] })).error).toBeDefined();
+  const result = await f.rpc("turn/start", { threadId: id, model: "opus", input: [{ type: "text", text: "hello" }] });
+  expect(result.error).toBeUndefined();
+  await until(() => f.engines[0]!.sent.length === 1);
+  expect(f.engines[0]!.sent[0]!.options.model).toBe("opus");
+  expect(f.frames.filter(f => f.method === "warning")).toEqual([]);
 });
 
 for (const fail of [false, true]) test(`Claude permission escalation holds only a short operation lease and releases on ${fail ? "failure" : "success"}`, async () => {
@@ -290,6 +303,7 @@ for (const choice of ["allow", "deny"]) test(`generic Claude permissions: ${choi
   e.emit({ type: "approval", request: { method: "item/permissions/requestApproval", params: { requestId: "generic", threadId: as.id, turnId: t.id, itemId: "read", cwd: process.cwd(), startedAtMs: Date.now(), permissions: { toolName: "Read", input: { path: "/tmp/a" } } } }, respond: d => { decisions.push(d); } });
   await until(() => f.frames.some(x => x.method === "item/tool/requestUserInput"));
   const card = f.frames.find(x => x.method === "item/tool/requestUserInput")!;
+  expect(card.params).toMatchObject({ threadId: id, turnId: t.id, itemId: "read", isBlocking: true });
   expect(card.params.questions[0]).toMatchObject({ header: "权限请求：Read", isOther: false, options: [{ label: "allow" }, { label: "deny" }] });
   expect(card.params.questions[0].question).toContain("/tmp/a");
   expect(f.frames.some(x => x.method === "item/permissions/requestApproval")).toBe(false);

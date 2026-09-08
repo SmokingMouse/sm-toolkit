@@ -6,6 +6,13 @@
 
 ## 已结案
 
+### codex-ingress slice 3 再审：启动模型覆盖与权限卡 schema（resolved）
+
+- 症状：TUI `--model sonnet` 切到 Codex 线程被拒绝；Claude Read 权限卡缺官方 schema 必填 isBlocking。
+- 可证伪假设：guardThread 将 TUI 粘性默认模型当作引擎切换；权限卡自造 params 漏字段，旧 schema 校验未覆盖全部 serverRequest。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude`（默认含 cross_backend_model_override_tolerated 与 wire_schema_clean）。
+- 修复：已有线程忽略跨后端模型 override 并发带 threadId 的可见 warning，同后端校验保留；权限卡补 isBlocking=true，所有出站帧过新生成官方 schema，缺映射也失败。本条取代下条「不传 --model」规避方式，该规避未满足原契约。
+
 ### codex-ingress slice 3 返工：混合 picker 的模型与准备状态（resolved）
 
 - 症状：Claude 主会话切 Codex 被 changing backend guard 拒绝；合并后的 fresh 关闭/重开与旧 full 租约断言不兼容；对当前线程重复 /resume 不发新 resume RPC。

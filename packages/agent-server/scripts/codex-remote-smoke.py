@@ -28,12 +28,12 @@ import traceback
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=["codex", "claude"], default="codex")
-    parser.add_argument("--expect", default="thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,multi_thread_ok,fork_ok,reconnect_ok,external_client_reply_while_attached_ok,list_contains_both_backends")
+    parser.add_argument("--expect", default="thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,multi_thread_ok,fork_ok,reconnect_ok,external_client_reply_while_attached_ok,list_contains_both_backends,cross_backend_model_override_tolerated,wire_schema_clean")
     parser.add_argument("--timeout", type=float, default=360)
     args = parser.parse_args()
     expected = set(args.expect.split(","))
     known = {"thread_started", "turn_completed", "approval_roundtrip", "resume_ok", "interrupt_ok", "resume_fresh_ok",
-             "agent_message_delta", "command_execution_output", "user_input_question", "unsupported_method_errors", "multi_thread_ok", "fork_ok", "reconnect_ok", "external_client_reply_while_attached_ok", "list_contains_both_backends"}
+             "agent_message_delta", "command_execution_output", "user_input_question", "unsupported_method_errors", "multi_thread_ok", "fork_ok", "reconnect_ok", "external_client_reply_while_attached_ok", "list_contains_both_backends", "cross_backend_model_override_tolerated", "wire_schema_clean"}
     if not expected <= known:
         parser.error("unknown expectation: " + str(expected - known))
     root = Path(tempfile.mkdtemp(prefix="as-codex-remote-")).resolve()
@@ -43,7 +43,9 @@ def main():
     workspace = root / "workspace"
     for directory in [home, codex_home, state, workspace]:
         directory.mkdir(parents=True, exist_ok=True)
-    mixed = "list_contains_both_backends" in expected
+    mixed = bool({"list_contains_both_backends", "cross_backend_model_override_tolerated"} & expected)
+    schema_root = root / "schema"
+    subprocess.run(["codex", "app-server", "generate-json-schema", "--experimental", "--out", str(schema_root)], check=True, capture_output=True)
     if args.backend == "claude" or mixed:
         # Reuse existing login only; never request or create credentials. Keep
         # global allowlists/hooks out of the isolated approval smoke.
@@ -250,9 +252,8 @@ trust_level = "trusted"
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 150, 0, 0))
         command = ["codex", "--remote", endpoint["url"], "--remote-auth-token-env", "SMOKE_BEARER", "--no-alt-screen"]
-        # --model is a sticky override on every native resume, including the
-        # other backend. The config default selects the first thread instead;
-        # subsequent picker selections must inherit their saved model.
+        # Exercise the sticky TUI startup override across both backends.
+        command += ["--model", "sonnet" if args.backend == "claude" else "gpt-5.6-sol"]
         command += extra or []
         tui = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, cwd=workspace, env=env, start_new_session=True)
         os.close(slave)
@@ -561,6 +562,17 @@ trust_level = "trusted"
             assert card["connection"] == primary_card["connection"] and card["id"] != primary_card["id"], "mixed approval IDs collided or used different connections"
             summary["mixed_backends"] = {"connection": next(iter(connections)), "threads": backend_ids, "metadata": {k: metadata[v] for k, v in backend_ids.items()}, "loaded_lists": loaded, "interrupts": interrupts, "approvals": [primary_card, card]}
             proof["list_contains_both_backends"] = True
+            startup_model = "sonnet" if args.backend == "claude" else "gpt-5.6-sol"
+            retained_model = "sonnet" if other_backend == "claude" else "gpt-5.6-sol"
+            overrides = [f for f in current if f.get("direction") == "TUI>AS" and f.get("method") in {"thread/resume", "turn/start"} and f.get("params", {}).get("threadId") == other_id and f["params"].get("model") == startup_model]
+            assert overrides, "TUI did not send a cross-backend startup override"
+            for request in overrides:
+                assert any(f.get("direction") == "AS>TUI" and f.get("connection") == request["connection"] and f.get("id") == request["id"] and "result" in f for f in current), "cross-backend override request failed"
+            warning = "该线程为 %s，已沿用 %s" % (other_backend, retained_model)
+            assert any(f.get("direction") == "AS>TUI" and f.get("method") == "warning" and f.get("params", {}).get("threadId") == other_id and f["params"].get("message") == warning for f in current), "missing visible model fallback warning"
+            wait(lambda: warning.encode() in output, "TUI rendered model fallback warning")
+            proof["cross_backend_model_override_tolerated"] = True
+            summary["cross_backend_model_override"] = {"requests": len(overrides), "startup_model": startup_model, "retained_model": retained_model, "warning": warning}
             switch(thread_id)
         if "fork_ok" in expected:
             fork_offset = len(frames())
@@ -651,8 +663,17 @@ trust_level = "trusted"
         summary["wire_frames"] = len(current)
         summary["client_methods"] = list(dict.fromkeys(f["method"] for f in current if f.get("direction") == "TUI>AS" and "method" in f))
         summary["rpc_errors"] = [f for f in current if "error" in f]
+        validator = Path(__file__).with_name("codex-wire-schema.py")
+        validation = subprocess.run(["uv", "run", str(validator), str(schema_root), str(wire)], capture_output=True, text=True)
+        (root / "wire-schema.json").write_text(validation.stdout)
+        (root / "wire-schema.stderr").write_text(validation.stderr)
+        try:
+            summary["wire_schema"] = json.loads(validation.stdout)
+            proof["wire_schema_clean"] = validation.returncode == 0 and summary["wire_schema"]["clean"]
+        except (ValueError, KeyError):
+            summary["wire_schema"] = {"clean": False, "error": validation.stderr}
         summary["elapsed_seconds"] = round(time.monotonic() - started, 2)
-        summary["passed"] = all(proof[name] for name in expected) and "error" not in summary
+        summary["passed"] = all(proof[name] for name in expected) and proof["wire_schema_clean"] and "error" not in summary
         (root / "summary.json").write_text(json.dumps(summary, indent=2))
         print(json.dumps(summary, indent=2))
     return 0 if summary["passed"] else 1

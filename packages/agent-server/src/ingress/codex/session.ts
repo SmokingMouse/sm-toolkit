@@ -38,7 +38,7 @@ export class CodexSession {
   private restoring: Promise<void> = Promise.resolve();
   constructor(server: AgentServer, private readonly control: ControlClient, private readonly options: { token: string; send: (frame: NativeObject) => void; end?: () => void; audit?: (message: string) => void; claudeThreads?: boolean }) {
     this.client = server.connectInProcess();
-    this.router = new CodexRouter(server, this.client, control, this.abort.signal, options.claudeThreads ?? false);
+    this.router = new CodexRouter(server, this.client, control, this.abort.signal, options.claudeThreads ?? false, frame => this.send(frame));
     this.unsubscribe = this.client.onFrame(frame => this.fromAS(frame));
     this.unclose = this.client.onClose(() => { this.close(); options.end?.(); });
   }

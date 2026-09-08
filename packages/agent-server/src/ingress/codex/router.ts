@@ -63,7 +63,7 @@ export function nativeOptions(p: NativeObject, current: Partial<StartThreadParam
 /** The durable engine UUID index plus ThreadManager.live are the routing table. */
 export class CodexRouter {
   readonly attached = new Set<string>();
-  constructor(readonly server: AgentServer, readonly client: InProcessClient, readonly control: ControlClient, private readonly signal?: AbortSignal, readonly claudeThreads = false) {}
+  constructor(readonly server: AgentServer, readonly client: InProcessClient, readonly control: ControlClient, private readonly signal?: AbortSignal, readonly claudeThreads = false, private readonly notify?: (frame: NativeObject) => void) {}
   async reattach(threadId: string): Promise<void> {
     const thread = this.server.threads.get(threadId);
     if (thread.backend === "claude" && !this.claudeThreads) return;
@@ -107,8 +107,12 @@ export class CodexRouter {
     await this.allowedPath(options.cwd ?? thread.cwd);
     if (thread.permission === "readonly" && ((options.permission && options.permission !== "readonly") || (options.sandbox && options.sandbox !== "read-only"))) throw new ProtocolError(ErrorCode.unauthorized, "as-ingress: readonly thread cannot be elevated");
     if (options.model != null) {
-      this.server.threads.model(options.model, thread.backend, thread.id);
-      if (isClaudeModel(options.model) !== (thread.backend === "claude")) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: changing backend requires a new thread");
+      // The TUI repeats its startup model on picker resumes and turns. An
+      // existing thread's backend is immutable; discard only that override.
+      if (isClaudeModel(options.model) !== (thread.backend === "claude")) {
+        delete options.model;
+        this.notify?.({ method: "warning", params: { threadId: nativeThreadId(thread), message: `该线程为 ${thread.backend}，已沿用 ${thread.model}` } });
+      } else this.server.threads.model(options.model, thread.backend, thread.id);
     }
     if (thread.backend === "codex" && saved.fjContext && options.model != null && options.model !== "gpt-6-astra") throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: fj Codex requires gpt-6-astra");
   }
@@ -260,7 +264,7 @@ export class CodexRouter {
         this.rejectExtras(p); const thread = resolveThread(this.server, p.threadId);
         const saved = this.server.log.options<StartThreadParams>(thread.id);
         const options = nativeOptions(p, { ...saved, permission: thread.permission }); await this.paths(p);
-        await this.guardThread(thread, { ...options, permission: options.permission ?? thread.permission });
+        await this.guardThread(thread, options);
         const input = this.input(p);
         for (const part of input) if (part.type === "image" || part.type === "file") await this.allowedPath(part.path);
         const engine = thread.backend === "codex" ? this.engine(thread) : undefined;

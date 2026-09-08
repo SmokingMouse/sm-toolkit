@@ -98,7 +98,7 @@ export function claudeAnswer(method: ServerRequestMethod, p: NativeObject, resul
 }
 export function claudeApproval(method: ServerRequestMethod, p: NativeObject, thread: Thread): NativeObject {
   if (claudeToolPermission(method, p)) return {
-    threadId: thread.id.slice(3), turnId: p.turnId, itemId: p.itemId,
+    threadId: thread.id.slice(3), turnId: p.turnId, itemId: p.itemId, isBlocking: true,
     questions: [{ id: "permission", header: `权限请求：${p.permissions.toolName}`, question: JSON.stringify(p.permissions.input, null, 2)?.slice(0, 4000) ?? "无输入",
       isOther: false, isSecret: false, options: [{ label: "allow", description: "允许本次工具调用" }, { label: "deny", description: "拒绝本次工具调用" }] }],
   };
