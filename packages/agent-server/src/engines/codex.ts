@@ -120,7 +120,7 @@ export class CodexEngine implements EngineSession {
         const version = (typeof thread.cliVersion === "string" ? thread.cliVersion.trim() : "")
           || String(initialized.userAgent ?? "").match(/^[^\s/]+\/(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)(?=\s|$)/)?.[1];
         if (version !== CODEX_SCHEMA_VERSION) this.events.push({ type: "error", error: codexProtocolError(`Codex version ${version ?? "unknown"} differs from pinned schema ${CODEX_SCHEMA_VERSION}`, { initialized, thread }).toJSON(), willRetry: false });
-        this.engineThreadId = id; this.events.push({ type: "metadata", engineThreadId: id });
+        this.engineThreadId = id; this.events.push({ type: "metadata", engineThreadId: id, nativeThreadData: { ...structuredClone(thread), turns: [] } });
         this.threadResponse = structuredClone(result);
       });
       this.assertAlive(); this.ready = true;

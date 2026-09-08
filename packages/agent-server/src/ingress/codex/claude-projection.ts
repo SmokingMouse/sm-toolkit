@@ -54,7 +54,7 @@ export function claudeThread(thread: Thread, turns: NativeObject[] = []): Native
   const id = thread.id.slice(3);
   return { id, sessionId: id, model: thread.model ?? null, modelProvider: "claude", cwd: thread.cwd, name: thread.title ?? null, preview: thread.title ?? "",
     createdAt: Math.floor(thread.createdAtMs / 1000), updatedAt: Math.floor((thread.closedAtMs ?? thread.createdAtMs) / 1000),
-    cliVersion: "", source: "appServer", status: claudeStatus(thread.status.type), turns, historyMode: "legacy", ephemeral: false,
+    cliVersion: "", source: "cli", status: claudeStatus(thread.status.type), turns, historyMode: "paginated", ephemeral: false,
     projectId: null, path: null, parentThreadId: null, forkedFromId: thread.forkedFrom?.threadId.slice(3) ?? null, gitInfo: null };
 }
 export function claudeSettings(thread: Thread): NativeObject {
@@ -98,7 +98,7 @@ export function claudeAnswer(method: ServerRequestMethod, p: NativeObject, resul
 }
 export function claudeApproval(method: ServerRequestMethod, p: NativeObject, thread: Thread): NativeObject {
   if (claudeToolPermission(method, p)) return {
-    threadId: thread.id.slice(3), turnId: p.turnId, itemId: p.itemId,
+    threadId: thread.id.slice(3), turnId: p.turnId, itemId: p.itemId, isBlocking: true,
     questions: [{ id: "permission", header: `权限请求：${p.permissions.toolName}`, question: JSON.stringify(p.permissions.input, null, 2)?.slice(0, 4000) ?? "无输入",
       isOther: false, isSecret: false, options: [{ label: "allow", description: "允许本次工具调用" }, { label: "deny", description: "拒绝本次工具调用" }] }],
   };

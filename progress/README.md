@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server native ingress 已修 full 附着误占输入租约，权限设置改用短租约，生命周期 close 放开输入门控，待主控独立验收。
+agent-server native ingress 已修复 TUI 跨后端默认模型兼容与 Claude 权限卡 schema，双后端各三轮、全量测试和 typecheck 通过，待主控验收。
 
 ## Goals
 

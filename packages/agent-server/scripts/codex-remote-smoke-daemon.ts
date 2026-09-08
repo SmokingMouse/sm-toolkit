@@ -73,9 +73,16 @@ as1.onFrame(frame => appendFileSync(join(root, "fresh-as1.ndjson"), JSON.stringi
 await as1.request("initialize", { protocolVersion: "as/1", token, client: { name: "smoke-as1", version: "1", kind: "cli", label: "smoke-as1" }, capabilities: {} });
 await as1.notifyInitialized();
 const fresh = await as1.request("thread/start", { backend, cwd: join(root, "workspace"), model: backend === "claude" ? "sonnet" : "gpt-5.6-sol", permission: "full" });
+let mixedThreadId: string | undefined;
+if (process.env.CODEX_SMOKE_MIXED === "1") {
+  const other = backend === "claude" ? "codex" : "claude";
+  const { thread } = await as1.request("thread/start", { backend: other, cwd: join(root, "workspace"), model: other === "claude" ? "sonnet" : "gpt-5.6-sol", permission: "auto-edit", ...(other === "codex" ? { sandbox: "workspace-write" } : {}) });
+  await as1.request("thread/name/set", { threadId: thread.id, name: "S3-MIXED-" + other.toUpperCase() });
+  mixedThreadId = other === "claude" ? thread.id.slice(3) : thread.engineThreadId;
+}
 if (daemon.server.log.turns(fresh.thread.id).length !== 0) throw new Error("fresh thread already has turns");
 as1.close();
-writeFileSync(join(root, "smoke-endpoint.json"), JSON.stringify({ url: `ws://127.0.0.1:${proxy.port}`, tokenPath: daemon.paths.tokenPath, databasePath: daemon.paths.databasePath, freshThreadId: backend === "claude" ? fresh.thread.id.slice(3) : fresh.thread.engineThreadId, freshAsThreadId: fresh.thread.id }));
+writeFileSync(join(root, "smoke-endpoint.json"), JSON.stringify({ url: `ws://127.0.0.1:${proxy.port}`, nativeUrl: daemon.codexIngressUrl, tokenPath: daemon.paths.tokenPath, databasePath: daemon.paths.databasePath, mixedThreadId, freshThreadId: backend === "claude" ? fresh.thread.id.slice(3) : fresh.thread.engineThreadId, freshAsThreadId: fresh.thread.id }));
 let closing = false;
 async function shutdown() {
   if (closing) return; closing = true;

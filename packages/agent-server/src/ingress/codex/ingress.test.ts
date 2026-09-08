@@ -4,6 +4,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync, chmodSy
 import { join, resolve } from "node:path";
 import { AgentServer } from "../../server/server.js";
 import { CodexEngine } from "../../engines/codex.js";
+import { MockEngine } from "../../engines/mock.js";
 import { mapCodexDecision } from "../../engines/codex-mapper.js";
 import { ServerRequestMethodSchema } from "../../protocol/index.js";
 import { until } from "../../test-helpers.test.js";
@@ -28,20 +29,22 @@ class FakeControl implements ControlClient {
   async request(method: string, params?: NativeObject) { this.calls.push({ method, params }); return method === "model/list" ? { data: [{ id: "good", model: "gpt-6-astra" }, { id: "bad", model: "fable" }], nextCursor: null } : { marker: method }; }
   async close() { this.closed = true; }
 }
-function setup(scenario = "simple", requestTimeoutMs?: number) {
+function setup(scenario = "simple", requestTimeoutMs?: number, mixed = false) {
   const root = temporary(), control = new FakeControl(), engines: CodexEngine[] = [];
-  const server = new AgentServer({ databasePath: join(root, "db"), token: "secret", allowedRoots: [root], idleTimeoutMs: 0, engineFactory: () => {
+  const claude = new MockEngine();
+  const server = new AgentServer({ databasePath: join(root, "db"), token: "secret", allowedRoots: [root], idleTimeoutMs: 0, engineFactory: backend => {
+    if (mixed && backend === "claude") return claude;
     const nativeId = crypto.randomUUID();
     const engine = new CodexEngine({ requestTimeoutMs, spawnProcess: (_cmd, _args, opts) => spawn(process.execPath, [resolve(import.meta.dir, "../../../scripts/fixtures/fake-codex-app-server.ts")], {
       ...opts, env: { ...opts.env, FAKE_CODEX_SCENARIO: scenario, FAKE_CODEX_THREAD_ID: nativeId }, stdio: "pipe",
     }) }); engines.push(engine); return engine;
   } });
   cleanups.push(() => server.close());
-  return { root, server, control, engines };
+  return { root, server, control, engines, claude, mixed };
 }
 function connection(f: ReturnType<typeof setup>) {
   const frames: NativeObject[] = [];
-  const session = new CodexSession(f.server, f.control, { token: "secret", send: frame => frames.push(frame) });
+  const session = new CodexSession(f.server, f.control, { token: "secret", claudeThreads: f.mixed, send: frame => frames.push(frame) });
   cleanups.push(() => session.close());
   let id = 0;
   const request = async (method: string, params: NativeObject = {}) => {
@@ -113,7 +116,7 @@ test("native UUID routes across connections; AS mutations own turn IDs, resume, 
   expect(b.frames.find(frame => frame.id === "missing-turn")?.error).toEqual({ code: -32600, message: "Invalid request: missing field `turnId`" });
   const resumed = await b.request("thread/resume", { threadId: first.thread.id }); expect(resumed.thread.id).toBe(first.thread.id);
   expect(f.engines).toHaveLength(2);
-  const list = await a.request("thread/list", { limit: 1 }); expect(list.data).toHaveLength(1); expect(list.nextCursor).toBe(list.data[0].id);
+  const list = await a.request("thread/list", { limit: 1 }); expect(list.data).toHaveLength(1); expect(list.nextCursor).toBeString();
   expect((await a.request("thread/list", { cursor: list.nextCursor, limit: 1 })).data[0].id).not.toBe(list.data[0].id);
   await a.session.client.request("thread/lease/acquire", { threadId: asThread.id });
   await expect(b.request("thread/name/set", { threadId: first.thread.id, name: "blocked title" })).rejects.toThrow(`codex-tui:${a.session.client.clientId}`);
@@ -143,6 +146,20 @@ test("full Codex resume and input never acquire a lease; a peer lease still bloc
   // A cold native resume must also omit the unchanged full permission.
   expect((await b.request("thread/resume", full)).thread.id).toBe(thread.id);
   expect(f.server.leases.read(as.id)).toBeUndefined();
+});
+
+test("cold resume discards cross-backend defaults but applies same-backend models", async () => {
+  const f = setup(), c = connection(f); await c.initialize();
+  const { thread } = await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });
+  const asId = resolveThread(f.server, thread.id).id;
+  await c.session.client.request("thread/close", { threadId: asId });
+  const resumed = await c.request("thread/resume", { threadId: thread.id, model: "sonnet" });
+  expect(resumed.model).toBe("gpt-6-astra");
+  expect(resumed.thread.id).toBe(thread.id);
+  expect(resolveThread(f.server, thread.id).backend).toBe("codex");
+  await c.session.client.request("thread/close", { threadId: asId });
+  expect((await c.request("thread/resume", { threadId: thread.id, model: "gpt-5.6-sol" })).model).toBe("gpt-5.6-sol");
+  expect(c.frames.filter(f => f.method === "warning")).toHaveLength(1);
 });
 
 test("native thread names are trimmed, persisted and projected through read, list and resume", async () => {
@@ -280,7 +297,7 @@ test("model, cwd, reviewer, service tier, readonly and side-effect guards are fa
   for (const options of [{ serviceTier: "priority" }, { approvalsReviewer: "auto_review" }, { config: { approval_policy: "never" } }, { model: "fable" }, { cwd: "/" }]) await expect(c.request("thread/start", { model: "gpt-6-astra", cwd: f.root, ...options })).rejects.toThrow();
   expect(f.engines).toHaveLength(0);
   const { thread } = await c.request("thread/start", { model: "gpt-6-astra", cwd: f.root, approvalPolicy: "never", sandbox: "read-only" });
-  for (const options of [{ sandboxPolicy: { type: "workspaceWrite" } }, { approvalsReviewer: "auto_review" }, { serviceTier: "fast" }, { cwd: "/" }, { model: "fable" }, { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }]) await expect(c.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "bad" }], ...options })).rejects.toThrow();
+  for (const options of [{ sandboxPolicy: { type: "workspaceWrite" } }, { approvalsReviewer: "auto_review" }, { serviceTier: "fast" }, { cwd: "/" }, { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }]) await expect(c.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "bad" }], ...options })).rejects.toThrow();
   await expect(c.request("thread/resume", { threadId: thread.id, approvalPolicy: "never", sandbox: "danger-full-access" })).rejects.toThrow("readonly");
   expect(f.server.log.turns(resolveThread(f.server, thread.id).id)).toHaveLength(0);
   for (const method of ["hooks/list", "skills/list", "plugin/list"]) await expect(c.request(method, { cwds: ["/"] })).rejects.toThrow("allowed_roots");
@@ -345,6 +362,142 @@ test("engine UUID lookup survives daemon restart without an ingress mapping tabl
   expect(resolveThread(reopened, thread.id).id).toBe(original);
   expect(resolveThread(reopened, thread.id).title).toBe("survives restart");
   expect(resolveThread(reopened, thread.id).meta?.nativeThreadData).toHaveProperty("id", thread.id);
+});
+
+test("one native connection alternates two owning processes and detached threads stop streaming", async () => {
+  const f = setup(), c = connection(f); await c.initialize();
+  const ids = [];
+  for (let n = 0; n < 2; n++) ids.push((await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" })).thread.id);
+  for (const id of [ids[0], ids[1], ids[0], ids[1]]) {
+    const offset = c.frames.length;
+    const turn = await c.request("turn/start", { threadId: id, input: [{ type: "text", text: id }] });
+    await until(() => c.frames.slice(offset).some(f => f.method === "turn/completed"));
+    const events = c.frames.slice(offset).filter(f => f.method?.startsWith("turn/") || f.method?.startsWith("item/"));
+    expect(events.length).toBeGreaterThan(0);
+    for (const event of events) { expect(event.params.threadId).toBe(id); if (event.method === "turn/completed") expect(event.params.turn.id).toBe(turn.turn.id); }
+  }
+  const loaded = await c.request("thread/loaded/list", { limit: 1 });
+  expect(loaded.data).toEqual([...ids].sort().slice(0, 1));
+  expect((await c.request("thread/loaded/list", { cursor: loaded.nextCursor, limit: 0 })).data).toEqual([...ids].sort().slice(1));
+  expect((await c.request("thread/loaded/list", { cursor: "ffffffff-ffff-ffff-ffff-ffffffffffff" })).data).toEqual([]);
+  await c.request("thread/unsubscribe", { threadId: ids[1] });
+  c.session.close();
+  const reconnected = connection(f); await reconnected.initialize();
+  expect([...reconnected.session.router.attached]).toEqual([resolveThread(f.server, ids[0]).id]);
+  expect(f.engines).toHaveLength(2);
+});
+
+test("mixed Codex and Claude share a connection with independent pending approvals and interrupts", async () => {
+  const f = setup("pending-status", undefined, true), c = connection(f); await c.initialize();
+  const codex = (await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" })).thread.id;
+  const claude = (await c.request("thread/start", { cwd: f.root, model: "sonnet" })).thread.id;
+  const list = (await c.request("thread/list")).data;
+  expect(list.find((t: NativeObject) => t.id === codex).modelProvider).toBe("fake");
+  expect(list.find((t: NativeObject) => t.id === claude)).toMatchObject({ modelProvider: "claude", model: "sonnet" });
+  expect((await c.request("thread/loaded/list")).data).toEqual([codex, claude].sort());
+  const asClaude = resolveThread(f.server, claude);
+  expect((await c.request("thread/resume", { threadId: codex, model: "sonnet" })).model).toBe("gpt-6-astra");
+  expect((await c.request("thread/resume", { threadId: claude, model: "gpt-6-astra" })).model).toBe("sonnet");
+  for (const [id, backend, model] of [[codex, "codex", "gpt-6-astra"], [claude, "claude", "sonnet"]])
+    expect(c.frames).toContainEqual({ method: "warning", params: { threadId: id, message: `该线程为 ${backend}，已沿用 ${model}` } });
+  for (const interrupted of [codex, claude]) {
+    const offset = c.frames.length, decisions: unknown[] = [];
+    const ct = (await c.request("turn/start", { threadId: codex, model: "sonnet", input: [{ type: "text", text: "codex approval" }] })).turn.id;
+    const at = (await c.request("turn/start", { threadId: claude, collaborationMode: { mode: "default", settings: { model: "gpt-6-astra" } }, input: [{ type: "text", text: "claude approval" }] })).turn.id;
+    await until(() => f.claude.sent.some(t => t.turnId === at));
+    expect(f.claude.sent.find(t => t.turnId === at)!.options.model).not.toBe("gpt-6-astra");
+    expect(resolveThread(f.server, codex).model).toBe("gpt-6-astra");
+    expect(resolveThread(f.server, claude).model).toBe("sonnet");
+    expect(c.frames.slice(offset).filter(f => f.method === "warning")).toHaveLength(2);
+    const requestId = `ar_${crypto.randomUUID()}`;
+    f.claude.emit({ type: "itemStarted", turnId: at, item: { id: `item-${at}`, type: "commandExecution", payload: { command: "pwd", cwd: f.root }, status: "inProgress" } });
+    f.claude.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { threadId: asClaude.id, turnId: at, itemId: `item-${at}`, requestId, command: "pwd", cwd: f.root, startedAtMs: 1 } }, respond: d => { decisions.push(d); } });
+    await until(() => c.frames.slice(offset).filter(x => x.method === "item/commandExecution/requestApproval").length === 2);
+    const cards = c.frames.slice(offset).filter(x => x.method === "item/commandExecution/requestApproval");
+    const cc = cards.find(x => x.params.threadId === codex)!, ac = cards.find(x => x.params.threadId === claude)!;
+    expect(cc.id).not.toBe(ac.id); expect(cc.params.turnId).toBe(ct); expect(ac.params.turnId).toBe(at);
+    // Interrupt one engine while the other engine's approval is still pending.
+    const peer = interrupted === codex ? claude : codex, peerCard = interrupted === codex ? ac : cc;
+    await expect(c.request("turn/interrupt", { threadId: interrupted, turnId: interrupted === codex ? at : ct })).rejects.toThrow("expected active turn id");
+    await c.request("turn/interrupt", { threadId: interrupted, turnId: interrupted === codex ? ct : at });
+    await until(() => c.frames.slice(offset).some(x => x.method === "turn/completed" && x.params.threadId === interrupted));
+    expect(c.frames.slice(offset).some(x => x.method === "turn/completed" && x.params.threadId === peer)).toBe(false);
+    expect(c.frames.slice(offset).some(x => x.method === "serverRequest/resolved" && x.params.requestId === peerCard.id)).toBe(false);
+    if (peer === claude) expect(decisions).toEqual([]);
+    await c.session.receive({ id: peerCard.id, result: { decision: "accept" } });
+    if (peer === claude) {
+      await until(() => decisions.length === 1); expect(decisions).toEqual([{ decision: "accept" }]);
+      f.claude.emit({ type: "turnCompleted", turnId: at, status: "completed" });
+    }
+    await until(() => c.frames.slice(offset).some(x => x.method === "turn/completed" && x.params.threadId === peer));
+    expect(c.frames.slice(offset).find(x => x.method === "turn/completed" && x.params.threadId === peer)?.params.turn.status).toBe("completed");
+    expect(c.frames.slice(offset).find(x => x.method === "serverRequest/resolved" && x.params.requestId === peerCard.id)?.params.threadId).toBe(peer);
+  }
+});
+
+test("disconnect releases full lease, replays pending and offline resolved cards without killing either engine", async () => {
+  const f = setup("conversation"), a = connection(f); await a.initialize();
+  const { thread } = await a.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });
+  const as = resolveThread(f.server, thread.id);
+  await a.session.client.request("thread/lease/acquire", { threadId: as.id });
+  await a.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "approval" }] });
+  await until(() => a.frames.some(f => f.method === "item/commandExecution/requestApproval"));
+  const original = a.frames.find(f => f.method === "item/commandExecution/requestApproval")!;
+  a.session.close();
+  expect(f.server.leases.read(as.id)).toBeUndefined(); expect(f.server.threads.live.has(as.id)).toBe(true);
+  const b = connection(f); await b.initialize();
+  const pending = b.frames.find(f => f.method === "item/commandExecution/requestApproval")!;
+  expect(pending.params).toEqual(original.params); expect(pending.id).not.toBe(original.id);
+  expect(b.frames.some(f => f.method === "serverRequest/resolved" && f.params.requestId === original.id)).toBe(true);
+  // An already-online observer decides after b disconnects, then the next
+  // native connection must receive resolved, not a duplicate approval.
+  const observer = connection(f); await observer.initialize(); await observer.request("thread/resume", { threadId: thread.id });
+  b.session.close();
+  const card = observer.frames.find(f => f.method === "item/commandExecution/requestApproval")!;
+  await observer.session.receive({ id: card.id, result: { decision: "acceptForSession" } });
+  await until(() => observer.frames.some(f => f.method === "item/fileChange/requestApproval"));
+  const d = connection(f); await d.initialize();
+  expect(d.frames.some(f => f.method === "serverRequest/resolved" && f.params.requestId === pending.id && f.params.reason === "decided")).toBe(true);
+  expect(d.frames.some(f => f.method === "item/commandExecution/requestApproval")).toBe(false);
+  expect(d.frames.some(f => f.method === "item/fileChange/requestApproval")).toBe(true);
+  await d.session.client.request("thread/lease/acquire", { threadId: as.id });
+  expect(f.server.leases.read(as.id)?.holder.clientId).toBe(d.session.client.clientId);
+  expect(f.engines).toHaveLength(1);
+});
+
+test("reconnected full-permission input does not acquire an implicit lease", async () => {
+  const f = setup(), a = connection(f); await a.initialize();
+  const { thread } = await a.request("thread/start", { cwd: f.root, model: "gpt-6-astra", approvalPolicy: "never", sandbox: "danger-full-access" });
+  const as = resolveThread(f.server, thread.id);
+  expect(f.server.leases.read(as.id)).toBeUndefined();
+  await a.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "first" }] });
+  await until(() => f.server.threads.get(as.id).status.type === "idle");
+  expect(f.server.leases.read(as.id)).toBeUndefined();
+  a.session.close(); expect(f.server.leases.read(as.id)).toBeUndefined();
+  const b = connection(f); await b.initialize();
+  expect(f.server.leases.read(as.id)).toBeUndefined();
+  await b.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "second" }] });
+  expect(f.server.leases.read(as.id)).toBeUndefined();
+  expect(f.engines).toHaveLength(1);
+});
+
+test("thread aggregation traverses every AS page, excludes archived by default, and resumes reverse anchors", async () => {
+  const f = setup(), c = connection(f); await c.initialize();
+  // Real durable rows beyond the as/1 page limit; no thousands of processes.
+  f.server.log.transaction(() => { for (let n = 0; n < 10003; n++) {
+    const id = `th_${crypto.randomUUID()}`;
+    f.server.log.insertThread({ id, backend: "codex", engineThreadId: crypto.randomUUID(), cwd: f.root, createdAtMs: n * 1000,
+      status: { type: n === 10002 ? "closed" : "idle" }, meta: { nativeThreadData: { createdAt: n, modelProvider: "test" } } }, {}, {});
+  } });
+  const first = await c.request("thread/list", { limit: 2 });
+  expect(first.data.map((t: NativeObject) => t.createdAt)).toEqual([10001, 10000]);
+  const second = await c.request("thread/list", { limit: 2, cursor: first.nextCursor });
+  expect(second.data.map((t: NativeObject) => t.createdAt)).toEqual([9999, 9998]);
+  const back = await c.request("thread/list", { limit: 2, sortDirection: "asc", cursor: second.backwardsCursor });
+  expect(back.data.map((t: NativeObject) => t.createdAt)).toEqual([9999, 10000]);
+  expect((await c.request("thread/list", { archived: true })).data.map((t: NativeObject) => t.createdAt)).toEqual([10002]);
+  expect((await c.request("thread/list", { limit: 10000 })).data).toHaveLength(100);
+  expect((await c.request("thread/list", { modelProviders: ["missing"] }))).toEqual({ data: [], nextCursor: null, backwardsCursor: null });
 });
 
 test("codex_ingress defaults off, validates config, and disabled endpoint bytes stay unchanged", async () => {

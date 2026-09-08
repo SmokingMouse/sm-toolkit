@@ -5,15 +5,13 @@ import { ErrorCode, ProtocolError, type Item, type StartThreadParams, type Threa
 import type { AgentServer, InProcessClient } from "../../server/server.js";
 import { CONTROL_METHODS, type ControlClient, type NativeObject } from "./control-process.js";
 import { claudeItems, claudeSettings, claudeThread, claudeTurn } from "./claude-projection.js";
+import { nativePage, pageLimit, turnItemsView } from "./pagination.js";
+import { NativeRpcError, nativeResult } from "./native-error.js";
+export { NativeRpcError } from "./native-error.js";
 
 export const isClaudeModel = (model: string): boolean => /^(claude-|sonnet(?:$|-)|opus(?:$|-)|haiku(?:$|-)|fable(?:$|-))/i.test(model);
 const claudeModels = ["sonnet", "opus"].map(model => ({ id: model, model, displayName: `Claude · ${model}`, description: `Claude ${model} via Agent Server`, hidden: false,
   isDefault: false, supportedReasoningEfforts: [], defaultReasoningEffort: "medium", inputModalities: ["text", "image"] }));
-
-/** Preserve native app-server errors without AS codes or message prefixes. */
-export class NativeRpcError extends Error {
-  constructor(readonly code: number, message: string) { super(message); }
-}
 
 export function nativeThreadId(thread: Thread): string {
   if (thread.backend === "claude") return thread.id.slice(3);
@@ -64,7 +62,15 @@ export function nativeOptions(p: NativeObject, current: Partial<StartThreadParam
 
 /** The durable engine UUID index plus ThreadManager.live are the routing table. */
 export class CodexRouter {
-  constructor(readonly server: AgentServer, readonly client: InProcessClient, readonly control: ControlClient, private readonly signal?: AbortSignal, readonly claudeThreads = false) {}
+  readonly attached = new Set<string>();
+  constructor(readonly server: AgentServer, readonly client: InProcessClient, readonly control: ControlClient, private readonly signal?: AbortSignal, readonly claudeThreads = false, private readonly notify?: (frame: NativeObject) => void) {}
+  async reattach(threadId: string): Promise<void> {
+    const thread = this.server.threads.get(threadId);
+    if (thread.backend === "claude" && !this.claudeThreads) return;
+    await this.allowedPath(thread.cwd);
+    await this.client.request("thread/attach", { threadId });
+    this.attached.add(threadId);
+  }
   private engine(thread: Thread): CodexEngine {
     const engine = this.server.threads.session(thread.id);
     if (!(engine instanceof CodexEngine)) throw new ProtocolError(ErrorCode.backend_unsupported, "as-ingress: native Codex engine required");
@@ -101,28 +107,40 @@ export class CodexRouter {
     await this.allowedPath(options.cwd ?? thread.cwd);
     if (thread.permission === "readonly" && ((options.permission && options.permission !== "readonly") || (options.sandbox && options.sandbox !== "read-only"))) throw new ProtocolError(ErrorCode.unauthorized, "as-ingress: readonly thread cannot be elevated");
     if (options.model != null) {
-      this.server.threads.model(options.model, thread.backend, thread.id);
-      if (isClaudeModel(options.model) !== (thread.backend === "claude")) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: changing backend requires a new thread");
+      // The TUI repeats its startup model on picker resumes and turns. An
+      // existing thread's backend is immutable; discard only that override.
+      if (isClaudeModel(options.model) !== (thread.backend === "claude")) {
+        delete options.model;
+        this.notify?.({ method: "warning", params: { threadId: nativeThreadId(thread), message: `该线程为 ${thread.backend}，已沿用 ${thread.model}` } });
+      } else this.server.threads.model(options.model, thread.backend, thread.id);
     }
     if (thread.backend === "codex" && saved.fjContext && options.model != null && options.model !== "gpt-6-astra") throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: fj Codex requires gpt-6-astra");
   }
   private threadView(thread: Thread): NativeObject {
-    if (thread.backend === "claude") return claudeThread(thread);
+    if (thread.backend === "claude") return { ...claudeThread(thread), ...this.threadActivity(thread) };
     const engine = this.server.threads.live.get(thread.id);
     const native = engine instanceof CodexEngine ? engine.nativeThreadStart().thread : thread.meta?.nativeThreadData;
     return { forkedFromId: null, parentThreadId: null,
       preview: thread.title ?? "", ephemeral: false, modelProvider: "unknown", createdAt: Math.floor(thread.createdAtMs / 1000),
-      updatedAt: Math.floor(thread.createdAtMs / 1000), cwd: thread.cwd, cliVersion: "", source: "appServer", gitInfo: null,
-      name: thread.title ?? null, turns: [], historyMode: "paginated", ...(native as NativeObject ?? {}),
+      updatedAt: Math.floor(thread.createdAtMs / 1000), cwd: thread.cwd, cliVersion: "", source: "cli", gitInfo: null,
+      name: thread.title ?? null, historyMode: "paginated", ...(native as NativeObject ?? {}),
       id: nativeThreadId(thread), sessionId: nativeThreadId(thread),
+      ...this.threadActivity(thread), turns: [],
+      ...(thread.forkedFrom ? { forkedFromId: nativeThreadId(this.server.threads.get(thread.forkedFrom.threadId)) } : {}),
       ...(thread.title !== undefined ? { name: thread.title } : {}),
       status: { type: thread.status.type === "running" ? "active" : thread.status.type === "systemError" ? "systemError" : "idle", ...(thread.status.type === "running" ? { activeFlags: [] } : {}) },
     };
   }
+  private threadActivity(thread: Thread): NativeObject {
+    const turns = this.server.log.turns(thread.id);
+    const last = turns.at(-1);
+    const updated = Math.max(thread.createdAtMs, thread.closedAtMs ?? 0, last?.completedAtMs ?? last?.startedAtMs ?? last?.enqueuedAtMs ?? 0);
+    return { updatedAt: Math.floor(updated / 1000), recencyAt: Math.floor(updated / 1000) };
+  }
   private claudeResponse(thread: Thread, includeTurns = false): NativeObject {
     thread = this.server.threads.get(thread.id);
     const items = includeTurns ? this.server.log.snapshot(thread.id).items : [];
-    return { ...claudeSettings(thread), thread: claudeThread(thread, includeTurns ? this.server.log.turns(thread.id).map(t => claudeTurn(t, items, nativeThreadId(thread))) : []) };
+    return { ...claudeSettings(thread), thread: { ...claudeThread(thread, includeTurns ? this.server.log.turns(thread.id).map(t => claudeTurn(t, items, nativeThreadId(thread))) : []), ...this.threadActivity(thread) } };
   }
   private claudeOnly(thread: Thread, method: string): void {
     if (thread.backend !== "claude") throw new ProtocolError(ErrorCode.method_not_found, `as-ingress: unsupported method ${method} on Codex threads`);
@@ -141,17 +159,7 @@ export class CodexRouter {
     return rest;
   }
   private async claudeHistory(thread: Thread, method: string, p: NativeObject): Promise<NativeObject> {
-    const direction = p.sortDirection ?? "desc", limit = p.limit ?? 100;
-    if (!["asc", "desc"].includes(direction) || !Number.isSafeInteger(limit) || limit < 1 || limit > 10000) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: invalid history pagination");
     const scope = `${nativeThreadId(thread)}:${method}:${p.turnId ?? ""}`;
-    let anchor: number | undefined, inclusive = false;
-    if (p.cursor != null) {
-      try { const c = JSON.parse(Buffer.from(p.cursor, "base64url").toString());
-        if (c.scope !== scope || !Number.isSafeInteger(c.anchor) || c.anchor < 0 || typeof c.inclusive !== "boolean") throw new Error();
-        anchor = c.anchor; inclusive = c.inclusive;
-      } catch { throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: invalid history cursor"); }
-    }
-    const cursor = (anchor: number, inclusive: boolean) => Buffer.from(JSON.stringify({ scope, anchor, inclusive })).toString("base64url");
     const snapshot: Item[] = [];
     let asCursor: string | undefined;
     do {
@@ -160,17 +168,35 @@ export class CodexRouter {
     } while (asCursor);
     let rows: Array<{ ordinal: number; value: NativeObject }>;
     if (method === "thread/turns/list") {
-      if (p.itemsView != null && !["full", "notLoaded", "summary"].includes(p.itemsView)) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: invalid itemsView");
-      rows = this.server.log.turns(thread.id).map(t => ({ ordinal: t.ordinal, value: p.itemsView === "notLoaded" ? { ...claudeTurn(t, [], nativeThreadId(thread)), itemsView: "notLoaded" } : claudeTurn(t, snapshot, nativeThreadId(thread)) }));
+      rows = this.server.log.turns(thread.id).map(t => ({ ordinal: t.ordinal, value: turnItemsView(claudeTurn(t, snapshot, nativeThreadId(thread)), p.itemsView ?? "summary") }));
     } else {
       // Keep AS seq cursors private. Each page is an immutable ordered slice of
       // the AS snapshot, including secondary image/subagent presentation items.
       rows = snapshot.filter(i => p.turnId == null || i.turnId === p.turnId).flatMap(i => claudeItems(i, nativeThreadId(thread)).map((item, n) => ({ ordinal: i.seq * 4 + n, value: { turnId: i.turnId, item } })));
     }
-    rows.sort((a, b) => (a.ordinal - b.ordinal) * (direction === "asc" ? 1 : -1));
-    if (anchor !== undefined) rows = rows.filter(r => direction === "asc" ? inclusive ? r.ordinal >= anchor! : r.ordinal > anchor! : inclusive ? r.ordinal <= anchor! : r.ordinal < anchor!);
-    const page = rows.slice(0, limit);
-    return { data: page.map(r => r.value), nextCursor: rows.length > limit ? cursor(page.at(-1)!.ordinal, false) : null, backwardsCursor: page.length ? cursor(page[0]!.ordinal, true) : null };
+    return nativePage(rows.map(r => ({ key: [r.ordinal, ""], value: r.value })), p, scope, method === "thread/items/list" ? "asc" : "desc");
+  }
+  private async claudeResume(thread: Thread, p: NativeObject): Promise<NativeObject> {
+    const turns = await this.claudeHistory(thread, "thread/turns/list", { limit: 1, sortDirection: "desc", itemsView: "notLoaded" });
+    const items = await this.claudeHistory(thread, "thread/items/list", { limit: 1, sortDirection: "desc" });
+    return { ...this.claudeResponse(thread, p.excludeTurns !== true),
+      initialTurnsPage: p.initialTurnsPage == null ? null : await this.claudeHistory(thread, "thread/turns/list", p.initialTurnsPage),
+      turnsBackwardsCursor: turns.backwardsCursor, itemsBackwardsCursor: items.backwardsCursor };
+  }
+  private async codexRead(thread: Thread, includeTurns: boolean): Promise<NativeObject> {
+    const result = await nativeResult(this.engine(thread).nativeThreadRead(includeTurns));
+    if (includeTurns && Array.isArray(thread.meta?.nativeInheritedTurns)) result.thread.turns = [...structuredClone(thread.meta.nativeInheritedTurns), ...result.thread.turns];
+    if (thread.forkedFrom) result.thread.forkedFromId = nativeThreadId(this.server.threads.get(thread.forkedFrom.threadId));
+    return result;
+  }
+  private async codexHistory(thread: Thread, method: "thread/turns/list" | "thread/items/list", p: NativeObject): Promise<NativeObject> {
+    if (!Array.isArray(thread.meta?.nativeInheritedTurns)) return nativeResult(this.engine(thread).nativeThreadHistory(method, p));
+    // AS forks at an item inside a turn use a bounded seed, not a native turn
+    // checkpoint. Retain original native presentation items for that prefix.
+    const { thread: native } = await this.codexRead(thread, true);
+    const values: NativeObject[] = method === "thread/turns/list" ? native.turns.map((t: NativeObject) => turnItemsView(t, p.itemsView ?? "summary"))
+      : native.turns.filter((t: NativeObject) => p.turnId == null || t.id === p.turnId).flatMap((t: NativeObject) => t.items.map((item: NativeObject) => ({ turnId: t.id, item })));
+    return nativePage(values.map((value, i) => ({ key: [i, ""], value })), p, `${nativeThreadId(thread)}:${method}:${p.turnId ?? ""}`, method === "thread/items/list" ? "asc" : "desc");
   }
   async request(method: string, p: NativeObject = {}): Promise<NativeObject> {
     if (!this.claudeThreads && typeof p.threadId === "string" && !this.server.log.findEngine(p.threadId, "codex") && findClaudeThread(this.server, `th_${p.threadId}`))
@@ -193,6 +219,7 @@ export class CodexRouter {
         if (backend === "claude" && !this.claudeThreads) throw new ProtocolError(ErrorCode.method_not_found, "as-ingress: Claude threads are disabled by codex_ingress.claude_threads");
         const selected = backend === "claude" ? this.claudeOptions(options) : options;
         const { thread } = await this.client.request("thread/start", { ...selected, model, backend, ...(backend === "codex" ? { serviceTier: "default" as const } : {}), permission: selected.permission ?? "default", ...(p.baseInstructions != null ? { systemPrompt: p.baseInstructions } : {}) });
+        this.attached.add(thread.id);
         if (backend === "claude") return this.claudeResponse(thread);
         const result = this.engine(thread).nativeThreadStart();
         // The ID mapping stays in the existing durable engine index. This shadow
@@ -216,18 +243,19 @@ export class CodexRouter {
         if (selected.permission === thread.permission) delete selected.permission;
         if (this.server.threads.live.has(thread.id)) await this.client.request("thread/attach", { threadId: thread.id });
         else await this.client.request("thread/resume", { ...selected, threadId: thread.id, backend: thread.backend });
-        if (thread.backend === "claude") return { ...this.claudeResponse(thread, p.excludeTurns !== true), initialTurnsPage: p.initialTurnsPage ? await this.claudeHistory(thread, "thread/turns/list", p.initialTurnsPage) : null, turnsBackwardsCursor: null, itemsBackwardsCursor: null };
+        this.attached.add(thread.id);
+        if (thread.backend === "claude") return this.claudeResume(thread, p);
         const engine = this.engine(thread), response = engine.nativeThreadStart();
-        const result: NativeObject = { ...response, ...await engine.nativeThreadRead(p.excludeTurns !== true), initialTurnsPage: null, turnsBackwardsCursor: null, itemsBackwardsCursor: null };
+        const result: NativeObject = { ...response, ...await this.codexRead(thread, p.excludeTurns !== true), initialTurnsPage: null, turnsBackwardsCursor: null, itemsBackwardsCursor: null };
         if (result.thread.historyMode === "paginated") {
           // Same one-entry descending probes as upstream
           // paginated_resume_backwards_cursors; never translate opaque cursors.
-          const turns = await engine.nativeThreadHistory("thread/turns/list", { limit: 1, sortDirection: "desc", itemsView: "notLoaded" });
-          const items = await engine.nativeThreadHistory("thread/items/list", { limit: 1, sortDirection: "desc" });
+          const turns = await this.codexHistory(thread, "thread/turns/list", { limit: 1, sortDirection: "desc", itemsView: "notLoaded" });
+          const items = await this.codexHistory(thread, "thread/items/list", { limit: 1, sortDirection: "desc" });
           result.turnsBackwardsCursor = turns.backwardsCursor;
           result.itemsBackwardsCursor = items.backwardsCursor;
         }
-        if (p.initialTurnsPage != null) result.initialTurnsPage = await engine.nativeThreadHistory("thread/turns/list", p.initialTurnsPage);
+        if (p.initialTurnsPage != null) result.initialTurnsPage = await this.codexHistory(thread, "thread/turns/list", p.initialTurnsPage);
         const title = this.server.threads.get(thread.id).title;
         if (title !== undefined) result.thread.name = title;
         return result;
@@ -236,7 +264,7 @@ export class CodexRouter {
         this.rejectExtras(p); const thread = resolveThread(this.server, p.threadId);
         const saved = this.server.log.options<StartThreadParams>(thread.id);
         const options = nativeOptions(p, { ...saved, permission: thread.permission }); await this.paths(p);
-        await this.guardThread(thread, { ...options, permission: options.permission ?? thread.permission });
+        await this.guardThread(thread, options);
         const input = this.input(p);
         for (const part of input) if (part.type === "image" || part.type === "file") await this.allowedPath(part.path);
         const engine = thread.backend === "codex" ? this.engine(thread) : undefined;
@@ -291,7 +319,7 @@ export class CodexRouter {
         const thread = resolveThread(this.server, p.threadId); await this.allowedPath(thread.cwd);
         await this.client.request("thread/read", { threadId: thread.id });
         if (thread.backend === "claude") return { thread: this.claudeResponse(thread, p.includeTurns === true).thread };
-        const result = await this.engine(thread).nativeThreadRead(p.includeTurns === true);
+        const result = await this.codexRead(thread, p.includeTurns === true);
         const title = this.server.threads.get(thread.id).title;
         if (title !== undefined) result.thread.name = title;
         return result;
@@ -301,27 +329,49 @@ export class CodexRouter {
         const thread = resolveThread(this.server, p.threadId); await this.allowedPath(thread.cwd);
         await this.client.request("thread/read", { threadId: thread.id });
         if (thread.backend === "claude") return this.claudeHistory(thread, method, p);
-        return this.engine(thread).nativeThreadHistory(method, p);
+        return this.codexHistory(thread, method, p);
       }
       case "thread/list": {
-        await this.paths(p);
-        const result = await this.client.request("thread/list", { limit: 10000, ...(p.cwd ? { cwd: p.cwd } : {}) });
-        let data = result.threads.filter(t => (this.claudeThreads && t.backend === "claude" || t.backend === "codex" && t.engineThreadId) && (p.archived == null || (t.status.type === "closed") === p.archived)).map(t => this.threadView(t));
+        const cwds = p.cwd == null ? [] : Array.isArray(p.cwd) ? p.cwd : [p.cwd];
+        await this.paths({ ...p, cwd: undefined, cwds });
+        if (p.originators?.length || p.projectId !== undefined || p.sectionId != null || p.sortKey === "section_position") throw new ProtocolError(ErrorCode.unsupported_capability, "as-ingress: originator/project/section filtering is unavailable");
+        if (p.parentThreadId && p.ancestorThreadId) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: parentThreadId and ancestorThreadId are mutually exclusive");
+        const threads: Thread[] = [];
+        let cursor: string | undefined;
+        do {
+          const result = await this.client.request("thread/list", { limit: 10000, ...(cursor ? { cursor } : {}) });
+          threads.push(...result.threads); cursor = result.nextCursor ?? undefined;
+        } while (cursor);
+        let data = threads.filter(t => (this.claudeThreads && t.backend === "claude" || t.backend === "codex" && t.engineThreadId) && (t.status.type === "closed") === (p.archived ?? false) && (!cwds.length || cwds.includes(t.cwd))).map(t => this.threadView(t));
         if (p.modelProviders?.length) data = data.filter(t => p.modelProviders.includes(t.modelProvider));
-        if (p.sourceKinds?.length) data = data.filter(t => p.sourceKinds.includes(typeof t.source === "string" ? t.source : "subAgent"));
-        if (p.searchTerm) data = data.filter(t => `${t.name ?? ""} ${t.preview}`.toLowerCase().includes(String(p.searchTerm).toLowerCase()));
+        const sourceKinds = p.sourceKinds?.length ? p.sourceKinds : p.parentThreadId || p.ancestorThreadId ? null : ["cli", "vscode"];
+        if (sourceKinds) data = data.filter(t => {
+          if (typeof t.source === "string") return sourceKinds.includes(t.source);
+          const kind = t.source?.subAgent;
+          return sourceKinds.includes("subAgent") || sourceKinds.includes(kind === "review" ? "subAgentReview" : kind === "compact" ? "subAgentCompact" : kind?.thread_spawn ? "subAgentThreadSpawn" : "subAgentOther");
+        });
+        if (p.searchTerm) data = data.filter(t => String(t.name ?? t.preview).toLowerCase().includes(String(p.searchTerm).toLowerCase()));
         if (p.parentThreadId) data = data.filter(t => t.parentThreadId === p.parentThreadId);
-        if (p.ancestorThreadId) throw new ProtocolError(ErrorCode.unsupported_capability, "as-ingress: ancestor search unavailable");
-        const key = p.sortKey === "created_at" ? "createdAt" : p.sortKey === "updated_at" ? "updatedAt" : "recencyAt";
-        data.sort((a, b) => ((b[key] ?? b.updatedAt) - (a[key] ?? a.updatedAt) || a.id.localeCompare(b.id)) * (p.sortDirection === "asc" ? -1 : 1));
-        if (p.cursor != null) { const index = data.findIndex(t => t.id === p.cursor); if (index < 0) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: invalid list cursor"); data = data.slice(index + 1); }
-        const limit = p.limit ?? 100;
-        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10000) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: invalid list limit");
-        const page = data.slice(0, limit); return { data: page, nextCursor: data.length > limit ? page.at(-1)!.id : null };
+        if (p.ancestorThreadId) {
+          const parents = new Map(threads.filter(t => t.backend === "claude" || t.engineThreadId).map(t => { const view = this.threadView(t); return [view.id, view.parentThreadId]; }));
+          data = data.filter(t => { const seen = new Set([t.id]); let parent = t.parentThreadId;
+            while (parent && !seen.has(parent)) { if (parent === p.ancestorThreadId) return true; seen.add(parent); parent = parents.get(parent); } return false; });
+        }
+        if (p.sortKey != null && !["created_at", "updated_at", "recency_at"].includes(p.sortKey)) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: invalid sortKey");
+        const key = p.sortKey === "updated_at" ? "updatedAt" : p.sortKey === "recency_at" ? "recencyAt" : "createdAt";
+        const scope = JSON.stringify(["thread/list", key, [...cwds].sort(), p.archived ?? false, p.modelProviders ?? [], p.sourceKinds ?? [], p.searchTerm ?? null, p.parentThreadId ?? null, p.ancestorThreadId ?? null]);
+        return nativePage(data.map(t => ({ key: [t[key] ?? t.updatedAt, t.id], value: t })), p, scope);
       }
       case "thread/loaded/list": {
         const health = await this.client.request("server/health", {});
-        return { data: health.engines.filter(e => this.claudeThreads && e.backend === "claude" || e.backend === "codex" && e.engineThreadId).map(e => e.backend === "claude" ? e.threadId.slice(3) : e.engineThreadId) };
+        let data = health.engines.filter(e => this.claudeThreads && e.backend === "claude" || e.backend === "codex" && e.engineThreadId).map(e => e.backend === "claude" ? e.threadId.slice(3) : e.engineThreadId!).sort();
+        if (!data.length) return { data, nextCursor: null };
+        if (p.cursor != null) {
+          if (typeof p.cursor !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(p.cursor)) throw new NativeRpcError(-32600, `invalid cursor: ${p.cursor}`);
+          data = data.filter(id => id > p.cursor.toLowerCase());
+        }
+        const limit = pageLimit(p.limit, data.length, 0xffffffff), page = data.slice(0, limit);
+        return { data: page, nextCursor: data.length > limit ? page.at(-1)! : null };
       }
       case "turn/steer": {
         const thread = resolveThread(this.server, p.threadId); this.claudeOnly(thread, method);
@@ -357,10 +407,33 @@ export class CodexRouter {
         await this.client.request("thread/compact", { threadId: thread.id }); return {};
       }
       case "thread/fork": {
-        const thread = resolveThread(this.server, p.threadId); this.claudeOnly(thread, method); await this.guardThread(thread, {});
-        for (const key of Object.keys(p)) if (p[key] != null && !["threadId", "fromItemId"].includes(key)) throw new ProtocolError(ErrorCode.method_not_found, `as-ingress: unsupported Claude fork option ${key}`);
-        const result = await this.client.request("thread/fork", { threadId: thread.id, ...(p.fromItemId ? { fromItemId: p.fromItemId } : {}) });
-        return this.claudeResponse(result.thread, true);
+        const thread = resolveThread(this.server, p.threadId); this.rejectExtras(p); await this.paths(p);
+        const saved = this.server.log.options<StartThreadParams>(thread.id), options = nativeOptions(p, { ...saved, permission: thread.permission });
+        await this.guardThread(thread, options);
+        const effective = { ...saved, model: thread.model, cwd: thread.cwd, permission: thread.permission, sandbox: effectiveSandbox({ ...saved, permission: thread.permission }) };
+        for (const key of ["model", "cwd", "permission", "sandbox", "effort"] as const) if (options[key] != null && options[key] !== effective[key]) throw new ProtocolError(ErrorCode.invalid_params, `as-ingress: fork inherits saved ${key}`);
+        for (const key of ["beforeTurnId", "baseInstructions"]) if (p[key] != null) throw new ProtocolError(ErrorCode.method_not_found, `as-ingress: unsupported fork option ${key}`);
+        if (p.fromItemId != null && p.lastTurnId != null) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: fork boundaries are mutually exclusive");
+        let fromItemId = p.fromItemId;
+        if (p.lastTurnId != null) {
+          const items = this.server.log.snapshot(thread.id).items;
+          fromItemId = items.findLast(i => thread.backend === "claude" ? i.turnId === p.lastTurnId : this.server.log.forkPoint(thread.id, i.id) === p.lastTurnId)?.id;
+          if (!fromItemId) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: unknown fork turn boundary");
+        }
+        const result = await this.client.request("thread/fork", { threadId: thread.id, ...(fromItemId != null ? { fromItemId } : {}) });
+        this.attached.add(result.thread.id);
+        if (thread.backend === "claude") return this.claudeResponse(result.thread, p.excludeTurns !== true);
+        if (this.server.log.options<import("../../engines/session.js").SessionOptions>(result.thread.id).seedHistory !== undefined) {
+          const prefix = new Set(this.server.log.snapshot(result.thread.id).items.map(i => i.id));
+          const original = await this.codexRead(thread, true);
+          const inherited = original.thread.turns.map((t: NativeObject) => ({ ...t, status: "completed", items: t.items.filter((i: NativeObject) => prefix.has(i.id)) })).filter((t: NativeObject) => t.items.length);
+          result.thread.meta = { ...result.thread.meta, nativeInheritedTurns: inherited };
+          this.server.log.saveThread(result.thread);
+        }
+        const response = this.engine(result.thread).nativeThreadStart();
+        response.thread = (await this.codexRead(result.thread, p.excludeTurns !== true)).thread;
+        result.thread.meta = { ...result.thread.meta, nativeThreadData: { ...response.thread, turns: [] } }; this.server.log.saveThread(result.thread);
+        return response;
       }
       case "thread/archive": {
         const thread = resolveThread(this.server, p.threadId); this.claudeOnly(thread, method); await this.guardThread(thread, {});
@@ -368,7 +441,7 @@ export class CodexRouter {
       }
       case "thread/unsubscribe": {
         const thread = resolveThread(this.server, p.threadId);
-        await this.client.request("thread/detach", { threadId: thread.id }); return { status: "unsubscribed" };
+        await this.client.request("thread/detach", { threadId: thread.id }); this.attached.delete(thread.id); return { status: "unsubscribed" };
       }
       default: throw new ProtocolError(ErrorCode.method_not_found, `as-ingress: unsupported method ${method}`);
     }

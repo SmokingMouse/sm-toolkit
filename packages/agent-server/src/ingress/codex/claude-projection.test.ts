@@ -99,7 +99,9 @@ test("Claude model routing, persisted UUID, settings guards and explicit unsuppo
   expect((await f.rpc("thread/settings/update", { threadId: id, model: "opus" })).result).toEqual({});
   expect(f.frames.findLast(x => x.method === "thread/settings/updated")?.params.threadSettings.model).toBe("opus");
   expect(f.engines[0]?.controls.at(-1)).toEqual({ subtype: "set_model", params: { model: "opus" } });
-  expect((await f.rpc("thread/settings/update", { threadId: id, model: "gpt-6-astra" })).error.code).toBe(ErrorCode.invalid_params);
+  expect((await f.rpc("thread/settings/update", { threadId: id, model: "gpt-6-astra" })).result).toEqual({});
+  expect(f.engines[0]?.controls.at(-1)).toEqual({ subtype: "set_model", params: { model: "opus" } });
+  expect(f.frames.findLast(x => x.method === "warning")?.params).toEqual({ threadId: id, message: "该线程为 claude，已沿用 opus" });
   expect((await f.rpc("thread/settings/update", { threadId: id, effort: "high" })).error.code).toBe(-32601);
   expect((await f.rpc("thread/settings/update", { threadId: id, effort: "high" })).error.message).toContain("Claude 线程 effort 只在新建时生效");
   for (const method of ["thread/resume", "turn/start"]) {
@@ -113,6 +115,17 @@ test("Claude model routing, persisted UUID, settings guards and explicit unsuppo
   for (const method of ["thread/settings/update", "turn/start", "thread/resume"]) expect((await f.rpc(method, { threadId: ro, approvalPolicy: "never", sandbox: "danger-full-access", ...(method === "turn/start" ? { input: [{ type: "text", text: "write" }] } : {}) })).error.code).toBe(ErrorCode.unauthorized);
   expect(f.engines[1]?.controls).toEqual([]);
   const denied = await setup(["sonnet"]); expect((await denied.rpc("model/list")).result.data.map((m: NativeObject) => m.model)).toEqual(["opus"]);
+});
+
+test("same-backend turn model overrides still reach Claude and denied models still fail", async () => {
+  const f = await setup(["haiku"]);
+  const id = (await f.rpc("thread/start", { model: "sonnet", cwd: process.cwd() })).result.thread.id;
+  expect((await f.rpc("turn/start", { threadId: id, model: "haiku", input: [{ type: "text", text: "denied" }] })).error).toBeDefined();
+  const result = await f.rpc("turn/start", { threadId: id, model: "opus", input: [{ type: "text", text: "hello" }] });
+  expect(result.error).toBeUndefined();
+  await until(() => f.engines[0]!.sent.length === 1);
+  expect(f.engines[0]!.sent[0]!.options.model).toBe("opus");
+  expect(f.frames.filter(f => f.method === "warning")).toEqual([]);
 });
 
 for (const fail of [false, true]) test(`Claude permission escalation holds only a short operation lease and releases on ${fail ? "failure" : "success"}`, async () => {
@@ -175,7 +188,7 @@ test("Claude real AS turns synthesize stream, resume history, paging, steer, com
   expect(next.data[0].item.text).toBe("hello"); expect(next.nextCursor).not.toBeNull(); // steer appended another user message
   const back = (await f.rpc("thread/items/list", { threadId: id, sortDirection: "desc", cursor: next.backwardsCursor })).result;
   expect(back.data.map((i: NativeObject) => i.item.type)).toEqual(["agentMessage", "userMessage"]);
-  expect((await f.rpc("thread/items/list", { threadId: id, cursor: "1" })).error.code).toBe(ErrorCode.invalid_params);
+  expect((await f.rpc("thread/items/list", { threadId: id, cursor: "1" })).error).toEqual({ code: -32600, message: "invalid cursor: 1" });
   expect((await f.rpc("thread/turns/list", { threadId: id, itemsView: "notLoaded" })).result.data[0].items).toEqual([]);
   expect((await f.rpc("thread/compact/start", { threadId: id })).result).toEqual({});
   await until(() => e.sent.length === 2); expect(e.sent[1]?.input).toEqual([{ type: "text", text: "/compact" }]);
@@ -185,6 +198,70 @@ test("Claude real AS turns synthesize stream, resume history, paging, steer, com
   await until(() => f.server.log.turn(running!).status === "interrupted");
   expect((await f.rpc("thread/archive", { threadId: id })).result).toEqual({});
   expect(f.server.threads.get(as.id).status.type).toBe("closed");
+});
+
+test("Claude 240-item history matches native defaults, summary, reverse cursors, limits and fork boundaries", async () => {
+  const f = await setup(), id = (await f.rpc("thread/start", { model: "sonnet", cwd: process.cwd() })).result.thread.id;
+  const as = resolveThread(f.server, id), e = f.engines[0]!;
+  for (let n = 0; n < 60; n++) {
+    const t = (await f.rpc("turn/start", { threadId: id, input: [{ type: "text", text: `user-${n}` }] })).result.turn;
+    await until(() => e.sent.length === n + 1);
+    for (const suffix of ["early", "middle", "final"]) {
+      const item = { id: `${n}-${suffix}`, type: "agentMessage" as const, payload: { text: `${n}-${suffix}` }, status: "completed" as const };
+      e.emit({ type: "itemStarted", turnId: t.id, item }); e.emit({ type: "itemCompleted", turnId: t.id, item });
+    }
+    e.emit({ type: "turnCompleted", turnId: t.id, status: "completed" });
+    await until(() => f.server.log.turn(t.id).status === "completed");
+  }
+  const items = f.server.log.snapshot(as.id).items;
+  expect(items).toHaveLength(240);
+  const all: NativeObject[] = []; let cursor: string | null = null;
+  do {
+    const page = (await f.rpc("thread/items/list", { threadId: id, ...(cursor ? { cursor } : {}) })).result;
+    expect(page.data.length).toBeLessThanOrEqual(25); all.push(...page.data); cursor = page.nextCursor;
+  } while (cursor);
+  expect(all.map(i => i.item.id)).toEqual(items.map(i => i.id));
+  const turns = (await f.rpc("thread/turns/list", { threadId: id })).result;
+  expect(turns.data).toHaveLength(25); expect(turns.data[0].itemsView).toBe("summary");
+  expect(turns.data[0].items.map((i: NativeObject) => i.type)).toEqual(["userMessage", "agentMessage"]);
+  expect(turns.data[0].items.at(-1).text).toBe("59-final");
+  const full = (await f.rpc("thread/turns/list", { threadId: id, limit: 1, itemsView: "full" })).result;
+  expect(full.data[0].items).toHaveLength(4);
+  expect((await f.rpc("thread/items/list", { threadId: id, limit: 1000 })).result.data).toHaveLength(100);
+  expect((await f.rpc("thread/items/list", { threadId: id, limit: 0 })).result.data).toHaveLength(1);
+  const resumed = (await f.rpc("thread/resume", { threadId: id, excludeTurns: true, initialTurnsPage: { limit: 2, itemsView: "notLoaded" } })).result;
+  expect(resumed.thread.turns).toEqual([]); expect(resumed.initialTurnsPage.data).toHaveLength(2);
+  expect(resumed.initialTurnsPage.data[0].items).toEqual([]);
+  const tail = (await f.rpc("thread/items/list", { threadId: id, cursor: resumed.itemsBackwardsCursor, sortDirection: "desc", limit: 1 })).result;
+  expect(tail.data[0].item.id).toBe("59-final");
+  const empty = (await f.rpc("thread/items/list", { threadId: id, cursor: tail.nextCursor, sortDirection: "asc" })).result;
+  expect(empty.data).toEqual([]); expect(empty.nextCursor).toBeNull(); expect(empty.backwardsCursor).toBeNull();
+  expect((await f.rpc("thread/turns/list", { threadId: id, cursor: resumed.itemsBackwardsCursor })).error).toBeDefined();
+  expect((await f.rpc("thread/items/list", { threadId: id, turnId: full.data[0].id, cursor: resumed.itemsBackwardsCursor })).error).toBeDefined();
+  const fork = (await f.rpc("thread/fork", { threadId: id, fromItemId: "0-middle" })).result;
+  expect(fork.thread.id).not.toBe(id); expect(fork.thread.forkedFromId).toBe(id);
+  expect(fork.thread.turns.flatMap((t: NativeObject) => t.items).map((i: NativeObject) => i.id)).toEqual(items.slice(0, 3).map(i => i.id));
+  expect((await f.rpc("thread/resume", { threadId: fork.thread.id })).result.thread.id).toBe(fork.thread.id);
+  expect((await f.rpc("turn/start", { threadId: fork.thread.id, input: [{ type: "text", text: "branch only" }] })).result.turn.id).toBeString();
+  expect(f.server.log.snapshot(as.id).items).toHaveLength(240);
+  expect((await f.rpc("thread/fork", { threadId: id, fromItemId: "foreign" })).error).toBeDefined();
+});
+
+test("global native list merges both backend ID spaces and filters native metadata", async () => {
+  const f = await setup();
+  const claude = (await f.rpc("thread/start", { model: "sonnet", cwd: process.cwd() })).result.thread;
+  const id = crypto.randomUUID(), asId = `th_${crypto.randomUUID()}`;
+  f.server.log.insertThread({ id: asId, backend: "codex", engineThreadId: id, cwd: process.cwd(), createdAtMs: 1,
+    status: { type: "idle" }, meta: { nativeThreadData: { source: "vscode", createdAt: 0, modelProvider: "native-provider", parentThreadId: claude.id, sessionId: id, historyMode: "paginated", agentNickname: "native agent" } } }, {}, {});
+  const list = (await f.rpc("thread/list")).result.data;
+  expect(new Set(list.map((t: NativeObject) => t.id))).toEqual(new Set([id, claude.id]));
+  expect(list.find((t: NativeObject) => t.id === id)).toMatchObject({ parentThreadId: claude.id, sessionId: id, agentNickname: "native agent", modelProvider: "native-provider" });
+  expect(resolveThread(f.server, id).id).toBe(asId);
+  expect(resolveThread(f.server, claude.id).id).toBe(`th_${claude.id}`);
+  expect((await f.rpc("thread/list", { modelProviders: ["claude"] })).result.data.map((t: NativeObject) => t.id)).toEqual([claude.id]);
+  expect((await f.rpc("thread/list", { parentThreadId: claude.id })).result.data.map((t: NativeObject) => t.id)).toEqual([id]);
+  expect((await f.rpc("thread/list", { ancestorThreadId: claude.id })).result.data.map((t: NativeObject) => t.id)).toEqual([id]);
+  expect((await f.rpc("thread/loaded/list")).result).toEqual({ data: [claude.id], nextCursor: null });
 });
 
 test("four Claude approvals without raw traverse the actual AS broker and close once", async () => {
@@ -226,6 +303,7 @@ for (const choice of ["allow", "deny"]) test(`generic Claude permissions: ${choi
   e.emit({ type: "approval", request: { method: "item/permissions/requestApproval", params: { requestId: "generic", threadId: as.id, turnId: t.id, itemId: "read", cwd: process.cwd(), startedAtMs: Date.now(), permissions: { toolName: "Read", input: { path: "/tmp/a" } } } }, respond: d => { decisions.push(d); } });
   await until(() => f.frames.some(x => x.method === "item/tool/requestUserInput"));
   const card = f.frames.find(x => x.method === "item/tool/requestUserInput")!;
+  expect(card.params).toMatchObject({ threadId: id, turnId: t.id, itemId: "read", isBlocking: true });
   expect(card.params.questions[0]).toMatchObject({ header: "权限请求：Read", isOther: false, options: [{ label: "allow" }, { label: "deny" }] });
   expect(card.params.questions[0].question).toContain("/tmp/a");
   expect(f.frames.some(x => x.method === "item/permissions/requestApproval")).toBe(false);

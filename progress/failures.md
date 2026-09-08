@@ -6,6 +6,34 @@
 
 ## 已结案
 
+### codex-ingress slice 3 再审：启动模型覆盖与权限卡 schema（resolved）
+
+- 症状：TUI `--model sonnet` 切到 Codex 线程被拒绝；Claude Read 权限卡缺官方 schema 必填 isBlocking。
+- 可证伪假设：guardThread 将 TUI 粘性默认模型当作引擎切换；权限卡自造 params 漏字段，旧 schema 校验未覆盖全部 serverRequest。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude`（默认含 cross_backend_model_override_tolerated 与 wire_schema_clean）。
+- 修复：已有线程忽略跨后端模型 override 并发带 threadId 的可见 warning，同后端校验保留；权限卡补 isBlocking=true，所有出站帧过新生成官方 schema，缺映射也失败。本条取代下条「不传 --model」规避方式，该规避未满足原契约。
+
+### codex-ingress slice 3 返工：混合 picker 的模型与准备状态（resolved）
+
+- 症状：Claude 主会话切 Codex 被 changing backend guard 拒绝；合并后的 fresh 关闭/重开与旧 full 租约断言不兼容；对当前线程重复 /resume 不发新 resume RPC。
+- 可证伪假设：TUI 启动 --model 是后续 resume 的粘性覆盖；fresh 仍带 full 或显式向 Claude 传 sandbox；脚本把当前选择当成新选择。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude`；wire 中跨后端 resume 必须 model=null，双线程轮流完成且各自审批/中断可核验。
+- 修复：用配置默认模型和显式 sonnet 建线程，保留跨后端模型 override 拒绝；fresh 在关闭前命名、关闭后停旧 PTY，再以 auto-edit 重开（仅 Codex 传 sandbox）；跟踪真实 resume/turn 选择。旧租约测试改为普通 full 输入不占租约，与 129f581 一致。
+
+### codex-ingress slice 3：分页错误被包装为引擎不可用（resolved）
+
+- 症状：真实 0.153.4 的无效 items cursor 原本返回 -32600，ingress 返回 -32004，并附引擎 stderr；活进程被错误描述为 unavailable。
+- 可证伪假设：CodexEngine 的统一 AS 错误包装遮住了只读 native RPC 的 code/message。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex`；history-proof.json 中 invalid cursor 断言必须严格等于 -32600 与上游原文。
+- 修复：nativeResult 解包 read/history 原始错误，保留 code/message/data；Claude 无效 opaque cursor 同样使用 -32600。223 项、双向 28 页、空页、resume 与中间 fork 的真实探针已通过。
+
+### codex-ingress slice 3：picker 搜索被误认为必发 RPC（resolved）
+
+- 症状：首轮扩展冒烟在 picker search 超时，真实屏幕已经筛出 S3-FRESH。
+- 可证伪假设：官方 picker 优先本地过滤已取回的行，只有需要更多页时才再请求 thread/list。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex`；要求真实 picker 列出目标后选择，随后主连接发匹配 UUID 的 resume/turn。
+- 修复：不等待不存在的搜索 RPC；以选中后的 resume 和对应线程 turn 为判据。picker 自己另开的列表连接不计入主连接的 turn/start 同连接断言。
+
 ### codex-ingress：full 附着长期占用输入租约（resolved）
 
 - 症状：TUI full resume 后独立 as/1 reply / close 返回 -32012；扩展冒烟首轮另发现 Responses fixture 重复 msg_fresh 导致 items 唯一键冲突。
