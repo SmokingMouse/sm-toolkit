@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server native ingress 已补 Unix WebSocket、完整方法治理与中断收尾，正在合并多线程切片并执行升级回归。
+agent-server native ingress 已合并多线程与治理硬化，Unix/WS 双后端升级回归全部通过，待主控独立验收。
 
 ## Goals
 
