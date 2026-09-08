@@ -6,6 +6,14 @@
 
 ## 已结案
 
+### codex-ingress：真实 TUI 冷启动、恢复与审批时序（resolved）
+
+- 症状：初版 PTY 未提交文本、审批快捷键落入输入框；native 默认 collaborationMode 被拒，恢复缺少原生 thread/items/list。
+- 可证伪假设：快速文本后立刻 CR 被视为粘贴；官方审批有一秒输入静默延迟；当前 TUI 的默认模式和分页属于真实生命周期依赖。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok`。
+- 修复：bracketed paste 后独立 Enter，审批前等两秒；default collaboration model/effort 经 AS 校验，历史分页只读转 owning 进程。五项全过，证据 fj-tui-ingress-slice1-9065/out/result.md。
+- 额外实测：0.153.4 配置文件已拒绝 approval_policy=untrusted，冒烟改用 on-request + 显式 require_escalated；TUI 自动 thread/name/set / thread/goal/get 属于明确不支持的可选操作，保留错误，不伪成功。
+
 ### midfork：无坐标原生 tip fork 的并发追加竞态（resolved）
 
 - 症状：审查发现 AS 先捕获前缀、原生稍后加载 tip，期间源追加可能进入引擎上下文而不在复制日志中。

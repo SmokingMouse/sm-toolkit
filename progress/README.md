@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server 已合入 dogfood，保留权限修复及 TUI 收口，测试、构建和 fjContext 临时 daemon 验证通过，交主控验收；生产试点与 Trellis 集成待主控推进。
+agent-server Codex native ingress 首个切片已实现并通过隔离 PTY 冒烟，交主控验收；Trellis 迁移与后续 TUI 切片待推进。
 
 ## Goals
 

@@ -80,6 +80,9 @@ export class CodexEngine implements EngineSession {
   private dead = false;
   private closed = false;
   private ready = false;
+  private threadResponse?: NativeFrame;
+  private nativeTurns = new Map<string, NativeFrame>();
+  private turnReaders = new Map<string, Set<{ resolve: (value: NativeFrame) => void; reject: (error: Error) => void }>>();
   constructor(private readonly config: CodexEngineOptions = {}) {}
 
   async spawn(options: SessionOptions): Promise<void> {
@@ -116,6 +119,7 @@ export class CodexEngine implements EngineSession {
           || String(initialized.userAgent ?? "").match(/^[^\s/]+\/(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)(?=\s|$)/)?.[1];
         if (version !== CODEX_SCHEMA_VERSION) this.events.push({ type: "error", error: codexProtocolError(`Codex version ${version ?? "unknown"} differs from pinned schema ${CODEX_SCHEMA_VERSION}`, { initialized, thread }).toJSON(), willRetry: false });
         this.engineThreadId = id; this.events.push({ type: "metadata", engineThreadId: id });
+        this.threadResponse = structuredClone(result);
       });
       this.assertAlive(); this.ready = true;
     } catch (error) {
@@ -131,7 +135,13 @@ export class CodexEngine implements EngineSession {
     const turn: ActiveTurn = { id: turnId, interrupting: false, buffered: [] };
     this.active = turn; this.mapper.beginTurn(turnId); this.mapper.registerInput(input, options.clientTurnId);
     try {
-      await this.request("turn/start", { threadId: this.engineThreadId, input: codexUserInput(input), ...turnOverrides(options, this.options?.serviceTier) }, result => this.bindTurn(turn, codexString(codexRecord(result.turn).id, "turn id")));
+      await this.request("turn/start", { threadId: this.engineThreadId, input: codexUserInput(input), ...turnOverrides(options, this.options?.serviceTier) }, result => {
+        this.nativeTurns.set(turnId, structuredClone(result));
+        if (this.nativeTurns.size > 32) this.nativeTurns.delete(this.nativeTurns.keys().next().value!);
+        this.bindTurn(turn, codexString(codexRecord(result.turn).id, "turn id"));
+        for (const reader of this.turnReaders.get(turnId) ?? []) reader.resolve(structuredClone(result));
+        this.turnReaders.delete(turnId);
+      });
     } catch (error) {
       this.fail(error instanceof ProtocolError ? error : this.unavailable(String(error))); throw error;
     }
@@ -161,6 +171,36 @@ export class CodexEngine implements EngineSession {
     }
     this.events.end();
   }
+  /** Read-only native views for ingress; mutations still enter through as/1. */
+  nativeThreadStart(): NativeFrame {
+    if (!this.threadResponse) throw this.unavailable("native thread snapshot is not available");
+    return structuredClone(this.threadResponse);
+  }
+  async nativeThreadRead(includeTurns = true): Promise<NativeFrame> {
+    this.assertReady();
+    return this.request("thread/read", { threadId: this.engineThreadId, includeTurns });
+  }
+  async nativeThreadHistory(method: "thread/turns/list" | "thread/items/list", params: NativeFrame): Promise<NativeFrame> {
+    this.assertReady();
+    return this.request(method, { ...params, threadId: this.engineThreadId });
+  }
+  nativeTurnId(turnId: string): string | undefined {
+    return this.active?.id === turnId ? this.active.nativeId : this.nativeTurns.get(turnId)?.turn?.id;
+  }
+  waitNativeTurn(turnId: string, signal?: AbortSignal): Promise<NativeFrame> {
+    this.assertReady();
+    const result = this.nativeTurns.get(turnId);
+    if (result) return Promise.resolve(structuredClone(result));
+    return new Promise((resolve, reject) => {
+      const readers = this.turnReaders.get(turnId) ?? new Set();
+      const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); readers.delete(reader); if (!readers.size) this.turnReaders.delete(turnId); };
+      const reader = { resolve: (value: NativeFrame) => { cleanup(); resolve(value); }, reject: (error: Error) => { cleanup(); reject(error); } };
+      const abort = () => reader.reject(this.unavailable("native turn reader disconnected"));
+      const timer = setTimeout(() => reader.reject(this.unavailable("native turn acknowledgement timed out")), this.config.requestTimeoutMs ?? 30_000);
+      readers.add(reader); this.turnReaders.set(turnId, readers);
+      if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
+    });
+  }
   private unavailable(message: string): ProtocolError { return new ProtocolError(ErrorCode.engine_unavailable, message, { stderr: this.stderr, retryable: true }); }
   private assertAlive(): void { if (!this.process || this.dead || this.closed) throw this.unavailable("Codex session is not alive"); }
   private assertReady(): void { this.assertAlive(); if (!this.ready) throw this.unavailable("Codex handshake is not complete"); }
@@ -184,7 +224,11 @@ export class CodexEngine implements EngineSession {
       catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
     });
   }
-  private rejectPending(error: Error): void { for (const call of this.pending.values()) { clearTimeout(call.timer); call.reject(error); } this.pending.clear(); }
+  private rejectPending(error: Error): void {
+    for (const call of this.pending.values()) { clearTimeout(call.timer); call.reject(error); } this.pending.clear();
+    for (const readers of this.turnReaders.values()) for (const reader of [...readers]) reader.reject(error);
+    this.turnReaders.clear();
+  }
   private fail(error: ProtocolError): void {
     if (this.dead || this.closed) return;
     this.dead = true; this.ready = false; this.approvals.clear(); this.rejectPending(error);

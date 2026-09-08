@@ -712,3 +712,67 @@ item 的 `type` 取值取 codex `ThreadItem` 的子集，字段名一致（`aggr
 - 用量字段是否直接复用 `packages/agent` 的 `Cost`（`usd/inputTokens/outputTokens/
   cachedTokens/cacheCreation/estimated/contextTokens`）。倾向复用，只把 `usd`
   标为可空。
+
+## 13. codex-ingress（slice 1：Codex 官方 TUI）
+
+独立 native WebSocket listener，不改变 as/1 帧、端口或客户端握手。默认不启动；daemon TOML 显式开启：
+
+```toml
+[codex_ingress]
+enabled = true
+port = 0 # 随机 loopback 端口，endpoint.json 的 codexIngressUrl 给出实际地址
+```
+
+官方 `codex-cli 0.153.4` 用 `codex --remote ws://127.0.0.1:PORT --remote-auth-token-env TOKEN_ENV` 连接。
+TOKEN_ENV 指向 daemon token 文件中同一个 bearer。鉴权在 HTTP upgrade 的 Authorization header；
+仅接受 loopback peer，拒绝浏览器 Origin，最大 WebSocket 消息 128 MiB（as/1 网络传输仍为 16 MiB）。
+当前不提供 Unix WebSocket。关闭开关后不创建 control 进程，不增加 endpoint 字段或 as/1 通知。
+
+native initialize / initialized 映射为一个独立 connectInProcess 客户端，声明 engineEvents、pendingRequests 和四类审批能力。
+client label 为 `codex-tui:c_<uuid>`，断开只 detach / 释放租约，不关闭线程。
+initialize 返回 ingress 自有、无 thread 的 control app-server 原始响应；版本不等于固定 schema 时发 warning 并写 daemon 日志。
+
+连接级只读方法由 control 进程处理：model/list、configRequirements/read、account/read（不允许 refreshToken）、
+account/rateLimits/read、hooks/list、skills/list、plugin/list、experimentalFeature/list、collaborationMode/list、
+environment/info、config/read、permissionProfile/list、mcpServerStatus/list。携带 cwd/cwds 的查询检查 allowed_roots。
+model/list 过滤 daemon 拒绝的模型，并移除非 default 服务档位选项；执行时仍经 AS model guard 二次检查。
+
+线程 UUID 是原生 engineThreadId，反查现有 SQLite engine 索引，再由 ThreadManager.live 定位独占进程；不另存 ID 映射。
+thread/start、thread/resume、turn/start、turn/interrupt 全经 as/1。启动响应和 turn/start 响应保留 native 原始对象；
+AS turn id 只用于内部队列，interrupt 必须匹配当前 native turn id，防止迟到 Esc 打断新轮次。
+等待 native turn 启动确认最多 30 秒；若超时时仍在 AS 队列中，通过 as/1 turn/cancel 撤销后报错，避免报错后悄悄执行。
+resume 只恢复 AS 已登记的 Codex UUID；live resume 不允许静默覆盖已生效的设置。
+thread/list 从 AS 库提供 data/nextCursor，展示字段使用 native 启动快照；thread/loaded/list 从 AS health 取 live UUID。
+thread/read、thread/turns/list、thread/items/list 通过 owning Codex 进程只读查询，历史分页保留 native cursor；
+原生“首条消息前尚未 materialize”的明确错误转换为空历史。thread/unsubscribe 映射 AS detach。
+
+Codex 通知订阅 thread/engineEvent，把 payload 中的 native 帧原样回传，包括额外字段和 emittedAtMs。
+唯一生命周期例外为 serverRequest/resolved：原生进程内 request id 不可跨进程使用，卡片统一由 broker 收口。
+四类反请求从 AS 的 data.raw 还原参数，使用连接独有 wire id，不暴露 ar_ durable id 或进程局部 id：
+
+| native 决策 | AS 决策 |
+|---|---|
+| accept / acceptForSession | accept / acceptForSession |
+| decline / cancel | reject / abort |
+| permissions scope=session | scope=thread |
+| requestUserInput answers | 原样保留 |
+
+availableDecisions 只保留 AS 支持的四种；扩展策略修改决策返回错误，不降成 accept。
+回答走 AS broker 的 audience、租约和首次决策检查，approvals.decided_by.label 带 codex-tui: 前缀。
+其他客户端先答或请求过期，同样发送 native serverRequest/resolved 关闭当前连接的卡片。
+超时由 AS 决定：普通请求 120 秒，blocking userInput 无普通超时，无 audience 的 orphan 默认 30 分钟；ingress 不另计审批超时。
+
+所有副作用方法默认返回 -32601，message 前缀 `as-ingress: `，不返回伪成功。
+包括 TUI 自动 thread/name/set 和恢复时 thread/goal/get（可见的非阻断拒绝）、配置写入、command/exec、fs 写入、插件安装、账户写入、
+review、realtime、goal、memory、动态 TUI 工具；这些不在 slice 1 中实现。
+原生 dynamicTools、historyMode 和 UI personality/web_search 提示不传入 engine；以 daemon 的 native 配置为准。
+仅支持 default collaboration mode，其 model/effort 进入 AS guard，TUI 的模式说明不覆盖引擎说明。
+拒绝原生权限 profiles、任意 config overrides、auto_review、非 default serviceTier/serviceTierForTurn。
+readonly thread 不能通过 resume/turn sandbox 或 permission override 升权。full 输入按需获取 AS 租约；他人持租约时返回 holder.label。
+fjContext 只能由 as/1 创建，native 入口拒绝写入；已有 fj Codex 线程维持 gpt-6-astra/default 约束。
+
+冒烟：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok`。
+使用真实官方 TUI（PTY 交互、能力查询应答）和真实官方 app-server；仅模型 Responses HTTP 端点为本地确定性 fixture，
+不请求外部模型或凭证。HOME、CODEX_HOME、socket、DB、配置和随机端口全在 mktemp 下，wire.ndjson、终端输出、
+model-requests.json、summary.json 留在打印的 artifact_dir。approval_roundtrip 同时检查真实 TUI 回答、broker decided_by、
+resolved 帧及被批准命令生成的隔离 proof 文件；不把单测 fake app-server 当端到端冒烟。

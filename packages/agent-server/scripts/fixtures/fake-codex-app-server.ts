@@ -13,7 +13,8 @@ const record = (direction: string, frame: unknown) => { if (trace) appendFileSyn
 const send = (frame: unknown) => { record("out", frame); process.stdout.write(JSON.stringify(frame) + "\n"); };
 const notify = (method: string, params: unknown) => send({ method, params });
 const reply = (id: string | number, result: unknown) => send({ id, result });
-let initialized = false, acknowledged = false, threadId = "native-thread", turnId = "", turns = process.pid * 1000, total = 0;
+let initialized = false, acknowledged = false, threadId = process.env.FAKE_CODEX_THREAD_ID ?? "native-thread", turnId = "", turns = process.pid * 1000, total = 0;
+let threadData: Record<string, unknown>;
 let cwd = process.cwd();
 const pending = new Map<string | number, (frame: any) => void>();
 const turn = (status = "inProgress") => ({ id: turnId, items: [], status, error: null });
@@ -91,10 +92,12 @@ function handle(frame: any) {
     assert.equal(p.serviceTier, "default"); assert.equal(p.approvalsReviewer, "user");
     cwd = p.cwd ?? cwd;
     const thread = { id: threadId, sessionId: threadId, cliVersion: version.cliVersion, cwd, ephemeral: false, createdAt: 1, updatedAt: 1, modelProvider: "fake", preview: "", projectId: null, source: "appServer", status: { type: "idle" }, turns: [] };
+    threadData = thread;
     reply(frame.id, { thread, model: p.model ?? "model-from-config", modelProvider: "fake", cwd, reasoningEffort: p.config?.model_reasoning_effort ?? null, approvalPolicy: p.approvalPolicy ?? "untrusted", approvalsReviewer: "user", sandbox: { type: "workspaceWrite" } });
     notify("thread/started", { thread }); notify("thread/status/changed", { threadId, status: { type: "idle" } }); return;
   }
   assert.equal(p.threadId, threadId, "must use engine thread id");
+  if (frame.method === "thread/read") { reply(frame.id, { thread: threadData }); return; }
   if (frame.method === "turn/start") {
     assert.ok(p.input.length); assert.equal(p.serviceTier, "default");
     if (turnId) notify("turn/started", { threadId, turn: turn() }); // stale prior turn
