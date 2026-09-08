@@ -35,7 +35,16 @@ const proxy = Bun.serve<ProxyData>({ hostname: "127.0.0.1", port: 0,
     close(socket) { sockets.delete(socket); socket.data.upstream?.close(); },
   },
 });
-writeFileSync(join(root, "smoke-endpoint.json"), JSON.stringify({ url: `ws://127.0.0.1:${proxy.port}`, tokenPath: daemon.paths.tokenPath, databasePath: daemon.paths.databasePath }));
+// Exercise the fj entry path through the real as/1 client. No native turn is
+// sent here; the official TUI must resume this UUID and supply its first input.
+const as1 = daemon.server.connectInProcess();
+as1.onFrame(frame => appendFileSync(join(root, "fresh-as1.ndjson"), JSON.stringify(frame) + "\n"));
+await as1.request("initialize", { protocolVersion: "as/1", token, client: { name: "smoke-as1", version: "1", kind: "cli", label: "smoke-as1" }, capabilities: {} });
+await as1.notifyInitialized();
+const fresh = await as1.request("thread/start", { backend: "codex", cwd: join(root, "workspace"), model: "gpt-5.6-sol", permission: "auto-edit" });
+if (daemon.server.log.turns(fresh.thread.id).length !== 0) throw new Error("fresh thread already has turns");
+as1.close();
+writeFileSync(join(root, "smoke-endpoint.json"), JSON.stringify({ url: `ws://127.0.0.1:${proxy.port}`, tokenPath: daemon.paths.tokenPath, databasePath: daemon.paths.databasePath, freshThreadId: fresh.thread.engineThreadId, freshAsThreadId: fresh.thread.id }));
 let closing = false;
 async function shutdown() {
   if (closing) return; closing = true;

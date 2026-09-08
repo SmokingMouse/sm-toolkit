@@ -133,7 +133,16 @@ export class CodexRouter {
         }
         await this.client.request("thread/resume", { ...options, threadId: thread.id, backend: "codex" });
         const engine = this.engine(thread), response = engine.nativeThreadStart();
-        const result = { ...response, ...await engine.nativeThreadRead(true) };
+        const result: NativeObject = { ...response, ...await engine.nativeThreadRead(p.excludeTurns !== true), initialTurnsPage: null, turnsBackwardsCursor: null, itemsBackwardsCursor: null };
+        if (result.thread.historyMode === "paginated") {
+          // Same one-entry descending probes as upstream
+          // paginated_resume_backwards_cursors; never translate opaque cursors.
+          const turns = await engine.nativeThreadHistory("thread/turns/list", { limit: 1, sortDirection: "desc", itemsView: "notLoaded" });
+          const items = await engine.nativeThreadHistory("thread/items/list", { limit: 1, sortDirection: "desc" });
+          result.turnsBackwardsCursor = turns.backwardsCursor;
+          result.itemsBackwardsCursor = items.backwardsCursor;
+        }
+        if (p.initialTurnsPage != null) result.initialTurnsPage = await engine.nativeThreadHistory("thread/turns/list", p.initialTurnsPage);
         const title = this.server.threads.get(thread.id).title;
         if (title !== undefined) result.thread.name = title;
         return result;
@@ -166,8 +175,9 @@ export class CodexRouter {
           if (p.turnId === "") return {};
           throw new NativeRpcError(-32600, "no active turn to interrupt");
         }
-        const nativeId = this.engine(thread).nativeTurnId(turnId);
-        if (p.turnId !== "" && nativeId && nativeId !== p.turnId) throw new NativeRpcError(-32600, `expected active turn id ${p.turnId} but found ${nativeId}`);
+        const engine = this.engine(thread);
+        const nativeId = engine.nativeTurnId(turnId) ?? (p.turnId !== "" ? (await engine.waitNativeTurn(turnId, this.signal)).turn.id : undefined);
+        if (p.turnId !== "" && nativeId !== p.turnId) throw new NativeRpcError(-32600, `expected active turn id ${p.turnId} but found ${nativeId}`);
         try { await this.client.request("turn/interrupt", { threadId: thread.id, turnId }); }
         catch (error) {
           if (error instanceof ProtocolError && error.code === ErrorCode.turn_not_active) {
@@ -200,13 +210,7 @@ export class CodexRouter {
       case "thread/turns/list": {
         const thread = resolveThread(this.server, p.threadId); await this.allowedPath(thread.cwd);
         await this.client.request("thread/read", { threadId: thread.id });
-        try { return await this.engine(thread).nativeThreadHistory(method, p); }
-        catch (error) {
-          // Native 0.153.4 has no rollout before the first message. This is a
-          // verified empty history, not a fallback for arbitrary read failures.
-          if (method === "thread/turns/list" && error instanceof ProtocolError && error.message.includes("not materialized yet; thread/turns/list is unavailable before first user message")) return { data: [], nextCursor: null };
-          throw error;
-        }
+        return this.engine(thread).nativeThreadHistory(method, p);
       }
       case "thread/list": {
         await this.paths(p);

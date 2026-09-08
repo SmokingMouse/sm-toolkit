@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server Codex native ingress 首个切片已实现并通过隔离 PTY 冒烟，交主控验收；Trellis 迁移与后续 TUI 切片待推进。
+agent-server Codex native ingress 已修复零 turn 线程恢复与中断启动竞态，交主控复验；Trellis 迁移与后续 TUI 切片待推进。
 
 ## Goals
 

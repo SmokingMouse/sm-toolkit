@@ -136,6 +136,61 @@ test("native thread names are trimmed, persisted and projected through read, lis
   expect(c.frames.find(frame => frame.id === "empty-name")?.error).toEqual({ code: -32600, message: "thread name must not be empty" });
 });
 
+for (const scenario of ["history-unsupported", "history-legacy"]) test(`${scenario}: fresh as/1 and native threads expose empty history and accept a turn after resume`, async () => {
+  const f = setup(scenario), c = connection(f); await c.initialize();
+  const as1 = f.server.connectInProcess(); cleanups.push(() => as1.close());
+  await as1.request("initialize", { protocolVersion: "as/1", token: "secret", client: { name: "fj", version: "1", kind: "cli", label: "fj" }, capabilities: {} });
+  await as1.notifyInitialized();
+  const created = await as1.request("thread/start", { backend: "codex", cwd: f.root, model: "gpt-6-astra" });
+  const native = await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });
+  for (const threadId of [created.thread.engineThreadId!, native.thread.id]) {
+    expect(f.server.log.turns(resolveThread(f.server, threadId).id)).toHaveLength(0);
+    expect((await c.request("thread/read", { threadId, includeTurns: true })).thread.turns).toEqual([]);
+    const empty = { data: [], nextCursor: null, backwardsCursor: null };
+    for (const method of ["thread/turns/list", "thread/items/list"]) {
+      expect(await c.request(method, { threadId, limit: 1, sortDirection: "desc" })).toEqual(empty);
+      await expect(c.request(method, { threadId, cursor: "invalid" })).rejects.toThrow();
+    }
+    await expect(c.request("thread/items/list", { threadId, turnId: "unknown" })).rejects.toThrow();
+    const resumed = await c.request("thread/resume", { threadId, initialTurnsPage: { limit: 1, itemsView: "notLoaded" } });
+    expect(resumed.thread.turns).toEqual([]);
+    expect(resumed.initialTurnsPage).toEqual(empty);
+    expect(resumed.turnsBackwardsCursor).toBeNull(); expect(resumed.itemsBackwardsCursor).toBeNull();
+    expect((await c.request("thread/resume", { threadId, excludeTurns: true })).thread.turns).toEqual([]);
+    const started = await c.request("turn/start", { threadId, input: [{ type: "text", text: "hello" }] });
+    await until(() => c.frames.some(frame => frame.method === "turn/completed" && frame.params.threadId === threadId && frame.params.turn.id === started.turn.id));
+    // The exact same native Unsupported error after dispatch is not empty history.
+    for (const method of ["thread/turns/list", "thread/items/list", "thread/read"]) await expect(c.request(method, { threadId, includeTurns: true })).rejects.toThrow();
+  }
+});
+
+test("history failures are never converted to empty pages or successful resume", async () => {
+  const f = setup("history-failure"), c = connection(f); await c.initialize();
+  const { thread } = await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });
+  for (const method of ["thread/read", "thread/resume", "thread/turns/list", "thread/items/list"]) await expect(c.request(method, { threadId: thread.id, includeTurns: true })).rejects.toThrow("history database is corrupt");
+});
+
+test("an imported native thread is not assumed empty just because AS has no turns", async () => {
+  const f = setup("history-unsupported"), c = connection(f); await c.initialize();
+  const threadId = crypto.randomUUID();
+  const imported = await c.session.client.request("thread/resume", { engineThreadId: threadId, backend: "codex", cwd: f.root, model: "gpt-6-astra" });
+  expect(f.server.log.turns(imported.thread.id)).toHaveLength(0);
+  for (const method of ["thread/read", "thread/resume", "thread/turns/list", "thread/items/list"]) await expect(c.request(method, { threadId, includeTurns: true })).rejects.toThrow("not supported yet");
+});
+
+test("named interrupt waits for native acknowledgement and cannot interrupt a different turn during startup", async () => {
+  const f = setup("hold-delayed"), c = connection(f); await c.initialize();
+  const { thread } = await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });
+  const asThread = resolveThread(f.server, thread.id);
+  const { turn } = await c.session.client.request("turn/start", { threadId: asThread.id, input: [{ type: "text", text: "hold" }] });
+  expect(f.engines[0].nativeTurnId(turn.id)).toBeUndefined();
+  await expect(c.request("turn/interrupt", { threadId: thread.id, turnId: "wrong" })).rejects.toThrow("expected active turn id wrong but found native-turn-");
+  expect(f.server.log.turn(turn.id).status).toBe("inProgress");
+  expect(c.frames.some(frame => frame.method === "turn/completed")).toBe(false);
+  expect(await c.request("turn/interrupt", { threadId: thread.id, turnId: f.engines[0].nativeTurnId(turn.id) })).toEqual({});
+  await until(() => f.server.log.turn(turn.id).status === "interrupted");
+});
+
 test("all four reverse requests go through broker, preserve raw native fields and resolve once", async () => {
   const f = setup("conversation"), c = connection(f); await c.initialize();
   const { thread } = await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });

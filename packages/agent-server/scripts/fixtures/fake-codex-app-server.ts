@@ -97,6 +97,15 @@ function handle(frame: any) {
     notify("thread/started", { thread }); notify("thread/status/changed", { threadId, status: { type: "idle" } }); return;
   }
   assert.equal(p.threadId, threadId, "must use engine thread id");
+  if (scenario.startsWith("history-") && ["thread/turns/list", "thread/items/list", ...(p.includeTurns ? ["thread/read"] : [])].includes(frame.method)) {
+    const operation = frame.method === "thread/read" ? "includeTurns" : "thread/turns/list";
+    const error = scenario === "history-failure"
+      ? { code: -32603, message: "history database is corrupt" }
+      : scenario === "history-legacy" && frame.method !== "thread/items/list"
+        ? { code: -32600, message: `thread ${threadId} is not materialized yet; ${operation} is unavailable before first user message` }
+        : { code: -32601, message: frame.method === "thread/items/list" ? "thread/items/list is not supported yet" : "list_turns is not supported yet" };
+    send({ id: frame.id, error }); return;
+  }
   if (frame.method === "thread/read") { reply(frame.id, { thread: threadData }); return; }
   if (frame.method === "turn/start") {
     assert.ok(p.input.length); assert.equal(p.serviceTier, "default");
@@ -106,7 +115,8 @@ function handle(frame: any) {
     const user = { id: `user-${turns}`, type: "userMessage", content: p.input, clientId: p.clientUserMessageId ?? null };
     started(user); completed(user);
     notify("turn/started", { threadId, turn: turn() });
-    reply(frame.id, { turn: turn() });
+    if (scenario === "hold-delayed") { const result = { turn: turn() }; setTimeout(() => reply(frame.id, result), 150); }
+    else reply(frame.id, { turn: turn() });
     notify("thread/status/changed", { threadId, status: { type: "active", activeFlags: [] } });
     if (scenario === "crash") {
       started({ type: "agentMessage", id: `partial-${turns}`, text: "" });
@@ -128,7 +138,7 @@ function handle(frame: any) {
       setTimeout(() => { notify("serverRequest/resolved", { threadId, requestId: 92 }); }, 40); return;
     }
     if (scenario === "native-error") { notify("error", { ...base(), error: { message: "temporary provider error", codexErrorInfo: "serverOverloaded" }, willRetry: true }); message("recovered"); finish(); return; }
-    if (scenario === "hold" && p.input[0].text !== "complete") return;
+    if ((scenario === "hold" || scenario === "hold-delayed") && p.input[0].text !== "complete") return;
     if (scenario === "pending-status" || scenario === "pending-withdraw") {
       const command = { id: `command-${turns}`, type: "commandExecution", command: "pwd", cwd, status: "inProgress" };
       started(command);

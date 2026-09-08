@@ -82,6 +82,7 @@ export class CodexEngine implements EngineSession {
   private ready = false;
   private threadResponse?: NativeFrame;
   private nativeTurns = new Map<string, NativeFrame>();
+  private nativeHistoryFresh = false;
   private turnReaders = new Map<string, Set<{ resolve: (value: NativeFrame) => void; reject: (error: Error) => void }>>();
   constructor(private readonly config: CodexEngineOptions = {}) {}
 
@@ -89,6 +90,7 @@ export class CodexEngine implements EngineSession {
     if (this.process || this.closed || this.dead) throw new ProtocolError(ErrorCode.engine_unavailable, "Codex session has already been spawned or closed");
     const params = buildCodexThreadParams(options);
     this.options = options; this.mapper = new CodexEventMapper(Boolean(options.engineThreadId));
+    this.nativeHistoryFresh = !options.engineThreadId;
     try {
       this.process = (this.config.spawnProcess ?? ((command, args, opts) => spawn(command, args, { ...opts, stdio: "pipe" })))(this.config.executable ?? "codex", ["app-server", "--listen", "stdio://"], { cwd: options.cwd, env: sessionEnvironment(options) });
       const child = this.process;
@@ -132,6 +134,7 @@ export class CodexEngine implements EngineSession {
   async sendTurn(turnId: string, input: UserInput[], options: StartTurnParams): Promise<void> {
     this.assertReady(); this.validateTurn(options);
     if (this.active) throw new ProtocolError(ErrorCode.turn_not_active, "Codex already has an active turn");
+    this.nativeHistoryFresh = false;
     const turn: ActiveTurn = { id: turnId, interrupting: false, buffered: [] };
     this.active = turn; this.mapper.beginTurn(turnId); this.mapper.registerInput(input, options.clientTurnId);
     try {
@@ -178,11 +181,35 @@ export class CodexEngine implements EngineSession {
   }
   async nativeThreadRead(includeTurns = true): Promise<NativeFrame> {
     this.assertReady();
-    return this.request("thread/read", { threadId: this.engineThreadId, includeTurns });
+    try { return await this.request("thread/read", { threadId: this.engineThreadId, includeTurns }); }
+    catch (error) {
+      if (!includeTurns || !this.emptyNativeHistoryError(error, "thread/read")) throw error;
+      // Read current metadata, not the stale thread/start snapshot. A concurrent
+      // first turn invalidates the empty-history proof and requires a fresh read.
+      const result = await this.nativeThreadRead(false);
+      if (!this.nativeHistoryFresh) return this.nativeThreadRead(true);
+      return { ...result, thread: { ...result.thread, turns: [] } };
+    }
   }
   async nativeThreadHistory(method: "thread/turns/list" | "thread/items/list", params: NativeFrame): Promise<NativeFrame> {
     this.assertReady();
-    return this.request(method, { ...params, threadId: this.engineThreadId });
+    try { return await this.request(method, { ...params, threadId: this.engineThreadId }); }
+    catch (error) {
+      // Never swallow cursor/filter errors or infer empty history for an imported
+      // thread. Nonempty pages and their opaque cursors remain native end to end.
+      if (params.cursor != null || params.turnId != null || !this.emptyNativeHistoryError(error, method)) throw error;
+      return { data: [], nextCursor: null, backwardsCursor: null };
+    }
+  }
+  private emptyNativeHistoryError(error: unknown, method: string): boolean {
+    if (!this.nativeHistoryFresh || !(error instanceof ProtocolError) || typeof error.data.raw !== "string") return false;
+    let native: NativeFrame;
+    try { native = JSON.parse(error.data.raw); } catch { return false; }
+    // Pinned 0.153.4 exposes an unmaterialized paginated store as Unsupported.
+    // Only threads created by this engine, before any turn dispatch, qualify.
+    if (native.code === -32601 && native.message === (method === "thread/items/list" ? "thread/items/list is not supported yet" : "list_turns is not supported yet")) return true;
+    const operation = method === "thread/read" ? "includeTurns" : "thread/turns/list";
+    return method !== "thread/items/list" && native.code === -32600 && native.message === `thread ${this.engineThreadId} is not materialized yet; ${operation} is unavailable before first user message`;
   }
   nativeTurnId(turnId: string): string | undefined {
     return this.active?.id === turnId ? this.active.nativeId : this.nativeTurns.get(turnId)?.turn?.id;

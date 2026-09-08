@@ -26,11 +26,11 @@ import traceback
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=["codex"], default="codex")
-    parser.add_argument("--expect", default="thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok")
+    parser.add_argument("--expect", default="thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok")
     parser.add_argument("--timeout", type=float, default=120)
     args = parser.parse_args()
     expected = set(args.expect.split(","))
-    known = {"thread_started", "turn_completed", "approval_roundtrip", "resume_ok", "interrupt_ok"}
+    known = {"thread_started", "turn_completed", "approval_roundtrip", "resume_ok", "interrupt_ok", "resume_fresh_ok"}
     if not expected <= known:
         parser.error("unknown expectation: " + str(expected - known))
     root = Path(tempfile.mkdtemp(prefix="as-codex-remote-")).resolve()
@@ -47,6 +47,8 @@ def main():
     held_stream = threading.Event()
     release_stream = threading.Event()
     hold_marker = "INGRESS_SMOKE_HOLD_UNTIL_INTERRUPT"
+    fresh_marker = "INGRESS_SMOKE_FRESH_TURN"
+    fresh_response = "INGRESS_SMOKE_FRESH_COMPLETED"
     stop_model = threading.Event()
 
     class Model(http.server.BaseHTTPRequestHandler):
@@ -86,7 +88,9 @@ def main():
             response_id = "smoke-response-" + str(count)
             events = [{"type": "response.created", "response": {"id": response_id}}]
             tool_returned = any(entry.get("type") in {"function_call_output", "custom_tool_call_output"} and entry.get("call_id") == "call_smoke" for entry in body.get("input", []))
-            if not tool_returned:
+            if user_inputs and fresh_marker in json.dumps(user_inputs[-1]):
+                item = {"type": "message", "id": "msg_fresh", "role": "assistant", "status": "completed", "phase": "final_answer", "content": [{"type": "output_text", "text": fresh_response, "annotations": []}]}
+            elif not tool_returned:
                 names = [t.get("name") for t in body.get("tools", [])]
                 if "exec_command" in names:
                     name, arguments = "exec_command", {"cmd": "printf ingress-approved > ingress-proof.txt", "workdir": str(workspace), "yield_time_ms": 1000}
@@ -248,9 +252,32 @@ trust_level = "trusted"
         wait(lambda: (root / "smoke-endpoint.json").exists(), "daemon startup")
         endpoint = json.loads((root / "smoke-endpoint.json").read_text())
         env["SMOKE_BEARER"] = Path(endpoint["tokenPath"]).read_text().strip()
+        fresh_id = endpoint["freshThreadId"]
+        summary["fresh_thread_id"] = fresh_id
+        with sqlite3.connect(endpoint["databasePath"]) as db:
+            assert db.execute("SELECT count(*) FROM turns WHERE thread_id = ?", (endpoint["freshAsThreadId"],)).fetchone()[0] == 0, "as/1 thread is not fresh"
+        launch(["resume", fresh_id])
+        def fresh_resumed():
+            current = frames()
+            requests = [f for f in current if f.get("direction") == "TUI>AS" and f.get("method") == "thread/resume" and f["params"]["threadId"] == fresh_id]
+            return any(f.get("connection") == r.get("connection") and f.get("id") == r["id"] and f.get("direction") == "AS>TUI" and f.get("result", {}).get("thread", {}).get("id") == fresh_id and f["result"]["thread"]["turns"] == [] for r in requests for f in current)
+        wait(fresh_resumed, "as/1 fresh thread resume with empty history")
+        until = time.monotonic() + 0.7
+        while time.monotonic() < until:
+            pump()
+        prompt(fresh_marker)
+        def fresh_completed():
+            current = frames()
+            started_ids = {f["params"]["turn"]["id"] for f in current if f.get("method") == "turn/started" and f["params"].get("threadId") == fresh_id}
+            return any(f.get("method") == "turn/completed" and f["params"].get("threadId") == fresh_id and f["params"]["turn"]["id"] in started_ids and f["params"]["turn"]["status"] == "completed" for f in current)
+        wait(fresh_completed, "first real turn completed on as/1 fresh thread")
+        wait(lambda: fresh_response.encode() in output, "TUI rendered fresh response")
+        proof["resume_fresh_ok"] = True
+        stop_tui(graceful=True)
+        initial_offset = len(frames())
         launch()
-        wait(lambda: any(f.get("method") == "thread/started" for f in frames()), "thread start")
-        first = next(f for f in frames() if f.get("method") == "thread/started")
+        wait(lambda: any(f.get("method") == "thread/started" for f in frames()[initial_offset:]), "thread start")
+        first = next(f for f in frames()[initial_offset:] if f.get("method") == "thread/started")
         thread_id = first["params"]["thread"]["id"]
         summary["thread_id"] = thread_id
         proof["thread_started"] = True
@@ -265,7 +292,7 @@ trust_level = "trusted"
         while time.monotonic() < until:
             pump()
         os.write(master, b"y")
-        wait(lambda: any(f.get("method") == "turn/completed" and f["params"]["turn"]["status"] == "completed" for f in frames()), "completed turn after approval")
+        wait(lambda: any(f.get("method") == "turn/completed" and f["params"].get("threadId") == thread_id and f["params"]["turn"]["status"] == "completed" for f in frames()), "completed turn after approval")
         proof["turn_completed"] = True
         with sqlite3.connect(endpoint["databasePath"]) as db:
             db.row_factory = sqlite3.Row
