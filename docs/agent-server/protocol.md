@@ -242,7 +242,24 @@ Claude 启动权限映射（本机 CLI 2.1.258）：所有模式保留 `--permis
 
 **readonly 不再是 plan 的启动别名**（P0-1 修复，见 out/diagnosis.md）：诊断发现原生 plan 模式对 Bash 的 `can_use_tool` 询问由 CLI 内部启发式决定、agent-server 无法控制，且这一空当与 permission-mode 无关——`turn/start` 的独立 bash 输入（`{type:"bash"}`，映射为原生 `bash_command` 控制消息）在 default/plan 下都从不触发 `can_use_tool`。因此 readonly 现在启动时用 `--permission-mode default`（可靠触发 can_use_tool）叠加 `--disallowedTools Edit,Write,MultiEdit,NotebookEdit`（纵深防御：模型拿不到写工具）；readonly 线程收到 Write/Edit/MultiEdit/NotebookEdit 的 can_use_tool 请求时（万一原生仍转发）经纪人直接 reject 并发 `thread/engineEvent` subtype=`readonly_denied`（payload 含 requestId/toolUseId/toolName/permission/behavior=deny/reason=`readonly_write_tool`），同时写入 `approvals` 表一行（`kind='readonly_denied'`，`status='auto_denied'`），供事后审计。readonly 仍只接受 thread/start，不支持热切进入；热切请使用 plan。
 
-**独立 bash turn 的门禁**（`ClaudeEngine.sendTurn` 新增 `gateStandaloneBash`）：`turn/start` 的 `input:[{type:"bash"}]` 从不经过原生 `can_use_tool`（见上），readonly/plan 线程因此在写入子进程之前，由 agent-server 自己对该命令跑一遍 `classifyReadonlyCommand`——命中只读名单直接放行并发 `readonly_auto_allow`（与 can_use_tool 路径相同的留痕：engineEvent + `approvals` 表一行）；未命中则创建 `item/commandExecution/requestApproval`，从不把命令写给子进程，被拒时该 turn 以 commandExecution 失败收尾。default/acceptEdits/bypassPermissions/dontAsk 线程的独立 bash turn 行为不变（不受本次改动影响，也不做前置分类）。
+**P1-1：`readonly_denied` 在真机通常不会出现，这不是回归**。`--disallowedTools` 在 CLI 侧把 Edit/Write/MultiEdit/NotebookEdit 从模型可见的工具 schema 里整个移除，模型根本不知道这些工具存在，所以 CLI 从不为它们发出 `can_use_tool`——上一段的 reject+`readonly_denied` 审计代码是纵深防御的第二层，只有在 CLI 未来某个版本仍把这类请求转发过来时才会执行。真机可观测的、每次都会发生的是**两层语义中更早的一层**：`ClaudeEngine.spawn` 在 readonly 线程启动时发一条 `thread/engineEvent`，subtype=`readonly_tools_disabled`，payload `{toolNames:["Write","Edit","MultiEdit","NotebookEdit"],reason:"disallowed_tools_flag"}`，记录的是"这个线程的写工具在 CLI 层已被整体禁用"这一结构性事实，而不是某一次具体尝试。它只在 spawn 时发一次（不按 turn/按尝试计数），不写入 `approvals` 表（不是某个请求的审批决定，没有 requestId/turnId 可挂）。因此事后审计能回答"这个 readonly 线程的写工具从一开始就不可用"，但回答不了"模型是否真的尝试过写文件"——`--disallowedTools` 从模型的工具 schema 里就移除了它们，模型不会生成这类调用，daemon 也就没有"一次尝试"可记。plan 线程虽然也传了同样的 `--disallowedTools`，但只有 readonly 发 `readonly_tools_disabled`（plan 的已知限制单独记录在下文，两者不合并）。
+
+**独立 bash turn 的门禁**（`ClaudeEngine.sendTurn` 新增 `gateStandaloneBash`）：`turn/start` 的 `input:[{type:"bash"}]` 从不经过原生 `can_use_tool`（见上），因此**所有**模式的独立 bash turn 都在写入子进程之前先过 `gateStandaloneBash`，而不是只有 readonly/plan（P0-2 修复前的实现只覆盖了这两种，default/acceptEdits 的独立 bash turn 曾经无门直接执行）：
+- readonly / plan / default / acceptEdits：由 agent-server 自己对该命令跑一遍 `classifyReadonlyCommand`——命中只读名单直接放行并发 `readonly_auto_allow`（与 can_use_tool 路径相同的留痕：engineEvent + `approvals` 表一行）；未命中则创建 `item/commandExecution/requestApproval`，从不把命令写给子进程，被拒时该 turn 以 commandExecution 失败收尾。
+- bypassPermissions / dontAsk：原生模式已经决定了结果（bypass 允许、dontAsk 拒绝），不创建审批、不占 pendingRequests，但发 `thread/engineEvent` subtype=`permission_auto_response`（payload 同下文 can_use_tool 路径的自动答复留痕），与 can_use_tool 途径的自动答复对称。
+
+`readonly_auto_allow` 开关（daemon `config.toml`，见下）只决定「名单命中的命令是否可以免审」，从不决定「是否设门」（P0-1 修复：曾经关闭这个开关会连带让 readonly/plan 的独立 bash turn 完全不设门、命令直接执行）。关闭后，readonly/plan/default/acceptEdits 下的独立 bash turn 一律创建审批，即使命令本身只读；bypassPermissions/dontAsk 的自动答复语义不受这个开关影响。
+
+五种模式下独立 bash turn（`input:[{type:"bash"}]`）的完整行为：
+
+| permission | `readonly_auto_allow=true` 且命令命中名单 | `readonly_auto_allow=true` 但未命中 / `readonly_auto_allow=false` |
+| --- | --- | --- |
+| readonly | 直接放行，发 `readonly_auto_allow`（engineEvent + `approvals` 表一行） | 创建 `item/commandExecution/requestApproval`，命令不写给子进程 |
+| plan | 同上 | 同上 |
+| default | 同上 | 同上 |
+| acceptEdits / auto-edit | 同上 | 同上 |
+| bypassPermissions / full | 不查名单，直接放行，发 `permission_auto_response`（仅 engineEvent，不占 pendingRequests） | 同左（名单与开关都不影响这两种模式） |
+| dontAsk | 不查名单，直接拒绝，发 `permission_auto_response`（仅 engineEvent，不占 pendingRequests） | 同左 |
 
 **plan 的已知限制**：plan 面向需要原生"先出计划再执行"交互体验的用户，保留 `--permission-mode plan`。对独立 bash turn，agent-server 的门禁与 readonly 一致、完全兜底。但对模型在聊天中自主发起的 Bash 工具调用，原生 plan 模式有时会判定"这条命令明显只读"后直接执行、完全不发 `can_use_tool`（非确定性，由 CLI 内部启发式决定，agent-server 不可见也不可配置）——这条路径下 plan **不是** fail-closed 的。需要对聊天驱动的 Bash 调用也做到 fail-closed 时，请使用 readonly 而不是 plan。
 

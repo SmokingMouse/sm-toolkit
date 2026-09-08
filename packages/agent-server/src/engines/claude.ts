@@ -132,6 +132,12 @@ export class ClaudeEngine implements EngineSession {
   }
   async spawn(options: SessionOptions): Promise<void> {
     this.options = options; this.mapper = new ClaudeEventMapper(options.cwd);
+    // P1-1: --disallowedTools strips Edit/Write/MultiEdit/NotebookEdit from the model's tool
+    // schema, so it never emits can_use_tool for them and the readonly_denied deny+audit path in
+    // receive() is unreachable on a real engine -- the CLI blocks the attempt one layer earlier
+    // than the daemon can see. Audit that structural fact once at launch so "readonly disables
+    // these tools" is still observable, even though no individual attempt can be.
+    if (options.permission === "readonly") this.events.push({ type: "engineEvent", backend: this.backend, subtype: "readonly_tools_disabled", payload: { toolNames: ["Write", "Edit", "MultiEdit", "NotebookEdit"], reason: "disallowed_tools_flag" } });
     const launch = buildClaudeLaunch(options);
     this.process = (this.config.spawnProcess ?? ((command, args, opts) => spawn(command, args, { ...opts, stdio: "pipe" })))(this.config.executable ?? "claude", launch.args, { cwd: options.cwd, env: launch.env });
     this.process.stdout.setEncoding("utf8"); this.process.stderr.setEncoding("utf8");
@@ -253,14 +259,26 @@ export class ClaudeEngine implements EngineSession {
     }
     this.write(message);
   }
-  /** Returns a denial message if the standalone bash turn must not reach the engine, else undefined. */
+  /**
+   * Returns a denial message if the standalone bash turn must not reach the engine, else undefined.
+   * A standalone bash turn (`turn/start` with `input:[{type:"bash"}]`) never round-trips native
+   * can_use_tool for ANY permission mode (see the comment at the call site in sendTurn), so this is
+   * the only gate this command will ever see. readonly_auto_allow only decides whether an
+   * allowlisted read-only command may skip the broker -- it must never decide whether the gate
+   * exists at all (P0-1): turning it off makes every standalone bash turn require approval, it does
+   * not remove the gate. bypassPermissions/dontAsk keep native mode's already-decided outcome but
+   * still leave an audit trail (P0-2), matching the can_use_tool fallback in receive().
+   */
   private async gateStandaloneBash(turnId: string, command: string): Promise<string | undefined> {
-    const semanticPermission = this.options?.permission;
-    if (!this.readonlyAutoAllow || (semanticPermission !== "readonly" && semanticPermission !== "plan")) return undefined;
-    const permission = claudePermission(semanticPermission);
-    const match = classifyReadonlyCommand(command, this.readonlyCommandSet);
+    const permission = claudePermission(this.options?.permission);
     const toolUseId = this.bash!.itemId;
-    if (match.readonly) {
+    if (permission === "bypassPermissions" || permission === "dontAsk") {
+      const decision: "allow" | "deny" = permission === "bypassPermissions" ? "allow" : "deny";
+      this.events.push({ type: "engineEvent", turnId, backend: this.backend, subtype: "permission_auto_response", payload: { requestId: `ar_${crypto.randomUUID()}`, toolUseId, toolName: "Bash", permission, behavior: decision, reason: "permission_mode" } });
+      return decision === "allow" ? undefined : "Denied";
+    }
+    const match = this.readonlyAutoAllow ? classifyReadonlyCommand(command, this.readonlyCommandSet) : undefined;
+    if (match?.readonly) {
       const requestId = `ar_${crypto.randomUUID()}`;
       this.events.push({ type: "engineEvent", turnId, backend: this.backend, subtype: "readonly_auto_allow", payload: { requestId, toolUseId, toolName: "Bash", permission, behavior: "allow", reason: "readonly_command", command, matchedRules: match.matchedRules } });
       return undefined;

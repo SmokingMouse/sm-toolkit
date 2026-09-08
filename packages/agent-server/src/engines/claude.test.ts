@@ -311,7 +311,7 @@ describe("Claude native frame exchange (fake child only)", () => {
       expect(server.log.readonlyAutoAllows(thread.id)).toEqual([]);
     } finally { await server.close(); }
   });
-  test.each(["readonly", "plan"] as const)("standalone bash turn: %s mode gates outside the CLI's can_use_tool round trip", async permission => {
+  test.each(["readonly", "plan", "default", "acceptEdits"] as const)("standalone bash turn: %s mode gates outside the CLI's can_use_tool round trip (P0-2)", async permission => {
     const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
     const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
     try {
@@ -338,6 +338,65 @@ describe("Claude native frame exchange (fake child only)", () => {
       expect(events.filter(e => e.type === "itemCompleted" && e.item.type === "commandExecution").at(-1)).toMatchObject({ item: { status: "failed" } });
     } finally { await engine.close("test"); await consuming; }
   });
+  test.each(["bypassPermissions", "dontAsk"] as const)("standalone bash turn: %s mode auto-responds without a broker round trip but still audits (P0-2)", async permission => {
+    const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th", permission });
+      const bash = [{ type: "bash" as const, command: "touch /tmp/roclaw-p0-2-bypass" }];
+      await engine.sendTurn("tn", bash, { threadId: "th", input: bash });
+      // Native mode already decided the outcome: bypassPermissions executes, dontAsk denies. Either
+      // way there must never be a pendingRequests-style "approval" event for this turn.
+      expect(events.some(e => e.type === "approval")).toBe(false);
+      const audit = events.find(e => e.type === "engineEvent" && e.subtype === "permission_auto_response");
+      expect(audit).toMatchObject({ subtype: "permission_auto_response", payload: { toolName: "Bash", permission, behavior: permission === "bypassPermissions" ? "allow" : "deny", reason: "permission_mode" } });
+      if (permission === "bypassPermissions") {
+        await until(() => fake.written.some(f => f.type === "bash_command"));
+        expect(fake.written.at(-1)).toMatchObject({ type: "bash_command", command: "touch /tmp/roclaw-p0-2-bypass" });
+        fake.send({ type: "user", isReplay: true, message: { role: "user", content: "<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr><bash-exit-code>0</bash-exit-code>" } });
+        await until(() => events.some(e => e.type === "turnCompleted"));
+      } else {
+        await until(() => events.some(e => e.type === "turnCompleted"));
+        expect(fake.written.some(f => f.type === "bash_command")).toBe(false);
+        expect(events.filter(e => e.type === "itemCompleted" && e.item.type === "commandExecution").at(-1)).toMatchObject({ item: { status: "failed" } });
+      }
+    } finally { await engine.close("test"); await consuming; }
+  });
+  test("standalone bash gate: readonlyAutoAllow=false decouples from the gate itself (P0-1)", async () => {
+    // The switch only controls whether an allowlisted command may skip approval; it must never
+    // remove the gate. Even a bare readonly-looking command must queue an approval when it is off.
+    const fake = fakeProcess(() => {});
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child, readonlyAutoAllow: false });
+    const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
+    try {
+      const c = await client(server);
+      const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd(), permission: "readonly" });
+      await c.request("turn/start", { threadId: thread.id, input: [{ type: "bash", command: "touch /tmp/roclaw-p0-1-should-not-run" }] });
+      await until(() => server.log.pendingRequests(thread.id).length === 1);
+      expect(server.log.pendingRequests(thread.id)[0]).toMatchObject({ method: "item/commandExecution/requestApproval", params: { command: "touch /tmp/roclaw-p0-1-should-not-run" } });
+      expect(fake.written.some(f => f.type === "bash_command")).toBe(false);
+      expect(server.log.readonlyAutoAllows(thread.id)).toEqual([]);
+    } finally { await server.close(); }
+  });
+  test("readonly spawn: disallowedTools trimming the CLI tool schema is audited (P1-1)", async () => {
+    // --disallowedTools removes Edit/Write/MultiEdit/NotebookEdit from the model's tool schema, so
+    // the CLI never emits can_use_tool for them and the readonly_denied deny+audit path in receive()
+    // is unreachable on a real engine. Audit the structural fact once at launch instead.
+    const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th", permission: "readonly" });
+      expect(events.find(e => e.type === "engineEvent" && e.subtype === "readonly_tools_disabled")).toMatchObject({ payload: { toolNames: ["Write", "Edit", "MultiEdit", "NotebookEdit"], reason: "disallowed_tools_flag" } });
+    } finally { await engine.close("test"); await consuming; }
+  });
+  test("plan spawn: does not emit readonly_tools_disabled (audit is readonly-specific)", async () => {
+    const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th", permission: "plan" });
+      expect(events.some(e => e.type === "engineEvent" && e.subtype === "readonly_tools_disabled")).toBe(false);
+    } finally { await engine.close("test"); await consuming; }
+  });
   test("readonly auto-allow: does not apply to fileChange requests", async () => {
     const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-write-file", request: { subtype: "can_use_tool", tool_use_id: "edit", tool_name: "Write", input: { file_path: "/tmp/a", content: "hi" } } }));
     const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
@@ -359,7 +418,9 @@ describe("Claude native frame exchange (fake child only)", () => {
     }), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
     const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
     try {
-      await engine.spawn({ backend: "claude", threadId: "th", cwd: "/tmp" });
+      // bypassPermissions: this test exercises bash plumbing, not permission gating, and every
+      // other mode now gates a standalone bash turn (P0-2) unless the command is allowlisted.
+      await engine.spawn({ backend: "claude", threadId: "th", cwd: "/tmp", permission: "bypassPermissions" });
       const bash = [{ type: "bash" as const, command: "printf test" }];
       expect(() => engine.validateTurn({ threadId: "th", input: [...bash, ...input("mixed")] })).toThrow("standalone");
       await engine.sendTurn("tn1", bash, { threadId: "th", input: bash });
@@ -375,7 +436,8 @@ describe("Claude native frame exchange (fake child only)", () => {
     const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
     const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
     try {
-      await engine.spawn({ backend: "claude", threadId: "th" });
+      // bypassPermissions: this test exercises interrupt/steer plumbing, not permission gating.
+      await engine.spawn({ backend: "claude", threadId: "th", permission: "bypassPermissions" });
       const bash = [{ type: "bash" as const, command: "sleep 5" }];
       await engine.sendTurn("tn", bash, { threadId: "th", input: bash });
       await expect(engine.steer("tn", input("no"))).rejects.toMatchObject({ code: -32602 });
