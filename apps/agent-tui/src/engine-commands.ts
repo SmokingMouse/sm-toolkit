@@ -9,10 +9,11 @@ export const engineCommands: Record<string, string> = {
 export interface EngineCommand { command: string; subtype: string; params: JsonObject }
 export interface OutputLine { text: string; tone?: "add" | "remove" | "heading" }
 export interface EnginePanel { title: string; lines: OutputLine[]; scroll?: number }
+export const blockedEngineCommands = ["/add-dir", "/cd", "/login", "/logout", "/feedback", "/plugin", "/engineControl"];
 
 export function engineCommand(command: string, args: string[]): EngineCommand | undefined {
   // These native commands are outside the daemon allowlist; never send as prompts.
-  if (["/add-dir", "/cd", "/login", "/logout", "/feedback", "/plugin", "/engineControl"].includes(command)) throw new Error(`${command} 未在引擎控制白名单开放，请使用原生 Claude Code`);
+  if (blockedEngineCommands.includes(command)) throw new Error(`${command} 未在引擎控制白名单开放，请使用原生 Claude Code`);
   if (!Object.hasOwn(engineCommands, command)) return;
   const params: JsonObject = {};
   if (command === "/rewind") {
@@ -83,7 +84,7 @@ export function renderEngineResult(command: string, data: JsonObject): EnginePan
       return lines(`[${display(server.status)}] ${display(server.name)}${server.error ? ` · ${display(server.error)}` : ""}`);
     }) : lines("没有 MCP 服务器");
   } else if (command === "/rewind") {
-    result = lines(data.rewound === true ? "会话已回滚（引擎确认）；历史为 daemon 已记录事件" : `未回滚：${display(data.error ?? "引擎未确认 rewound")}`);
+    result = lines(data.rewound === true ? "会话已回滚（引擎确认）；旧时间线已标为回滚前审计记录" : `未回滚：${display(data.error ?? "引擎未确认 rewound")}`);
     if (typeof data.prefillText === "string" && data.prefillText) result.push(...lines(`原输入：${data.prefillText}`));
   } else if (typeof data.text === "string") result = lines(data.text);
   else if (command === "/btw" && typeof data.response === "string") result = lines(data.response);

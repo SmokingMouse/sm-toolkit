@@ -1,7 +1,7 @@
 import type { AgentClient } from "@smokingmouse/agent-server/client";
 import type { RequestCard, TuiModel } from "./model.js";
 import { Sessions } from "./sessions.js";
-import { pickerOffset } from "./render.js";
+import { pickerOffset, scrollLimit } from "./render.js";
 import { imageInput, messageInput, pasteImage, unquote } from "./attachments.js";
 import { CompletionSource, completionToken } from "./completion.js";
 import { controlError, controlSuccess, effortBudgets, efforts, estimatedContextWindow, nativePermission, nextEffort, nextPermission, permissionModes, type Effort, type Permission } from "./modes.js";
@@ -28,6 +28,7 @@ export class Controller {
     this.columns = columns; this.rows = rows;
     if (this.model.picker) this.model.picker.offset = pickerOffset(this.model, columns, rows);
     if (this.model.forkPicker) this.model.forkPicker.offset = pickerOffset(this.model, columns, rows);
+    if (["input", "card"].includes(focusStack(this.model)[0])) this.model.scroll = Math.max(0, Math.min(this.model.scroll, scrollLimit(this.model, columns, rows)));
   }
   constructor(readonly client: AgentClient, readonly model: TuiModel, readonly exit: () => void, readonly now: () => number = Date.now) { this.sessions = new Sessions(client, model); this.lease = new InputLease(client, model); }
   dispose(): void { this.lease.dispose(); }
@@ -120,18 +121,21 @@ export class Controller {
         return;
       }
       if (focus === "permissions") { await this.permissionKey(text, key); return; }
-      if (this.model.enginePanel && !this.model.activeCard && this.model.panelFocus === "history" && (key.name === "pageup" || key.name === "pagedown")) {
+      if (focus !== "completion" && this.model.enginePanel && this.model.panelFocus === "history" && (key.name === "pageup" || key.name === "pagedown")) {
         this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? -10 : 10)); return;
       }
-      if (!this.model.activeCard && (key.name === "pageup" || key.name === "pagedown") && this.model.panelFocus !== "history") {
+      if (focus !== "completion" && (key.name === "pageup" || key.name === "pagedown") && this.model.panelFocus !== "history") {
         const field = this.model.panelFocus === "log" ? "logScroll" : "taskScroll";
         this.model[field] = Math.max(0, this.model[field] + (key.name === "pageup" ? 5 : -5)); return;
       }
-      if (key.name === "pageup" || key.name === "pagedown") { this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? (this.model.activeCard ? -10 : 10) : (this.model.activeCard ? 10 : -10))); return; }
-      if (key.name === "escape" && this.model.enginePanel && !this.model.completion) { this.model.enginePanel = undefined; this.model.scroll = 0; return; }
+      if (focus !== "completion" && (key.name === "pageup" || key.name === "pagedown")) { this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? 10 : -10)); return; }
+      if (key.name === "escape" && this.model.enginePanel && !this.model.completion) { this.model.enginePanel = undefined; return; }
       const completion = this.model.completion;
       if (completion) {
         const draft = completion.draft ?? this.model.input;
+        if (key.name === "tab" && (key.shift || key.sequence === "\x1b[Z")) {
+          await this.control(() => this.setPermission(nextPermission(this.model.thread?.permission, this.model.bypassAvailable))); return;
+        }
         if (key.name === "escape") { this.model.completion = undefined; return; }
         if (key.name === "up" || key.name === "down") {
           completion.selected = (completion.selected + (key.name === "up" ? -1 : 1) + completion.candidates.length) % completion.candidates.length; return;
@@ -309,7 +313,7 @@ export class Controller {
       if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) <= 0) throw new Error("用法：/context <窗口 token 数>，当前默认窗口为估算值");
       this.model.contextWindow = Number(value); this.model.contextWindowEstimated = false; return true;
     }
-    const request = engineCommand(command, args);
+    const request = engineCommand(command, command === "/btw" && args.length ? [text.slice(command.length).trimStart()] : args);
     if (request) {
       if (command === "/rewind") {
         this.model.rewindConfirmation = { threadId: this.model.thread!.id, request };
@@ -361,6 +365,7 @@ export class Controller {
     const frame = await this.withLease(threadId, () => this.client.request("thread/engineControl", { threadId, subtype: request.subtype, params: request.params }));
     if (this.model.thread?.id !== threadId) return;
     const data = controlPayload(frame);
+    if (request.command === "/rewind" && data.rewound === true) this.model.recordRewind(String(request.params.target_message_uuid));
     this.model.enginePanel = renderEngineResult(request.command, data);
     this.model.panelFocus = "history"; this.model.scroll = 0;
     this.model.message = `${request.command} 返回 · Esc 关闭 · PgUp/PgDn 滚动`;

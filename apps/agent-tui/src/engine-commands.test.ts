@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
-import { controlPayload, engineCommand, renderEngineResult } from "./engine-commands.js";
-import { render, plain } from "./render.js";
+import { blockedEngineCommands, controlPayload, engineCommand, renderEngineResult } from "./engine-commands.js";
+import { render, plain, renderTimeline, scrollLimit } from "./render.js";
 import { TuiModel } from "./model.js";
+import { Controller } from "./controller.js";
+import type { AgentClient } from "@smokingmouse/agent-server/client";
+import { help } from "./options.js";
 
 test("native commands use allowlisted subtypes and explicit rewind UUIDs; unknown skills pass through", () => {
   expect(engineCommand("/rewind", ["native-id", "latest-id"])).toEqual({ command: "/rewind", subtype: "rewind_conversation", params: { target_message_uuid: "native-id", last_seen_user_message_uuid: "latest-id" } });
@@ -44,4 +47,52 @@ test("diff panel highlights native hunks after sanitization and wrapping; suppor
   expect(renderEngineResult("/diff", { diff: null }).lines[0].text).toContain("差异不可用");
   expect(renderEngineResult("/diff", { diff: { hunks: [], perFileStats: [{ path: "binary", isBinary: true }] } }).lines[0].text).toContain("binary");
   expect(renderEngineResult("/diff", { diff: { hunks: [{ path: "a", hunks: [{ lines: ["+native"] }] }] } }).lines.at(-1)).toEqual({ text: "+native", tone: "add" });
+});
+
+test("cmds-review P2-2 help blocked list is generated from command rejection source", () => {
+  for (const name of blockedEngineCommands) { expect(help).toContain(name); expect(() => engineCommand(name, [])).toThrow("白名单"); }
+});
+
+test("cmds-review P2-4 result/card/history scroll have separate bounded viewports after paging and resize", async () => {
+  const model = new TuiModel(); model.connection = "connected";
+  model.thread = { id: "source", backend: "claude", engineThreadId: null, cwd: "/tmp", createdAtMs: 1, status: { type: "idle" } };
+  const client = { onStateChange: () => () => {} } as unknown as AgentClient;
+  const controller = new Controller(client, model, () => {});
+  try {
+    model.items.set("history", { id: "history", seq: 1, turnId: "turn", startedAtMs: 1, type: "agentMessage", payload: { text: "old line\n".repeat(100) } });
+    model.scroll = 30;
+    model.enginePanel = renderEngineResult("/diff", { diff: Array.from({ length: 100 }, (_, i) => `+${i}`).join("\n") });
+    controller.resize(80, 20);
+    expect(model.scroll).toBe(0);
+    for (let i = 0; i < 20; i++) await controller.key(undefined, { name: "pagedown" });
+    expect(model.scroll).toBe(scrollLimit(model, 80, 20));
+    const bottom = model.scroll;
+    await controller.key(undefined, { name: "pageup" }); expect(model.scroll).toBe(bottom - 10);
+    controller.resize(80, 120); expect(model.scroll).toBe(0);
+    controller.resize(80, 20);
+    model.scroll = 15;
+    model.request({ method: "item/commandExecution/requestApproval", params: { threadId: "source", turnId: "turn", itemId: "history", requestId: "card", startedAtMs: 1, command: "long\n".repeat(30), cwd: "/tmp" } });
+    expect(model.scroll).toBe(0);
+    for (let i = 0; i < 20; i++) await controller.key(undefined, { name: "pagedown" });
+    expect(model.scroll).toBe(scrollLimit(model, 80, 20));
+    model.activeCard!.state = "resolved"; expect(model.scroll).toBe(15);
+    await controller.key(undefined, { name: "escape" }); expect(model.scroll).toBe(30);
+  } finally { controller.dispose(); }
+});
+
+test("cmds-review P2-3 rewind audit markers retain events, invalidate context usage and survive reattach", () => {
+  const model = new TuiModel();
+  const thread = { id: "source", backend: "claude" as const, engineThreadId: null, cwd: "/tmp", createdAtMs: 1, status: { type: "idle" as const } };
+  model.thread = thread;
+  const item = { id: "old", seq: 1, turnId: "turn", startedAtMs: 1, type: "agentMessage" as const, payload: { text: "old-context" } };
+  model.items.set(item.id, item);
+  model.usage = { inputTokens: 1, outputTokens: 1, cachedTokens: 0, cacheCreation: 0, usd: 1, estimated: false, contextTokens: 100 };
+  model.recordRewind("native-target");
+  expect(model.items.get("old")).toBe(item); expect(model.usage.contextTokens).toBeNull();
+  expect(model.usage.usd).toBe(1);
+  model.select({ thread: { ...thread, id: "other" }, items: [], pendingRequests: [], queue: [], nextSeq: 1 });
+  expect(model.rewinds).toHaveLength(0);
+  model.select({ thread, items: [item], pendingRequests: [], queue: [], nextSeq: 2 });
+  expect(renderTimeline(model).join("\n")).toContain("引擎已回滚至 native-target");
+  expect(renderTimeline(model).join("\n")).toContain("[回滚前审计] Agent: old-context");
 });

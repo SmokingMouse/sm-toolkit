@@ -5,6 +5,7 @@ import { resolveDaemonPaths } from "@smokingmouse/agent-server/paths";
 import type { ClientEndpoint } from "@smokingmouse/agent-server/client";
 import { PermissionSchema } from "@smokingmouse/agent-server/protocol";
 import type { Permission } from "./modes.js";
+import { blockedEngineCommands } from "./engine-commands.js";
 
 export interface Options { attach?: string; backend?: "claude" | "codex"; permission: Permission; cwd: string; endpoint: ClientEndpoint; tokenPath: string; help: boolean }
 export const help = `agent-tui --attach <threadId> [--socket <path> | --ws <url>]
@@ -22,12 +23,15 @@ Shift+Tab: permissions; /permissions: picker; Tab: effort; /effort low|medium|hi
 /diff: workspace diff; /context: native context usage; /context <window tokens>: set window
 /usage: usage table; /cost: session cost; /mcp: MCP server status; /btw <question>: side question
 /rewind <native message UUID> [last seen user UUID]: rewind conversation after physical y/N
-Rewind UUIDs come from native Claude history, not TUI item IDs; daemon history stays as recorded
-/help: this help; result panels: Esc closes, PageUp/PageDown scrolls
-Engine commands require Claude support; /add-dir /cd /login /feedback /plugin are not allowed
+Rewind UUIDs come from native Claude history, not TUI item IDs; old items are audit records after rewind
+/help: this help; result panels share the screen with live history; Esc closes, PageUp/PageDown scrolls
+Engine commands require Claude support; ${blockedEngineCommands.join(" ")} are not allowed
 Ctrl-R: reasoning; Ctrl-P: plan; PageUp/PageDown: history; approvals: y/s/n/a
 Ctrl-L /log: system log; /tasks: tasks; /agents [id]: subagents; F6: panel focus
 Questions: number selects/toggles, Enter advances/submits; type a free answer
+Cards keep separate drafts (also during confirmation); Ctrl-N is blocked until cards resolve
+Ctrl-L / F6 / Ctrl-R / Ctrl-P / Ctrl-T / Ctrl-C remain available during cards
+Cards cancel pending rewind/resume confirmations; Enter/n/Esc cancels, only physical y confirms
 Token and default socket use agent-server HOME/XDG resolution.`;
 
 export function parseOptions(args: string[], env: NodeJS.ProcessEnv = process.env): Options {

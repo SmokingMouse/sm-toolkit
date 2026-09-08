@@ -82,7 +82,7 @@ for (const backend of ["claude", "codex"] as const) test(`engine commands PTY ($
       if (backend === "claude" && c.subtype === "get_workspace_diff") expect(screen).toContain("\x1b[32m+after\x1b[0m");
       if (backend === "claude" && c.subtype === "get_context_usage") expect(frame()).toContain("50% / 100000");
       if (backend === "claude") {
-        write("\x1b"); await wait(() => !frame().includes("Esc 关闭 · PgUp/PgDn 滚动\n"), "close result panel");
+        write("\x1b"); await wait(() => !frame().includes("Esc 关闭 · PgUp/PgDn 滚动 · "), "close result panel");
       }
     }
     if (backend === "claude") {

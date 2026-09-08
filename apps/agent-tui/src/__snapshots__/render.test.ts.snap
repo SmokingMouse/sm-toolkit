@@ -53,19 +53,19 @@ Command: ls
 cwd: /tmp
 Reason: inspect
 y 允许 · s 本会话允许 · n 拒绝 · a 中止
-Enter to confirm · Esc to cancel
+Enter 不操作 · Esc 拒绝
 
 [request] Action Required
 update a.ts
 grantRoot: /tmp
 y 允许 · s 本会话允许 · n 拒绝 · a 中止
-Enter to confirm · Esc to cancel
+Enter 不操作 · Esc 拒绝
 
 [request] Action Required
 Permissions: {"network":{"enabled":true}}
 cwd: /tmp
 y 允许 · s 本会话允许 · n 拒绝 · a 中止
-Enter to confirm · Esc to cancel
+Enter 不操作 · Esc 拒绝
 
 [request] Action Required
 问题 1/1:  Choose
@@ -105,7 +105,7 @@ ypass 上限未知，已隐藏
 Command: ls
 cwd: /tmp
 y 允许 · s 本会话允许 · n 拒绝 · a 中止
-Enter to confirm · Esc to cancel
+Enter 不操作 · Esc 拒绝
 系统日志 0 条 · 折叠 · Ctrl-L /log
 
 审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片

@@ -1,5 +1,5 @@
 // PTY fixture: real terminal, input decoder, controller and renderer; only RPCs are fake.
-import { writeFileSync } from "node:fs";
+import { renameSync, writeFileSync } from "node:fs";
 import type { AgentClient } from "@smokingmouse/agent-server/client";
 import type { PendingServerRequest, Thread } from "@smokingmouse/agent-server/protocol";
 import { TuiModel } from "../model.js";
@@ -52,6 +52,9 @@ const client = {
   },
 } as unknown as AgentClient;
 let revision = 0;
-const save = () => writeFileSync(output, JSON.stringify({ revision: ++revision, calls, input: model.input, card: model.cards.get("card"), focus: focusStack(model), log: model.logExpanded, reasoning: model.expandedReasoning, plan: model.expandedPlan, panelFocus: model.panelFocus, message: model.message, discardNote: model.discardNote, thread: model.thread?.id, rewind: model.rewindConfirmation, resume: model.resumeConfirmation }));
+const save = () => {
+  writeFileSync(`${output}.tmp`, JSON.stringify({ revision: ++revision, calls, input: model.input, card: model.cards.get("card"), focus: focusStack(model), log: model.logExpanded, reasoning: model.expandedReasoning, plan: model.expandedPlan, panelFocus: model.panelFocus, message: model.message, discardNote: model.discardNote, thread: model.thread?.id, rewind: model.rewindConfirmation, resume: model.resumeConfirmation }));
+  renameSync(`${output}.tmp`, output);
+};
 model.onChange(save); save();
 await runTerminal(client, model);

@@ -35,6 +35,8 @@ export function renderCard(card: RequestCard): string[] {
   const r = card.request;
   if (!["pending", "sending"].includes(card.state)) return [plain(`[${r.params.requestId}] ${card.note ?? (card.state === "offline" ? "连接中断，重连后恢复" : card.state)}`)];
   const lines = [`[${r.params.requestId}] Action Required${card.state === "sending" ? " · 等待服务器确认" : ""}`];
+  const confirming = card.replying || card.state === "sending";
+  if (card.note) lines.push(card.note);
   switch (r.method) {
     case "item/commandExecution/requestApproval": lines.push(`Command: ${r.params.command}`, `cwd: ${r.params.cwd}`); break;
     case "item/fileChange/requestApproval": lines.push(...r.params.changes.map(c => `${c.kind} ${c.path}`), ...(r.params.grantRoot ? [`grantRoot: ${r.params.grantRoot}`] : [])); break;
@@ -47,16 +49,16 @@ export function renderCard(card: RequestCard): string[] {
         lines.push(`问题 ${card.question + 1}/${r.params.questions.length}: ${q.header ?? ""} ${q.question}`);
         const selected = card.answers[q.id]?.answers ?? [];
         q.options?.forEach((o, i) => lines.push(`${i + 1}. [${selected.includes(o.label) ? "x" : " "}] ${o.label}${o.description ? ` — ${o.description}` : ""}`));
-        lines.push(q.multiSelect ? "数字切换多选 · Enter 下一题/提交" : "数字选择 · Enter 下一题/提交");
-        if ((q.options?.length ?? 0) > 9) lines.push("输入选项编号后按 Space 选择/切换");
+        if (!confirming) lines.push(q.multiSelect ? "数字切换多选 · Enter 下一题/提交" : "数字选择 · Enter 下一题/提交");
+        if (!confirming && (q.options?.length ?? 0) > 9) lines.push("输入选项编号后按 Space 选择/切换");
         lines.push(`自由回答: ${card.draft}`);
       }
-      lines.push("Enter to confirm · Esc to cancel");
+      lines.push(confirming ? "确认中：仅编辑卡片草稿 · Enter/Esc 暂不受理" : "Enter to confirm · Esc to cancel");
       return lines.flatMap(line => plain(line).split("\n"));
     }
   }
   if ("reason" in r.params && r.params.reason) lines.push(`Reason: ${r.params.reason}`);
-  lines.push("y 允许 · s 本会话允许 · n 拒绝 · a 中止", "Enter to confirm · Esc to cancel");
+  lines.push(...(confirming ? ["确认中：仅编辑卡片草稿 · 决策键暂不受理"] : ["y 允许 · s 本会话允许 · n 拒绝 · a 中止", "Enter 不操作 · Esc 拒绝"]));
   return lines.flatMap(line => plain(line).split("\n"));
 }
 
@@ -77,29 +79,46 @@ function wrapLine(line: string, width: number): string[] {
 }
 export function renderTimeline(model: TuiModel): string[] {
   const items = [...model.items.values()].sort((a, b) => a.seq - b.seq), seen = new Set<string>();
+  const markers = [...model.rewinds];
+  const auditThrough = markers.at(-1)?.afterSeq ?? -1;
+  const boundariesBefore = (seq: number): string[] => {
+    const lines: string[] = [];
+    while (markers.length && markers[0].afterSeq < seq) {
+      const marker = markers.shift()!;
+      lines.push(plain(`── 引擎已回滚至 ${marker.target} · 上方为回滚前审计记录，不代表当前上下文 ──`), "");
+    }
+    return lines;
+  };
   const children = new Map<string, Item[]>();
   for (const item of items) if (item.type === "subAgent") children.set(item.payload.parentItemId, [...children.get(item.payload.parentItemId) ?? [], item]);
   const visit = (item: Item, depth: number): string[] => {
     if (seen.has(item.id)) return []; seen.add(item.id);
+    const boundary = boundariesBefore(item.seq);
     const indent = "  ".repeat(Math.min(depth, 8));
     let lines: string[];
     if (item.type === "subAgent") {
       const p = item.payload, collapsed = model.collapsedAgents.has(item.id), progress = object(p.progress);
       lines = [`${collapsed ? "▸" : "▾"} SubAgent ${item.id} [${item.status}] ${p.phase} · parent ${p.parentItemId}`];
       if (!collapsed) lines.push(...[p.text ?? progress.text, model.expandedReasoning ? p.thinking ?? progress.thinking : undefined, p.report === undefined ? undefined : json(p.report)].filter(v => typeof v === "string" && v.length > 0).flatMap(v => plain(String(v)).split("\n")).map(line => `  ${line}`));
-      if (collapsed) { const hide = (id: string) => { for (const child of children.get(id) ?? []) if (!seen.has(child.id)) { seen.add(child.id); hide(child.id); } }; hide(item.id); return lines.map(l => indent + plain(l)); }
+      if (collapsed) {
+        const hide = (id: string) => { for (const child of children.get(id) ?? []) if (!seen.has(child.id)) { seen.add(child.id); hide(child.id); } };
+        hide(item.id);
+        if (item.seq <= auditThrough) lines[0] = `[回滚前审计] ${lines[0]}`;
+        return [...boundary, ...lines.map(l => indent + plain(l))];
+      }
     } else lines = renderItem(item, model.expandedReasoning, model.expandedPlan);
-    return [...lines.map(l => indent + plain(l)), ...(children.get(item.id) ?? []).flatMap(child => visit(child, depth + 1)), ""];
+    if (item.seq <= auditThrough && lines.length) lines[0] = `[回滚前审计] ${lines[0]}`;
+    return [...boundary, ...lines.map(l => indent + plain(l)), ...(children.get(item.id) ?? []).flatMap(child => visit(child, depth + 1)), ""];
   };
   const ids = new Set(items.map(i => i.id));
-  return [...items.filter(i => i.type !== "subAgent" || !ids.has(i.payload.parentItemId)).flatMap(i => visit(i, 0)), ...items.flatMap(i => visit(i, 0))];
+  return [...items.filter(i => i.type !== "subAgent" || !ids.has(i.payload.parentItemId)).flatMap(i => visit(i, 0)), ...items.flatMap(i => visit(i, 0)), ...boundariesBefore(Infinity)];
 }
 
 function frameLayout(model: TuiModel, columns: number, rows: number) {
   const width = Math.max(1, columns - 1), height = Math.max(4, rows);
   const thread = model.thread, usage = model.usage;
   const status = `${thread ? shortId(thread.id) : "connecting"} | cwd ${thread?.cwd ?? "—"} | model ${thread?.model ?? "unknown"}`;
-const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "unknown"}${canResume(thread) ? "（可恢复 · /resume）" : ""} | 待处理 ${model.pendingCount}${model.pendingCount > 0 && model.connection !== "connected" ? "（离线待确认）" : ""} | 租约:${model.leaseLabel} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection}`);
+  const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "unknown"}${canResume(thread) ? "（可恢复 · /resume）" : ""} | 待处理 ${model.pendingCount}${model.pendingCount > 0 && model.connection !== "connected" ? "（离线待确认）" : ""} | 租约:${model.leaseLabel} | queue ${model.queue.length} | tokens ${usage ? `${usage.inputTokens} in / ${usage.outputTokens} out / ${usage.cachedTokens} cached` : "—"} | ${model.connection}`);
   const context = contextUsage(usage?.contextTokens, model.contextWindow);
   const modeStatus = wrap(`mode ${nativePermission(thread?.permission)} | effort ${model.effort ? `${model.effort}（本端设置）` : "—"} | model ${thread?.model ?? "—"} | ctx [${context.bar}] ${context.percent ?? "?"}% / ${model.contextWindowEstimated ? "~" : ""}${model.contextWindow}${model.launchPermission === undefined ? " | bypass 上限未知，已隐藏" : ""}`, width).slice(0, height - 4);
   if (model.leaseExpiresAt > Date.now()) modeStatus.splice(0, modeStatus.length, ...wrap(`${modeStatus.join("")} | 持有控制权至 ${new Date(model.leaseExpiresAt).toLocaleTimeString()} · /release`, width).slice(0, height - 4));
@@ -133,14 +152,13 @@ export function pickerOffset(model: TuiModel, columns: number, rows: number): nu
   else if (bottom > offset + available) offset = Math.min(top, bottom - available);
   return Math.max(0, Math.min(offset, total - available));
 }
-export function render(model: TuiModel, columns = 100, rows = 30, color = false): string {
+function layoutFrame(model: TuiModel, columns: number, rows: number, color: boolean) {
   const { width, height, headers, notices, inputRows, extras, available: frameAvailable } = frameLayout(model, columns, rows);
   const body = renderTimeline(model);
   for (const q of model.queue) body.push(`排队 #${q.position + 1}: ${q.preview}`);
   for (const c of model.cards.values()) if (c !== model.activeCard) body.push(...renderCard(c));
-  const content = model.enginePanel
-    ? [{ text: `${model.enginePanel.title} · Esc 关闭 · PgUp/PgDn 滚动`, tone: "heading" }, ...model.enginePanel.lines].flatMap(line => wrap(line.text, width).map(text => color && line.tone ? `\x1b[${line.tone === "add" ? 32 : line.tone === "remove" ? 31 : 36}m${text}\x1b[0m` : text))
-    : body.flatMap(line => wrap(line, width));
+  const content = body.flatMap(line => wrap(line, width));
+  const result = model.enginePanel ? model.enginePanel.lines.flatMap(line => wrap(line.text, width).map(text => color && line.tone ? `\x1b[${line.tone === "add" ? 32 : line.tone === "remove" ? 31 : 36}m${text}\x1b[0m` : text)) : [];
   const focus = focusStack(model)[0];
   const picker = focus !== "permissions" ? [] : ["权限模式 · ↑↓/数字选择 · Enter 确认 · Esc 取消", ...model.permissionChoices.map((p, i) => `${i === model.permissionPicker ? ">" : " "} ${i + 1}. ${p}${p === nativePermission(model.thread?.permission) ? " (当前)" : ""}`)];
   const card = (model.activeCard ? renderCard(model.activeCard) : picker).flatMap(line => wrap(line, width));
@@ -173,22 +191,36 @@ export function render(model: TuiModel, columns = 100, rows = 30, color = false)
     panels.push(...tail(lines.length ? lines : wrap("暂无已观测任务", width), Math.min(Math.floor(budget / 3), budget - panels.length), model.taskScroll));
   }
   const available = frameAvailable - panels.length;
+  let maxScroll = 0;
   let middle: string[];
   if (focus === "threads" || focus === "fork") {
     const { entries, offset = 0 } = (model.forkPicker ?? model.picker)!;
     middle = entries.length ? pickerLines(model, width).flat().slice(offset, offset + available) : ["（daemon 中没有会话）"].slice(0, available);
   } else if (card.length) {
     const cardRows = Math.min(card.length, available);
-    const offset = Math.min(model.scroll, Math.max(0, card.length - cardRows));
+    maxScroll = Math.max(0, card.length - cardRows);
+    const offset = focus === "permissions" ? 0 : Math.min(model.scroll, maxScroll);
     middle = [...content.slice(-Math.max(0, available - cardRows)).slice(0, available - cardRows), ...card.slice(offset, offset + cardRows)];
   } else if (model.enginePanel) {
-    const start = Math.min(model.scroll, Math.max(0, content.length - available));
-    middle = content.slice(start, start + available);
+    // Stack two panes: keep streaming history visible above the bounded result.
+    const historyRows = Math.min(6, Math.floor(available / 3));
+    const resultRows = Math.max(0, available - historyRows - 1);
+    maxScroll = Math.max(0, result.length - resultRows);
+    const start = Math.min(model.scroll, maxScroll);
+    const history = historyRows ? content.slice(-historyRows) : [];
+    while (history.length < historyRows) history.push("");
+    const heading = wrap(`${model.enginePanel.title} · Esc 关闭 · PgUp/PgDn 滚动 · ${maxScroll ? start + 1 : 1}/${maxScroll + 1}`, width)[0];
+    middle = [...history, ...(available > 0 ? [heading] : []), ...result.slice(start, start + resultRows)];
   } else {
+    maxScroll = Math.max(0, content.length - available);
     const end = Math.max(Math.min(content.length, available), content.length - model.scroll);
     middle = content.slice(Math.max(0, end - available), end);
   }
   while (middle.length < available) middle.push("");
   const status = [model.message, model.leaseWarning].filter(Boolean).join(" · ");
-  return [...headers, ...middle, ...panels, ...extras, wrap(status, width)[0], ...notices, wrap(focusFooter(model), width)[0], ...inputRows].slice(-height).join("\n");
+  return { maxScroll, text: [...headers, ...middle, ...panels, ...extras, wrap(status, width)[0], ...notices, wrap(focusFooter(model), width)[0], ...inputRows].slice(-height).join("\n") };
 }
+
+export function render(model: TuiModel, columns = 100, rows = 30, color = false): string { return layoutFrame(model, columns, rows, color).text; }
+/** Same wrapped-content and viewport calculation used for drawing. */
+export function scrollLimit(model: TuiModel, columns: number, rows: number): number { return layoutFrame(model, columns, rows, false).maxScroll; }

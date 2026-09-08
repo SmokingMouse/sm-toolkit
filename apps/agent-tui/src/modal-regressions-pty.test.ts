@@ -6,6 +6,8 @@ import { AgentClient } from "@smokingmouse/agent-server/client";
 import { resolveDaemonPaths, runDaemon } from "@smokingmouse/agent-server/daemon";
 import type { PendingServerRequest } from "@smokingmouse/agent-server/protocol";
 import { shortId } from "./sessions.js";
+import { blockedEngineCommands } from "./engine-commands.js";
+import { commands } from "./completion.js";
 
 async function harness() {
   const home = mkdtempSync("/tmp/tui-modal-regression-");
@@ -120,3 +122,80 @@ test("fn-review2 P2-1 PTY: card keeps view shortcuts, thread scan and emergency 
     h.write("\x03"); await h.wait(() => h.engine.interrupted.includes(h.turnId), "Ctrl-C interrupts");
   } finally { await h.cleanup(); }
 }, 20000);
+
+test("cmds-review P2-1 PTY: btw preserves internal spaces, tabs and multiline free text", async () => {
+  const h = await harness();
+  try {
+    h.engine.controlResponse = () => ({ response: { subtype: "success", response: { response: "side-answer" } } });
+    const question = "why   does    this  fail?\n\tcode  block";
+    h.write(`\x1b[200~/btw ${question}\x1b[201~\r`);
+    await h.wait(() => h.frame().includes("side-answer"), "side answer");
+    expect(h.engine.controls).toEqual([{ subtype: "side_question", params: { question } }]);
+    expect(h.engine.sent).toHaveLength(1);
+  } finally { await h.cleanup(); }
+}, 12000);
+
+test("cmds-review P2-2 PTY: help and rejected command list share the executable allowlist", async () => {
+  const h = await harness();
+  try {
+    h.write("/help \r"); await h.wait(() => h.frame().includes("/help · Esc 关闭"), "help shown");
+    let helpFrames = h.frame();
+    h.write("\x1b[6~"); await h.wait(() => h.frame().includes("Token and default socket"), "help bottom");
+    helpFrames += h.frame();
+    for (const name of blockedEngineCommands) expect(helpFrames).toContain(name);
+    for (const c of commands) expect(helpFrames).toContain(`/${c.name}`);
+    h.write("\x1b"); await h.wait(() => h.frame().endsWith("> ") && !h.frame().includes("/help · Esc 关闭"), "close help");
+    for (const name of blockedEngineCommands) {
+      h.write(`\x15${name} \r`); await h.wait(() => h.frame().includes(`${name} 未在引擎控制白名单`), `${name} blocked`);
+    }
+    expect(h.engine.controls).toHaveLength(0); expect(h.engine.sent).toHaveLength(1);
+  } finally { await h.cleanup(); }
+}, 15000);
+
+test("cmds-review P2-3 PTY: confirmed rewind marks audit history and preserves daemon events", async () => {
+  const h = await harness();
+  try {
+    const before = await h.phone.request("thread/items/list", { threadId: h.thread.id });
+    let rewound = false;
+    h.engine.controlResponse = () => ({ response: { subtype: "success", response: { rewound, error: "stale target" } } });
+    h.write("/rewind native-target \r"); await h.wait(() => h.frame().includes("[y/N]"), "first confirmation");
+    h.write("y"); await h.wait(() => h.frame().includes("未回滚：stale target"), "refusal");
+    expect(h.frame()).not.toContain("引擎已回滚至");
+    rewound = true;
+    h.write("/rewind native-target \r"); await h.wait(() => h.frame().includes("[y/N]"), "second confirmation");
+    h.write("y"); await h.wait(() => h.frame().includes("引擎已回滚至 native-target"), "authoritative marker");
+    expect(h.frame()).toContain("回滚前审计"); expect(h.frame()).toContain("不代表当前上下文");
+    h.write("\x1b"); await h.wait(() => h.frame().endsWith("> ") && !h.frame().includes("/rewind · Esc 关闭"), "close result");
+    expect(h.frame()).toContain("引擎已回滚至 native-target");
+    h.engine.emit({ type: "itemStarted", turnId: h.turnId, item: { id: "post-rewind", type: "agentMessage", payload: { text: "fresh-context" } } });
+    await h.wait(() => h.frame().includes("fresh-context"), "new timeline after marker");
+    expect(h.frame().indexOf("引擎已回滚至 native-target")).toBeLessThan(h.frame().indexOf("fresh-context"));
+    expect(h.frame()).not.toContain("[回滚前审计] Agent …: fresh-context");
+    const after = await h.phone.request("thread/items/list", { threadId: h.thread.id });
+    expect(after.items.filter(i => before.items.some(old => old.id === i.id))).toEqual(before.items);
+  } finally { await h.cleanup(); }
+}, 15000);
+
+test("cmds-review P2-4/P2-5 PTY: bounded result paging keeps streaming timeline visible", async () => {
+  const h = await harness();
+  try {
+    let lines = 5;
+    h.engine.controlResponse = () => ({ response: { subtype: "success", response: { diff: Array.from({ length: lines }, (_, i) => `+diff-line-${i}`).join("\n") } } });
+    h.write("/diff \r"); await h.wait(() => h.frame().includes("+diff-line-4"), "short diff");
+    h.write("\x1b[6~".repeat(20)); await h.wait(() => h.frame().includes("滚动 · 1/1"), "short scroll clamped");
+    h.write("\x1b[5~"); await h.wait(() => h.frame().includes("滚动 · 1/1"), "no hidden overscroll debt");
+    lines = 60;
+    h.write("/diff \r"); await h.wait(() => h.frame().includes("+diff-line-0"), "long diff starts at top");
+    h.write("\x1b[6~".repeat(20)); await h.wait(() => h.frame().includes("+diff-line-59"), "long scroll reaches bottom");
+    const position = () => /滚动 · (\d+)\/(\d+)/.exec(h.frame())!.slice(1).map(Number);
+    const [bottom, max] = position(); expect(bottom).toBe(max);
+    h.write("\x1b[5~"); await h.wait(() => !!/滚动 · (\d+)\/(\d+)/.exec(h.frame()), "one page up");
+    expect(position()[0]).toBe(bottom - 10);
+    h.engine.emit({ type: "itemStarted", turnId: h.turnId, item: { id: "live", type: "agentMessage", payload: { text: "STREAM-A" } } });
+    await h.wait(() => h.frame().includes("STREAM-A"), "timeline visible alongside result");
+    h.engine.emit({ type: "itemDelta", turnId: h.turnId, itemId: "live", kind: "text", text: "-STREAM-B" });
+    await h.wait(() => h.frame().includes("STREAM-A-STREAM-B"), "stream updates without closing panel");
+    expect(h.frame()).toContain("/diff · Esc 关闭"); expect(h.frame()).toContain("+diff-line-");
+    for (const line of h.frame().split("\n")) expect(Bun.stringWidth(line)).toBeLessThan(180);
+  } finally { await h.cleanup(); }
+}, 15000);

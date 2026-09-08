@@ -36,6 +36,15 @@ export class TuiModel {
   completion?: Completion;
   enginePanel?: EnginePanel;
   rewindConfirmation?: { threadId: string; request: EngineCommand };
+  private rewindHistory = new Map<string, Array<{ afterSeq: number; target: string }>>();
+  get rewinds(): ReadonlyArray<{ afterSeq: number; target: string }> { return this.rewindHistory.get(this.thread?.id ?? "") ?? []; }
+  recordRewind(target: string): void {
+    if (!this.thread) return;
+    const markers = this.rewindHistory.get(this.thread.id) ?? [];
+    markers.push({ afterSeq: [...this.items.values()].reduce((max, item) => Math.max(max, item.seq), 0), target });
+    this.rewindHistory.set(this.thread.id, markers);
+    if (this.usage) this.usage.contextTokens = null; // Old context occupancy is no longer authoritative.
+  }
   expandedReasoning = false;
   expandedPlan = true;
   permissionPicker?: number;

@@ -45,7 +45,7 @@ for (const mode of modes) test(`modal penetration PTY matrix: ${mode} × ${Objec
         else if (mode === "permissions" && key === "enter") expected.push("thread/permission/set");
         else if (mode === "input" && key === "enter") expected.push("turn/start");
         else if (mode === "input" && key === "tab") expected.push("thread/effort/set");
-        else if (mode === "input" && key === "shiftTab") expected.push("thread/permission/set");
+        else if (["input", "completion"].includes(mode) && key === "shiftTab") expected.push("thread/permission/set");
         const semantic = methods.filter(m => !m.startsWith("thread/lease/"));
         expect(semantic, `${mode}/${key} RPC ownership`).toEqual(expected);
         if (!["input", "completion"].includes(mode)) expect(state.input, `${mode}/${key} input isolation`).toBe(before.input);
