@@ -101,7 +101,7 @@ export class Controller {
         if (key.name === "escape") this.model.forkPicker = undefined;
         else if (key.name === "up") picker.index = Math.max(0, picker.index - 1);
         else if (key.name === "down") picker.index = Math.min(picker.entries.length - 1, picker.index + 1);
-        else if (key.name === "return" || key.name === "enter") {
+        else if (!key.shift && (key.name === "return" || key.name === "enter")) {
           if (picker.threadId !== this.model.thread?.id) { this.model.forkPicker = undefined; throw new Error("分叉来源已切换，请重新 /fork"); }
           const entry = picker.entries[picker.index];
           if (entry) await this.sessions.run("/fork", entry.itemId, false, !entry.itemId);
@@ -113,7 +113,7 @@ export class Controller {
         if (key.name === "escape") this.model.picker = undefined;
         else if (key.name === "up") picker.index = Math.max(0, picker.index - 1);
         else if (key.name === "down") picker.index = Math.min(Math.max(0, picker.entries.length - 1), picker.index + 1);
-        else if (key.name === "return" || key.name === "enter") {
+        else if (!key.shift && (key.name === "return" || key.name === "enter")) {
           const entry = picker.entries[picker.index];
           if (entry) await this.sessions.run("/resume", entry.thread.id);
           else this.model.message = "没有可选择的会话；按 Esc 退出";
@@ -291,7 +291,7 @@ export class Controller {
     if (key.name === "escape") { this.model.permissionPicker = undefined; return; }
     if (key.name === "up" || key.name === "down") { this.model.permissionPicker = (this.model.permissionPicker! + (key.name === "up" ? choices.length - 1 : 1)) % choices.length; return; }
     if (text && /^[1-5]$/.test(text) && Number(text) <= choices.length) this.model.permissionPicker = Number(text) - 1;
-    if (key.name === "return" || key.name === "enter") {
+    if (!key.shift && (key.name === "return" || key.name === "enter")) {
       if (this.model.permissionPicker! < 0) throw new Error("当前模式不在允许集合，请显式选择模式或 Esc 取消");
       await this.control(() => this.setPermission(choices[this.model.permissionPicker!]));
       this.model.permissionPicker = undefined;
@@ -411,6 +411,7 @@ export class Controller {
     } finally { card.replying = false; this.model.changed(); }
   }
   private async cardKey(card: RequestCard, text: string | undefined, key: Key): Promise<void> {
+    if ((key.ctrl && key.name === "j") || (key.shift && ["return", "enter"].includes(key.name ?? ""))) { card.draft += "\n"; return; }
     if (card.state === "sending" || card.replying || key.paste) {
       // Keep draft editing usable while the overlay owns all action keys.
       // In particular Enter must not submit that draft or confirm a hidden picker.
@@ -426,7 +427,6 @@ export class Controller {
     if (!handle || this.client.state !== "connected") throw new Error("请求连接已失效，等待重连快照");
     if (handle.method === "item/tool/requestUserInput") {
       if (key.ctrl && key.name === "u") { card.draft = ""; return; }
-      if ((key.ctrl && key.name === "j") || (key.shift && ["return", "enter"].includes(key.name ?? ""))) { card.draft += "\n"; return; }
       // TerminalInput already normalizes pasted CR/CRLF for every input surface.
       // Treat the entire paste as draft text, including digits that select options when typed.
       if (key.paste) { card.draft += text ?? ""; return; }

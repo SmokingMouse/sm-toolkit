@@ -5,7 +5,7 @@ import { join } from "node:path";
 const keys = {
   y: "y", n: "n", s: "s", a: "a", text: "Z", digit: "1", enter: "\r", escape: "\x1b", tab: "\t", shiftTab: "\x1b[Z",
   up: "\x1b[A", down: "\x1b[B", pageup: "\x1b[5~", pagedown: "\x1b[6~", backspace: "\x7f", clear: "\x15",
-  paste: "\x1b[200~y\nZ\x1b[201~", newline: "\n", log: "\x0c", f6: "\x1b[17~", reasoning: "\x12", plan: "\x10", threads: "\x14", new: "\x0e", interrupt: "\x03",
+  paste: "\x1b[200~y\nZ\x1b[201~", newline: "\n", shiftEnter: "\x1b[13;2u", metaY: "\x1by", log: "\x0c", f6: "\x1b[17~", reasoning: "\x12", plan: "\x10", threads: "\x14", new: "\x0e", interrupt: "\x03",
 };
 const modes = ["approval-card", "question-card", "approval-card-sending", "question-card-sending", "rewind", "resume", "threads", "fork", "permissions", "completion", "busy", "input"];
 
@@ -52,6 +52,7 @@ for (const mode of modes) test(`modal penetration PTY matrix: ${mode} × ${Objec
         if (card && key === "new") { expect(state.thread).toBe("source"); expect(state.discardNote).toContain("Ctrl-N"); }
         if (card && key === "threads") { expect(state.focus[0]).toBe("card"); expect(state.focus).toContain("threads"); }
         if (card && ["text", "paste"].includes(key)) expect(state.card.draft).toBe(key === "text" ? "Z" : "y\nZ");
+        if (card && ["newline", "shiftEnter"].includes(key)) expect(state.card.draft).toBe("\n");
         if (card && sending && ["y", "n", "s", "a"].includes(key)) expect(state.card.draft).toBe(key);
         if (key === "log") expect(state.log).toBe(true);
         if (key === "reasoning") expect(state.reasoning).toBe(true);
