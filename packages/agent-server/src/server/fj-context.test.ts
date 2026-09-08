@@ -17,7 +17,7 @@ test("fj full permission maps to native bypass and Codex ordinary tier on start/
 });
 test("close cannot bypass another client's input lease", async () => {
   const { server } = setup(); servers.push(server); const a = await client(server), b = await client(server);
-  const { thread } = await a.request("thread/start", { backend: "codex", cwd: process.cwd() });
+  const { thread } = await a.request("thread/start", { model: "gpt-6-astra", backend: "codex", cwd: process.cwd() });
   await a.request("thread/lease/acquire", { threadId: thread.id });
   await expect(b.request("thread/close", { threadId: thread.id })).rejects.toMatchObject({ code: -32012 });
   expect(server.threads.get(thread.id).status.type).toBe("idle");
@@ -27,9 +27,9 @@ test("close cannot bypass another client's input lease", async () => {
 afterEach(async () => { for (const s of servers.splice(0)) await s.close(); });
 test("serviceTier is Codex-only and cannot silently disappear on Claude start/resume", async () => {
   const { server, engines } = setup(); servers.push(server); const c = await client(server);
-  await expect(c.request("thread/start", { backend: "claude", cwd: process.cwd(), serviceTier: "default" })).rejects.toMatchObject({ code: -32008, message: "serviceTier requires Codex" });
+  await expect(c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd(), serviceTier: "default" })).rejects.toMatchObject({ code: -32008, message: "serviceTier requires Codex" });
   expect(engines).toHaveLength(0);
-  const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+  const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() });
   await c.request("thread/close", { threadId: thread.id });
   await expect(c.request("thread/resume", { threadId: thread.id, serviceTier: "default" })).rejects.toMatchObject({ code: -32008, message: "serviceTier requires Codex" });
   expect(engines).toHaveLength(1);

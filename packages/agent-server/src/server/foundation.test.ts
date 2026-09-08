@@ -21,10 +21,10 @@ function childFixture() {
   Object.assign(child, { stdout, stderr, stdin, exitCode: null, signalCode: null, kill: () => { Object.assign(child, { exitCode: 0 }); queueMicrotask(() => child.emit("close", 0)); return true; } });
   return { child, send, written };
 }
-function fixture() {
+function fixture(defaultModel?: string) {
   let peer = childFixture(), spawned = false;
   let argv: string[] = [];
-  const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], idleTimeoutMs: 0, engineFactory: backend => backend === "claude" ? new ClaudeEngine({ spawnProcess: (_command, args) => { if (spawned) peer = childFixture(); spawned = true; argv = args; return peer.child; } }) : new MockEngine() });
+  const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], idleTimeoutMs: 0, defaultModel, engineFactory: backend => backend === "claude" ? new ClaudeEngine({ spawnProcess: (_command, args) => { if (spawned) peer = childFixture(); spawned = true; argv = args; return peer.child; } }) : new MockEngine() });
   return { server, send: (frame: unknown) => peer.send(frame), get written() { return peer.written; }, argv: () => argv };
 }
 
@@ -32,7 +32,7 @@ test("P1-1: escalation requires an owned live lease on every permission entry po
   const f = fixture();
   try {
     const owner = await client(f.server, "owner"), stranger = await client(f.server, "stranger");
-    const { thread } = await owner.request("thread/start", { backend: "claude", permission: "plan" });
+    const { thread } = await owner.request("thread/start", { model: "sonnet", backend: "claude", permission: "plan" });
     expect(f.argv()).not.toContain("--allow-dangerously-skip-permissions");
     const calls = [
       ["thread/permission/set", { threadId: thread.id, permission: "bypassPermissions" }],
@@ -64,7 +64,7 @@ test("review2 foundation P2-1 unsupported permission backend precedes every leas
   const f = fixture();
   try {
     const c = await client(f.server, "caller"), holder = await client(f.server, "holder");
-    const { thread } = await c.request("thread/start", { backend: "codex" });
+    const { thread } = await c.request("thread/start", { model: "gpt-6-astra", backend: "codex" });
     for (const lease of ["none", "owned", "other"] as const) {
       if (lease === "owned") await c.request("thread/lease/acquire", { threadId: thread.id });
       if (lease === "other") {
@@ -84,9 +84,9 @@ test("P2-1: invalid Claude effort rejects start, live resume and turn before nat
   const f = fixture();
   try {
     const c = await client(f.server);
-    for (const effort of ["banana", "bogus", "HIGH", " "]) await expect(c.request("thread/start", { backend: "claude", effort })).rejects.toMatchObject({ code: -32602 });
+    for (const effort of ["banana", "bogus", "HIGH", " "]) await expect(c.request("thread/start", { model: "sonnet", backend: "claude", effort })).rejects.toMatchObject({ code: -32602 });
     expect(f.written).toHaveLength(0);
-    const { thread } = await c.request("thread/start", { backend: "claude", effort: "xhigh" });
+    const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", effort: "xhigh" });
     expect(f.argv()[f.argv().indexOf("--effort") + 1]).toBe("xhigh");
     const count = f.written.length;
     await expect(c.request("thread/resume", { threadId: thread.id, effort: "banana" })).rejects.toMatchObject({ code: -32602 });
@@ -99,7 +99,7 @@ test("P2-3: unnegotiated connections receive permission changes but not engineEv
   const f = fixture();
   try {
     const old = await client(f.server, "old"), frames = capture(old);
-    const { thread } = await old.request("thread/start", { backend: "claude" });
+    const { thread } = await old.request("thread/start", { model: "sonnet", backend: "claude" });
     f.send({ type: "system", subtype: "new_notice" });
     await old.request("thread/permission/set", { threadId: thread.id, permission: "plan" });
     expect(frames.some(n => "method" in n && n.method === "thread/permission/changed")).toBe(true);
@@ -124,11 +124,27 @@ test("P2-4: set_model updates thread and saved options, then respawns with the s
     expect(f.argv()[f.argv().indexOf("--model") + 1]).toBe("opus");
     expect(f.argv()[f.argv().indexOf("--resume") + 1]).toBe("native-model-session");
     for (const params of [{ model: null }, {}]) {
-      await c.request("thread/engineControl", { threadId: thread.id, subtype: "set_model", params });
-      expect(f.server.log.options<any>(thread.id).model).toBe("default");
+      await expect(c.request("thread/engineControl", { threadId: thread.id, subtype: "set_model", params })).rejects.toMatchObject({ code: -32602, data: { reason: "model_required" } });
+      expect(f.server.log.options<any>(thread.id).model).toBe("opus");
       await c.request("thread/close", { threadId: thread.id });
-      expect((await c.request("thread/resume", { threadId: thread.id })).thread.model).toBe("default");
-      expect(f.argv()[f.argv().indexOf("--model") + 1]).toBe("default");
+      expect((await c.request("thread/resume", { threadId: thread.id })).thread.model).toBe("opus");
+      expect(f.argv()[f.argv().indexOf("--model") + 1]).toBe("opus");
+    }
+  } finally { await f.server.close(); }
+});
+
+test("model guard: configured reset reaches Claude explicitly and persists across resume", async () => {
+  const f = fixture("haiku");
+  try {
+    const c = await client(f.server);
+    const { thread } = await c.request("thread/start", { backend: "claude", model: "sonnet" });
+    for (const params of [{}, { model: null }, { model: "default" }]) {
+      await c.request("thread/engineControl", { threadId: thread.id, subtype: "set_model", params });
+      expect(f.written.at(-1).request).toMatchObject({ subtype: "set_model", model: "haiku" });
+      expect(f.server.log.options(thread.id).model).toBe("haiku");
+      await c.request("thread/close", { threadId: thread.id });
+      expect((await c.request("thread/resume", { threadId: thread.id })).thread.model).toBe("haiku");
+      expect(f.argv()[f.argv().indexOf("--model") + 1]).toBe("haiku");
     }
   } finally { await f.server.close(); }
 });
@@ -137,7 +153,7 @@ test("P2-5: permission aliases normalize in results, notifications and saved opt
   const f = fixture();
   try {
     const c = await client(f.server), notices = capture(c);
-    const { thread } = await c.request("thread/start", { backend: "claude", permission: "full" });
+    const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", permission: "full" });
     await c.request("thread/lease/acquire", { threadId: thread.id });
     for (const [permission, canonical] of [["auto-edit", "acceptEdits"], ["full", "bypassPermissions"]] as const) {
       const changed = await c.request("thread/permission/set", { threadId: thread.id, permission });
@@ -153,10 +169,10 @@ test("P2-5: AS autocompact rejects CLI shorthand and forwards explicit token cou
   const f = fixture();
   try {
     const c = await client(f.server);
-    for (const autocompact of ["500k", "200", 200, 999, 99999, 1000001, 100000.5]) await expect(c.request("thread/start", { backend: "claude", autocompact } as any)).rejects.toMatchObject({ code: -32602 });
+    for (const autocompact of ["500k", "200", 200, 999, 99999, 1000001, 100000.5]) await expect(c.request("thread/start", { model: "sonnet", backend: "claude", autocompact } as any)).rejects.toMatchObject({ code: -32602 });
     expect(f.written).toHaveLength(0);
     for (const autocompact of ["auto", 100000, 1000000] as const) {
-      await c.request("thread/start", { backend: "claude", autocompact });
+      await c.request("thread/start", { model: "sonnet", backend: "claude", autocompact });
       expect(f.argv()[f.argv().indexOf("--autocompact") + 1]).toBe(String(autocompact));
     }
   } finally { await f.server.close(); }
@@ -166,7 +182,7 @@ test("foundation RPC: capabilities, hot permission persistence, effort shape, le
   const f = fixture();
   try {
     const c = await client(f.server), notices = capture(c);
-    const { thread } = await c.request("thread/start", { backend: "claude", permission: "plan", effort: "high" });
+    const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", permission: "plan", effort: "high" });
     expect(thread.permission).toBe("plan");
     await c.request("thread/lease/acquire", { threadId: thread.id });
     const changed = await c.request("thread/permission/set", { threadId: thread.id, permission: "dontAsk" });
@@ -186,7 +202,7 @@ test("foundation RPC: capabilities, hot permission persistence, effort shape, le
       ["thread/engineControl", { threadId: thread.id, subtype: "mcp_status", params: {} }],
       ["thread/compact", { threadId: thread.id }],
     ] as const) await expect(c.request(method, params)).rejects.toMatchObject({ code: -32012 });
-    const codex = await c.request("thread/start", { backend: "codex" });
+    const codex = await c.request("thread/start", { model: "gpt-6-astra", backend: "codex" });
     for (const [method, params] of [
       ["thread/engineControl", { threadId: codex.thread.id, subtype: "mcp_status", params: {} }],
       ["thread/permission/set", { threadId: codex.thread.id, permission: "plan" }],
@@ -200,7 +216,7 @@ test("foundation compact: slash frame, autocompact argv, queue ordering and clie
   const f = fixture();
   try {
     const c = await client(f.server);
-    const { thread } = await c.request("thread/start", { backend: "claude", autocompact: 200000 });
+    const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", autocompact: 200000 });
     expect(f.argv()[f.argv().indexOf("--autocompact") + 1]).toBe("200000");
     await c.request("turn/start", { threadId: thread.id, input: input("first") });
     const compact = { threadId: thread.id, instructions: "keep decisions", clientTurnId: "compact-id" };
@@ -225,7 +241,7 @@ test("foundation legacy compatibility: opt-in native events and bash snapshots r
     const initialized = await modern.request("initialize", { protocolVersion: "as/1", client: { name: "new", version: "1", kind: "test", label: "new" }, capabilities: { engineEvents: true, bashInput: true } });
     expect(initialized.capabilities.engine?.engineEvents).toBe(true);
     await modern.notifyInitialized(); const modernFrames = capture(modern);
-    const { thread } = await modern.request("thread/start", { backend: "claude" });
+    const { thread } = await modern.request("thread/start", { model: "sonnet", backend: "claude" });
     await old.request("thread/attach", { threadId: thread.id });
     f.send({ type: "system", subtype: "future_unknown", nested: { untouched: [1, null] } });
     await until(() => modernFrames.some(n => "method" in n && n.method === "thread/engineEvent"));

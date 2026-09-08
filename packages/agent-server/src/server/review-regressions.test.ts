@@ -18,7 +18,7 @@ async function fixture(options: ServerOptions = {}) {
   const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [directory], idleTimeoutMs: 0, engineFactory: backend => { const engine = new MockEngine(undefined, backend); engines.push(engine); return engine; }, ...options });
   cleanup.push(() => server.close());
   const c = await client(server, "phone");
-  const start = () => c.request("thread/start", { backend: "claude", cwd: directory });
+  const start = () => c.request("thread/start", { model: "sonnet", backend: "claude", cwd: directory });
   return { directory, engines, server, c, start };
 }
 async function running(options: ServerOptions = {}) {
@@ -110,11 +110,11 @@ test("R1 / R1b: sequential, concurrent, closed, crashed and unknown native resum
   f.engines[1].emit({ type: "exit", error: { code: -32004, message: "crashed", data: { retryable: true } } });
   await until(() => f.server.threads.get(thread.id).status.type === "systemError");
   expect((await f.c.request("thread/resume", { threadId: thread.id })).attached).toBe(false); expect(f.engines).toHaveLength(3);
-  const imported = await Promise.all([f.c, other].map(c => c.request("thread/resume", { engineThreadId: "ghost", backend: "claude", cwd: f.directory })));
+  const imported = await Promise.all([f.c, other].map(c => c.request("thread/resume", { model: "sonnet", engineThreadId: "ghost", backend: "claude", cwd: f.directory })));
   expect(imported[0].thread.id).toBe(imported[1].thread.id); expect(imported.map(r => r.attached).sort()).toEqual([false, true]); expect(f.engines).toHaveLength(4);
 });
 test("R2: thread and turn keys deduplicate identical payloads and reject divergence", async () => {
-  const f = await fixture(), params = { backend: "claude" as const, cwd: f.directory, clientThreadId: "key" };
+  const f = await fixture(), params = { backend: "claude" as const, model: "sonnet", cwd: f.directory, clientThreadId: "key" };
   const first = await f.c.request("thread/start", params), second = await f.c.request("thread/start", params);
   expect(second).toMatchObject({ deduplicated: true, thread: { id: first.thread.id } });
   await expect(f.c.request("thread/start", { ...params, backend: "codex" })).rejects.toMatchObject({ code: -32013 });
@@ -142,8 +142,8 @@ test("S2: allowed_roots rejects sibling-prefix, traversal, symlink escape and fi
   const f = await fixture(), root = join(f.directory, "allowed"), sibling = join(f.directory, "allowed-evil");
   mkdirSync(root); mkdirSync(sibling); const inside = join(root, "inside"); mkdirSync(inside); const link = join(root, "escape"); symlinkSync(sibling, link);
   const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [root], engineFactory: () => new MockEngine(), idleTimeoutMs: 0 }); cleanup.push(() => server.close()); const c = await client(server);
-  for (const cwd of [sibling, `${root}/../allowed-evil`, link, "/", "/etc"]) await expect(c.request("thread/start", { backend: "claude", cwd })).rejects.toMatchObject({ code: -32005 });
-  expect((await c.request("thread/start", { backend: "claude", cwd: inside })).thread.cwd).toBe(inside);
+  for (const cwd of [sibling, `${root}/../allowed-evil`, link, "/", "/etc"]) await expect(c.request("thread/start", { model: "sonnet", backend: "claude", cwd })).rejects.toMatchObject({ code: -32005 });
+  expect((await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: inside })).thread.cwd).toBe(inside);
 });
 test("N4: asc and desc pagination exhaust exactly the same seven identities", async () => {
   const f = await running();
@@ -176,7 +176,7 @@ test("C3: capabilities describe implemented backends and AS v2 fails closed", as
   const init = await c.request("initialize", { protocolVersion: "as/1", client: { name: "test", kind: "test", version: "1", label: "test" } });
   expect(init.capabilities).toMatchObject({ backends: ["claude", "codex"], externalProviders: false, maxQueuedTurns: 8 });
   expect((await f.c.request("server/config/read", {})).allowed_roots).toEqual([f.directory]);
-  await expect(f.c.request("thread/start", { backend: "external", cwd: f.directory })).rejects.toMatchObject({ code: -32008 });
+  await expect(f.c.request("thread/start", { model: "sonnet", backend: "external", cwd: f.directory })).rejects.toMatchObject({ code: -32008 });
   const future = f.server.connectInProcess();
   await expect(future.request("initialize", { protocolVersion: "as/2", client: { name: "test", kind: "test", version: "1", label: "test" } })).rejects.toMatchObject({ code: -32003 });
   expect(future.closed).toBe(true);

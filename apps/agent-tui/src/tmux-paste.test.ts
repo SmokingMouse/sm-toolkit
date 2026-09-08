@@ -63,7 +63,7 @@ test("P0-1 real tmux paste renders separate lines and sends only LF to daemon", 
     let client: AgentClient | undefined;
     try {
       client = await AgentClient.connectUnix({ path: paths.socketPath, token: readFileSync(paths.tokenPath, "utf8").trim(), client: { name: "tmux-test", label: "tmux-test", kind: "test", version: "1" }, reconnect: false });
-      const { thread } = await client.request("thread/start", { backend: "claude", cwd: home });
+      const { thread } = await client.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
       const command = [process.execPath, resolve(import.meta.dir, "../bin/agent-tui"), "--attach", thread.id, "--socket", paths.socketPath].map(quote).join(" ");
       await tmux(["new-session", "-d", "-x", "140", "-y", "32", command]);
       await waitFor(async () => (await tmux(["capture-pane", "-p"])).includes(thread.id.slice(0, 11)), "TUI attached");

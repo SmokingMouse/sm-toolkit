@@ -39,7 +39,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
   test("two attached clients receive identical ordered items; unrelated clients remain silent", async () => {
     const { home, engines, connect } = await setup();
     const a = await connect("a"), b = await connect("b"), unrelated = await connect("unrelated");
-    const { thread } = await a.request("thread/start", { backend: "claude", cwd: home });
+    const { thread } = await a.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
     await b.request("thread/attach", { threadId: thread.id });
     const af: ServerNotification[] = [], bf: ServerNotification[] = [], uf: Frame[] = [];
     a.onFrame(f => { if ("method" in f && !("id" in f)) af.push(f as ServerNotification); });
@@ -63,7 +63,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
   test("capable attached clients race by separate wire IDs; late answers get -32014", async () => {
     const { home, engines, server, connect } = await setup();
     const a = await connect("a"), b = await connect("b"), display = await connect("display", { capabilities: {} }), unattached = await connect("unattached");
-    const { thread } = await a.request("thread/start", { backend: "claude", cwd: home });
+    const { thread } = await a.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
     await b.request("thread/attach", { threadId: thread.id }); await display.request("thread/attach", { threadId: thread.id });
     const cards: ServerRequestHandle<typeof approval>[] = [], excluded: Frame[] = [];
     a.onServerRequest(approval, request => cards.push(request)); b.onServerRequest(approval, request => cards.push(request));
@@ -90,7 +90,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
   test("reconnect replays missing items and final text, never offline deltas", async () => {
     const { home, engines, server, manager, connect } = await setup();
     const a = await connect("a", { reconnect: { minDelayMs: 80, maxDelayMs: 80 } });
-    const { thread } = await a.request("thread/start", { backend: "claude", cwd: home });
+    const { thread } = await a.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
     const { turn } = await a.request("turn/start", { threadId: thread.id, input: input("stream") });
     engines[0].emit({ type: "itemStarted", turnId: turn.id, item: { id: "partial", type: "agentMessage", payload: { text: "" } } });
     const deltas: string[] = [], snapshots: AttachResult[] = [];
@@ -111,7 +111,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
   test("approvals created offline reappear in attach snapshots with answerable new wire IDs", async () => {
     const { home, engines, manager, connect } = await setup();
     const a = await connect("a", { reconnect: { minDelayMs: 80, maxDelayMs: 80 } });
-    const { thread } = await a.request("thread/start", { backend: "claude", cwd: home });
+    const { thread } = await a.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
     const { turn } = await a.request("turn/start", { threadId: thread.id, input: input("offline approval") });
     manager.disconnect(a.clientId!);
     const snapshots: AttachResult[] = []; a.onSnapshot(s => snapshots.push(s));
@@ -135,7 +135,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
       serverRequests: [approval], pendingRequests: mode === "undeclared" ? undefined : mode === "optOut",
       ...(mode === "optOut" ? { notifications: { optOut: ["thread/pendingRequests"] } } : {}),
     }, reconnect: { minDelayMs: 10, maxDelayMs: 10 } });
-    const { thread } = await owner.request("thread/start", { backend: "claude", cwd: home });
+    const { thread } = await owner.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
     const { turn } = await owner.request("turn/start", { threadId: thread.id, input: input("approval") });
     engines[0].emit({ type: "itemStarted", turnId: turn.id, item: { id: "command", type: "commandExecution", payload: { command: "pwd", cwd: home } } });
     let decision: unknown;
@@ -162,7 +162,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
     const { home, engines, manager, connect } = await setup();
     const owner = await connect("phone"), display = await connect("display", { capabilities: {}, reconnect: { minDelayMs: 80, maxDelayMs: 80 } });
     const muted = await connect("muted", { capabilities: { notifications: { optOut: ["thread/pendingRequests"] } } }), unrelated = await connect("unrelated");
-    const { thread } = await owner.request("thread/start", { backend: "claude", cwd: home });
+    const { thread } = await owner.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
     await muted.request("thread/attach", { threadId: thread.id });
     const { turn } = await owner.request("turn/start", { threadId: thread.id, input: input("status") });
     const create = (id: string) => {
@@ -205,7 +205,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
   test("disconnect detaches, releases leases and keeps the engine alive", async () => {
     const { home, engines, connect, manager } = await setup();
     const a = await connect("a"), b = await connect("b");
-    const { thread } = await a.request("thread/start", { backend: "claude", cwd: home });
+    const { thread } = await a.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
     await b.request("thread/attach", { threadId: thread.id });
     await a.request("thread/lease/acquire", { threadId: thread.id });
     await expect(b.request("turn/start", { threadId: thread.id, input: input("blocked") })).rejects.toMatchObject({ code: -32012 });
@@ -246,7 +246,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
 
   test("large multibyte item messages survive socket backpressure without truncation", async () => {
     const { home, engines, connect } = await setup(); const a = await connect("a");
-    const { thread } = await a.request("thread/start", { backend: "claude", cwd: home });
+    const { thread } = await a.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
     const { turn } = await a.request("turn/start", { threadId: thread.id, input: input("large") });
     const text = "中文\n".repeat(128 * 1024), items: Item[] = [];
     a.onNotification("item/completed", p => items.push(p.item));
@@ -258,7 +258,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
 
   test("attach snapshot precedes a delta produced immediately after its read boundary", async () => {
     const { home, engines, server, connect } = await setup(); const a = await connect("a"), b = await connect("b");
-    const { thread } = await a.request("thread/start", { backend: "claude", cwd: home });
+    const { thread } = await a.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
     const { turn } = await a.request("turn/start", { threadId: thread.id, input: input("race") });
     engines[0].emit({ type: "itemStarted", turnId: turn.id, item: { id: "answer", type: "agentMessage", payload: { text: "before" } } });
     await until(() => server.log.snapshot(thread.id).items.length === 2);
@@ -278,7 +278,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
   test("pendingRequests: resolution at attach snapshot boundary cannot resurrect a pending state", async () => {
     const { home, engines, server, connect } = await setup();
     const owner = await connect("owner"), display = await connect("display", { capabilities: {} });
-    const { thread } = await owner.request("thread/start", { backend: "claude", cwd: home });
+    const { thread } = await owner.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
     const { turn } = await owner.request("turn/start", { threadId: thread.id, input: input("boundary") });
     engines[0].emit({ type: "itemStarted", turnId: turn.id, item: { id: "boundary", type: "commandExecution", payload: { command: "pwd", cwd: home } } });
     engines[0].emit({ type: "approval", request: { method: approval, params: { requestId: "boundary", threadId: thread.id, turnId: turn.id, itemId: "boundary", command: "pwd", cwd: home, startedAtMs: Date.now() } }, respond: () => {} });
@@ -300,7 +300,7 @@ for (const transport of ["unix", "ws"] as const) describe(`${transport} transpor
 
   test("an additive AS v1 notification remains observable without dropping the connection", async () => {
     const { home, server, connect } = await setup(); const a = await connect("a");
-    const { thread } = await a.request("thread/start", { backend: "claude", cwd: home });
+    const { thread } = await a.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
     const frames: Frame[] = []; a.onFrame(frame => frames.push(frame));
     server.log.publish({ jsonrpc: "2.0", method: "thread/futureMetadata", params: { threadId: thread.id } } as unknown as ServerNotification);
     await a.request("server/health", {});

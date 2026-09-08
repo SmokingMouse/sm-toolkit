@@ -188,7 +188,7 @@ describe("Claude native frame exchange (fake child only)", () => {
     let unsubscribe = () => {};
     try {
       const c = await client(server);
-      const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd(), permission });
+      const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd(), permission });
       unsubscribe = server.log.subscribe(thread.id, frame => published.push(frame));
       await c.request("turn/start", { threadId: thread.id, input: input("go") });
       if (permission === "default") {
@@ -213,7 +213,7 @@ describe("Claude native frame exchange (fake child only)", () => {
     let unsubscribe = () => {};
     try {
       const c = await client(server);
-      const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd(), permission });
+      const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd(), permission });
       unsubscribe = server.log.subscribe(thread.id, frame => published.push(frame));
       await c.request("turn/start", { threadId: thread.id, input: input("go") });
       await until(() => published.some(f => f.method === "thread/engineEvent" && f.params.subtype === "readonly_auto_allow"));
@@ -229,7 +229,7 @@ describe("Claude native frame exchange (fake child only)", () => {
     const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
     try {
       const c = await client(server);
-      const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd(), permission: "plan" });
+      const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd(), permission: "plan" });
       await c.request("turn/start", { threadId: thread.id, input: input("go") });
       await until(() => server.log.pendingRequests(thread.id).length === 1);
       expect(fake.written.some(f => f.type === "control_response")).toBe(false);
@@ -241,7 +241,7 @@ describe("Claude native frame exchange (fake child only)", () => {
     const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
     try {
       const c = await client(server);
-      const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd(), permission: "plan" });
+      const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd(), permission: "plan" });
       await c.request("turn/start", { threadId: thread.id, input: input("go") });
       await until(() => server.log.pendingRequests(thread.id).length === 1);
       expect(fake.written.some(f => f.type === "control_response")).toBe(false);
@@ -255,7 +255,7 @@ describe("Claude native frame exchange (fake child only)", () => {
     let unsubscribe = () => {};
     try {
       const c = await client(server);
-      const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd(), permission: "plan" });
+      const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd(), permission: "plan" });
       unsubscribe = server.log.subscribe(thread.id, frame => published.push(frame));
       await c.request("turn/start", { threadId: thread.id, input: input("go") });
       await until(() => published.some(f => f.method === "thread/engineEvent" && f.params.subtype === "readonly_auto_allow"));
@@ -268,7 +268,7 @@ describe("Claude native frame exchange (fake child only)", () => {
     const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
     try {
       const c = await client(server);
-      const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd(), permission: "plan" });
+      const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd(), permission: "plan" });
       await c.request("turn/start", { threadId: thread.id, input: input("go") });
       await until(() => server.log.pendingRequests(thread.id).length === 1);
       expect(server.log.pendingRequests(thread.id)[0]).toMatchObject({ method: "item/fileChange/requestApproval" });

@@ -28,9 +28,9 @@ async function harness() {
     return connection;
   };
   const phone = await AgentClient.connectUnix({ path: paths.socketPath, token: readFileSync(paths.tokenPath, "utf8").trim(), reconnect: false });
-  const { thread: closed } = await phone.request("thread/start", { backend: "claude", cwd: home });
+  const { thread: closed } = await phone.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
   await phone.request("thread/close", { threadId: closed.id });
-  const { thread } = await phone.request("thread/start", { backend: "claude", cwd: home });
+  const { thread } = await phone.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
   const engine = engines.at(-1)!;
   const decoder = new TextDecoder();
   const proc = Bun.spawn([resolve(import.meta.dir, "../bin/agent-tui"), "--attach", thread.id, "--socket", paths.socketPath], { env, terminal: { cols: 180, rows: 36, data(_t, data) { screen += decoder.decode(data, { stream: true }); } } });

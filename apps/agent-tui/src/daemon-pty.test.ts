@@ -40,7 +40,7 @@ test("tui-live: real daemon, WS phone, Unix PTY, fake Herdr, race, reconnect and
     for (const path of [paths.socketPath, paths.tokenPath, paths.databasePath, `${paths.databasePath}-wal`, `${paths.databasePath}-shm`, paths.logPath, paths.endpointPath, paths.pidPath]) expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(readFileSync(paths.logPath, "utf8")).not.toContain(token);
     phone = await AgentClient.connectWebSocket({ url: daemon.webSocketUrl!, token, client: { name: "phone", kind: "test", label: "phone", version: "1" }, capabilities: { serverRequests: ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/tool/requestUserInput"] }, reconnect: false });
-    const { thread } = await phone.request("thread/start", { backend: "claude", cwd: home });
+    const { thread } = await phone.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
     const decoder = new TextDecoder();
     proc = Bun.spawn([resolve(import.meta.dir, "../bin/agent-tui"), "--attach", thread.id, "--socket", paths.socketPath], {
       env: { ...env, HERDR_PANE_ID: "pane-test", HERDR_SOCKET_PATH: herdrPath, TERM: "xterm-256color" },

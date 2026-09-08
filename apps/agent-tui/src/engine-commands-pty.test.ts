@@ -57,7 +57,7 @@ for (const backend of ["claude", "codex"] as const) test(`engine commands PTY ($
       return connection;
     };
     client = await AgentClient.connectUnix({ path: paths.socketPath, token: readFileSync(paths.tokenPath, "utf8").trim(), reconnect: false });
-    const { thread } = await client.request("thread/start", { backend, cwd: home });
+    const { thread } = await client.request("thread/start", { model: "sonnet", backend, cwd: home });
     const decoder = new TextDecoder();
     proc = Bun.spawn([resolve(import.meta.dir, "../bin/agent-tui"), "--attach", thread.id, "--socket", paths.socketPath], { env, terminal: { cols: 180, rows: 36, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } } });
     await wait(() => frame().includes(shortId(thread.id)) && frame().endsWith("> "), "first raw frame");

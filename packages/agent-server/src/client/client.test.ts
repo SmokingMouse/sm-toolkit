@@ -43,7 +43,7 @@ for (const transport of ["unix", "ws"] as const) describe(`client over ${transpo
   test("midfork: typed client exposes capability, lineage and inherited history", async () => {
     const { client, directory, server } = await setup();
     expect(client.initializeResult?.capabilities.midThreadFork).toBe(true);
-    const { thread } = await client.request("thread/start", { backend: "claude", cwd: directory });
+    const { thread } = await client.request("thread/start", { model: "sonnet", backend: "claude", cwd: directory });
     await client.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "prefix" }] });
     const [item] = server.log.snapshot(thread.id).items;
     const fork = await client.fork({ threadId: thread.id, fromItemId: item.id, clientThreadId: "fork-key" });
@@ -60,7 +60,7 @@ for (const transport of ["unix", "ws"] as const) describe(`client over ${transpo
     });
     const received: NotificationParams<"thread/engineEvent">[] = [];
     client.onNotification("thread/engineEvent", params => received.push(params));
-    const { thread } = await client.request("thread/start", { backend: "claude", cwd: directory });
+    const { thread } = await client.request("thread/start", { model: "sonnet", backend: "claude", cwd: directory });
     engine.emit({ type: "engineEvent", backend: "claude", subtype: "hook_progress", payload: { untouched: [1, null] } });
     await until(() => received.length === 1);
     expect(received[0]).toEqual({ threadId: thread.id, backend: "claude", subtype: "hook_progress", payload: { untouched: [1, null] } });
@@ -97,7 +97,7 @@ for (const transport of ["unix", "ws"] as const) describe(`client over ${transpo
     const { client, engine, directory, manager } = await setup();
     const other = new AgentClient(client.endpoint, { token: "test", reconnect: false });
     cleanups.push(async () => other.close()); await other.connect();
-    const { thread } = await client.request("thread/start", { backend: "claude", cwd: directory });
+    const { thread } = await client.request("thread/start", { model: "sonnet", backend: "claude", cwd: directory });
     await other.request("thread/attach", { threadId: thread.id });
     const received: NotificationParams<"error">[][] = [[], []], errors: Error[] = [], states: string[] = [];
     for (const [index, c] of [client, other].entries()) {
@@ -115,7 +115,7 @@ for (const transport of ["unix", "ws"] as const) describe(`client over ${transpo
 
   test("R4: automatic reconnect uses highest seen cursor and receives offline completion", async () => {
     const { client, directory, engine, manager, server } = await setup();
-    const { thread } = await client.request("thread/start", { backend: "claude", cwd: directory });
+    const { thread } = await client.request("thread/start", { model: "sonnet", backend: "claude", cwd: directory });
     const { turn } = await client.request("turn/start", { threadId: thread.id, input: input("go") });
     engine.emit({ type: "itemStarted", turnId: turn.id, item: { id: "answer", type: "agentMessage", payload: { text: "" } } });
     await until(() => server.log.snapshot(thread.id).items.length === 2);

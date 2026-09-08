@@ -18,7 +18,7 @@ describe("in-process JSON-RPC server", () => {
   });
   test("K1: reused requestId rejects only the duplicate callback and keeps the thread alive", async () => {
     const { server, engines } = create(); const c = await client(server), frames = capture(c);
-    const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+    const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() });
     const { turn } = await c.request("turn/start", { threadId: thread.id, input: input("go") });
     const engine = engines[0], decisions: unknown[] = [], duplicate: unknown[] = [];
     engine.emit({ type: "itemStarted", turnId: turn.id, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: process.cwd() } } });
@@ -42,7 +42,7 @@ describe("in-process JSON-RPC server", () => {
   });
   test("P1: attach rejects limit; complete suffix and bounded history have separate contracts", async () => {
     const { server } = create({ allowedRoots: [process.cwd()] }); const c = await client(server);
-    const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+    const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() });
     for (let i = 0; i < 5; i++) {
       await c.request("turn/start", { threadId: thread.id, input: input(String(i)) });
       await c.request("thread/interrupt", { threadId: thread.id }); await flush();
@@ -55,9 +55,9 @@ describe("in-process JSON-RPC server", () => {
     const { server, engines } = create({ allowedRoots: [process.cwd()] });
     const c = await client(server);
     for (const backend of ["claude", "codex"] as const) {
-      const { thread } = await c.request("thread/start", { backend, cwd: process.cwd() });
+      const { thread } = await c.request("thread/start", { model: "sonnet", backend, cwd: process.cwd() });
       for (const key of ["PATH", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "NODE_OPTIONS", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD"]) {
-        await expect(c.request("thread/start", { backend, env: { [key]: "attacker" } } as any)).rejects.toMatchObject({ code: -32602 });
+        await expect(c.request("thread/start", { model: "sonnet", backend, env: { [key]: "attacker" } } as any)).rejects.toMatchObject({ code: -32602 });
         await expect(c.request("thread/resume", { threadId: thread.id, env: { [key]: "attacker" } } as any)).rejects.toMatchObject({ code: -32602 });
       }
     }
@@ -85,14 +85,14 @@ describe("in-process JSON-RPC server", () => {
   });
   test("unattached clients receive no thread notifications and detach preserves live engine", async () => {
     const { server, engines } = create(); const a = await client(server), b = await client(server); const seen = capture(b);
-    const { thread } = await a.request("thread/start", { backend: "claude", cwd: process.cwd() }); await a.request("turn/start", { threadId: thread.id, input: input("one") }); expect(seen).toEqual([]);
+    const { thread } = await a.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() }); await a.request("turn/start", { threadId: thread.id, input: input("one") }); expect(seen).toEqual([]);
     await b.request("thread/attach", { threadId: thread.id }); await b.request("thread/detach", { threadId: thread.id }); seen.splice(0);
     engines[0].emit({ type: "exit" }); await flush(); expect(seen).toEqual([]);
   });
   test("notification opt-out only affects the declaring connection", async () => {
     const { server, engines } = create(); const a = await client(server); const b = server.connectInProcess();
     await b.request("initialize", { protocolVersion: "as/1", client: { name: "b", version: "1", kind: "test", label: "b" }, capabilities: { notifications: { optOut: ["item/reasoning/textDelta"] } } }); await b.notifyInitialized();
-    const { thread } = await a.request("thread/start", { backend: "claude", cwd: process.cwd() }); await b.request("thread/attach", { threadId: thread.id }); const af = capture(a), bf = capture(b);
+    const { thread } = await a.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() }); await b.request("thread/attach", { threadId: thread.id }); const af = capture(a), bf = capture(b);
     const { turn } = await a.request("turn/start", { threadId: thread.id, input: input("one") });
     engines[0].emit({ type: "itemStarted", turnId: turn.id, item: { id: "reason", type: "reasoning", payload: { text: "" } } });
     engines[0].emit({ type: "itemDelta", turnId: turn.id, itemId: "reason", kind: "reasoning", text: "think" }); await flush();
@@ -100,15 +100,15 @@ describe("in-process JSON-RPC server", () => {
   });
   test("thread and turn keys deduplicate canonical payloads; conflicts are -32013", async () => {
     const { server, engines } = create(); const a = await client(server), b = await client(server);
-    const [one, two] = await Promise.all([a.request("thread/start", { backend: "claude", cwd: process.cwd(), clientThreadId: "thread-key", meta: { a: 1, b: 2 } }), b.request("thread/start", { backend: "claude", cwd: process.cwd(), clientThreadId: "thread-key", meta: { b: 2, a: 1 } })]);
+    const [one, two] = await Promise.all([a.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd(), clientThreadId: "thread-key", meta: { a: 1, b: 2 } }), b.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd(), clientThreadId: "thread-key", meta: { b: 2, a: 1 } })]);
     expect(one.thread.id).toBe(two.thread.id); expect(two.deduplicated).toBe(true); expect(engines).toHaveLength(1);
-    await expect(a.request("thread/start", { backend: "claude", cwd: process.cwd(), clientThreadId: "thread-key", meta: {} })).rejects.toMatchObject({ code: -32013 });
+    await expect(a.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd(), clientThreadId: "thread-key", meta: {} })).rejects.toMatchObject({ code: -32013 });
     const p = { threadId: one.thread.id, input: input("same"), clientTurnId: "turn-key" };
     const [t1, t2] = await Promise.all([a.request("turn/start", p), b.request("turn/start", p)]); expect(t1.turn.id).toBe(t2.turn.id); expect(t2.deduplicated).toBe(true); expect(engines[0].sent).toHaveLength(1);
     await expect(a.request("turn/start", { ...p, input: input("different") })).rejects.toMatchObject({ code: -32013 });
   });
   test("input lease excludes others, can be renewed, and disconnect releases", async () => {
-    const { server } = create(); const a = await client(server, "a"), b = await client(server, "b"); const { thread } = await a.request("thread/start", { backend: "claude", cwd: process.cwd() });
+    const { server } = create(); const a = await client(server, "a"), b = await client(server, "b"); const { thread } = await a.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() });
     const first = await a.request("thread/lease/acquire", { threadId: thread.id }); expect(first.lease.holder.label).toBe("a");
     const renewed = await a.request("thread/lease/acquire", { threadId: thread.id }); expect(renewed.lease.expiresAtMs).toBeGreaterThanOrEqual(first.lease.expiresAtMs);
     await expect(b.request("turn/start", { threadId: thread.id, input: input("blocked") })).rejects.toMatchObject({ code: -32012, data: { holder: { label: "a" } } });
@@ -116,8 +116,8 @@ describe("in-process JSON-RPC server", () => {
   });
   test("cwd guard and unsupported backend fail before spawning", async () => {
     const { server, engines } = create(); const c = await client(server);
-    await expect(c.request("thread/start", { backend: "claude", cwd: "/" })).rejects.toMatchObject({ code: -32005 });
-    await expect(c.request("thread/start", { backend: "external", cwd: process.cwd() })).rejects.toMatchObject({ code: -32008 }); expect(engines).toHaveLength(0);
+    await expect(c.request("thread/start", { model: "sonnet", backend: "claude", cwd: "/" })).rejects.toMatchObject({ code: -32005 });
+    await expect(c.request("thread/start", { model: "sonnet", backend: "external", cwd: process.cwd() })).rejects.toMatchObject({ code: -32008 }); expect(engines).toHaveLength(0);
   });
   test("transport adapters consume the same frame objects through async iteration", async () => {
     const { server } = create(); const c = server.connectInProcess(); const stream = c.frames[Symbol.asyncIterator]();
@@ -125,7 +125,7 @@ describe("in-process JSON-RPC server", () => {
     expect((await stream.next()).value).toMatchObject({ id: "wire-init", result: { protocolVersion: "as/1" } }); c.close(); expect((await stream.next()).done).toBe(true);
   });
   test("reattach on the same connection reissues pending requests with fresh wire IDs", async () => {
-    const { server, engines } = create(); const c = await client(server); const frames = capture(c); const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+    const { server, engines } = create(); const c = await client(server); const frames = capture(c); const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() });
     const { turn } = await c.request("turn/start", { threadId: thread.id, input: input("approval") });
     engines[0].emit({ type: "itemStarted", turnId: turn.id, item: { id: "cmd", type: "commandExecution", payload: { command: "pwd", cwd: process.cwd() } } });
     engines[0].emit({ type: "approval", request: { method: capability, params: { requestId: "reattach-ar", threadId: thread.id, turnId: turn.id, itemId: "cmd", command: "pwd", cwd: process.cwd(), startedAtMs: Date.now() } }, respond: () => {} });
@@ -134,12 +134,12 @@ describe("in-process JSON-RPC server", () => {
     expect(cards()).toHaveLength(2); expect((cards()[0] as { id: string }).id).not.toBe((cards()[1] as { id: string }).id);
   });
   test("external backend remains read-only even with an injected engine", async () => {
-    const { server } = create({ backends: ["external"], engineFactory: () => new MockEngine(undefined, "external") }); const c = await client(server); const { thread } = await c.request("thread/start", { backend: "external", cwd: process.cwd() });
+    const { server } = create({ backends: ["external"], engineFactory: () => new MockEngine(undefined, "external") }); const c = await client(server); const { thread } = await c.request("thread/start", { model: "sonnet", backend: "external", cwd: process.cwd() });
     await expect(c.request("turn/start", { threadId: thread.id, input: input("no") })).rejects.toMatchObject({ code: -32008 });
   });
   test("shutdown rejects new requests while a live engine is closing", async () => {
-    const { server, engines } = create(); const c = await client(server); await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
-    const closing = server.close(); await expect(c.request("thread/start", { backend: "claude", cwd: process.cwd() })).rejects.toThrow(); await closing; expect(engines).toHaveLength(1);
+    const { server, engines } = create(); const c = await client(server); await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() });
+    const closing = server.close(); await expect(c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() })).rejects.toThrow(); await closing; expect(engines).toHaveLength(1);
   });
   test("MockEngine end-to-end: two clients, approval race, stream, usage, reconnect snapshot", async () => {
     let decision: unknown;
@@ -154,7 +154,7 @@ describe("in-process JSON-RPC server", () => {
       yield { type: "turnCompleted", turnId, status: "completed", usage: { usd: null, inputTokens: 10, outputTokens: 2, cachedTokens: 0, cacheCreation: 0, estimated: false, contextTokens: 10 } };
     }) });
     const a = await client(server, "web"), b = await client(server, "phone"), readonly = await client(server, "display", []); const af = capture(a), bf = capture(b), rf = capture(readonly);
-    const { thread } = await a.request("thread/start", { backend: "claude", cwd: process.cwd() }); await b.request("thread/attach", { threadId: thread.id }); await readonly.request("thread/attach", { threadId: thread.id });
+    const { thread } = await a.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() }); await b.request("thread/attach", { threadId: thread.id }); await readonly.request("thread/attach", { threadId: thread.id });
     const { turn } = await a.request("turn/start", { threadId: thread.id, input: input("do it") });
     const approvalFrame = (frames: Frame[]) => frames.find(f => "method" in f && f.method === capability && "id" in f) as { id: string } | undefined;
     await until(() => Boolean(approvalFrame(af) && approvalFrame(bf)));

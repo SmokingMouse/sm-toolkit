@@ -53,7 +53,7 @@ async function setup(permission: Permission = "default") {
   }
   const a = await connect("terminal"), b = await connect("phone");
   a.model.launchPermission = permission;
-  const { thread } = await a.client.request("thread/start", { backend: "claude", cwd: home, permission });
+  const { thread } = await a.client.request("thread/start", { model: "sonnet", backend: "claude", cwd: home, permission });
   for (const client of clients) await client.request("thread/attach", { threadId: thread.id });
   engine.assertLease = () => { if (!server.leases.read(thread.id)) throw new ProtocolError(-32005, "lease required"); };
   const command = async (text: string) => { a.model.input = text; await a.controller.key("\r", { name: "return" }); };
@@ -79,9 +79,9 @@ test("review2 P2-4 model success waits for delayed authoritative notification, i
   let finished = false;
   const pending = command("/model gpt-5").then(() => { finished = true; });
   await wait(() => a.model.message.includes("等待 gpt-5"));
-  expect((await a.client.request("thread/read", { threadId: thread.id })).thread.model).toBeUndefined();
-  engine.emit({ type: "modelChanged", model: "sonnet" });
-  await wait(() => a.model.thread?.model === "sonnet");
+  expect((await a.client.request("thread/read", { threadId: thread.id })).thread.model).toBe("sonnet");
+  engine.emit({ type: "modelChanged", model: "haiku" });
+  await wait(() => a.model.thread?.model === "haiku");
   expect(finished).toBe(false); expect(a.model.message).not.toContain("模型：");
   engine.emit({ type: "modelChanged", model: "gpt-5" });
   await pending;

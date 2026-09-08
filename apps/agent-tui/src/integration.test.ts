@@ -37,7 +37,7 @@ async function setup(transport: "unix" | "ws" = "unix") {
     return { client, model, controller, get exited() { return exited; } };
   }
   const a = await connect("terminal"), b = await connect("phone");
-  const { thread } = await a.client.request("thread/start", { backend: "claude", cwd: home });
+  const { thread } = await a.client.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
   await a.client.request("thread/attach", { threadId: thread.id });
   await b.client.request("thread/attach", { threadId: thread.id });
   return { home, server, engine, manager, a, b, thread, peers };

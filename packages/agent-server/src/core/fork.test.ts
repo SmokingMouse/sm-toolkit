@@ -21,7 +21,7 @@ const frozen = (item: Item) => withoutTurn(item.status === "inProgress" ? { ...i
 for (const backend of ["claude", "codex"] as const) describe(`midfork ${backend}`, () => {
   test("P2-2: nested native forks retain only prefix checkpoints; seeded forks report fallback without copying coordinates", async () => {
     const { server, engines } = fixture(), c = await client(server);
-    const { thread } = await c.request("thread/start", { backend, cwd: process.cwd() });
+    const { thread } = await c.request("thread/start", { model: "sonnet", backend, cwd: process.cwd() });
     const first = await c.request("turn/start", { threadId: thread.id, input: input("first") });
     engines[0].emit({ type: "turnCompleted", turnId: first.turn.id, status: "completed", forkPoint: "point-1" });
     await until(() => server.threads.get(thread.id).status.type === "idle");
@@ -51,7 +51,7 @@ for (const backend of ["claude", "codex"] as const) describe(`midfork ${backend}
 
   test("inclusive middle snapshot preserves source, cursors and independent continuation", async () => {
     const { server, engines } = fixture(), c = await client(server);
-    const { thread } = await c.request("thread/start", { backend, cwd: process.cwd() });
+    const { thread } = await c.request("thread/start", { model: "sonnet", backend, cwd: process.cwd() });
     const { turn } = await c.request("turn/start", { threadId: thread.id, input: input("first") });
     const answer: EngineItem = { id: "middle", type: "agentMessage", payload: { text: "answer" } };
     server.log.startItem(thread.id, turn.id, answer); server.log.updateItem(thread.id, answer, true);
@@ -92,7 +92,7 @@ for (const backend of ["claude", "codex"] as const) describe(`midfork ${backend}
   test("native checkpoint survives restart and does not include later source turns", async () => {
     const databasePath = join(mkdtempSync(join(tmpdir(), "as-midfork-")), "db");
     const first = fixture(databasePath), c = await client(first.server);
-    const { thread } = await c.request("thread/start", { backend, cwd: process.cwd() });
+    const { thread } = await c.request("thread/start", { model: "sonnet", backend, cwd: process.cwd() });
     const { turn } = await c.request("turn/start", { threadId: thread.id, input: input("checkpoint") });
     first.engines[0].emit({ type: "turnCompleted", turnId: turn.id, status: "completed", forkPoint: "native-checkpoint" });
     await until(() => first.server.threads.get(thread.id).status.type === "idle");
@@ -109,7 +109,7 @@ for (const backend of ["claude", "codex"] as const) describe(`midfork ${backend}
 
   test("default fork snapshots tip; empty source has null lineage item and cursor 1", async () => {
     const { server, engines } = fixture(), c = await client(server);
-    const { thread } = await c.request("thread/start", { backend, cwd: process.cwd() });
+    const { thread } = await c.request("thread/start", { model: "sonnet", backend, cwd: process.cwd() });
     const empty = await c.request("thread/fork", { threadId: thread.id });
     expect(empty.thread.forkedFrom).toEqual({ threadId: thread.id, itemId: null });
     expect(server.log.snapshot(empty.thread.id)).toMatchObject({ items: [], nextSeq: 1 });
@@ -126,7 +126,7 @@ for (const backend of ["claude", "codex"] as const) describe(`midfork ${backend}
 
 test("midfork: idle tip without native coordinate seeds its captured prefix despite concurrent append", async () => {
   const { server, engines } = fixture(), c = await client(server);
-  const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+  const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() });
   const { turn } = await c.request("turn/start", { threadId: thread.id, input: input("captured") });
   engines[0].emit({ type: "turnCompleted", turnId: turn.id, status: "completed" });
   await until(() => server.threads.get(thread.id).status.type === "idle");
@@ -142,7 +142,7 @@ test("midfork: idle tip without native coordinate seeds its captured prefix desp
 
 test("P2-3: every item boundary freezes live payload as failed and continuation leaves no orphan", async () => {
   const { server, engines } = fixture(), c = await client(server);
-  const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+  const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() });
   const { turn } = await c.request("turn/start", { threadId: thread.id, input: input("user") });
   const drafts: EngineItem[] = [
     { id: "a", type: "agentMessage", payload: { text: "partial" } },
@@ -180,13 +180,13 @@ test("P2-3: every item boundary freezes live payload as failed and continuation 
   await until(() => server.threads.get(commandBranch.id).status.type === "idle");
   expect(server.log.item(commandBranch.id, "cmd").status).toBe("failed");
   expect(server.log.snapshot(commandBranch.id).items.some(item => item.status === "inProgress")).toBe(false);
-  const other = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+  const other = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() });
   await expect(c.request("thread/fork", { threadId: other.thread.id, fromItemId: "a" })).rejects.toMatchObject({ code: -32602 });
 });
 
 for (const status of ["failed", "interrupted"] as const) test(`P2-1: seeded Claude ${status} first turn preserves replay guard until completed`, async () => {
   const { server, engines } = fixture(), c = await client(server);
-  const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+  const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() });
   await c.request("turn/start", { threadId: thread.id, input: input("prefix") });
   const { thread: fork } = await c.request("thread/fork", { threadId: thread.id });
   const { turn } = await c.request("turn/start", { threadId: fork.id, input: input("unsuccessful") });
@@ -210,7 +210,7 @@ for (const status of ["failed", "interrupted"] as const) test(`P2-1: seeded Clau
 
 test("midfork: seeded Claude close/resume before first turn recreates seed, after turn resumes native", async () => {
   const { server, engines } = fixture(), c = await client(server);
-  const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd() });
+  const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd() });
   await c.request("turn/start", { threadId: thread.id, input: input("prefix") });
   const { thread: fork } = await c.request("thread/fork", { threadId: thread.id });
   await c.request("thread/close", { threadId: fork.id });

@@ -285,7 +285,7 @@ describe("Codex through AS core", () => {
     const observer = server.connectInProcess(), observerFrames = capture(observer);
     const init = await observer.request("initialize", { protocolVersion: "as/1", client: { name: "display", label: "display", kind: "test", version: "1" }, capabilities: { pendingRequests: true } });
     await observer.notifyInitialized(); expect(init.capabilities.pendingRequests).toBe(true);
-    const { thread } = await owner.request("thread/start", { backend: "codex", cwd: tmpdir() });
+    const { thread } = await owner.request("thread/start", { model: "gpt-6-astra", backend: "codex", cwd: tmpdir() });
     await observer.request("thread/attach", { threadId: thread.id }); await legacy.request("thread/attach", { threadId: thread.id });
     const cards = capture(owner);
     const { turn } = await owner.request("turn/start", { threadId: thread.id, input: input("go") });
@@ -313,7 +313,7 @@ describe("Codex through AS core", () => {
     const { server } = integrated(scenario, scenario === "pending-status" ? 40 : 10000);
     const owner = await client(server, "owner"), observer = server.connectInProcess(), frames = capture(observer);
     await observer.request("initialize", { protocolVersion: "as/1", client: { name: "display", label: "display", kind: "test", version: "1" }, capabilities: { pendingRequests: true } }); await observer.notifyInitialized();
-    const { thread } = await owner.request("thread/start", { backend: "codex", cwd: tmpdir() });
+    const { thread } = await owner.request("thread/start", { model: "gpt-6-astra", backend: "codex", cwd: tmpdir() });
     await observer.request("thread/attach", { threadId: thread.id });
     const { turn } = await owner.request("turn/start", { threadId: thread.id, input: input("go") });
     await until(() => server.log.turn(turn.id).status === "completed");
@@ -325,7 +325,7 @@ describe("Codex through AS core", () => {
   test("native user items appear once, attachments/clientTurnId survive, and all approvals reach AS clients", async () => {
     const { server } = integrated("conversation"), c = await client(server, "codex-test", [...ServerRequestMethodSchema.options]), frames = capture(c);
     c.onFrame(frame => { if ("id" in frame && "method" in frame && ServerRequestMethodSchema.safeParse(frame.method).success) void c.respond(frame.id, decision(frame.method as ServerRequestMethod)); });
-    const { thread } = await c.request("thread/start", { backend: "codex", cwd: tmpdir(), effort: "high" });
+    const { thread } = await c.request("thread/start", { model: "gpt-6-astra", backend: "codex", cwd: tmpdir(), effort: "high" });
     const content = [...input("go"), { type: "image" as const, path: "/tmp/image.png", mime: "image/png" }, { type: "file" as const, path: "/tmp/file.txt" }];
     const { turn } = await c.request("turn/start", { threadId: thread.id, input: content, clientTurnId: "client-turn" });
     await until(() => server.log.turn(turn.id).status === "completed");
@@ -342,7 +342,7 @@ describe("Codex through AS core", () => {
   });
   test("interrupt retains FIFO and waits for native completion before dispatching next turn", async () => {
     const { server, peers } = integrated("hold"), c = await client(server);
-    const { thread } = await c.request("thread/start", { backend: "codex", cwd: tmpdir() });
+    const { thread } = await c.request("thread/start", { model: "gpt-6-astra", backend: "codex", cwd: tmpdir() });
     const first = await c.request("turn/start", { threadId: thread.id, input: input("hold") });
     const next = await c.request("turn/start", { threadId: thread.id, input: input("complete") });
     await c.request("turn/steer", { threadId: thread.id, expectedTurnId: first.turn.id, input: input("more"), clientTurnId: "steered-client-id" });
@@ -359,7 +359,7 @@ describe("Codex through AS core", () => {
   });
   test("crash freezes queue, fails partial items, expires approval, and resume consumes the preserved turn", async () => {
     const { server, peers } = integrated("crash"), c = await client(server, "offline", ["item/tool/requestUserInput"]), frames = capture(c);
-    const { thread } = await c.request("thread/start", { backend: "codex", cwd: tmpdir() });
+    const { thread } = await c.request("thread/start", { model: "gpt-6-astra", backend: "codex", cwd: tmpdir() });
     const first = await c.request("turn/start", { threadId: thread.id, input: input("crash") });
     const next = await c.request("turn/start", { threadId: thread.id, input: input("complete") });
     await until(() => server.threads.get(thread.id).status.type === "systemError");
@@ -377,7 +377,7 @@ describe("Codex through AS core", () => {
   });
   test.each(["unknown-item", "unknown-request", "version-mismatch"])("C1/C2: %s reports -32015 while thread and next turn survive", async scenario => {
     const { server, peers } = integrated(scenario), c = await client(server), frames: Frame[] = capture(c);
-    const { thread } = await c.request("thread/start", { backend: "codex", cwd: tmpdir() });
+    const { thread } = await c.request("thread/start", { model: "gpt-6-astra", backend: "codex", cwd: tmpdir() });
     const first = await c.request("turn/start", { threadId: thread.id, input: input("go") });
     await until(() => server.log.turn(first.turn.id).status === "completed");
     expect(frames.some(f => "method" in f && f.method === "error" && f.params.error.code === -32015)).toBe(true);
@@ -388,7 +388,7 @@ describe("Codex through AS core", () => {
   });
   test.each(["system-error"])("%s produces AS error and systemError", async scenario => {
     const { server } = integrated(scenario), c = await client(server), frames: Frame[] = capture(c);
-    const { thread } = await c.request("thread/start", { backend: "codex", cwd: tmpdir() });
+    const { thread } = await c.request("thread/start", { model: "gpt-6-astra", backend: "codex", cwd: tmpdir() });
     await c.request("turn/start", { threadId: thread.id, input: input("go") });
     await until(() => server.threads.get(thread.id).status.type === "systemError");
     expect(frames.some(f => "method" in f && f.method === "error" && f.params.error.code === -32004)).toBe(true);

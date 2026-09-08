@@ -59,7 +59,7 @@ test("grace broadcasts to unix and WS before closing MockEngine, then releases f
   const a = await AgentClient.connectUnix({ path: paths.socketPath, token, reconnect: false });
   const b = await AgentClient.connectWebSocket({ url: daemon.webSocketUrl!, token, reconnect: false });
   cleanups.push(() => { a.close(); b.close(); });
-  await a.request("thread/start", { backend: "claude", cwd: directory });
+  await a.request("thread/start", { model: "sonnet", backend: "claude", cwd: directory });
   const shutdowns: number[] = [];
   a.onNotification("server/shuttingDown", params => shutdowns.push(params.graceMs));
   b.onNotification("server/shuttingDown", params => shutdowns.push(params.graceMs));

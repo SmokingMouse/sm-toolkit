@@ -41,7 +41,7 @@ for (const midThreadFork of [true, false]) test(`protocol PTY: pending state wit
       return connection;
     };
     phone = await AgentClient.connectUnix({ path: paths.socketPath, token: readFileSync(paths.tokenPath, "utf8").trim(), reconnect: false, client: { name: "phone", kind: "test", version: "1", label: "测试手机" }, capabilities: { pendingRequests: true, serverRequests: ["item/commandExecution/requestApproval"] } });
-    const { thread } = await phone.request("thread/start", { backend: "claude", cwd: home });
+    const { thread } = await phone.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
     const decoder = new TextDecoder();
     proc = Bun.spawn([resolve(import.meta.dir, "../bin/agent-tui"), "--attach", thread.id, "--socket", paths.socketPath], { env, terminal: { cols: 180, rows: 36, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } } });
     await wait(() => frame().includes(shortId(thread.id)) && frame().endsWith("> "), "first raw-input frame");

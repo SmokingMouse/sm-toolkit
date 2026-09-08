@@ -35,7 +35,7 @@ for (const questions of [false, true]) for (const picker of [false, true]) {
         return connection;
       };
       phone = await AgentClient.connectUnix({ path: paths.socketPath, token: readFileSync(paths.tokenPath, "utf8").trim(), reconnect: false, client: { name: "phone", kind: "test", version: "1", label: "测试手机" } });
-      const { thread } = await phone.request("thread/start", { backend: "claude", cwd: home });
+      const { thread } = await phone.request("thread/start", { model: "sonnet", backend: "claude", cwd: home });
       const decoder = new TextDecoder();
       proc = Bun.spawn([resolve(import.meta.dir, "../bin/agent-tui"), "--attach", thread.id, "--socket", paths.socketPath], { env, terminal: { cols: 180, rows: 32, data(_terminal, data) { screen += decoder.decode(data, { stream: true }); } } });
       await wait(() => frame().includes(shortId(thread.id)) && frame().endsWith("> "), "initial frame");
