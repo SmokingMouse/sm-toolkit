@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { Item } from "@smokingmouse/agent-server/protocol";
+import type { Item, PendingServerRequest } from "@smokingmouse/agent-server/protocol";
 import { forkEntries, itemSummary } from "./fork.js";
 import { TuiModel } from "./model.js";
 import { Controller } from "./controller.js";
@@ -32,6 +32,27 @@ function setup(supported: boolean) {
   } } as unknown as AgentClient;
   return { model, calls, controller: new Controller(client, model, () => {}) };
 }
+test("P1-1 card overlay exclusively consumes repeated Enter in lease and sending windows", async () => {
+  for (const questions of [false, true]) for (const picker of [false, true]) for (const [state, replying] of [["pending", true], ["sending", true], ["sending", false]] as const) {
+    const { model, calls, controller } = setup(true);
+    if (picker) await controller.sessions.run("/fork");
+    const params = { threadId: "source", turnId: "turn", itemId: "first", requestId: "card", startedAtMs: 1 };
+    const request: PendingServerRequest = questions
+      ? { method: "item/tool/requestUserInput", params: { ...params, isBlocking: true, questions: [{ id: "q", question: "Answer?" }] } }
+      : { method: "item/commandExecution/requestApproval", params: { ...params, command: "pwd", cwd: "/tmp" } };
+    model.request(request);
+    Object.assign(model.activeCard!, { state, replying });
+    model.input = "/fork first";
+    expect(render(model, 120, 24)).toContain("Action Required");
+    expect(render(model, 120, 24)).not.toContain("分叉 item 选择");
+    const before = calls.length;
+    for (const name of ["return", "enter", "return"]) await controller.key(undefined, { name });
+    expect(calls).toHaveLength(before);
+    expect(model.thread?.id).toBe("source");
+    expect(model.input).toBe("/fork first");
+    controller.dispose();
+  }
+});
 test("fork selection fetches all pages, navigates, cancels, and sends fromItemId before switching", async () => {
   const { model, calls, controller } = setup(true);
   await controller.sessions.run("/fork");

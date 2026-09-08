@@ -16,7 +16,9 @@ export async function runTerminal(client: AgentClient, model: TuiModel): Promise
   // Complete each async edit before applying the next key in the same PTY chunk.
   let edits = Promise.resolve();
   const keyboard = new TerminalInput((text: string | undefined, key: Key) => {
-    if (controller.sessions.busy || (key.ctrl && key.name === "c")) { void controller.key(text, key); return; }
+    // Route overlay keys at receipt, so Enter cannot wait for a reply and then
+    // execute against the picker/input revealed when that card disappears.
+    if ((model.activeCard && !model.picker) || controller.sessions.busy || (key.ctrl && key.name === "c")) { void controller.key(text, key); return; }
     edits = edits.then(() => {
       const pending = controller.key(text, key);
       // Session RPCs stay in flight so subsequent keys are rejected (or answer a scan-time card).

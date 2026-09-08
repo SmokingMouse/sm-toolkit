@@ -56,6 +56,14 @@ export class Controller {
         }
         this.sessions.rejectInput(); return;
       }
+      // Match render's card overlay, including lease acquisition and reply confirmation.
+      // In-flight card keys must be swallowed, never fall through to a hidden surface.
+      if (this.model.activeCard && !this.model.picker) {
+        if (key.name === "pageup" || key.name === "pagedown") {
+          this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? -10 : 10)); return;
+        }
+        await this.cardKey(this.model.activeCard, text, key); return;
+      }
       if (this.model.resumeConfirmation) {
         const threadId = this.model.resumeConfirmation;
         if (!key.ctrl && !key.meta && text?.toLowerCase() === "y") {
@@ -73,7 +81,6 @@ export class Controller {
       }
       if (this.model.forkPicker) {
         const picker = this.model.forkPicker;
-        if (this.model.activeCard?.state === "pending" && !this.model.activeCard.replying) { await this.cardKey(this.model.activeCard, text, key); return; }
         if (key.name === "escape") this.model.forkPicker = undefined;
         else if (key.name === "up") picker.index = Math.max(0, picker.index - 1);
         else if (key.name === "down") picker.index = Math.min(picker.entries.length - 1, picker.index + 1);
@@ -106,7 +113,6 @@ export class Controller {
         this.model[field] = Math.max(0, this.model[field] + (key.name === "pageup" ? 5 : -5)); return;
       }
       if (key.name === "pageup" || key.name === "pagedown") { this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? (this.model.activeCard ? -10 : 10) : (this.model.activeCard ? 10 : -10))); return; }
-      if (this.model.activeCard?.state === "pending" && !this.model.activeCard.replying) { await this.cardKey(this.model.activeCard, text, key); return; }
       if (this.model.permissionPicker !== undefined) { await this.permissionKey(text, key); return; }
       if (key.paste || (key.ctrl && key.name === "j") || (key.shift && ["return", "enter"].includes(key.name ?? ""))) {
         this.model.input += key.paste ? (text ?? "") : "\n";
@@ -337,7 +343,7 @@ export class Controller {
     } finally { card.replying = false; this.model.changed(); }
   }
   private async cardKey(card: RequestCard, text: string | undefined, key: Key): Promise<void> {
-    if (card.state !== "pending") return;
+    if (card.state !== "pending" || card.replying) return;
     const handle = this.client.pendingRequests.get(card.request.params.requestId);
     if (!handle || this.client.state !== "connected") throw new Error("请求连接已失效，等待重连快照");
     if (handle.method === "item/tool/requestUserInput") {
