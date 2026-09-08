@@ -22,7 +22,7 @@ export function focusFooter(model: TuiModel): string {
     case "card": return model.activeCard!.replying || model.activeCard!.state === "sending"
       ? "审批确认中 · 卡片草稿保留 · Enter 暂不受理 · Ctrl-C 中断"
       : model.sessionOperation === "/threads" ? "/threads 加载中 · 审批/问题卡可操作 · Ctrl-C 中断"
-      : "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片";
+      : `审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动${model.panelFocus === "history" ? "卡片" : model.panelFocus === "log" ? "日志" : "任务"}`;
     case "rewind": return "回滚会话？[y/N] · Enter/n/Esc 取消 · 仅实体 y 确认";
     case "resume": return "恢复已关闭会话？[y/N] · Enter/n/Esc 取消 · 仅实体 y 确认";
     case "busy": return `${model.sessionOperation} 进行中 · 按键将丢弃 · Esc 不取消在途操作`;

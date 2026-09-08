@@ -110,7 +110,9 @@ test("fn-review2 P2-1 PTY: card keeps view shortcuts, thread scan and emergency 
     h.card(false, "approval", () => {});
     await h.wait(() => h.frame().includes("Action Required"), "card shown");
     h.write("\x0c"); await h.wait(() => h.frame().includes("展开 · Ctrl-L") && h.frame().includes("fixture-log"), "Ctrl-L displays log during card");
+    expect(h.frame()).toContain("PgUp/PgDn 滚动日志");
     h.write("\x1b[17~"); await h.wait(() => !h.frame().includes("Ctrl-L /log [焦点]"), "F6 changes panel focus");
+    await h.wait(() => h.frame().includes("PgUp/PgDn 滚动卡片"), "footer follows panel focus");
     h.write("\x12"); await h.wait(() => h.frame().includes("reasoning-visible"), "Ctrl-R unfolds reasoning");
     h.write("\x10"); await h.wait(() => h.frame().includes("Plan: [折叠"), "Ctrl-P folds plan");
     h.write("\x0e"); await h.wait(() => h.frame().includes("Ctrl-N 新建会话会离开卡片"), "Ctrl-N explicit semantic exception");
