@@ -137,7 +137,7 @@ export class ClaudeEngine implements EngineSession {
     // receive() is unreachable on a real engine -- the CLI blocks the attempt one layer earlier
     // than the daemon can see. Audit that structural fact once at launch so "readonly disables
     // these tools" is still observable, even though no individual attempt can be.
-    if (options.permission === "readonly") this.events.push({ type: "engineEvent", backend: this.backend, subtype: "readonly_tools_disabled", payload: { toolNames: ["Write", "Edit", "MultiEdit", "NotebookEdit"], reason: "disallowed_tools_flag" } });
+    if (options.permission === "readonly") this.events.push({ type: "engineEvent", backend: this.backend, subtype: "readonly_tools_disabled", payload: { requestId: `ar_${crypto.randomUUID()}`, toolNames: ["Write", "Edit", "MultiEdit", "NotebookEdit"], reason: "disallowed_tools_flag" } });
     const launch = buildClaudeLaunch(options);
     this.process = (this.config.spawnProcess ?? ((command, args, opts) => spawn(command, args, { ...opts, stdio: "pipe" })))(this.config.executable ?? "claude", launch.args, { cwd: options.cwd, env: launch.env });
     this.process.stdout.setEncoding("utf8"); this.process.stderr.setEncoding("utf8");

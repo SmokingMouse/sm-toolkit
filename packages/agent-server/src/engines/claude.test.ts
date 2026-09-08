@@ -208,6 +208,11 @@ describe("Claude native frame exchange (fake child only)", () => {
         const behavior = permission === "dontAsk" ? "deny" : "allow";
         expect(fake.written.find(f => f.type === "control_response")).toMatchObject({ response: { request_id: "native-permission", subtype: "success", response: { behavior, ...(behavior === "allow" ? { updatedInput: { command: "touch /tmp/x" } } : {}) } } });
         expect(published.find(f => f.method === "thread/engineEvent").params).toMatchObject({ backend: "claude", subtype: "permission_auto_response", payload: { toolName: "Bash", behavior, permission: permission === "full" ? "bypassPermissions" : permission } });
+        // P2-1: the same audit must survive as an approvals row, not just the live broadcast.
+        const persisted = server.log.permissionAutoResponses(thread.id);
+        expect(persisted).toHaveLength(1);
+        expect(persisted[0]).toMatchObject({ id: "native-permission", thread_id: thread.id, status: behavior === "allow" ? "auto_allowed" : "auto_denied" });
+        expect(JSON.parse(persisted[0]!.decision_json!)).toEqual({ toolName: "Bash", permission: permission === "full" ? "bypassPermissions" : permission, behavior });
       }
     } finally { unsubscribe(); await server.close(); }
   });
@@ -396,6 +401,24 @@ describe("Claude native frame exchange (fake child only)", () => {
       await engine.spawn({ backend: "claude", threadId: "th", permission: "plan" });
       expect(events.some(e => e.type === "engineEvent" && e.subtype === "readonly_tools_disabled")).toBe(false);
     } finally { await engine.close("test"); await consuming; }
+  });
+  test("readonly spawn: readonly_tools_disabled survives as an approvals row a post-spawn attach can query (P1-1)", async () => {
+    const fake = fakeProcess(() => {});
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
+    const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
+    const published: any[] = [];
+    let unsubscribe = () => {};
+    try {
+      const c = await client(server);
+      const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd(), permission: "readonly" });
+      // Attach only after spawn already completed: the fact must be queryable, not just broadcast to whoever was connected at spawn time.
+      unsubscribe = server.log.subscribe(thread.id, frame => published.push(frame));
+      const persisted = server.log.readonlyToolsDisabled(thread.id);
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0]).toMatchObject({ thread_id: thread.id, status: "auto_denied" });
+      expect(JSON.parse(persisted[0]!.decision_json!)).toEqual({ toolNames: ["Write", "Edit", "MultiEdit", "NotebookEdit"], reason: "disallowed_tools_flag" });
+      expect(published).toEqual([]); // sanity: this row was not merely re-derived from a live broadcast this subscriber happened to catch
+    } finally { unsubscribe(); await server.close(); }
   });
   test("readonly auto-allow: does not apply to fileChange requests", async () => {
     const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-write-file", request: { subtype: "can_use_tool", tool_use_id: "edit", tool_name: "Write", input: { file_path: "/tmp/a", content: "hi" } } }));

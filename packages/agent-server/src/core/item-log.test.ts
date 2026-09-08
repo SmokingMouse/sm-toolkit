@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { chmodSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -166,5 +167,49 @@ describe("ItemLog", () => {
     log.recordReadonlyAutoAllow({ id: "req2", threadId: "th2", turnId: "tn_th2", itemId: "toolu_2", command: "pwd", matchedRules: ["pwd"] });
     expect(log.readonlyAutoAllows("th")).toEqual([row]);
     expect(log.readonlyAutoAllows("th2")).toHaveLength(1);
+  });
+  test("recordReadonlyToolsDisabled persists a turn-less audit row queryable after attach (P1-1)", () => {
+    const log = create();
+    log.recordReadonlyToolsDisabled({ id: "ar_disabled1", threadId: "th", toolNames: ["Write", "Edit", "MultiEdit", "NotebookEdit"], reason: "disallowed_tools_flag", now: 42 });
+    const row = log.approval("ar_disabled1")!;
+    expect(row).toMatchObject({ id: "ar_disabled1", thread_id: "th", status: "auto_denied", decided_by: JSON.stringify({ system: "readonly_tools_disabled" }) });
+    expect(JSON.parse(row.decision_json!)).toEqual({ toolNames: ["Write", "Edit", "MultiEdit", "NotebookEdit"], reason: "disallowed_tools_flag" });
+    // A client that only attaches after spawn must be able to see this through the same
+    // thread-scoped query path readonly_auto_allow/readonly_denied already use.
+    expect(log.readonlyToolsDisabled("th")).toEqual([row]);
+    seed(log, "th2");
+    log.recordReadonlyToolsDisabled({ id: "ar_disabled2", threadId: "th2", toolNames: ["Write"], reason: "disallowed_tools_flag" });
+    expect(log.readonlyToolsDisabled("th")).toEqual([row]);
+    expect(log.readonlyToolsDisabled("th2")).toHaveLength(1);
+  });
+  test("recordPermissionAutoResponse persists a decided, queryable audit row (P2-1)", () => {
+    const log = create();
+    log.recordPermissionAutoResponse({ id: "ar_resp1", threadId: "th", turnId: "tn_th", itemId: "toolu_1", toolName: "Bash", permission: "bypassPermissions", behavior: "allow", now: 42 });
+    const row = log.approval("ar_resp1")!;
+    expect(row).toMatchObject({ id: "ar_resp1", thread_id: "th", status: "auto_allowed", decided_by: JSON.stringify({ system: "permission_auto_response" }) });
+    expect(JSON.parse(row.decision_json!)).toEqual({ toolName: "Bash", permission: "bypassPermissions", behavior: "allow" });
+    expect(log.permissionAutoResponses("th")).toEqual([row]);
+    log.recordPermissionAutoResponse({ id: "ar_resp2", threadId: "th", turnId: "tn_th", itemId: "toolu_2", toolName: "Bash", permission: "dontAsk", behavior: "deny" });
+    expect(log.approval("ar_resp2")).toMatchObject({ status: "auto_denied" });
+    expect(log.permissionAutoResponses("th")).toHaveLength(2);
+  });
+  test("databases created before turn_id was nullable are migrated in place, not just at insert time (P1-1)", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "as-migrate-")), "db");
+    const legacy = new Database(path, { create: true, strict: true });
+    legacy.exec(`
+      CREATE TABLE threads (id TEXT PRIMARY KEY, backend TEXT NOT NULL, engine_thread_id TEXT, cwd TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, client_thread_id TEXT UNIQUE, request_json TEXT NOT NULL, options_json TEXT NOT NULL, data_json TEXT NOT NULL, next_seq INTEGER NOT NULL DEFAULT 1, UNIQUE(backend, engine_thread_id));
+      CREATE TABLE turns (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id), ordinal INTEGER NOT NULL, status TEXT NOT NULL, client_turn_id TEXT UNIQUE, request_json TEXT NOT NULL, data_json TEXT NOT NULL, UNIQUE(thread_id, ordinal));
+      CREATE TABLE approvals (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id), turn_id TEXT NOT NULL REFERENCES turns(id), item_id TEXT NOT NULL, kind TEXT NOT NULL, params_json TEXT NOT NULL, status TEXT NOT NULL, decided_by TEXT, decision_json TEXT, created_at INTEGER NOT NULL, decided_at INTEGER);
+    `);
+    legacy.query("INSERT INTO threads(id,backend,engine_thread_id,cwd,status,created_at,request_json,options_json,data_json) VALUES('th','claude',NULL,'/tmp','idle',1,'{}','{}','{}')").run();
+    legacy.query("INSERT INTO turns(id,thread_id,ordinal,status,request_json,data_json) VALUES('tn_th','th',1,'inProgress','{}','{}')").run();
+    legacy.query("INSERT INTO approvals(id,thread_id,turn_id,item_id,kind,params_json,status,created_at) VALUES('old1','th','tn_th','toolu_1','readonly_auto_allow','{}','auto_allowed',1)").run();
+    legacy.close();
+    const migrated = new ItemLog(path); logs.push(migrated);
+    // Pre-existing rows survive the rebuild untouched.
+    expect(migrated.approval("old1")).toMatchObject({ id: "old1", thread_id: "th", status: "auto_allowed" });
+    // And the column really is nullable now, not just tolerated by a stale in-memory check.
+    migrated.recordReadonlyToolsDisabled({ id: "new1", threadId: "th", toolNames: ["Write"], reason: "disallowed_tools_flag" });
+    expect(migrated.readonlyToolsDisabled("th")).toHaveLength(1);
   });
 });

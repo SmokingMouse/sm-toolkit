@@ -50,7 +50,7 @@ export class ItemLog {
       CREATE INDEX IF NOT EXISTS items_turn ON items(thread_id, turn_id, seq);
       CREATE TABLE IF NOT EXISTS fork_points (thread_id TEXT NOT NULL REFERENCES threads(id), item_id TEXT NOT NULL, native_id TEXT NOT NULL, PRIMARY KEY(thread_id,item_id));
       CREATE TABLE IF NOT EXISTS approvals (
-        id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id), turn_id TEXT NOT NULL REFERENCES turns(id),
+        id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id), turn_id TEXT REFERENCES turns(id),
         item_id TEXT NOT NULL, kind TEXT NOT NULL, params_json TEXT NOT NULL, status TEXT NOT NULL,
         decided_by TEXT, decision_json TEXT, created_at INTEGER NOT NULL, decided_at INTEGER
       );
@@ -69,6 +69,25 @@ export class ItemLog {
         this.db.query("UPDATE items SET completed_seq=? WHERE thread_id=? AND id=?").run(seq, row.thread_id, row.id);
       }
     });
+    // Migrate databases created before readonly_tools_disabled needed a turn-less audit row: SQLite
+    // cannot ALTER a NOT NULL constraint away, so rebuild the table per the standard 12-step recipe.
+    const approvalColumns = this.db.query<{ name: string; notnull: number }, []>("PRAGMA table_info(approvals)").all();
+    if (approvalColumns.find(column => column.name === "turn_id")?.notnull) {
+      this.db.exec(`
+        PRAGMA foreign_keys=OFF;
+        BEGIN;
+        ALTER TABLE approvals RENAME TO approvals_pre_nullable_turn;
+        CREATE TABLE approvals (
+          id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id), turn_id TEXT REFERENCES turns(id),
+          item_id TEXT NOT NULL, kind TEXT NOT NULL, params_json TEXT NOT NULL, status TEXT NOT NULL,
+          decided_by TEXT, decision_json TEXT, created_at INTEGER NOT NULL, decided_at INTEGER
+        );
+        INSERT INTO approvals SELECT * FROM approvals_pre_nullable_turn;
+        DROP TABLE approvals_pre_nullable_turn;
+        COMMIT;
+        PRAGMA foreign_keys=ON;
+      `);
+    }
   }
   private allocateSeq(threadId: string): number {
     return this.db.query<{ next_seq: number }, [string]>("UPDATE threads SET next_seq=next_seq+1 WHERE id=? RETURNING next_seq-1 AS next_seq").get(threadId)!.next_seq;
@@ -283,6 +302,31 @@ export class ItemLog {
   }
   readonlyDenials(threadId: string): ApprovalRow[] {
     return this.db.query<ApprovalRow, [string]>("SELECT * FROM approvals WHERE thread_id=? AND kind='readonly_denied' ORDER BY created_at,id").all(threadId);
+  }
+  /**
+   * Same rationale as recordReadonlyAutoAllow: "this thread's write tools were disabled" must
+   * survive past the one-shot spawn-time engineEvent broadcast. Unlike the sibling records this
+   * fires before any turn exists, so turn_id is NULL (see the nullable-turn_id migration above)
+   * and item_id is a synthetic constant rather than a real tool-use id.
+   */
+  recordReadonlyToolsDisabled(entry: { id: string; threadId: string; toolNames: string[]; reason: string; now?: number }): void {
+    const now = entry.now ?? Date.now();
+    const detail = JSON.stringify({ toolNames: entry.toolNames, reason: entry.reason });
+    this.db.query("INSERT INTO approvals(id,thread_id,turn_id,item_id,kind,params_json,status,decided_by,decision_json,created_at,decided_at) VALUES(?,?,NULL,'spawn','readonly_tools_disabled',?,'auto_denied',?,?,?,?)")
+      .run(entry.id, entry.threadId, detail, JSON.stringify({ system: "readonly_tools_disabled" }), detail, now, now);
+  }
+  readonlyToolsDisabled(threadId: string): ApprovalRow[] {
+    return this.db.query<ApprovalRow, [string]>("SELECT * FROM approvals WHERE thread_id=? AND kind='readonly_tools_disabled' ORDER BY created_at,id").all(threadId);
+  }
+  /** Same persistence pattern as recordReadonlyAutoAllow, for the bypassPermissions/dontAsk and can_use_tool auto-response paths. */
+  recordPermissionAutoResponse(entry: { id: string; threadId: string; turnId: string; itemId: string; toolName: string; permission: string; behavior: string; now?: number }): void {
+    const now = entry.now ?? Date.now();
+    const detail = JSON.stringify({ toolName: entry.toolName, permission: entry.permission, behavior: entry.behavior });
+    this.db.query("INSERT INTO approvals(id,thread_id,turn_id,item_id,kind,params_json,status,decided_by,decision_json,created_at,decided_at) VALUES(?,?,?,?,'permission_auto_response',?,?,?,?,?,?)")
+      .run(entry.id, entry.threadId, entry.turnId, entry.itemId, detail, entry.behavior === "allow" ? "auto_allowed" : "auto_denied", JSON.stringify({ system: "permission_auto_response" }), detail, now, now);
+  }
+  permissionAutoResponses(threadId: string): ApprovalRow[] {
+    return this.db.query<ApprovalRow, [string]>("SELECT * FROM approvals WHERE thread_id=? AND kind='permission_auto_response' ORDER BY created_at,id").all(threadId);
   }
   close(): void { this.listeners.clear(); this.serverListeners.clear(); this.partial.clear(); this.db.close(); }
 }

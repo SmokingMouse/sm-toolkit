@@ -192,6 +192,17 @@ export class ThreadManager {
     if (typeof requestId !== "string" || typeof toolUseId !== "string" || typeof toolName !== "string") return;
     this.log.recordReadonlyDenied({ id: requestId, threadId, turnId, itemId: toolUseId, toolName, now: this.now() });
   }
+  // Fires at spawn, before any turn exists, so unlike recordReadonlyDenied this does not gate on turnId.
+  private recordReadonlyToolsDisabled(threadId: string, payload: Record<string, unknown>): void {
+    const { requestId, toolNames, reason } = payload;
+    if (typeof requestId !== "string" || !Array.isArray(toolNames) || typeof reason !== "string") return;
+    this.log.recordReadonlyToolsDisabled({ id: requestId, threadId, toolNames: toolNames.map(String), reason, now: this.now() });
+  }
+  private recordPermissionAutoResponse(threadId: string, turnId: string, payload: Record<string, unknown>): void {
+    const { requestId, toolUseId, toolName, permission, behavior } = payload;
+    if (typeof requestId !== "string" || typeof toolUseId !== "string" || typeof toolName !== "string" || typeof permission !== "string" || typeof behavior !== "string") return;
+    this.log.recordPermissionAutoResponse({ id: requestId, threadId, turnId, itemId: toolUseId, toolName, permission, behavior, now: this.now() });
+  }
   private metadata(threadId: string, engineThreadId: string): void {
     const owner = this.engineThreads.get(engineThreadId);
     if (owner && owner !== threadId) throw new ProtocolError(ErrorCode.engine_protocol_error, "engine session already owned by another live thread", { threadId });
@@ -217,6 +228,8 @@ export class ThreadManager {
       const { type: _, ...params } = event;
       if (params.subtype === "readonly_auto_allow" && params.turnId) this.recordReadonlyAutoAllow(threadId, params.turnId, params.payload);
       if (params.subtype === "readonly_denied" && params.turnId) this.recordReadonlyDenied(threadId, params.turnId, params.payload);
+      if (params.subtype === "readonly_tools_disabled") this.recordReadonlyToolsDisabled(threadId, params.payload);
+      if (params.subtype === "permission_auto_response" && params.turnId) this.recordPermissionAutoResponse(threadId, params.turnId, params.payload);
       this.log.publish({ jsonrpc: "2.0", method: "thread/engineEvent", params: { threadId, ...params } });
       return;
     }
