@@ -17,7 +17,14 @@ Shift-Enter / Ctrl-J: newline; bracketed paste: preserve multiline text
 Up/Down: select completion; Tab/Enter: insert; Esc: dismiss
 /image <path>: send image; /paste-image: attach clipboard image (macOS pngpaste)
 Shift+Tab: permissions; /permissions: picker; Tab: effort; /effort low|medium|high|max
-/model <name>; /compact [instructions]; /takeover; /release; /context <window tokens>
+/model <name>; /compact [instructions]; /takeover; /release
+!<shell command>: standalone bash input; Ctrl-C interrupts; no image attachments
+/diff: workspace diff; /context: native context usage; /context <window tokens>: set window
+/usage: usage table; /cost: session cost; /mcp: MCP server status; /btw <question>: side question
+/rewind <native message UUID> [last seen user UUID]: rewind conversation after physical y/N
+Rewind UUIDs come from native Claude history, not TUI item IDs; daemon history stays as recorded
+/help: this help; result panels: Esc closes, PageUp/PageDown scrolls
+Engine commands require Claude support; /add-dir /cd /login /feedback /plugin are not allowed
 Ctrl-R: reasoning; Ctrl-P: plan; PageUp/PageDown: history; approvals: y/s/n/a
 Ctrl-L /log: system log; /tasks: tasks; /agents [id]: subagents; F6: panel focus
 Questions: number selects/toggles, Enter advances/submits; type a free answer
