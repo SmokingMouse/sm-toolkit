@@ -180,6 +180,13 @@ export class ThreadManager {
     const { seedHistory: __, engineThreadId: ___, forkSession: ____, forkPoint: _____, ...clean } = options as SessionOptions;
     return this.start({ ...clean, clientThreadId: params.clientThreadId }, onCreated, { ...(native ? { resume: source.engineThreadId!, fork: true, forkPoint } : { seedHistory: prefix }), prefix, forkedFrom: { threadId: source.id, itemId }, request: params });
   }
+  // Persist an otherwise-silent auto-allow so "why did this not need approval" is answerable
+  // after the fact, not just via the in-memory engineEvent broadcast (see docs P1-3).
+  private recordReadonlyAutoAllow(threadId: string, turnId: string, payload: Record<string, unknown>): void {
+    const { requestId, toolUseId, command, matchedRules } = payload;
+    if (typeof requestId !== "string" || typeof toolUseId !== "string" || typeof command !== "string" || !Array.isArray(matchedRules)) return;
+    this.log.recordReadonlyAutoAllow({ id: requestId, threadId, turnId, itemId: toolUseId, command, matchedRules: matchedRules.map(String), now: this.now() });
+  }
   private metadata(threadId: string, engineThreadId: string): void {
     const owner = this.engineThreads.get(engineThreadId);
     if (owner && owner !== threadId) throw new ProtocolError(ErrorCode.engine_protocol_error, "engine session already owned by another live thread", { threadId });
@@ -201,7 +208,12 @@ export class ThreadManager {
       this.log.saveThread(thread); this.log.saveOptions(threadId, { ...this.log.options<StartThreadParams>(threadId), permission: event.permission });
       this.log.publish({ jsonrpc: "2.0", method: "thread/permission/changed", params: { threadId, permission: event.permission } }); return;
     }
-    if (event.type === "engineEvent") { const { type: _, ...params } = event; this.log.publish({ jsonrpc: "2.0", method: "thread/engineEvent", params: { threadId, ...params } }); return; }
+    if (event.type === "engineEvent") {
+      const { type: _, ...params } = event;
+      if (params.subtype === "readonly_auto_allow" && params.turnId) this.recordReadonlyAutoAllow(threadId, params.turnId, params.payload);
+      this.log.publish({ jsonrpc: "2.0", method: "thread/engineEvent", params: { threadId, ...params } });
+      return;
+    }
     if (event.type === "metadata") { this.metadata(threadId, event.engineThreadId); return; }
     if (event.type === "exit") { this.engineDied(threadId, event.error ?? new ProtocolError(ErrorCode.engine_unavailable, "engine exited", { retryable: true }).toJSON()); return; }
     if (event.type === "error") { this.log.publish({ jsonrpc: "2.0", method: "error", params: { threadId, ...(event.turnId ? { turnId: event.turnId } : {}), error: event.error, willRetry: event.willRetry } }); return; }

@@ -259,5 +259,20 @@ export class ItemLog {
     } finally { this.broadcasting = false; }
   }
   approval(id: string): ApprovalRow | null { return this.db.query<ApprovalRow, [string]>("SELECT * FROM approvals WHERE id=?").get(id); }
+  /**
+   * Persists a readonly-auto-allow decision into the same `approvals` table as broker-mediated
+   * approvals (status='auto_allowed', decided immediately), so "which rule let this Bash command
+   * skip approval" survives process restarts and is queryable the same way regular approvals are,
+   * not just visible on the live engineEvent broadcast.
+   */
+  recordReadonlyAutoAllow(entry: { id: string; threadId: string; turnId: string; itemId: string; command: string; matchedRules: string[]; now?: number }): void {
+    const now = entry.now ?? Date.now();
+    const detail = JSON.stringify({ command: entry.command, matchedRules: entry.matchedRules });
+    this.db.query("INSERT INTO approvals(id,thread_id,turn_id,item_id,kind,params_json,status,decided_by,decision_json,created_at,decided_at) VALUES(?,?,?,?,'readonly_auto_allow',?,'auto_allowed',?,?,?,?)")
+      .run(entry.id, entry.threadId, entry.turnId, entry.itemId, detail, JSON.stringify({ system: "readonly_auto_allow" }), detail, now, now);
+  }
+  readonlyAutoAllows(threadId: string): ApprovalRow[] {
+    return this.db.query<ApprovalRow, [string]>("SELECT * FROM approvals WHERE thread_id=? AND kind='readonly_auto_allow' ORDER BY created_at,id").all(threadId);
+  }
   close(): void { this.listeners.clear(); this.serverListeners.clear(); this.partial.clear(); this.db.close(); }
 }

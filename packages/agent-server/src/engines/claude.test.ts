@@ -221,6 +221,13 @@ describe("Claude native frame exchange (fake child only)", () => {
       expect(published.some(f => f.method === "thread/pendingRequests")).toBe(false);
       expect(fake.written.find(f => f.type === "control_response")).toMatchObject({ response: { request_id: "native-readonly", subtype: "success", response: { behavior: "allow", updatedInput: { command: "git status && ls" } } } });
       expect(published.find(f => f.method === "thread/engineEvent").params).toMatchObject({ backend: "claude", subtype: "readonly_auto_allow", payload: { toolName: "Bash", behavior: "allow", reason: "readonly_command", command: "git status && ls", matchedRules: ["git status", "ls"] } });
+      // P1-3: the auto-allow decision must survive as more than a live broadcast — it is persisted
+      // into the same approvals table real approvals use, so "which rule let this through" is queryable later.
+      const persisted = server.log.readonlyAutoAllows(thread.id);
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0]).toMatchObject({ id: "native-readonly", thread_id: thread.id, status: "auto_allowed" });
+      expect(JSON.parse(persisted[0]!.decision_json!)).toEqual({ command: "git status && ls", matchedRules: ["git status", "ls"] });
+      expect(server.log.approval("native-readonly")).toMatchObject({ status: "auto_allowed" });
     } finally { unsubscribe(); await server.close(); }
   });
   test("readonly auto-allow: a non-readonly Bash command still queues an approval under plan", async () => {
@@ -233,6 +240,7 @@ describe("Claude native frame exchange (fake child only)", () => {
       await c.request("turn/start", { threadId: thread.id, input: input("go") });
       await until(() => server.log.pendingRequests(thread.id).length === 1);
       expect(fake.written.some(f => f.type === "control_response")).toBe(false);
+      expect(server.log.readonlyAutoAllows(thread.id)).toEqual([]);
     } finally { await server.close(); }
   });
   test("readonly auto-allow: readonlyAutoAllow=false always queues an approval for an otherwise-readonly command", async () => {
@@ -245,6 +253,7 @@ describe("Claude native frame exchange (fake child only)", () => {
       await c.request("turn/start", { threadId: thread.id, input: input("go") });
       await until(() => server.log.pendingRequests(thread.id).length === 1);
       expect(fake.written.some(f => f.type === "control_response")).toBe(false);
+      expect(server.log.readonlyAutoAllows(thread.id)).toEqual([]);
     } finally { await server.close(); }
   });
   test("readonly auto-allow: readonlyCommands override replaces the default allowlist", async () => {

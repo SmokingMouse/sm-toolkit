@@ -154,4 +154,17 @@ describe("ItemLog", () => {
     log.subscribe("th", n => { if (n.method === "item/started") seen.push(n.params.seq); });
     log.startItem("th", "tn_th", { id: "first", type: "agentMessage", payload: { text: "" } }); expect(seen).toEqual([1, 2]);
   });
+  test("recordReadonlyAutoAllow persists a decided, queryable audit row (P1-3)", () => {
+    const log = create();
+    log.recordReadonlyAutoAllow({ id: "req1", threadId: "th", turnId: "tn_th", itemId: "toolu_1", command: "git status && ls", matchedRules: ["git status", "ls"], now: 42 });
+    const row = log.approval("req1")!;
+    expect(row).toMatchObject({ id: "req1", thread_id: "th", status: "auto_allowed", decided_by: JSON.stringify({ system: "readonly_auto_allow" }) });
+    expect(JSON.parse(row.decision_json!)).toEqual({ command: "git status && ls", matchedRules: ["git status", "ls"] });
+    expect(log.readonlyAutoAllows("th")).toEqual([row]);
+    // A second, unrelated thread's rows are not mixed in.
+    seed(log, "th2");
+    log.recordReadonlyAutoAllow({ id: "req2", threadId: "th2", turnId: "tn_th2", itemId: "toolu_2", command: "pwd", matchedRules: ["pwd"] });
+    expect(log.readonlyAutoAllows("th")).toEqual([row]);
+    expect(log.readonlyAutoAllows("th2")).toHaveLength(1);
+  });
 });
