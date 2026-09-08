@@ -296,7 +296,15 @@ export class ClaudeEngine implements EngineSession {
         this.write({ type: "control_response", response: { subtype: "success", request_id: req.requestId, response: mapPermissionDecision(req, decision) } });
         if ("decision" in decision && decision.decision === "abort" && this.active) void this.interrupt(this.active).catch(error => this.fail(new ProtocolError(ErrorCode.engine_unavailable, String(error))));
       };
-      if (this.sessionGrants.has(grantKey)) respond({ decision: "accept" });
+      const permission = claudePermission(this.options.permission);
+      if (permission === "bypassPermissions" || permission === "dontAsk") {
+        const decision = permission === "bypassPermissions" ? "accept" : "reject";
+        respond({ decision });
+        // Never enqueue an approval: consumers can audit this native fallback
+        // through engineEvent without creating a pendingRequests row.
+        this.events.push({ type: "engineEvent", turnId: this.active, backend: this.backend, subtype: "permission_auto_response", payload: { requestId: req.requestId, toolUseId: req.toolUseId, toolName: req.toolName, permission, behavior: decision === "accept" ? "allow" : "deny", reason: "permission_mode" } });
+      }
+      else if (this.sessionGrants.has(grantKey)) respond({ decision: "accept" });
       else {
         const requestId = `ar_${crypto.randomUUID()}`;
         this.nativeRequests.set(req.requestId, { requestId, turnId: this.active, cancel: () => { cancelled = true; } });
