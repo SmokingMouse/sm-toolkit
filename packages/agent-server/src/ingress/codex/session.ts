@@ -20,6 +20,11 @@ export function nativeDecision(method: ServerRequestMethod, result: NativeObject
   return ServerRequestSchemas[method].result.parse(result);
 }
 
+interface DetachedSession { threads: Set<string>; pending: Map<RpcId, string> }
+// A bearer identifies the authorized local audience, not one TUI process. Only
+// detached subscriptions transfer; live connections keep their own ownership.
+const detached = new WeakMap<AgentServer, Map<string, DetachedSession>>();
+
 /** Each WebSocket owns exactly one authenticated AS connection. */
 export class CodexSession {
   readonly client: InProcessClient;
@@ -32,6 +37,7 @@ export class CodexSession {
   private optOut = new Set<string>();
   private unsubscribe: () => void;
   private unclose: () => void;
+  private restoring: Promise<void> = Promise.resolve();
   constructor(server: AgentServer, private readonly control: ControlClient, private readonly options: { token: string; send: (frame: NativeObject) => void; end?: () => void; audit?: (message: string) => void; claudeThreads?: boolean }) {
     this.client = server.connectInProcess();
     this.router = new CodexRouter(server, this.client, control, this.abort.signal, options.claudeThreads ?? false);
@@ -69,7 +75,9 @@ export class CodexSession {
         if (this.state !== "initialized") throw new ProtocolError(ErrorCode.not_initialized, "as-ingress: invalid initialized notification");
         // AS send serializes its own frames. Mark ready before awaiting so a
         // native startup burst can queue immediately behind initialized.
-        this.state = "ready"; await this.client.notifyInitialized(); return;
+        this.state = "ready";
+        this.restoring = this.client.notifyInitialized().then(() => this.restore());
+        await this.restoring; return;
       }
       if (id === null) throw new ProtocolError(ErrorCode.invalid_request, "as-ingress: request ID required");
       if (f.method === "initialize") {
@@ -93,6 +101,7 @@ export class CodexSession {
         this.state = "initialized"; this.send({ id, result }); return;
       }
       if (this.state !== "ready") throw new ProtocolError(ErrorCode.not_initialized, "as-ingress: initialize and initialized required");
+      await this.restoring;
       const result = await this.router.request(f.method, p);
       this.send({ id, result });
       if (f.method === "thread/resume" && result.thread?.id) {
@@ -102,12 +111,12 @@ export class CodexSession {
       }
     } catch (error) {
       const rpc = rpcError(error);
-      if (this.state !== "closed" && typeof f?.method === "string") {
+      if (!this.client.closed && typeof f?.method === "string") {
         // Durable audit omits arbitrary params, paths, tokens and tool contents.
         this.router.server.log.db.query("INSERT INTO ingress_audit(created_at,client_id,method,thread_id,code,reason) VALUES (?,?,?,?,?,?)")
           .run(Date.now(), this.client.clientId, f.method.slice(0, 256), typeof f.params?.threadId === "string" ? f.params.threadId.slice(0, 128) : null, error instanceof NativeRpcError ? error.code : rpc.code, "native_request_rejected");
       }
-      if (error instanceof NativeRpcError) { this.send({ id, error: { code: error.code, message: error.message } }); return; }
+      if (error instanceof NativeRpcError) { this.send({ id, error: { code: error.code, message: error.message, ...(error.data !== undefined ? { data: error.data } : {}) } }); return; }
       this.send({ id, error: { ...rpc, message: `${rpc.message.startsWith("as-ingress: ") ? "" : "as-ingress: "}${rpc.message}${rpc.data?.holder ? ` (holder: ${rpc.data.holder.label})` : ""}` } });
       if (this.state === "initializing") { this.close(); this.options.end?.(); }
     }
@@ -180,8 +189,43 @@ export class CodexSession {
     this.localTools.set(id, { engine, nativeId: frame.id });
     this.send({ ...frame, id });
   }
+  private async restore(): Promise<void> {
+    const records = detached.get(this.router.server), previous = records?.get(this.options.token);
+    if (!previous) return;
+    records!.delete(this.options.token);
+    // Close old connection-scoped cards even if another client decided while
+    // offline. AS attach below is the sole producer of new pending requests.
+    for (const [id, requestId] of previous.pending) {
+      const row = this.router.server.log.approval(requestId);
+      if (!row) continue;
+      const thread = this.router.server.threads.get(row.thread_id);
+      if (thread.backend === "claude" && !this.router.claudeThreads) continue;
+      this.send({ method: "serverRequest/resolved", params: { threadId: nativeThreadId(thread), requestId: id,
+        ...(row.decided_by ? { decidedBy: JSON.parse(row.decided_by) } : {}), reason: row.status === "pending" ? "reconnected" : row.status } });
+    }
+    for (const threadId of previous.threads) {
+      if (this.client.closed) break;
+      try {
+        await this.router.reattach(threadId);
+        const engine = this.router.server.threads.live.get(threadId);
+        if (engine instanceof CodexEngine) for (const call of engine.nativeToolCalls.values()) this.forwardTool(engine, call.frame);
+      }
+      catch (error) {
+        const message = `as-ingress: reconnect attach failed: ${String(error)}`;
+        this.options.audit?.(message); this.send({ method: "warning", params: { message } });
+      }
+    }
+  }
   close(): void {
     if (this.state === "closed") return;
+    if (this.router.attached.size) {
+      let records = detached.get(this.router.server);
+      if (!records) { records = new Map(); detached.set(this.router.server, records); }
+      const record = records.get(this.options.token) ?? { threads: new Set<string>(), pending: new Map<RpcId, string>() };
+      for (const threadId of this.router.attached) record.threads.add(threadId);
+      for (const [id, request] of this.reverse) record.pending.set(id, request.requestId);
+      records.set(this.options.token, record);
+    }
     this.state = "closed"; this.abort.abort(); this.unsubscribe?.(); this.unclose?.(); this.client.close(); this.reverse.clear(); this.logical.clear();
     for (const engine of new Set([...this.localTools.values()].map(call => call.engine))) engine.releaseNativeToolCalls(this.client.clientId);
     this.localTools.clear();

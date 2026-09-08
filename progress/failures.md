@@ -6,6 +6,34 @@
 
 ## 已结案
 
+### codex-ingress slice 4：Unix 路径过长与重连初始化竞态（resolved）
+
+- 症状：macOS 默认 TMPDIR 下隔离 CODEX_HOME 的 Unix socket 超过 sun_path；新增显示端崩溃冒烟在重连后立即 close，迟到的 TUI 初始化 read 又恢复线程。
+- 可证伪假设：失败取决于临时目录长度与 close 前是否等到重连历史显示，而非断连导致引擎中断。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --transport unix --expect display_disconnect_ok,external_client_reply_while_attached_ok`。
+- 修复：临时目录固定在 /tmp 下并检查 socket 字节上限；重连先等待离线完成历史在官方 TUI 渲染，再验 close。Codex unix / Claude ws 均已通过；进行中的 turn 经 TUI SIGKILL 仍完成。
+
+### codex-ingress slice 3 返工：混合 picker 的模型与准备状态（resolved）
+
+- 症状：Claude 主会话切 Codex 被 changing backend guard 拒绝；合并后的 fresh 关闭/重开与旧 full 租约断言不兼容；对当前线程重复 /resume 不发新 resume RPC。
+- 可证伪假设：TUI 启动 --model 是后续 resume 的粘性覆盖；fresh 仍带 full 或显式向 Claude 传 sandbox；脚本把当前选择当成新选择。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude`；wire 中跨后端 resume 必须 model=null，双线程轮流完成且各自审批/中断可核验。
+- 修复：用配置默认模型和显式 sonnet 建线程，保留跨后端模型 override 拒绝；fresh 在关闭前命名、关闭后停旧 PTY，再以 auto-edit 重开（仅 Codex 传 sandbox）；跟踪真实 resume/turn 选择。旧租约测试改为普通 full 输入不占租约，与 129f581 一致。
+
+### codex-ingress slice 3：分页错误被包装为引擎不可用（resolved）
+
+- 症状：真实 0.153.4 的无效 items cursor 原本返回 -32600，ingress 返回 -32004，并附引擎 stderr；活进程被错误描述为 unavailable。
+- 可证伪假设：CodexEngine 的统一 AS 错误包装遮住了只读 native RPC 的 code/message。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex`；history-proof.json 中 invalid cursor 断言必须严格等于 -32600 与上游原文。
+- 修复：nativeResult 解包 read/history 原始错误，保留 code/message/data；Claude 无效 opaque cursor 同样使用 -32600。223 项、双向 28 页、空页、resume 与中间 fork 的真实探针已通过。
+
+### codex-ingress slice 3：picker 搜索被误认为必发 RPC（resolved）
+
+- 症状：首轮扩展冒烟在 picker search 超时，真实屏幕已经筛出 S3-FRESH。
+- 可证伪假设：官方 picker 优先本地过滤已取回的行，只有需要更多页时才再请求 thread/list。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex`；要求真实 picker 列出目标后选择，随后主连接发匹配 UUID 的 resume/turn。
+- 修复：不等待不存在的搜索 RPC；以选中后的 resume 和对应线程 turn 为判据。picker 自己另开的列表连接不计入主连接的 turn/start 同连接断言。
+
 ### codex-ingress：full 附着长期占用输入租约（resolved）
 
 - 症状：TUI full resume 后独立 as/1 reply / close 返回 -32012；扩展冒烟首轮另发现 Responses fixture 重复 msg_fresh 导致 items 唯一键冲突。

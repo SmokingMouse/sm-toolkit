@@ -233,7 +233,11 @@ export class ThreadManager {
       this.log.publish({ jsonrpc: "2.0", method: "thread/engineEvent", params: { threadId, ...params } });
       return;
     }
-    if (event.type === "metadata") { this.metadata(threadId, event.engineThreadId); return; }
+    if (event.type === "metadata") {
+      this.metadata(threadId, event.engineThreadId);
+      if (event.nativeThreadData) { const thread = this.get(threadId); thread.meta = { ...thread.meta, nativeThreadData: event.nativeThreadData }; this.log.saveThread(thread); }
+      return;
+    }
     if (event.type === "exit") { this.engineDied(threadId, event.error ?? new ProtocolError(ErrorCode.engine_unavailable, "engine exited", { retryable: true }).toJSON()); return; }
     if (event.type === "error") { this.log.publish({ jsonrpc: "2.0", method: "error", params: { threadId, ...(event.turnId ? { turnId: event.turnId } : {}), error: event.error, willRetry: event.willRetry } }); return; }
     if (event.type === "usage") { this.log.publish({ jsonrpc: "2.0", method: "thread/tokenUsage/updated", params: { threadId, usage: event.usage } }); return; }
