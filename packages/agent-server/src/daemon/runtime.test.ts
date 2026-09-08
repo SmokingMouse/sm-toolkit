@@ -6,7 +6,7 @@ import { MockEngine } from "../engines/index.js";
 import { until } from "../test-helpers.test.js";
 import { loadToken, resolveDaemonPaths } from "./paths.js";
 import { readPid } from "./process.js";
-import { runDaemon } from "./runtime.js";
+import { readConfig, runDaemon } from "./runtime.js";
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -25,6 +25,22 @@ test("socket path precedence and state paths are independent of the caller's HOM
   expect(explicit.socketPath).toBe("/tmp/custom.sock"); expect(explicit.socketSource).toBe("AGENT_SERVER_SOCKET_PATH");
   expect(explicit.tokenPath).toBe(join(state, "sm-toolkit/agent-server/token"));
   expect(resolveDaemonPaths({ HOME: home, XDG_RUNTIME_DIR: "relative" }).socketPath).toBe(join(home, ".sm-toolkit/agent-server.sock"));
+});
+
+test("readConfig: missing file returns empty options", () => {
+  expect(readConfig(join(temporary(), "config.toml"))).toEqual({});
+});
+
+test("readConfig: readonly_auto_allow and readonly_commands map to camelCase ServerOptions", () => {
+  const path = join(temporary(), "config.toml");
+  writeFileSync(path, 'readonly_auto_allow = false\nreadonly_commands = ["ls", "whoami"]\nallowed_roots = ["/tmp"]\n');
+  expect(readConfig(path)).toEqual({ readonlyAutoAllow: false, readonlyCommands: ["ls", "whoami"], allowedRoots: ["/tmp"] });
+});
+
+test("readConfig: readonly_auto_allow=true is preserved (not treated as absent)", () => {
+  const path = join(temporary(), "config.toml");
+  writeFileSync(path, "readonly_auto_allow = true\n");
+  expect(readConfig(path)).toEqual({ readonlyAutoAllow: true });
 });
 
 test("token is generated once, reused and restricted to 0600", () => {

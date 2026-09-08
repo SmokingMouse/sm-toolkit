@@ -181,7 +181,7 @@ describe("Claude native frame exchange (fake child only)", () => {
     }
   });
   test.each(["bypassPermissions", "full", "dontAsk", "default"] as const)("permission broker: %s native can_use_tool fallback and audit", async permission => {
-    const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-permission", request: { subtype: "can_use_tool", tool_use_id: "bash", tool_name: "Bash", input: { command: "ls" } } }));
+    const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-permission", request: { subtype: "can_use_tool", tool_use_id: "bash", tool_name: "Bash", input: { command: "touch /tmp/x" } } }));
     const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
     const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
     const published: any[] = [];
@@ -200,10 +200,79 @@ describe("Claude native frame exchange (fake child only)", () => {
         expect(server.log.pendingRequests(thread.id)).toEqual([]);
         expect(published.some(f => f.method === "thread/pendingRequests")).toBe(false);
         const behavior = permission === "dontAsk" ? "deny" : "allow";
-        expect(fake.written.find(f => f.type === "control_response")).toMatchObject({ response: { request_id: "native-permission", subtype: "success", response: { behavior, ...(behavior === "allow" ? { updatedInput: { command: "ls" } } : {}) } } });
+        expect(fake.written.find(f => f.type === "control_response")).toMatchObject({ response: { request_id: "native-permission", subtype: "success", response: { behavior, ...(behavior === "allow" ? { updatedInput: { command: "touch /tmp/x" } } : {}) } } });
         expect(published.find(f => f.method === "thread/engineEvent").params).toMatchObject({ backend: "claude", subtype: "permission_auto_response", payload: { toolName: "Bash", behavior, permission: permission === "full" ? "bypassPermissions" : permission } });
       }
     } finally { unsubscribe(); await server.close(); }
+  });
+  test.each(["default", "plan", "acceptEdits"] as const)("readonly auto-allow: %s mode allows a readonly Bash command without an approval", async permission => {
+    const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-readonly", request: { subtype: "can_use_tool", tool_use_id: "bash", tool_name: "Bash", input: { command: "git status && ls" } } }));
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
+    const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
+    const published: any[] = [];
+    let unsubscribe = () => {};
+    try {
+      const c = await client(server);
+      const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd(), permission });
+      unsubscribe = server.log.subscribe(thread.id, frame => published.push(frame));
+      await c.request("turn/start", { threadId: thread.id, input: input("go") });
+      await until(() => published.some(f => f.method === "thread/engineEvent" && f.params.subtype === "readonly_auto_allow"));
+      expect(server.log.pendingRequests(thread.id)).toEqual([]);
+      expect(published.some(f => f.method === "thread/pendingRequests")).toBe(false);
+      expect(fake.written.find(f => f.type === "control_response")).toMatchObject({ response: { request_id: "native-readonly", subtype: "success", response: { behavior: "allow", updatedInput: { command: "git status && ls" } } } });
+      expect(published.find(f => f.method === "thread/engineEvent").params).toMatchObject({ backend: "claude", subtype: "readonly_auto_allow", payload: { toolName: "Bash", behavior: "allow", reason: "readonly_command", command: "git status && ls", matchedRules: ["git status", "ls"] } });
+    } finally { unsubscribe(); await server.close(); }
+  });
+  test("readonly auto-allow: a non-readonly Bash command still queues an approval under plan", async () => {
+    const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-write", request: { subtype: "can_use_tool", tool_use_id: "bash", tool_name: "Bash", input: { command: "rm -rf /tmp/x" } } }));
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
+    const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
+    try {
+      const c = await client(server);
+      const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd(), permission: "plan" });
+      await c.request("turn/start", { threadId: thread.id, input: input("go") });
+      await until(() => server.log.pendingRequests(thread.id).length === 1);
+      expect(fake.written.some(f => f.type === "control_response")).toBe(false);
+    } finally { await server.close(); }
+  });
+  test("readonly auto-allow: readonlyAutoAllow=false always queues an approval for an otherwise-readonly command", async () => {
+    const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-disabled", request: { subtype: "can_use_tool", tool_use_id: "bash", tool_name: "Bash", input: { command: "ls" } } }));
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child, readonlyAutoAllow: false });
+    const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
+    try {
+      const c = await client(server);
+      const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd(), permission: "plan" });
+      await c.request("turn/start", { threadId: thread.id, input: input("go") });
+      await until(() => server.log.pendingRequests(thread.id).length === 1);
+      expect(fake.written.some(f => f.type === "control_response")).toBe(false);
+    } finally { await server.close(); }
+  });
+  test("readonly auto-allow: readonlyCommands override replaces the default allowlist", async () => {
+    const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-custom", request: { subtype: "can_use_tool", tool_use_id: "bash", tool_name: "Bash", input: { command: "whoami" } } }));
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child, readonlyCommands: ["whoami"] });
+    const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
+    const published: any[] = [];
+    let unsubscribe = () => {};
+    try {
+      const c = await client(server);
+      const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd(), permission: "plan" });
+      unsubscribe = server.log.subscribe(thread.id, frame => published.push(frame));
+      await c.request("turn/start", { threadId: thread.id, input: input("go") });
+      await until(() => published.some(f => f.method === "thread/engineEvent" && f.params.subtype === "readonly_auto_allow"));
+      expect(server.log.pendingRequests(thread.id)).toEqual([]);
+    } finally { unsubscribe(); await server.close(); }
+  });
+  test("readonly auto-allow: does not apply to fileChange requests", async () => {
+    const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-write-file", request: { subtype: "can_use_tool", tool_use_id: "edit", tool_name: "Write", input: { file_path: "/tmp/a", content: "hi" } } }));
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
+    const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
+    try {
+      const c = await client(server);
+      const { thread } = await c.request("thread/start", { backend: "claude", cwd: process.cwd(), permission: "plan" });
+      await c.request("turn/start", { threadId: thread.id, input: input("go") });
+      await until(() => server.log.pendingRequests(thread.id).length === 1);
+      expect(server.log.pendingRequests(thread.id)[0]).toMatchObject({ method: "item/fileChange/requestApproval" });
+    } finally { await server.close(); }
   });
   test("foundation bash: native replay completes standalone turns, decodes output and leaves next turn usable", async () => {
     const fake = fakeProcess((send, frame) => {
@@ -484,13 +553,13 @@ describe("Claude native frame exchange (fake child only)", () => {
     await engine.close("test"); await consuming;
   });
   test("can_use_tool maps to reverse request and winner maps to native response", async () => {
-    const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-ar", request: { subtype: "can_use_tool", tool_use_id: "tool", tool_name: "Bash", input: { command: "pwd" } } }));
+    const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-ar", request: { subtype: "can_use_tool", tool_use_id: "tool", tool_name: "Bash", input: { command: "touch /tmp/x" } } }));
     const engine = new ClaudeEngine({ spawnProcess: () => fake.child }); const events: EngineEvent[] = [];
     const consuming = (async () => { for await (const event of engine.events) events.push(event); })();
     await engine.spawn({ threadId: "th", backend: "claude", cwd: "/tmp" }); await engine.sendTurn("tn", input("go"), { threadId: "th", input: input("go") });
     await until(() => events.some(e => e.type === "approval"));
     const approval = events.find(e => e.type === "approval")!; expect(approval.request).toMatchObject({ method: "item/commandExecution/requestApproval", params: { requestId: expect.stringContaining("ar_"), itemId: "tool" } });
-    await approval.respond({ decision: "accept" }); expect(fake.written.at(-1)).toMatchObject({ type: "control_response", response: { request_id: "native-ar", response: { behavior: "allow", updatedInput: { command: "pwd" } } } });
+    await approval.respond({ decision: "accept" }); expect(fake.written.at(-1)).toMatchObject({ type: "control_response", response: { request_id: "native-ar", response: { behavior: "allow", updatedInput: { command: "touch /tmp/x" } } } });
     await engine.close("test"); await consuming;
   });
   test("interrupt waits for native result before permitting a new turn", async () => {
@@ -526,7 +595,7 @@ describe("Claude native frame exchange (fake child only)", () => {
     expect(events.find(e => e.type === "itemCompleted")).toMatchObject({ item: { type: "agentMessage", payload: { text: "full answer" } } }); await engine.close("test"); await consuming;
   });
   test("native cancellation retracts the logical request and suppresses its late decision", async () => {
-    const fake = fakeProcess(send => send({ type: "control_request", request_id: "cancel-ar", request: { subtype: "can_use_tool", tool_use_id: "tool", tool_name: "Bash", input: { command: "pwd" } } }));
+    const fake = fakeProcess(send => send({ type: "control_request", request_id: "cancel-ar", request: { subtype: "can_use_tool", tool_use_id: "tool", tool_name: "Bash", input: { command: "touch /tmp/x" } } }));
     const engine = new ClaudeEngine({ spawnProcess: () => fake.child }); const events: EngineEvent[] = [];
     const consuming = (async () => { for await (const event of engine.events) events.push(event); })();
     await engine.spawn({ threadId: "th", backend: "claude", cwd: "/tmp" }); await engine.sendTurn("tn", input("go"), { threadId: "th", input: input("go") }); await until(() => events.some(e => e.type === "approval"));
