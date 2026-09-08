@@ -277,7 +277,7 @@ export class ClaudeEngine implements EngineSession {
       this.events.push({ type: "engineEvent", turnId, backend: this.backend, subtype: "permission_auto_response", payload: { requestId: `ar_${crypto.randomUUID()}`, toolUseId, toolName: "Bash", permission, behavior: decision, reason: "permission_mode" } });
       return decision === "allow" ? undefined : "Denied";
     }
-    const match = this.readonlyAutoAllow ? classifyReadonlyCommand(command, this.readonlyCommandSet) : undefined;
+    const match = this.readonlyAutoAllow ? classifyReadonlyCommand(command, this.readonlyCommandSet, this.options) : undefined;
     if (match?.readonly) {
       const requestId = `ar_${crypto.randomUUID()}`;
       this.events.push({ type: "engineEvent", turnId, backend: this.backend, subtype: "readonly_auto_allow", payload: { requestId, toolUseId, toolName: "Bash", permission, behavior: "allow", reason: "readonly_command", command, matchedRules: match.matchedRules } });
@@ -387,7 +387,7 @@ export class ClaudeEngine implements EngineSession {
       };
       const permission = claudePermission(this.options.permission);
       const readonlyCommand = req.toolName === "Bash" && this.readonlyAutoAllow ? String(record(req.input).command ?? "") : undefined;
-      const readonlyMatch = readonlyCommand !== undefined ? classifyReadonlyCommand(readonlyCommand, this.readonlyCommandSet) : undefined;
+      const readonlyMatch = readonlyCommand !== undefined ? classifyReadonlyCommand(readonlyCommand, this.readonlyCommandSet, this.options) : undefined;
       if (this.options.permission === "readonly" && ["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(req.toolName)) {
         // Defense in depth beyond --disallowedTools: deny and audit even if the CLI ever
         // forwards a can_use_tool for one of these tools under a readonly thread.

@@ -1,8 +1,9 @@
-import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import reviewVectors from "./readonly-review-vectors.json";
+import review4 from "./readonly-review4-vectors.json";
 import {
   classifyReadonlyCommand,
   DEFAULT_READONLY_COMMANDS,
@@ -21,13 +22,62 @@ for (const name of DEFAULT_READONLY_COMMANDS) {
   writeFileSync(path, "#!/bin/sh\n");
   chmodSync(path, 0o755);
 }
-const FIXTURE_OPTIONS: ReadonlyClassificationOptions = { pathDirs: [FIXTURE_BIN_DIR], systemDirs: [FIXTURE_BIN_DIR] };
+for (const name of ["patterns.txt", "list.txt"]) writeFileSync(join(FIXTURE_BIN_DIR, name), "foo\n");
+const FIXTURE_OPTIONS: ReadonlyClassificationOptions = { pathDirs: [FIXTURE_BIN_DIR], systemDirs: [FIXTURE_BIN_DIR], cwd: FIXTURE_BIN_DIR, allowedRoots: [FIXTURE_BIN_DIR] };
 
 function classify(command: string, allow?: ReadonlySet<string>, options: ReadonlyClassificationOptions = FIXTURE_OPTIONS) {
   return classifyReadonlyCommand(command, allow, options);
 }
 
 describe("classifyReadonlyCommand", () => {
+  test("preserves all 194 fourth-review rows and 67 differential commands", () => {
+    expect(review4.rows).toHaveLength(194);
+    expect(review4.rows.filter(row => row.source.endsWith("vectors-new.ts"))).toHaveLength(166);
+    expect(review4.differential).toHaveLength(67);
+  });
+  test.each(review4.rows)("fourth review $source: $command", ({ command, expected }) => {
+    expect(classify(command).readonly, command).toBe(expected);
+    if (!expected) expect(classify(command).matchedRules).toEqual([]);
+  });
+  test.each(["log", "diff", "show"])("git %s brace-forged output requires approval", sub => {
+    expect(classify(`git ${sub} {--output=/tmp/x,HEAD}`)).toEqual({ readonly: false, matchedRules: [] });
+  });
+  test("parser-wide character ban covers every argv and every allowlisted head", () => {
+    for (const name of DEFAULT_READONLY_COMMANDS) {
+      const base = name === "git" ? "git log" : name;
+      for (const char of ["{", "}", "*", "?", "[", "]", "~", "$", "`", "$(id)", "<(ls)", ">(ls)", "^", "#"]) {
+        for (const command of [`${base} a${char}b`, `${base} ${char}`, `ls; ${base} a${char}b; pwd`, `${name}${char}`]) {
+          expect(classify(command), command).toEqual({ readonly: false, matchedRules: [] });
+        }
+      }
+      for (const literal of ["'*'", '"*"', "\\*", "a'*'b"]) expect(classify(`${base} ${literal}`).readonly).toBe(true);
+    }
+    symlinkSync(join(FIXTURE_BIN_DIR, "ls"), join(FIXTURE_BIN_DIR, "custom-reader"));
+    expect(classify("custom-reader *", new Set(["custom-reader"]))).toEqual({ readonly: false, matchedRules: [] });
+  });
+  test("-f inputs require server roots, including aliases, repeats and symlink traversal", () => {
+    const outside = mkdtempSync(join(tmpdir(), "readonly-input-outside-"));
+    writeFileSync(join(outside, "secret"), "foo\n");
+    mkdirSync(join(outside, "sub"));
+    symlinkSync(outside, join(FIXTURE_BIN_DIR, "escape"));
+    symlinkSync(join(outside, "sub"), join(FIXTURE_BIN_DIR, "escape-sub"));
+    writeFileSync(join(FIXTURE_BIN_DIR, "secret"), "benign decoy\n");
+    symlinkSync(join(FIXTURE_BIN_DIR, "patterns.txt"), join(FIXTURE_BIN_DIR, "inside-link"));
+    for (const [head, long] of [["grep", "--file"], ["rg", "--file"], ["file", "--files-from"]]) {
+      for (const flag of ["-f ", `${long} `, `${long}=`]) {
+        for (const path of ["patterns.txt", "inside-link", join(FIXTURE_BIN_DIR, "patterns.txt")]) {
+          expect(classify(`${head} ${flag}${path}`).readonly).toBe(true);
+        }
+        for (const path of [join(outside, "secret"), "escape/secret", "escape/sub/../secret", "escape-sub/../secret", "missing", `${FIXTURE_BIN_DIR}-sibling/secret`]) {
+          expect(classify(`${head} ${flag}${path}`)).toEqual({ readonly: false, matchedRules: [] });
+        }
+      }
+      expect(classify(`${head} -f patterns.txt -f ${outside}/secret`).readonly).toBe(false);
+      expect(classify(`${head} -f patterns.txt`, undefined, { ...FIXTURE_OPTIONS, allowedRoots: undefined }).readonly).toBe(false);
+      expect(classify(`${head} -f ${outside}/secret`, undefined, { ...FIXTURE_OPTIONS, allowedRoots: [FIXTURE_BIN_DIR, outside] }).readonly).toBe(true);
+      expect(classify(`${head} -f ../secret`, undefined, { ...FIXTURE_OPTIONS, cwd: `${FIXTURE_BIN_DIR}/escape/sub` }).readonly).toBe(false);
+    }
+  });
   test("retains every historical probe row, including duplicate vectors across rounds", () => {
     expect(reviewVectors.length).toBe(377);
     for (const [source, count] of [["review-332b/probe.ts", 78], ["review-332b/probe2.ts", 19], ["review2-5f0a/probe.ts", 94], ["review3-8b89/probe.ts", 186]] as const) {
@@ -71,7 +121,7 @@ describe("classifyReadonlyCommand", () => {
     "grep --regexp=--pre foo", "grep -e --hostname-bin rm foo", "grep --files foo",
     "grep --color foo", "grep --binary-files=exec foo", "grep foo -- -delete",
     "file -C -m x", "file -Cmfoo", "file -bC -mfoo", "file -C=x", "file --compile",
-    "file --magic-file=x a", "file --unknown a", "file --mime-ty a", "file -bi a",
+    "file --magic-file=x a", "file --unknown a", "file --mime-ty a",
     "file -z a", "file --uncompress a", "file -F", "file --separator=", "file -f -C",
     "file -- a", "file a --compile", "file --brief=true a",
     "find *", "find . -name *", "rg foo *", "grep foo [ab]*", "file ?",
@@ -81,8 +131,8 @@ describe("classifyReadonlyCommand", () => {
     expect(classify(`ls && ${command} && pwd`)).toEqual({ readonly: false, matchedRules: [] });
   });
 
-  test("quoted and escaped globs stay literal, expansion state is scoped to one segment", () => {
-    for (const command of ["rg 'a*' src", "grep \\* file", "file 'a*'", "ls *; rg foo src"]) {
+  test("quoted and escaped globs stay literal across segments", () => {
+    for (const command of ["rg 'a*' src", "grep \\* file", "file 'a*'", "ls '*'; rg foo src", "grep -rn foo .", "grep -rl foo src", "grep -ri foo .", "file -bi a"]) {
       expect(classify(command).readonly).toBe(true);
     }
   });

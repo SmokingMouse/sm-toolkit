@@ -5,7 +5,7 @@ import { TurnQueue } from "./turn-queue.js";
 import type { ApprovalBroker } from "./approval-broker.js";
 import { executionModel, type ModelPolicyOptions } from "./model-policy.js";
 
-export interface ThreadManagerOptions extends ModelPolicyOptions { maxQueuedTurns?: number; idleTimeoutMs?: number; now?: () => number }
+export interface ThreadManagerOptions extends ModelPolicyOptions { maxQueuedTurns?: number; idleTimeoutMs?: number; now?: () => number; allowedRoots?: readonly string[] }
 const transitions: Record<ThreadStatus["type"], ThreadStatus["type"][]> = {
   spawning: ["idle", "systemError", "closed"], idle: ["running", "closed", "systemError"],
   running: ["idle", "interrupted", "systemError", "closed"], interrupted: ["idle", "systemError", "closed"],
@@ -118,7 +118,8 @@ export class ThreadManager {
           } catch (error) { if (this.live.get(thread.id) === owned) this.engineDied(thread.id, rpcError(error)); }
         })();
         this.consumers.set(thread.id, consumer);
-        await session.spawn(options);
+        // Server-owned scope always replaces saved/client session data, including on resume.
+        await session.spawn({ ...options, allowedRoots: this.options.allowedRoots });
         if (this.live.get(thread.id) !== session) throw new ProtocolError(ErrorCode.engine_unavailable, "engine died while spawning");
         if (session.engineThreadId) this.metadata(thread.id, session.engineThreadId);
         this.setStatus(thread.id, { type: "idle" }); this.queue(thread.id).resume();

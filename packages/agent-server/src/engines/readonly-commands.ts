@@ -1,5 +1,5 @@
 import { accessSync, constants as fsConstants, realpathSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 // Default allowlist for the readonly-auto-allow gate: pure inspection commands only.
 // `env` is deliberately absent: it is a program launcher (see HARD_BANNED_HEADS) and can never be
@@ -34,7 +34,8 @@ function isGitWriteToFile(arg: string): boolean { return arg === "--output" || a
 // names) and only flags that list/inspect. Anything else (create/delete/rename/move/set-upstream) mutates refs.
 const BRANCH_READONLY_FLAGS = new Set(["-a", "-l", "-r", "--list", "--show-current", "-v"]);
 
-// Exact spellings only: no abbreviation, short-option bundles, attached short values, or `--`.
+// Exact spellings only, except bundles consisting entirely of known no-value short flags.
+// No abbreviation, attached short values, or `--`.
 // Values are consumed once and validated, never reinterpreted as another option. Keep rg and
 // grep separate: the same short letter can have different semantics in different programs.
 type ValueCheck = (value: string) => boolean;
@@ -104,13 +105,14 @@ const FIND_READONLY_OPTIONS: ReadonlyOptions = {
   ),
 };
 
-function readonlyOptionArgs(args: string[], options: ReadonlyOptions, find = false): boolean {
+function readonlyOptionArgs(args: string[], options: ReadonlyOptions, find = false, inputFile?: ValueCheck): boolean {
   let expression = false;
   let paths = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     if (find && !paths && !expression && FIND_PREFIX_FLAGS.has(arg)) continue;
     if (options.flags.has(arg)) { expression = true; continue; }
+    if (!find && /^-[A-Za-z0-9]{2,}$/.test(arg) && [...arg.slice(1)].every(letter => options.flags.has(`-${letter}`))) continue;
     // Only long search/file options support =value; find primaries require a separate token.
     const equals = !find && arg.startsWith("--") ? arg.indexOf("=") : -1;
     const name = equals < 0 ? arg : arg.slice(0, equals);
@@ -118,6 +120,7 @@ function readonlyOptionArgs(args: string[], options: ReadonlyOptions, find = fal
     if (check) {
       const value = equals < 0 ? args[++i] : arg.slice(equals + 1);
       if (value === undefined || !check(value)) return false;
+      if (!find && ["-f", "--file", "--files-from"].includes(name) && !inputFile?.(value)) return false;
       expression = true;
       continue;
     }
@@ -127,7 +130,7 @@ function readonlyOptionArgs(args: string[], options: ReadonlyOptions, find = fal
   return true;
 }
 
-interface ParsedScript { commands: { words: string[]; hasExpansion: boolean }[] }
+interface ParsedScript { commands: { words: string[] }[] }
 
 /**
  * Fail-closed shell tokenizer for the readonly-auto-allow gate. See out/result.md for the BNF and
@@ -149,7 +152,6 @@ function parseScript(command: string): ParsedScript | null {
   if (/[`$]/.test(command)) return null;
 
   const commands: ParsedScript["commands"] = [];
-  let hasExpansion = false;
   let words: string[] = [];
   let word = "";
   let hasWord = false;
@@ -158,8 +160,8 @@ function parseScript(command: string): ParsedScript | null {
   const pushWord = () => { if (hasWord) { words.push(word); word = ""; hasWord = false; } };
   const pushCommand = () => {
     pushWord();
-    if (words.length) commands.push({ words, hasExpansion });
-    words = []; hasExpansion = false;
+    if (words.length) commands.push({ words });
+    words = [];
   };
 
   for (let i = 0; i < command.length; i++) {
@@ -206,10 +208,10 @@ function parseScript(command: string): ParsedScript | null {
       pushCommand(); continue;
     }
     if (ch === ";") { pushCommand(); continue; }
-    // Shell glob/brace expansion can manufacture additional argv entries such as -exec or
-    // --pre. The four option-whitelisted commands require literal argv (quoted/escaped globs
-    // remain useful as find/search patterns). Other command policies are unchanged.
-    if ("*?[{}~".includes(ch)) hasExpansion = true;
+    // Parser-wide invariant: no unquoted expansion characters in ANY argv, including argv[0].
+    // Reject characters, not recognized patterns, independently of shell options or matches.
+    // ^/# cover zsh EXTENDED_GLOB too; quoted/escaped patterns remain literal.
+    if ("*?[]{}~^#".includes(ch)) return null;
     word += ch; hasWord = true;
   }
   if (quote) return null; // unterminated quote
@@ -273,6 +275,10 @@ export function unresolvableReadonlyCommands(
 }
 
 export interface ReadonlyClassificationOptions {
+  /** Trusted server roots for -f/--file/--files-from inputs. Missing scope fails closed. */
+  allowedRoots?: readonly string[];
+  /** Execution cwd used to resolve relative input paths. */
+  cwd?: string;
   /** Directories a resolved executable must live in. Defaults to DEFAULT_SYSTEM_BIN_DIRS. */
   systemDirs?: readonly string[];
   /** Overrides the directories searched to resolve argv[0]. Defaults to process.env.PATH. Exists
@@ -281,6 +287,22 @@ export interface ReadonlyClassificationOptions {
 }
 
 export interface ReadonlyClassification { readonly: boolean; matchedRules: string[] }
+
+function inputWithinRoots(value: string, options: ReadonlyClassificationOptions): boolean {
+  try {
+    // Bun/Node realpath can normalize .. before following symlinks. Walk components so
+    // link/../secret means the real target's parent, as it does when the tool opens it.
+    let path = isAbsolute(value) ? "/" : realpathSync(options.cwd ?? process.cwd());
+    for (const part of value.split("/")) {
+      if (!part || part === ".") continue;
+      path = part === ".." ? dirname(path) : realpathSync(join(path, part));
+    }
+    return (options.allowedRoots ?? []).some(root => {
+      const child = relative(realpathSync(resolve(root)), path);
+      return child === "" || (child !== ".." && !child.startsWith("../") && !isAbsolute(child));
+    });
+  } catch { return false; } // missing, unreadable or unresolvable input requires approval
+}
 
 /**
  * Classifies a Bash command as readonly-auto-allowable. The command must parse under the strict
@@ -317,7 +339,7 @@ export function classifyReadonlyCommand(
   };
 
   const rules: string[] = [];
-  for (const { words: tokens, hasExpansion } of parsed.commands) {
+  for (const { words: tokens } of parsed.commands) {
     if (!tokens.length) continue;
     const [head, ...args] = tokens as [string, ...string[]];
     // A path (relative or absolute) can resolve to an attacker-planted same-named binary
@@ -340,15 +362,15 @@ export function classifyReadonlyCommand(
       rules.push(`git ${sub}`); continue;
     }
     if (name === "find") {
-      if (hasExpansion || !readonlyOptionArgs(args, FIND_READONLY_OPTIONS, true)) return deny;
+      if (!readonlyOptionArgs(args, FIND_READONLY_OPTIONS, true)) return deny;
       rules.push("find"); continue;
     }
     if (name === "grep" || name === "rg") {
-      if (hasExpansion || !readonlyOptionArgs(args, name === "rg" ? RG_READONLY_OPTIONS : GREP_READONLY_OPTIONS)) return deny;
+      if (!readonlyOptionArgs(args, name === "rg" ? RG_READONLY_OPTIONS : GREP_READONLY_OPTIONS, false, value => inputWithinRoots(value, options))) return deny;
       rules.push(name); continue;
     }
     if (name === "file") {
-      if (hasExpansion || !readonlyOptionArgs(args, FILE_READONLY_OPTIONS)) return deny;
+      if (!readonlyOptionArgs(args, FILE_READONLY_OPTIONS, false, value => inputWithinRoots(value, options))) return deny;
       rules.push("file"); continue;
     }
     // ls/cat/head/tail/wc/pwd/echo/stat/which: no flags of theirs write or execute anything, and

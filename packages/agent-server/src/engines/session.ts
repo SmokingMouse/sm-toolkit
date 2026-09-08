@@ -21,7 +21,7 @@ export type EngineEvent =
   | { type: "approvalExpired"; turnId: string; requestId: string; reason: string }
   | { type: "exit"; error?: RpcError };
 
-export interface SessionOptions extends StartThreadParams { threadId: string; engineThreadId?: string; forkSession?: boolean; forkPoint?: string; seedHistory?: Item[] }
+export interface SessionOptions extends StartThreadParams { threadId: string; engineThreadId?: string; forkSession?: boolean; forkPoint?: string; seedHistory?: Item[]; allowedRoots?: readonly string[] }
 /** A daemon must never lend its pane or another contract's identity to an engine. */
 export function sessionEnvironment(options: Pick<SessionOptions, "fjContext">, source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env = { ...source };

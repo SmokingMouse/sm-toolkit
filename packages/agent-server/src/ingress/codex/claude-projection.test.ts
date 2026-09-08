@@ -89,6 +89,7 @@ async function setup(deniedModels?: string[], claudeThreads = true) {
 test("Claude model routing, persisted UUID, settings guards and explicit unsupported errors", async () => {
   const f = await setup();
   expect((await f.rpc("model/list")).result.data.map((m: NativeObject) => m.model)).toEqual(["sonnet", "opus"]);
+  expect((await f.rpc("model/list")).result.data.every((m: NativeObject) => m.description.includes("rg without ripgrep always requires approval"))).toBe(true);
   for (const model of ["fable", "claude-fable-5"]) expect((await f.rpc("thread/start", { model, cwd: process.cwd() })).error.code).toBe(ErrorCode.invalid_params);
   const started = (await f.rpc("thread/start", { model: "sonnet", cwd: process.cwd(), approvalPolicy: "on-request", sandbox: "workspace-write" })).result;
   const id = started.thread.id, as = resolveThread(f.server, id);

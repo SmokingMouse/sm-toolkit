@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server native ingress 已修 full 附着误占输入租约，权限设置改用短租约，生命周期 close 放开输入门控，待主控独立验收。
+agent-server readonly 已将 shell 展开闸移至解析器并限制输入选项路径，真机审批验证通过，待主控独立验收。
 
 ## Goals
 

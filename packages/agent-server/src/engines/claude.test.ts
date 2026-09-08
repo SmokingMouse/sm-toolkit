@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventType, type AgentEvent } from "@smokingmouse/agent";
@@ -315,6 +318,35 @@ describe("Claude native frame exchange (fake child only)", () => {
       expect(fake.written.some(f => f.type === "control_response")).toBe(false);
       expect(server.log.readonlyAutoAllows(thread.id)).toEqual([]);
     } finally { await server.close(); }
+  });
+  test.each(["standalone", "native"])("readonly %s gate uses server-owned input roots and rejects git expansion", async mode => {
+    const root = mkdtempSync(join(tmpdir(), "readonly-engine-scope-"));
+    const cwd = join(root, "workspace"), inputs = join(root, "inputs"), outside = join(root, "outside");
+    for (const dir of [cwd, inputs, outside]) { mkdirSync(dir); writeFileSync(join(dir, "patterns"), "foo\n"); }
+    for (const [command, allowed] of [
+      ["grep -f patterns .", true], [`grep --file=${inputs}/patterns .`, true],
+      [`file --files-from ${inputs}/patterns`, true], [`grep -f ${outside}/patterns .`, false],
+      [`file --files-from=${outside}/patterns`, false], ["git log {--output=/tmp/x,HEAD}", false],
+      ["git diff {--output=/tmp/x,HEAD}", false], ["git show {--output=/tmp/x,HEAD}", false],
+    ] as const) {
+      const fake = fakeProcess(send => {
+        if (mode === "native") send({ type: "control_request", request_id: "native-scope", request: { subtype: "can_use_tool", tool_use_id: "bash", tool_name: "Bash", input: { command } } });
+      });
+      const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
+      const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [cwd, inputs], engineFactory: () => engine, idleTimeoutMs: 0 });
+      try {
+        const c = await client(server);
+        const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd, permission: "readonly" });
+        await c.request("turn/start", { threadId: thread.id, input: mode === "standalone" ? [{ type: "bash", command }] : input("go") });
+        await until(() => server.log.readonlyAutoAllows(thread.id).length + server.log.pendingRequests(thread.id).length > 0);
+        expect(server.log.readonlyAutoAllows(thread.id).length, command).toBe(allowed ? 1 : 0);
+        expect(server.log.pendingRequests(thread.id).length, command).toBe(allowed ? 0 : 1);
+        if (!allowed) {
+          expect(fake.written.some(f => f.type === "bash_command"), command).toBe(false);
+          expect(fake.written.some(f => f.type === "control_response"), command).toBe(false);
+        }
+      } finally { await server.close(); }
+    }
   });
   test.each(["readonly", "plan", "default", "acceptEdits"] as const)("standalone bash turn: %s mode gates outside the CLI's can_use_tool round trip (P0-2)", async permission => {
     const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
