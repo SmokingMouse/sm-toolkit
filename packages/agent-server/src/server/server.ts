@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { timingSafeEqual } from "node:crypto";
@@ -235,6 +235,14 @@ export class AgentServer {
       }
       case "thread/start": {
         const p = params(method);
+        if (p.fjContext) {
+          p.fjContext.root = this.cwd(p.fjContext.root);
+          if (!statSync(p.fjContext.root).isDirectory()) throw new ProtocolError(ErrorCode.invalid_params, "fjContext.root must be a directory");
+          if (!p.model?.trim() || /fable/i.test(p.model)) throw new ProtocolError(ErrorCode.invalid_params, "fjContext requires an explicit non-fable model");
+          if (!p.permission) throw new ProtocolError(ErrorCode.invalid_params, "fjContext requires explicit permission");
+          if (p.backend === "codex" && (p.model !== "gpt-6-astra" || p.serviceTier !== "default")) throw new ProtocolError(ErrorCode.invalid_params, "fj Codex requires gpt-6-astra and serviceTier default");
+        }
+        if (p.backend === "claude" && p.serviceTier !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "serviceTier requires Codex");
         if (p.backend === "claude") validateClaudeEffort(p.effort);
         if (!this.backends.includes(p.backend)) throw new ProtocolError(ErrorCode.unsupported_capability, "backend is not available");
         return this.threads.start({ ...p, cwd: this.cwd(p.cwd) }, thread => this.attach(connection, thread.id));
@@ -255,10 +263,21 @@ export class AgentServer {
       case "thread/effort/set": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.engineControl({ threadId: p.threadId, subtype: "set_max_thinking_tokens", params: { max_thinking_tokens: p.maxThinkingTokens, ...(p.thinkingDisplay !== undefined ? { thinking_display: p.thinkingDisplay } : {}) } }); }
       case "thread/resume": {
         const p = params(method);
+        if (p.fjContext) throw new ProtocolError(ErrorCode.invalid_params, "fjContext is immutable; resume uses persisted context");
         if (p.cwd) this.cwd(p.cwd);
         if (p.backend && !this.backends.includes(p.backend)) throw new ProtocolError(ErrorCode.unsupported_capability, "backend is not available");
         const existing = p.threadId ? this.threads.get(p.threadId) : p.engineThreadId ? this.log.findEngine(p.engineThreadId, p.backend) : undefined;
-        if ((existing?.backend ?? p.backend ?? "claude") === "claude") validateClaudeEffort(p.effort);
+        if (existing) {
+          const saved = this.log.options(existing.id);
+          if (saved.fjContext) {
+            this.cwd(saved.fjContext.root);
+            if (p.model !== undefined && (!p.model.trim() || /fable/i.test(p.model) || (existing.backend === "codex" && p.model !== "gpt-6-astra"))) throw new ProtocolError(ErrorCode.invalid_params, "fj resume requires an explicit compatible model");
+          }
+        }
+        if ((existing?.backend ?? p.backend ?? "claude") === "claude") {
+          if (p.serviceTier !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "serviceTier requires Codex");
+          validateClaudeEffort(p.effort);
+        }
         if (existing) permissionInput(existing.id, p.permission);
         if (!existing && !p.cwd) throw new ProtocolError(ErrorCode.invalid_params, "cwd is required when importing an unknown engineThreadId");
         if (existing) this.cwd(p.cwd ?? existing.cwd);
@@ -286,7 +305,7 @@ export class AgentServer {
         const more = threads.length > limit; threads = threads.slice(0, limit); return { threads, nextCursor: more ? threads.at(-1)!.id : null };
       }
       case "thread/fork": { const p = params(method); this.cwd(this.threads.get(p.threadId).cwd); return this.threads.fork(p, thread => this.attach(connection, thread.id)); }
-      case "thread/close": { const p = params(method); return this.threads.close(p.threadId, p.reason).then(() => { this.leases.clear(p.threadId); return {}; }); }
+      case "thread/close": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.close(p.threadId, p.reason).then(() => { this.leases.clear(p.threadId); return {}; }); }
       case "thread/interrupt": return this.threads.queue(params(method).threadId).interrupt().then(interruptedTurnId => ({ interruptedTurnId }));
       case "turn/start": { const p = params(method); permissionInput(p.threadId, p.permission); if (p.cwd) this.cwd(p.cwd); return this.threads.queue(p.threadId).enqueue(p); }
       case "turn/steer": { const p = params(method); this.leases.assertInput(p.threadId, connection.clientId); return this.threads.queue(p.threadId).steer(p).then(() => ({})); }

@@ -5793,6 +5793,32 @@
         {
           "type": "object",
           "properties": {
+            "fjContext": {
+              "type": "object",
+              "properties": {
+                "root": {
+                  "type": "string",
+                  "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
+                },
+                "cid": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                },
+                "seat": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+                }
+              },
+              "required": [
+                "root",
+                "cid"
+              ],
+              "additionalProperties": false
+            },
+            "serviceTier": {
+              "type": "string",
+              "const": "default"
+            },
             "cwd": {
               "type": "string",
               "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
@@ -5884,6 +5910,32 @@
         {
           "type": "object",
           "properties": {
+            "fjContext": {
+              "type": "object",
+              "properties": {
+                "root": {
+                  "type": "string",
+                  "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
+                },
+                "cid": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                },
+                "seat": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+                }
+              },
+              "required": [
+                "root",
+                "cid"
+              ],
+              "additionalProperties": false
+            },
+            "serviceTier": {
+              "type": "string",
+              "const": "default"
+            },
             "cwd": {
               "type": "string",
               "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
@@ -6249,6 +6301,32 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "properties": {
+        "fjContext": {
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string",
+              "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
+            },
+            "cid": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+            },
+            "seat": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+            }
+          },
+          "required": [
+            "root",
+            "cid"
+          ],
+          "additionalProperties": false
+        },
+        "serviceTier": {
+          "type": "string",
+          "const": "default"
+        },
         "cwd": {
           "type": "string",
           "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
@@ -6505,6 +6583,32 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "properties": {
+        "fjContext": {
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string",
+              "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
+            },
+            "cid": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+            },
+            "seat": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+            }
+          },
+          "required": [
+            "root",
+            "cid"
+          ],
+          "additionalProperties": false
+        },
+        "serviceTier": {
+          "type": "string",
+          "const": "default"
+        },
         "cwd": {
           "type": "string",
           "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
@@ -7918,6 +8022,32 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "properties": {
+        "fjContext": {
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string",
+              "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
+            },
+            "cid": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+            },
+            "seat": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+            }
+          },
+          "required": [
+            "root",
+            "cid"
+          ],
+          "additionalProperties": false
+        },
+        "serviceTier": {
+          "type": "string",
+          "const": "default"
+        },
         "cwd": {
           "type": "string",
           "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
@@ -9402,6 +9532,32 @@
         {
           "type": "object",
           "properties": {
+            "fjContext": {
+              "type": "object",
+              "properties": {
+                "root": {
+                  "type": "string",
+                  "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
+                },
+                "cid": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                },
+                "seat": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+                }
+              },
+              "required": [
+                "root",
+                "cid"
+              ],
+              "additionalProperties": false
+            },
+            "serviceTier": {
+              "type": "string",
+              "const": "default"
+            },
             "cwd": {
               "type": "string",
               "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
@@ -9493,6 +9649,32 @@
         {
           "type": "object",
           "properties": {
+            "fjContext": {
+              "type": "object",
+              "properties": {
+                "root": {
+                  "type": "string",
+                  "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"
+                },
+                "cid": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                },
+                "seat": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+                }
+              },
+              "required": [
+                "root",
+                "cid"
+              ],
+              "additionalProperties": false
+            },
+            "serviceTier": {
+              "type": "string",
+              "const": "default"
+            },
             "cwd": {
               "type": "string",
               "pattern": "^(?:\\/|[A-Za-z]:[\\\\/])"

@@ -22,6 +22,17 @@ export type EngineEvent =
   | { type: "exit"; error?: RpcError };
 
 export interface SessionOptions extends StartThreadParams { threadId: string; engineThreadId?: string; forkSession?: boolean; forkPoint?: string; seedHistory?: Item[] }
+/** A daemon must never lend its pane or another contract's identity to an engine. */
+export function sessionEnvironment(options: Pick<SessionOptions, "fjContext">, source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...source };
+  for (const key of Object.keys(env)) if (key.startsWith("HERDR_") || key.startsWith("FENJUE_")) delete env[key];
+  if (options.fjContext) {
+    env.FENJUE_ROOT = options.fjContext.root;
+    env.FENJUE_CID = options.fjContext.cid;
+    if (options.fjContext.seat) env.FENJUE_SEAT = options.fjContext.seat;
+  }
+  return env;
+}
 export interface EngineSession {
   readonly backend: Backend;
   readonly engineThreadId: string | null;

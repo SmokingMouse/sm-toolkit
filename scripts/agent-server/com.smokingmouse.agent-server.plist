@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.smokingmouse.agent-server</string>
+  <key>ProgramArguments</key><array><string>@BUN@</string><string>@RELEASE@/packages/agent-server/dist/daemon/cli.js</string><string>run</string><string>--grace-ms</string><string>5000</string></array>
+  <key>WorkingDirectory</key><string>@RELEASE@</string>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>@HOME@</string><key>PATH</key><string>@PATH@</string><key>AGENT_SERVER_SOCKET_PATH</key><string>@HOME@/.sm-toolkit/agent-server.sock</string></dict>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>@HOME@/Library/Logs/agent-server.launchd.out.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/Library/Logs/agent-server.launchd.err.log</string>
+</dict></plist>

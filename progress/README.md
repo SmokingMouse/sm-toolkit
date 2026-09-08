@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server 已集成 foundation 及 TUI 会话、输入、模式、观测面板，全量测试与真实引擎复验通过，交主控独立验收；迁移与发布待决定。
+agent-server 已合入 dogfood，保留权限修复及 TUI 收口，测试、构建和 fjContext 临时 daemon 验证通过，交主控验收；生产试点与 Trellis 集成待主控推进。
 
 ## Goals
 

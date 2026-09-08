@@ -17,6 +17,8 @@ export function canResume(thread: Thread | undefined): boolean {
   return !!thread && thread.backend !== "external" && ["systemError", "closed"].includes(thread.status.type);
 }
 export class TuiModel {
+  awaitFirstTurn = false;
+  get waitingForFirstTurn(): boolean { return this.awaitFirstTurn && ![...this.items.values()].some(item => item.type === "userMessage") && !this.queue.length && !this.activeTurnId; }
   thread?: Thread;
   items = new Map<string, Item>();
   cards = new Map<string, RequestCard>();

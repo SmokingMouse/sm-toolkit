@@ -62,7 +62,7 @@ export function startHerdr(model: TuiModel, write: (text: string) => void, env: 
     })();
   };
   write("\x1b[22;0t");
-  const unsubscribe = model.onChange(update), heartbeat = setInterval(update, 10_000);
+  const unsubscribe = model.onChange(update), heartbeat = setInterval(() => { reported = ""; update(); }, 10_000);
   update();
   return async () => { stopped = true; unsubscribe(); clearInterval(heartbeat); await work; write("\x1b[23;0t"); };
 }

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { ErrorCode, ProtocolError, ServerRequestMethodSchema, type StartTurnParams, type UserInput } from "../protocol/index.js";
-import { AsyncQueue, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
+import { AsyncQueue, sessionEnvironment, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
 import { CodexEventMapper, codexProtocolError, codexRecord, codexString, codexUserInput, mapCodexDecision, mapCodexRequest } from "./codex-mapper.js";
 import { CODEX_SCHEMA_VERSION } from "./codex-version.js";
 import { codexHistoryInstructions } from "./fork-history.js";
@@ -32,7 +32,7 @@ export function buildCodexThreadParams(options: SessionOptions): Record<string, 
     ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(sandbox ? { sandbox } : {}), ...(approval ? { approvalPolicy: approval } : {}),
-    approvalsReviewer: "user", serviceTier: "default",
+    approvalsReviewer: "user", serviceTier: options.serviceTier ?? "default",
     ...(options.systemPrompt !== undefined ? { baseInstructions: options.systemPrompt } : {}),
     ...(options.seedHistory?.length ? { developerInstructions: codexHistoryInstructions(options.seedHistory) } : {}),
     ...(options.forkSession && options.forkPoint ? { lastTurnId: options.forkPoint } : {}),
@@ -40,14 +40,14 @@ export function buildCodexThreadParams(options: SessionOptions): Record<string, 
     ...(options.engineThreadId ? { threadId: options.engineThreadId, excludeTurns: true } : {}),
   };
 }
-function turnOverrides(options: StartTurnParams): Record<string, unknown> {
+function turnOverrides(options: StartTurnParams, serviceTier: SessionOptions["serviceTier"] = "default"): Record<string, unknown> {
   checkEffort(options.effort);
   const mode = sandboxMode(options), approval = approvalPolicy(options.permission);
   const sandboxPolicy = mode === "read-only" ? { type: "readOnly" } : mode === "workspace-write" ? { type: "workspaceWrite" } : mode === "danger-full-access" ? { type: "dangerFullAccess" } : undefined;
   return {
     ...(options.cwd !== undefined ? { cwd: options.cwd } : {}), ...(options.model !== undefined ? { model: options.model } : {}),
     ...(options.effort !== undefined ? { effort: options.effort } : {}), ...(approval ? { approvalPolicy: approval } : {}),
-    ...(sandboxPolicy ? { sandboxPolicy } : {}), serviceTier: "default", approvalsReviewer: "user",
+    ...(sandboxPolicy ? { sandboxPolicy } : {}), serviceTier, approvalsReviewer: "user",
     ...(options.clientTurnId ? { clientUserMessageId: options.clientTurnId } : {}),
   };
 }
@@ -87,7 +87,7 @@ export class CodexEngine implements EngineSession {
     const params = buildCodexThreadParams(options);
     this.options = options; this.mapper = new CodexEventMapper(Boolean(options.engineThreadId));
     try {
-      this.process = (this.config.spawnProcess ?? ((command, args, opts) => spawn(command, args, { ...opts, stdio: "pipe" })))(this.config.executable ?? "codex", ["app-server", "--listen", "stdio://"], { cwd: options.cwd, env: { ...process.env } });
+      this.process = (this.config.spawnProcess ?? ((command, args, opts) => spawn(command, args, { ...opts, stdio: "pipe" })))(this.config.executable ?? "codex", ["app-server", "--listen", "stdio://"], { cwd: options.cwd, env: sessionEnvironment(options) });
       const child = this.process;
       child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => { this.stderr = (this.stderr + chunk).slice(-4000); });
@@ -131,7 +131,7 @@ export class CodexEngine implements EngineSession {
     const turn: ActiveTurn = { id: turnId, interrupting: false, buffered: [] };
     this.active = turn; this.mapper.beginTurn(turnId); this.mapper.registerInput(input, options.clientTurnId);
     try {
-      await this.request("turn/start", { threadId: this.engineThreadId, input: codexUserInput(input), ...turnOverrides(options) }, result => this.bindTurn(turn, codexString(codexRecord(result.turn).id, "turn id")));
+      await this.request("turn/start", { threadId: this.engineThreadId, input: codexUserInput(input), ...turnOverrides(options, this.options?.serviceTier) }, result => this.bindTurn(turn, codexString(codexRecord(result.turn).id, "turn id")));
     } catch (error) {
       this.fail(error instanceof ProtocolError ? error : this.unavailable(String(error))); throw error;
     }

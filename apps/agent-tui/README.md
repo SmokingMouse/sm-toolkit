@@ -9,11 +9,13 @@ agent-server start
 apps/agent-tui/bin/agent-tui --new --backend codex --cwd "$PWD"
 apps/agent-tui/bin/agent-tui --new --backend claude --permission full --cwd "$PWD"
 apps/agent-tui/bin/agent-tui --attach th_example
-apps/agent-tui/bin/agent-tui --attach th_example --socket /path/agent-server.sock
+apps/agent-tui/bin/agent-tui --attach th_example --socket /path/agent-server.sock --token-path /path/token
 apps/agent-tui/bin/agent-tui --attach th_example --ws ws://127.0.0.1:12345
 ```
 
-默认 socket、token 使用 daemon 的 `resolveDaemonPaths`，遵循 `AGENT_SERVER_SOCKET_PATH`、XDG 与 HOME。显式 socket/WS 只覆盖端点；token 仍从本机 daemon 的 token 文件读取，不创建凭证。需要交互式 TTY；退出只断开客户端，会话仍由 daemon 托管。
+默认 socket、token 使用 daemon 的 `resolveDaemonPaths`，遵循 `AGENT_SERVER_SOCKET_PATH`、XDG 与 HOME。显式 socket/WS 只覆盖端点；`--token-path` 可单独指定 token 文件，适用于 pane 与主控 HOME/XDG 不同的部署，不创建凭证或传递 token 内容。需要交互式 TTY；退出只断开客户端，会话仍由 daemon 托管。
+
+fj 起位必须显式 model/permission，Codex 使用 gpt-6-astra + `--service-tier default`（Claude 不支持 tier）。同一交接重试复用 `--client-thread-id`；`--ready-file` 搭配 `--ready-nonce-file` 与 `--await-first-turn`，nonce 文件须为同用户私有常规文件，不能是 symlink。nonce 值不出现在 argv。ready 丢失时先恢复同一身份的 TUI 补回回执，fj 不会绕过握手另建裸 thread。
 
 选型：沿用 `apps/cli/src/picker.ts` 的 ANSI 自绘惯例，使用 Bun 内置终端宽度计算和 TerminalInput 分帧后使用 Node readline 按键事件，新增运行时依赖为零。状态模型、纯文本渲染、按键控制分离，方便 MockEngine 集成测试和快照测试；无需引入 React/Ink 渲染运行时。根目录 typecheck 验证 Bun 类型兼容，测试覆盖 Unicode 宽度、终端控制字符过滤与网络重连。
 

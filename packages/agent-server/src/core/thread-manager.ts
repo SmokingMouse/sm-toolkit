@@ -76,6 +76,7 @@ export class ThreadManager {
     const thread: Thread = { id: `th_${crypto.randomUUID()}`, backend: params.backend, engineThreadId: internal?.fork ? null : internal?.resume ?? null, cwd: params.cwd ?? process.cwd(), status: { type: "spawning" }, createdAtMs: this.now(), ...(params.model ? { model: params.model } : {}), ...(params.meta ? { meta: params.meta } : {}), ...(params.clientThreadId ? { clientThreadId: params.clientThreadId } : {}) };
     if (internal?.forkedFrom) thread.forkedFrom = internal.forkedFrom;
     const options = { ...params, cwd: thread.cwd, ...(internal?.seedHistory ? { seedHistory: internal.seedHistory } : {}), ...(internal?.fork ? { engineThreadId: internal.resume, forkSession: true, forkPoint: internal.forkPoint } : {}) };
+    if (params.fjContext) thread.meta = { ...thread.meta, fjContext: params.fjContext };
     thread.permission = params.permission ?? "default";
     this.log.transaction(() => {
       this.log.insertThread(thread, request, options);
