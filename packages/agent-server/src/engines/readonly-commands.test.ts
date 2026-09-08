@@ -1,7 +1,8 @@
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import reviewVectors from "./readonly-review-vectors.json";
 import {
   classifyReadonlyCommand,
   DEFAULT_READONLY_COMMANDS,
@@ -27,6 +28,108 @@ function classify(command: string, allow?: ReadonlySet<string>, options: Readonl
 }
 
 describe("classifyReadonlyCommand", () => {
+  test("retains every historical probe row, including duplicate vectors across rounds", () => {
+    expect(reviewVectors.length).toBe(377);
+    for (const [source, count] of [["review-332b/probe.ts", 78], ["review-332b/probe2.ts", 19], ["review2-5f0a/probe.ts", 94], ["review3-8b89/probe.ts", 186]] as const) {
+      expect(reviewVectors.filter(row => row.source === source).length).toBe(count);
+    }
+  });
+  // Complete arrays from all three archived reviews' original probe scripts. Keep original
+  // expectations alongside explicit policy-change reasons; never derive expected from actual.
+  test.each(reviewVectors)("historical $source: $label", ({ command, expected }) => {
+    const result = classify(command);
+    expect(result.readonly).toBe(expected);
+    if (!expected) expect(result.matchedRules).toEqual([]);
+  });
+
+  test.each([
+    "find -L . src -maxdepth 2 -type f -name '*.ts' -print0",
+    "find . '(' -name '*.ts' -o -iname '*.js' ')' -print",
+    "find . -mtime -2 -size +1M -ls", "find . -prune", "find . -empty -print",
+    "rg -n -i --hidden --glob '*.ts' --max-depth=3 --color=never foo src",
+    "rg -e 'foo|bar' -f patterns.txt --context 2 src", "rg --files --no-config src",
+    "grep -r -n -E --include='*.ts' --exclude-dir=.git --color=never 'a|b' src",
+    "grep -A 2 --max-count=5 -e foo file", "grep --binary-files=without-match foo .",
+    "file -b --mime-type --separator=: a.txt", "file --files-from list.txt",
+    "file -L -0 thing", "rg -n -n foo", "find . -print -print",
+  ])("allows explicit readonly option forms: %s", command => {
+    expect(classify(command).readonly).toBe(true);
+  });
+
+  test.each([
+    "find . -unknown", "find . -exec+ rm '{}' +", "find . -fprint99 out", "find . -- -delete",
+    "find . -name", "find . -name -delete", "find . -maxdepth -exec", "find . -maxdepth=2",
+    "find . -maxdepth two", "find . -type z", "find . -type", "find . -size 1bogus",
+    "find . -name x extra", "find . -L", "find -LP .", "find . -name=x", "find . -files0-from list",
+    "rg --unknown foo", "rg --pre=rm foo", "rg --hostname-bin=rm foo", "rg --pre-glob=x foo",
+    "rg --preprocessor=rm foo", "rg --no-config --pre rm foo", "rg --pre rm --no-config foo",
+    "rg -nPz foo", "rg -C2 foo", "rg -efoo", "rg --col=never foo", "rg --hidden=yes foo",
+    "rg --max-count", "rg --max-count=", "rg --max-count=-1 foo", "rg --color=bogus foo",
+    "rg --regexp", "rg --regexp=", "rg -e --pre rm foo", "rg -e '--pre=rm' src",
+    "rg --glob --pre rm foo", "rg foo -- --pre rm", "rg -- foo", "rg --search-zip foo",
+    "grep --unknown foo", "grep -nZC foo", "grep -C -m 1 foo", "grep --context=bad foo",
+    "grep --regexp=--pre foo", "grep -e --hostname-bin rm foo", "grep --files foo",
+    "grep --color foo", "grep --binary-files=exec foo", "grep foo -- -delete",
+    "file -C -m x", "file -Cmfoo", "file -bC -mfoo", "file -C=x", "file --compile",
+    "file --magic-file=x a", "file --unknown a", "file --mime-ty a", "file -bi a",
+    "file -z a", "file --uncompress a", "file -F", "file --separator=", "file -f -C",
+    "file -- a", "file a --compile", "file --brief=true a",
+    "find *", "find . -name *", "rg foo *", "grep foo [ab]*", "file ?",
+    "rg foo {--pre=rm,src}", "file ~/{-C,-mfoo}",
+  ])("denies unknown options, ambiguous forms and argv expansion: %s", command => {
+    expect(classify(command)).toEqual({ readonly: false, matchedRules: [] });
+    expect(classify(`ls && ${command} && pwd`)).toEqual({ readonly: false, matchedRules: [] });
+  });
+
+  test("quoted and escaped globs stay literal, expansion state is scoped to one segment", () => {
+    for (const command of ["rg 'a*' src", "grep \\* file", "file 'a*'", "ls *; rg foo src"]) {
+      expect(classify(command).readonly).toBe(true);
+    }
+  });
+
+  test("shell line continuations cannot disguise options as positional arguments", () => {
+    for (const command of ["find . \\\n-delete", "find . -de\\\nlete", "rg foo \\\n--pre=rm", "grep foo \\\n--unknown", "file \\\n-C -m magic"]) {
+      expect(classify(command)).toEqual({ readonly: false, matchedRules: [] });
+    }
+    expect(classify("find . \\\n-name '*.ts'").readonly).toBe(true);
+  });
+
+  test("review3 probe2: unknown heads and all hard-banned wrappers deny even when configured", () => {
+    for (const command of ["definitelynotacmd -x", "rm -rf /tmp/x", "tee /tmp/x", "python3 -c 'x'", "node -e 1", "perl -e 1", "!", "{", "}", "[[", "function f", "if true", "for i", "while true", "case x"]) {
+      expect(classify(command).readonly).toBe(false);
+    }
+    const commands = ["env -S'touch /tmp/x'", "sh -c 'rm -rf /'", "bash -c 'rm -rf /'", "xargs rm", "sudo rm", "eval 'rm'", "exec rm", "command rm", "time rm", "nice rm", "nohup rm", "source /tmp/x", ". /tmp/x", "zsh -c x", "script -q /tmp/x", "expect -c x", "doas rm"];
+    const allow = new Set([...DEFAULT_READONLY_COMMANDS, ...commands.map(command => command.split(" ")[0]!)]);
+    for (const command of commands) expect(classify(command, allow).readonly).toBe(false);
+  });
+
+  test("review3 probe2: symlinks, missing paths and custom allowlist keep trust boundaries", () => {
+    const dir = mkdtempSync(join(tmpdir(), "readonly-review-symlink-"));
+    symlinkSync(join(FIXTURE_BIN_DIR, "ls"), join(dir, "ls"));
+    expect(classify("ls", undefined, { pathDirs: [dir, FIXTURE_BIN_DIR], systemDirs: [FIXTURE_BIN_DIR] }).readonly).toBe(false);
+    expect(classify("ls", undefined, { pathDirs: [dir], systemDirs: [dir] }).readonly).toBe(true);
+    for (const options of [{ pathDirs: [] }, { pathDirs: [join(dir, "absent")] }, { systemDirs: ["/nonexistent"] }]) {
+      expect(classify("ls", undefined, { ...FIXTURE_OPTIONS, ...options }).readonly).toBe(false);
+    }
+    const path = join(dir, "whoami");
+    writeFileSync(path, "#!/bin/sh\n"); chmodSync(path, 0o755);
+    expect(classify("whoami", new Set(["whoami"]), { pathDirs: [dir], systemDirs: [dir] }).readonly).toBe(true);
+    expect(classify("ls", new Set(["whoami"])).readonly).toBe(false);
+    expect(classify("ls", new Set()).readonly).toBe(false);
+    for (const command of ["ls && git status && rm -rf /tmp/x", "git status; ls; definitelynotacmd"]) {
+      expect(classify(command)).toEqual({ readonly: false, matchedRules: [] });
+    }
+    expect(classify("ls && ls").readonly).toBe(true);
+  });
+
+  test("review3 probe2: long input and deep nesting remain bounded and fail closed", () => {
+    for (const command of ["ls " + "-l ".repeat(5000), "ls " + "a".repeat(1_000_000), "ls " + "\\a".repeat(50000), Array(100).fill("ls").join(" && ") + " | wc -l", ...[500, 2000, 10000].map(n => Array(n).fill("ls").join("; "))]) {
+      expect(classify(command).readonly).toBe(true);
+    }
+    for (const command of [Array(10000).fill("ls").join("; ") + "; rm -rf /tmp/x", "(".repeat(5000) + "ls" + ")".repeat(5000), '"a"'.repeat(10000) + " ls"]) {
+      expect(classify(command)).toEqual({ readonly: false, matchedRules: [] });
+    }
+  });
   test.each([
     "ls", "ls -la /tmp", "cat file.txt", "head -n 5 file", "tail -f log", "wc -l file",
     "find . -name '*.ts'", "grep foo bar.txt", "rg pattern", "pwd", "echo hello", "stat file",
