@@ -1,4 +1,5 @@
 import type { Backend, PendingServerRequest, ServerRequestResult, StartTurnParams, UserInput } from "../protocol/index.js";
+import { ErrorCode, ProtocolError, type JsonObject } from "../protocol/index.js";
 import { AsyncQueue, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
 
 export type MockStep = EngineEvent | { waitMs: number } | { approval: PendingServerRequest; onDecision?: (decision: ServerRequestResult) => void };
@@ -12,6 +13,8 @@ export class MockEngine implements EngineSession {
   sent: Array<{ turnId: string; input: UserInput[]; options: StartTurnParams }> = [];
   steered: Array<{ turnId: string; input: UserInput[] }> = [];
   interrupted: string[] = [];
+  controls: Array<{ subtype: string; params: JsonObject }> = [];
+  controlResponse?: (subtype: string, params: JsonObject) => JsonObject | Promise<JsonObject>;
   closed = false;
   private active: string | null = null;
   private generation = 0;
@@ -22,6 +25,11 @@ export class MockEngine implements EngineSession {
     this.events.push({ type: "metadata", engineThreadId: this.engineThreadId });
   }
   async attach(): Promise<void> { this.attachCount++; }
+  async engineControl(subtype: string, params: JsonObject): Promise<JsonObject> {
+    this.controls.push({ subtype, params });
+    if (!this.controlResponse) throw new ProtocolError(ErrorCode.backend_unsupported, "mock engine controls unavailable");
+    return this.controlResponse(subtype, params);
+  }
   async sendTurn(turnId: string, input: UserInput[], options: StartTurnParams): Promise<void> {
     this.sent.push({ turnId, input, options }); this.active = turnId;
     if (this.script) void this.play(this.script(turnId, input, this), ++this.generation);
