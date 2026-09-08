@@ -198,7 +198,19 @@ Claude effort 仅允许 low/medium/high/xhigh/max，非法值在 start/resume/tu
 
 `thread/permission/set`：`{threadId, permission}` → `{thread}`。Claude 原生模式 default / acceptEdits / plan / bypassPermissions / dontAsk 映射 --permission-mode，热切发送 set_permission_mode 的 mode 字段；CLI 成功确认后更新 thread.permission、持久化恢复选项，并发送 `thread/permission/changed` `{threadId,permission}`。turn/start.permission 也在发送用户帧前热切。原生拒绝不更新状态，返回 unsupported_capability。CLI 或组织策略仍可拒绝 bypass。
 热切成功的返回 thread.permission、恢复选项和 permission/changed 均使用原生规范值：auto-edit → acceptEdits，full → bypassPermissions；不是请求别名的原样回显。启动状态仍保留调用方请求值，首次成功热切后归一化。
-旧值 full / auto-edit 分别映射 bypassPermissions / acceptEdits。readonly 仅限启动时工具限制（--disallowedTools），不能通过热切新增此限制；已有进程限制也不会被模式热切解除。仅启动 permission 显式为 full/bypassPermissions 才添加 --allow-dangerously-skip-permissions；其他会话不预先开放 bypass，也没有隐式 daemon 提权策略。CLI/组织策略仍可拒绝切换。权限模式热切会清除 daemon 会话审批缓存，避免旧授权跨模式复用。Codex 保持旧 permission 别名语义，新增 Claude 模式返回 backend_unsupported。
+Claude 启动权限映射（本机 CLI 2.1.258）：所有模式保留 `--permission-prompt-tool stdio`，用于审批与原生模式热切。
+
+| permission | `--permission-mode` | 注入 settings | daemon 收到 `can_use_tool` |
+| --- | --- | --- | --- |
+| default（省略时同） | default（原生 manual 兼容名） | `{"permissions":{"ask":["*"]}}`，显式要求经纪人审批，覆盖本机 allow 规则 | 创建审批 |
+| acceptEdits / auto-edit | acceptEdits | 无；由原生模式允许编辑 | 创建审批 |
+| plan / readonly | plan | 无；使用原生只读规划模式 | 创建审批 |
+| bypassPermissions / full | bypassPermissions | 无，尤其不注入 ask | 自动 allow，保留原始 input；不创建审批 |
+| dontAsk | dontAsk | 无；原生允许已授权工具，拒绝需要询问的操作 | 自动 deny；不创建审批 |
+
+readonly 是 AS 启动别名，对应原生 plan，不是 OS 文件系统沙箱；只读访问、规划及需要退出规划的操作由原生 CLI 控制，不再使用不完整的 Write/Edit 禁用列表。新增 readonly 仍只接受 thread/start；热切请使用 plan。旧值 full / auto-edit 分别映射 bypassPermissions / acceptEdits。只有启动 permission 显式为 full/bypassPermissions 才添加 `--allow-dangerously-skip-permissions`，允许之后重新进入 bypass；`--permission-mode bypassPermissions` 已选择绕过模式，不需要重复传 `--dangerously-skip-permissions`。其他会话不预先开放 bypass，CLI/组织策略仍可拒绝切换。
+
+自动答复发生在 Claude adapter 将请求交给审批经纪人之前，因此 bypass/dontAsk 的意外原生请求不会写入 pendingRequests，也不会发审批通知；发送 `thread/engineEvent`，subtype=`permission_auto_response`，payload 含 requestId、toolUseId、toolName、permission（规范值）、behavior（allow/deny）、reason=`permission_mode`，可按现有 engineEvents 协商查看。权限模式热切会清除 daemon 会话审批缓存，自动答复使用当前已确认的模式。启动注入的 settings 属于进程配置，热切不移除它；从 default 热切到 acceptEdits/plan 仍可能因 ask 规则要求审批，需要纯原生设置时新建相应模式线程。bypass 自动放行和 dontAsk 自动拒绝不受遗留 ask 规则影响。Codex 保持旧 permission 别名语义，新增 Claude 模式返回 backend_unsupported。
 对已有 thread，请求 full/bypassPermissions/dontAsk（或原生 ultraplan:true）必须由有效 lease 的持有者发起，覆盖 permission/set、engineControl.set_permission_mode、turn/start.permission 和 resume.permission；无 lease/已过期返回 unauthorized (-32005)，他人持有返回 lease_held (-32012)。持有 lease 不绕过原生 bypass availability/组织策略。普通输入和非提升模式继续使用可选 lease。
 
 `thread/engineControl` 请求 `{threadId, subtype, params}`，向 Claude 发送 `{type:"control_request", request_id, request:{...params,subtype}}`，result 是完整原生 control_response 帧（包括原生 error response），不拆解 response；调用方必须检查 response.subtype。params 不得包含 subtype。该方法遵守输入 lease；Codex/external 返回 backend_unsupported，未知或不允许的子类型返回 unsupported_capability。传输超时仍为 RPC 错误。

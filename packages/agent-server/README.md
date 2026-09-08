@@ -22,6 +22,18 @@ await client.compact({ threadId: thread.id, instructions: "保留决策" });
 
 `initializeResult.capabilities.engine` 提供 engineEvents / engineControl / permissionSet / effortSet / subAgentText / bashInput / compact 标记。除事件通道外，这些新增能力目前只适用于 Claude，Codex 调用返回 `backend_unsupported`。effort 启动档位与热切思考 token 预算语义不同；控制响应原样返回，调用方检查 `response.subtype`。子 agent 正文通过现有 subAgent item 与 progress 通知呈现，无需新 item 类型。控制白名单、readonly 启动限制和 bash 完成帧细节见协议。
 
+Claude 权限启动映射：
+
+| permission | 原生模式 | settings 与审批 |
+| --- | --- | --- |
+| default | default（manual 兼容名） | 仅此模式注入 `permissions.ask:["*"]`，强制经纪人审批 |
+| acceptEdits / auto-edit | acceptEdits | 不注入 settings，编辑由 CLI 自动允许，其余原生询问转审批 |
+| plan / readonly | plan | 不注入 settings，原生只读规划模式；readonly 是启动别名，热切用 plan |
+| bypassPermissions / full | bypassPermissions | 不注入 ask/settings；意外 `can_use_tool` 自动 allow，零新增 pendingRequests |
+| dontAsk | dontAsk | 不注入 settings；原生未授权操作拒绝，意外 `can_use_tool` 自动 deny |
+
+所有模式保留 `--permission-prompt-tool stdio`。bypass 启动另加 `--allow-dangerously-skip-permissions` 支持以后重新进入该模式；无需重复 `--dangerously-skip-permissions`。自动答复通过 `thread/engineEvent` 的 `permission_auto_response` 留痕（需协商 engineEvents），不经过审批队列。readonly/plan 是 CLI 权限模式，不是 OS 沙箱。热切保留启动 settings：从 default 热切后仍可能出现 ask 规则审批，但 bypass/dontAsk 会自动处理；需要原生 acceptEdits/plan 行为请直接以该模式新建线程。完整语义与 lease 要求见 [协议](../../docs/agent-server/protocol.md)。
+
 ```sh
 bun run typecheck
 packages/agent-server/bin/agent-server run --ws-port 0 --grace-ms 1000
