@@ -41,4 +41,7 @@ test("diff panel highlights native hunks after sanitization and wrapping; suppor
   expect(render(model, 80, 30)).toContain("restricted");
   for (const line of render(model, 15, 8, true).split("\n")) expect(Bun.stringWidth(plain(line))).toBeLessThan(15);
   expect(renderEngineResult("/diff", { hunks: [] }).lines[0].text).toBe("工作区无差异");
+  expect(renderEngineResult("/diff", { diff: null }).lines[0].text).toContain("差异不可用");
+  expect(renderEngineResult("/diff", { diff: { hunks: [], perFileStats: [{ path: "binary", isBinary: true }] } }).lines[0].text).toContain("binary");
+  expect(renderEngineResult("/diff", { diff: { hunks: [{ path: "a", hunks: [{ lines: ["+native"] }] }] } }).lines.at(-1)).toEqual({ text: "+native", tone: "add" });
 });

@@ -139,6 +139,7 @@ export async function skills(cwd: string, home = homedir()): Promise<Candidate[]
 }
 
 export function completionToken(input: string): { start: number; prefix: "@" | "/"; query: string } | undefined {
+  if (input.startsWith("!")) return;
   const file = /(?:^|\s)@([^\s"']*)$/.exec(input);
   if (file) return { start: input.length - file[1].length - 1, prefix: "@", query: file[1] };
   if (/^\/[^\s]*$/.test(input)) return { start: 0, prefix: "/", query: input.slice(1) };

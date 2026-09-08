@@ -338,6 +338,9 @@ export class Controller {
   private toggleLog(): void { this.model.logExpanded = !this.model.logExpanded; this.model.panelFocus = this.model.logExpanded ? "log" : "history"; }
   private async runEngineCommand(request: EngineCommand): Promise<void> {
     const threadId = this.model.thread!.id;
+    this.model.enginePanel = undefined;
+    this.model.message = `${request.command} 查询中`;
+    this.model.changed();
     const frame = await this.withLease(threadId, () => this.client.request("thread/engineControl", { threadId, subtype: request.subtype, params: request.params }));
     if (this.model.thread?.id !== threadId) return;
     const data = controlPayload(frame);

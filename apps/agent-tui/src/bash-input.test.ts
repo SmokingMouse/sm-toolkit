@@ -1,9 +1,12 @@
 import { expect, test } from "bun:test";
 import { bashInput } from "./bash-input.js";
 import { renderItem } from "./render.js";
+import { completionToken } from "./completion.js";
 
 test("shell input stays standalone and preserves shell syntax without file expansion", () => {
-  expect(bashInput("! printf '@missing'\n pwd", [])).toEqual([{ type: "bash", command: "printf '@missing'\n pwd" }]);
+  expect(bashInput("! printf '@missing'\n pwd", [])).toEqual([{ type: "bash", command: " printf '@missing'\n pwd" }]);
+  expect(bashInput("!printf foo\\ ", [])).toEqual([{ type: "bash", command: "printf foo\\ " }]);
+  expect(completionToken("!cat @missing")).toBeUndefined();
   expect(bashInput("hello!", [])).toBeUndefined();
   expect(() => bashInput("!  ", [])).toThrow("用法");
   expect(() => bashInput("!pwd", [{}])).toThrow("不能携带图片");
