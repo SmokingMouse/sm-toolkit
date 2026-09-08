@@ -308,6 +308,13 @@ export class AgentServer {
         this.approvals.audienceChanged(); return {};
       }
       case "thread/read": return { thread: this.threads.get(params(method).threadId) };
+      case "thread/name/set": {
+        const p = params(method), thread = this.threads.get(p.threadId);
+        this.leases.assertInput(thread.id, connection.clientId); this.cwd(thread.cwd);
+        thread.title = p.name; this.log.saveThread(thread);
+        this.log.publish({ jsonrpc: "2.0", method: "thread/metadata/updated", params: { threadId: thread.id, title: thread.title } });
+        return {};
+      }
       case "thread/items/list": return this.log.listItems(params(method));
       case "thread/list": {
         const p = params(method), limit = p.limit ?? 100;

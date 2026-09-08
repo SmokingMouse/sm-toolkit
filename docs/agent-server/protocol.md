@@ -104,6 +104,7 @@ WebSocket 下一条消息 = 一个 text frame，不额外加换行。
 | `thread/items/list` | `{threadId, cursor?, limit?, turnId?, direction?}` | `{items, nextCursor}` | 翻历史（快照之外的旧日志） |
 | `thread/list` | `{status?, backend?, cwd?, limit?, cursor?}` | `{threads, nextCursor}` | 列 thread |
 | `thread/read` | `{threadId}` | `{thread: Thread}` | 只读元信息 |
+| `thread/name/set` | `{threadId, name}` | `{}` | trim 后持久化标题；空名拒绝，遵循输入租约和 allowed_roots |
 | `thread/fork` | `{threadId, fromItemId?, clientThreadId?}` | `{thread: Thread, deduplicated?: true}` | 新 thread 复制源日志至指定 item（含）；缺省取调用时末尾；返回 `forkedFrom`。精确原生坐标用原生 fork，其余播种历史；非法 itemId 报 `-32602` |
 | `thread/close` | `{threadId, reason?}` | `{}` | 回收引擎进程，**保留日志** |
 | `thread/interrupt` | `{threadId}` | `{interruptedTurnId \| null}` | `turn/interrupt` 的 thread 级糖 |
@@ -740,6 +741,10 @@ model/list 过滤 daemon 拒绝的模型，并移除非 default 服务档位选�
 线程 UUID 是原生 engineThreadId，反查现有 SQLite engine 索引，再由 ThreadManager.live 定位独占进程；不另存 ID 映射。
 thread/start、thread/resume、turn/start、turn/interrupt 全经 as/1。启动响应和 turn/start 响应保留 native 原始对象；
 AS turn id 只用于内部队列，interrupt 必须匹配当前 native turn id，防止迟到 Esc 打断新轮次。
+与官方 0.153.4 一致：无活动 turn 时空 turnId 成功 `{}`；具名 turnId 返回
+`-32600 / no active turn to interrupt`；活动 ID 不匹配返回 `-32600 / expected active turn id X but found Y`。
+这些 native 错误不加 as-ingress 前缀。thread/name/set 经 AS 持久化 trim 后的标题，发布 thread/name/updated；
+read/list/resume 使用最新 AS 标题，空名称返回 `-32600 / thread name must not be empty`。
 等待 native turn 启动确认最多 30 秒；若超时时仍在 AS 队列中，通过 as/1 turn/cancel 撤销后报错，避免报错后悄悄执行。
 resume 只恢复 AS 已登记的 Codex UUID；live resume 不允许静默覆盖已生效的设置。
 thread/list 从 AS 库提供 data/nextCursor，展示字段使用 native 启动快照；thread/loaded/list 从 AS health 取 live UUID。
@@ -762,8 +767,8 @@ availableDecisions 只保留 AS 支持的四种；扩展策略修改决策返回
 其他客户端先答或请求过期，同样发送 native serverRequest/resolved 关闭当前连接的卡片。
 超时由 AS 决定：普通请求 120 秒，blocking userInput 无普通超时，无 audience 的 orphan 默认 30 分钟；ingress 不另计审批超时。
 
-所有副作用方法默认返回 -32601，message 前缀 `as-ingress: `，不返回伪成功。
-包括 TUI 自动 thread/name/set 和恢复时 thread/goal/get（可见的非阻断拒绝）、配置写入、command/exec、fs 写入、插件安装、账户写入、
+未实现的副作用方法默认返回 -32601，message 前缀 `as-ingress: `，不返回伪成功。
+包括恢复时 thread/goal/get（可见的非阻断拒绝）、配置写入、command/exec、fs 写入、插件安装、账户写入、
 review、realtime、goal、memory、动态 TUI 工具；这些不在 slice 1 中实现。
 原生 dynamicTools、historyMode 和 UI personality/web_search 提示不传入 engine；以 daemon 的 native 配置为准。
 仅支持 default collaboration mode，其 model/effort 进入 AS guard，TUI 的模式说明不覆盖引擎说明。
@@ -776,3 +781,7 @@ fjContext 只能由 as/1 创建，native 入口拒绝写入；已有 fj Codex �
 不请求外部模型或凭证。HOME、CODEX_HOME、socket、DB、配置和随机端口全在 mktemp 下，wire.ndjson、终端输出、
 model-requests.json、summary.json 留在打印的 artifact_dir。approval_roundtrip 同时检查真实 TUI 回答、broker decided_by、
 resolved 帧及被批准命令生成的隔离 proof 文件；不把单测 fake app-server 当端到端冒烟。
+首轮完成后等待真实终端渲染，再用 /quit 退出；恢复轮以用户消息标记选择 fixture 分支，HTTP SSE 保持打开，
+直到匹配的 turn/interrupt 请求、成功响应和 interrupted 终态全部出现才释放。请求次数和模型响应速度不参与判定。
+TUI 自动标题生成的临时 system thread 带禁止的 provider/config overrides，仍拒绝；冒烟只豁免这一明确可选请求与 goal/get，
+所有普通 thread/name/set、resume 和 interrupt 错误都会导致失败。

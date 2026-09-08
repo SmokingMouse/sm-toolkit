@@ -103,17 +103,37 @@ test("native UUID routes across connections; AS mutations own turn IDs, resume, 
   const turn = await a.request("turn/start", { threadId: first.thread.id, input: [{ type: "text", text: "wait" }] });
   const asTurn = f.server.threads.queue(asThread.id).runningTurnId!;
   expect(turn.turn.id).not.toBe(asTurn); expect(f.engines[0].nativeTurnId(asTurn)).toBe(turn.turn.id);
-  await expect(b.request("turn/interrupt", { threadId: first.thread.id, turnId: "stale" })).rejects.toThrow("not active");
+  await expect(b.request("turn/interrupt", { threadId: first.thread.id, turnId: "stale" })).rejects.toThrow(`expected active turn id stale but found ${turn.turn.id}`);
   expect(await b.request("turn/interrupt", { threadId: first.thread.id, turnId: turn.turn.id })).toEqual({});
   await until(() => f.server.log.turn(asTurn).status === "interrupted");
+  await b.session.receive({ id: "late", method: "turn/interrupt", params: { threadId: first.thread.id, turnId: turn.turn.id } });
+  expect(b.frames.find(frame => frame.id === "late")).toEqual({ id: "late", error: { code: -32600, message: "no active turn to interrupt" } });
+  expect(await b.request("turn/interrupt", { threadId: first.thread.id, turnId: "" })).toEqual({});
+  await b.session.receive({ id: "missing-turn", method: "turn/interrupt", params: { threadId: first.thread.id } });
+  expect(b.frames.find(frame => frame.id === "missing-turn")?.error).toEqual({ code: -32600, message: "Invalid request: missing field `turnId`" });
   const resumed = await b.request("thread/resume", { threadId: first.thread.id }); expect(resumed.thread.id).toBe(first.thread.id);
   expect(f.engines).toHaveLength(2);
   const list = await a.request("thread/list", { limit: 1 }); expect(list.data).toHaveLength(1); expect(list.nextCursor).toBe(list.data[0].id);
   expect((await a.request("thread/list", { cursor: list.nextCursor, limit: 1 })).data[0].id).not.toBe(list.data[0].id);
   await a.session.client.request("thread/lease/acquire", { threadId: asThread.id });
+  await expect(b.request("thread/name/set", { threadId: first.thread.id, name: "blocked title" })).rejects.toThrow(`codex-tui:${a.session.client.clientId}`);
   await expect(b.request("turn/start", { threadId: first.thread.id, input: [{ type: "text", text: "blocked" }] })).rejects.toThrow(`codex-tui:${a.session.client.clientId}`);
   a.session.close(); expect(f.server.leases.read(asThread.id)).toBeUndefined();
   await b.request("thread/resume", { threadId: first.thread.id });
+});
+
+test("native thread names are trimmed, persisted and projected through read, list and resume", async () => {
+  const f = setup(), c = connection(f); await c.initialize();
+  const { thread } = await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });
+  expect(await c.request("thread/name/set", { threadId: thread.id, name: "  TUI title  " })).toEqual({});
+  const asThread = resolveThread(f.server, thread.id);
+  expect(f.server.log.thread(asThread.id).title).toBe("TUI title");
+  expect(c.frames.some(frame => frame.method === "thread/name/updated" && frame.params.threadName === "TUI title")).toBe(true);
+  expect((await c.request("thread/read", { threadId: thread.id })).thread.name).toBe("TUI title");
+  expect((await c.request("thread/list")).data[0].name).toBe("TUI title");
+  expect((await c.request("thread/resume", { threadId: thread.id })).thread.name).toBe("TUI title");
+  await c.session.receive({ id: "empty-name", method: "thread/name/set", params: { threadId: thread.id, name: "  " } });
+  expect(c.frames.find(frame => frame.id === "empty-name")?.error).toEqual({ code: -32600, message: "thread name must not be empty" });
 });
 
 test("all four reverse requests go through broker, preserve raw native fields and resolve once", async () => {
@@ -215,7 +235,7 @@ test("listener requires bearer on loopback upgrade, refuses origins and owns AS 
 });
 
 test("control owns one threadless process, forwards only explicit readonly methods and closes pending calls", async () => {
-  const root = temporary(), executable = join(root, "control");
+  const root = temporary(), executable = join(root, "control.ts");
   writeFileSync(executable, `#!/usr/bin/env bun
 import { createInterface } from 'node:readline';
 import { appendFileSync } from 'node:fs';
@@ -224,7 +244,7 @@ createInterface({input:process.stdin}).on('line', line => {
   if(f.id && f.method !== 'environment/info') process.stdout.write(JSON.stringify({id:f.id,result:{userAgent:'codex/0.153.4',method:f.method,params:f.params,identity:Object.keys(process.env).filter(k=>k.startsWith('HERDR_')||k.startsWith('FENJUE_'))}})+'\\n');
 });
 `); chmodSync(executable, 0o700);
-  const control = new ControlProcess({ executable, cwd: root, timeoutMs: 1000, env: { ...process.env, HERDR_AGENT: "unrelated", FENJUE_CID: "unrelated" } });
+  const control = new ControlProcess({ executable, cwd: root, timeoutMs: 3000, env: { ...process.env, HERDR_AGENT: "unrelated", FENJUE_CID: "unrelated" } });
   cleanups.push(() => control.close());
   const [a, b] = await Promise.all([control.initialize(), control.initialize()]); expect(a).toEqual(b); expect(a.identity).toEqual([]);
   for (const method of CONTROL_METHODS) if (method !== "environment/info") expect((await control.request(method, { marker: "verbatim" })).params).toEqual({ marker: "verbatim" });
@@ -240,10 +260,12 @@ test("engine UUID lookup survives daemon restart without an ingress mapping tabl
   const f = setup(), c = connection(f); await c.initialize();
   const { thread } = await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });
   const original = resolveThread(f.server, thread.id).id;
+  await c.request("thread/name/set", { threadId: thread.id, name: "survives restart" });
   c.session.close(); await f.server.close();
   const reopened = new AgentServer({ databasePath: join(f.root, "db"), allowedRoots: [f.root], idleTimeoutMs: 0 });
   cleanups.push(() => reopened.close());
   expect(resolveThread(reopened, thread.id).id).toBe(original);
+  expect(resolveThread(reopened, thread.id).title).toBe("survives restart");
   expect(resolveThread(reopened, thread.id).meta?.nativeThreadData).toHaveProperty("id", thread.id);
 });
 

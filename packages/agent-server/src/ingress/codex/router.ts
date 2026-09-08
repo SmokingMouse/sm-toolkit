@@ -5,6 +5,11 @@ import { ErrorCode, ProtocolError, type StartThreadParams, type Thread, UserInpu
 import type { AgentServer, InProcessClient } from "../../server/server.js";
 import { CONTROL_METHODS, type ControlClient, type NativeObject } from "./control-process.js";
 
+/** Preserve native app-server errors without AS codes or message prefixes. */
+export class NativeRpcError extends Error {
+  constructor(readonly code: number, message: string) { super(message); }
+}
+
 export function nativeThreadId(thread: Thread): string {
   if (thread.backend !== "codex" || !thread.engineThreadId) throw new ProtocolError(ErrorCode.backend_unsupported, "as-ingress: slice 1 requires a Codex thread");
   return thread.engineThreadId;
@@ -91,6 +96,7 @@ export class CodexRouter {
       updatedAt: Math.floor(thread.createdAtMs / 1000), cwd: thread.cwd, cliVersion: "", source: "appServer", gitInfo: null,
       name: thread.title ?? null, turns: [], historyMode: "paginated", ...(native as NativeObject ?? {}),
       id: nativeThreadId(thread), sessionId: nativeThreadId(thread),
+      ...(thread.title !== undefined ? { name: thread.title } : {}),
       status: { type: thread.status.type === "running" ? "active" : thread.status.type === "systemError" ? "systemError" : "idle", ...(thread.status.type === "running" ? { activeFlags: [] } : {}) },
     };
   }
@@ -127,7 +133,10 @@ export class CodexRouter {
         }
         await this.client.request("thread/resume", { ...options, threadId: thread.id, backend: "codex" });
         const engine = this.engine(thread), response = engine.nativeThreadStart();
-        return { ...response, ...await engine.nativeThreadRead(true) };
+        const result = { ...response, ...await engine.nativeThreadRead(true) };
+        const title = this.server.threads.get(thread.id).title;
+        if (title !== undefined) result.thread.name = title;
+        return result;
       }
       case "turn/start": {
         this.rejectExtras(p); const thread = resolveThread(this.server, p.threadId);
@@ -149,13 +158,43 @@ export class CodexRouter {
       }
       case "turn/interrupt": {
         const thread = resolveThread(this.server, p.threadId), turnId = this.server.threads.queue(thread.id).runningTurnId;
-        if (!turnId || (p.turnId != null && this.engine(thread).nativeTurnId(turnId) !== p.turnId)) throw new ProtocolError(ErrorCode.turn_not_active, "as-ingress: native turn is not active");
-        await this.client.request("turn/interrupt", { threadId: thread.id, turnId }); return {};
+        if (p.turnId === undefined) throw new NativeRpcError(-32600, "Invalid request: missing field `turnId`");
+        if (typeof p.turnId !== "string") throw new ProtocolError(ErrorCode.invalid_params, "turnId must be a string");
+        // Upstream turn_interrupt_inner: empty ID is startup cancellation; a
+        // named terminal/absent turn is InvalidRequest, not AS turn_not_active.
+        if (!turnId) {
+          if (p.turnId === "") return {};
+          throw new NativeRpcError(-32600, "no active turn to interrupt");
+        }
+        const nativeId = this.engine(thread).nativeTurnId(turnId);
+        if (p.turnId !== "" && nativeId && nativeId !== p.turnId) throw new NativeRpcError(-32600, `expected active turn id ${p.turnId} but found ${nativeId}`);
+        try { await this.client.request("turn/interrupt", { threadId: thread.id, turnId }); }
+        catch (error) {
+          if (error instanceof ProtocolError && error.code === ErrorCode.turn_not_active) {
+            if (p.turnId === "") return {};
+            throw new NativeRpcError(-32600, "no active turn to interrupt");
+          }
+          if (error instanceof ProtocolError && typeof error.data.raw === "string") {
+            let native: NativeObject | undefined;
+            try { native = JSON.parse(error.data.raw); } catch { /* Non-native AS failure. */ }
+            if (native && typeof native.code === "number" && typeof native.message === "string") throw new NativeRpcError(native.code, native.message);
+          }
+          throw error;
+        }
+        return {};
+      }
+      case "thread/name/set": {
+        const thread = resolveThread(this.server, p.threadId);
+        if (typeof p.name !== "string" || !p.name.trim()) throw new NativeRpcError(-32600, "thread name must not be empty");
+        return this.client.request("thread/name/set", { threadId: thread.id, name: p.name });
       }
       case "thread/read": {
         const thread = resolveThread(this.server, p.threadId); await this.allowedPath(thread.cwd);
         await this.client.request("thread/read", { threadId: thread.id });
-        return this.engine(thread).nativeThreadRead(p.includeTurns === true);
+        const result = await this.engine(thread).nativeThreadRead(p.includeTurns === true);
+        const title = this.server.threads.get(thread.id).title;
+        if (title !== undefined) result.thread.name = title;
+        return result;
       }
       case "thread/items/list":
       case "thread/turns/list": {

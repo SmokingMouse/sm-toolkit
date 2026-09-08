@@ -6,13 +6,21 @@
 
 ## 已结案
 
+### codex-ingress：主控复跑揭露恢复冒烟时序依赖（resolved）
+
+- 症状：初次自跑通过，但主控连续两次复跑 resume_ok/interrupt_ok=false；迟到的具名 turn/interrupt 被 ingress 自造 -32011 拒绝，thread/name/set 未实现。
+- 可证伪假设：Ctrl-C 退出会在 TUI 尚未消费完成通知时发出旧 interrupt；模型请求次数无法可靠标识恢复轮，立即结束的响应无法保证 Esc 到达时仍在执行。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok` 连续五次。
+- 修复：等待实际完成文本再 /quit；恢复用户消息携唯一标记，模型返回保持打开的 SSE，直到匹配的 interrupt 请求、成功响应和 interrupted 终态齐备才释放。普通 RPC 错误不能被完成判据掩盖。
+- 官方 0.153.4 隔离探针：空 turnId 无活动时返回 {}；具名返回 -32600、no active turn to interrupt。桥接保留上游错误，命名经 AS 标题持久化且受租约/根目录检查；证据契约 out/upstream-interrupt-probe.json 与 rework-smoke-1..5。
+
 ### codex-ingress：真实 TUI 冷启动、恢复与审批时序（resolved）
 
 - 症状：初版 PTY 未提交文本、审批快捷键落入输入框；native 默认 collaborationMode 被拒，恢复缺少原生 thread/items/list。
 - 可证伪假设：快速文本后立刻 CR 被视为粘贴；官方审批有一秒输入静默延迟；当前 TUI 的默认模式和分页属于真实生命周期依赖。
 - 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok`。
 - 修复：bracketed paste 后独立 Enter，审批前等两秒；default collaboration model/effort 经 AS 校验，历史分页只读转 owning 进程。五项全过，证据 fj-tui-ingress-slice1-9065/out/result.md。
-- 额外实测：0.153.4 配置文件已拒绝 approval_policy=untrusted，冒烟改用 on-request + 显式 require_escalated；TUI 自动 thread/name/set / thread/goal/get 属于明确不支持的可选操作，保留错误，不伪成功。
+- 额外实测：0.153.4 配置文件已拒绝 approval_policy=untrusted，冒烟改用 on-request + 显式 require_escalated；初版拒绝 name/set/goal/get，返工后 name/set 已实现，旧单次通过不代表稳定性，见上条主控复跑记录。
 
 ### midfork：无坐标原生 tip fork 的并发追加竞态（resolved）
 

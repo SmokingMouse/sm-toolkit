@@ -44,7 +44,9 @@ def main():
     wire.write_text("")
     model_calls = []
     model_lock = threading.Lock()
-    interrupted_request = threading.Event()
+    held_stream = threading.Event()
+    release_stream = threading.Event()
+    hold_marker = "INGRESS_SMOKE_HOLD_UNTIL_INTERRUPT"
     stop_model = threading.Event()
 
     class Model(http.server.BaseHTTPRequestHandler):
@@ -64,15 +66,27 @@ def main():
                 model_calls.append(body)
                 (root / "model-requests.json").write_text(json.dumps(model_calls, indent=2))
                 count = len(model_calls)
-            # Hold the third model response until the TUI sends a real interrupt.
-            if count >= 3:
-                interrupted_request.set()
-                stop_model.wait(args.timeout)
+            # Identify the resumed user turn by content, never by HTTP count:
+            # retries/auxiliary requests must not change the fixture's phase.
+            user_inputs = [entry for entry in body.get("input", []) if entry.get("role") == "user"]
+            if user_inputs and hold_marker in json.dumps(user_inputs[-1]):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(('data: ' + json.dumps({"type": "response.created", "response": {"id": "held-response"}}) + '\n\n').encode())
+                self.wfile.flush()
+                held_stream.set()
+                # No completed event or EOF before the real interruption has
+                # been acknowledged and observed on this exact native turn.
+                while not release_stream.wait(0.1) and not stop_model.is_set():
+                    pass
                 self.close_connection = True
                 return
             response_id = "smoke-response-" + str(count)
             events = [{"type": "response.created", "response": {"id": response_id}}]
-            if count == 1:
+            tool_returned = any(entry.get("type") in {"function_call_output", "custom_tool_call_output"} and entry.get("call_id") == "call_smoke" for entry in body.get("input", []))
+            if not tool_returned:
                 names = [t.get("name") for t in body.get("tools", [])]
                 if "exec_command" in names:
                     name, arguments = "exec_command", {"cmd": "printf ingress-approved > ingress-proof.txt", "workdir": str(workspace), "yield_time_ms": 1000}
@@ -162,23 +176,31 @@ trust_level = "trusted"
     def wait(predicate, label):
         while time.monotonic() - started < args.timeout:
             pump()
-            if predicate():
-                return
             current = frames()
             # These optional startup UI features are explicitly denied in slice 1.
             requests, errors = {}, []
             for frame in current:
                 key = (frame.get("connection"), frame.get("id"))
                 if frame.get("direction") == "TUI>AS" and "method" in frame:
-                    requests[key] = frame["method"]
-                if "error" in frame and not (requests.get(key) in {"thread/name/set", "thread/goal/get"} and frame["error"]["code"] == -32601):
-                    errors.append(frame["error"])
+                    requests[key] = frame
+                if "error" in frame:
+                    request = requests.get(key, {})
+                    optional_goal = request.get("method") == "thread/goal/get" and frame["error"]["code"] == -32601
+                    # TUI's optional generated-title helper asks for a separate
+                    # ephemeral system thread with forbidden config overrides.
+                    # Its rejection is expected; the real name/set must succeed.
+                    p = request.get("params", {})
+                    optional_title = request.get("method") == "thread/start" and p.get("ephemeral") is True and p.get("threadSource") == "system" and frame["error"]["code"] == -32008
+                    if not (optional_goal or optional_title):
+                        errors.append(frame["error"])
             if errors:
                 raise RuntimeError("native RPC error while " + label + ": " + json.dumps(errors[-1]))
             if daemon.poll() is not None:
                 raise RuntimeError("daemon exited while " + label)
             if tui is not None and tui.poll() is not None:
                 raise RuntimeError("official TUI exited while " + label)
+            if predicate():
+                return
         raise TimeoutError(label)
 
     def launch(extra=None):
@@ -189,18 +211,21 @@ trust_level = "trusted"
         tui = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, cwd=workspace, env=env, start_new_session=True)
         os.close(slave)
 
-    def stop_tui():
+    def stop_tui(graceful=False):
         nonlocal tui, master
         if tui is not None and tui.poll() is None:
-            os.write(master, b"\x03")
-            until = time.monotonic() + 0.4
-            while time.monotonic() < until:
-                pump()
-            if tui.poll() is None:
-                os.write(master, b"\x03")
-            try:
-                tui.wait(timeout=3)
-            except subprocess.TimeoutExpired:
+            if graceful:
+                # Ctrl-C can interrupt a turn whose terminal notification is
+                # still in the TUI event queue. /quit never supplies a stale ID.
+                prompt("/quit")
+                deadline = time.monotonic() + 5
+                while tui.poll() is None and time.monotonic() < deadline:
+                    pump()
+                if tui.poll() is None:
+                    raise TimeoutError("TUI /quit")
+                if tui.returncode != 0:
+                    raise RuntimeError("TUI /quit exit " + str(tui.returncode))
+            else:
                 tui.terminate()
                 tui.wait(timeout=3)
         if master is not None:
@@ -245,9 +270,17 @@ trust_level = "trusted"
         with sqlite3.connect(endpoint["databasePath"]) as db:
             db.row_factory = sqlite3.Row
             approvals = [dict(row) for row in db.execute("SELECT id,thread_id,kind,status,decided_by,decision_json FROM approvals")]
+            persisted = json.loads(db.execute("SELECT data_json FROM threads WHERE engine_thread_id = ?", (thread_id,)).fetchone()[0])
+        current = frames()
+        names = [f for f in current if f.get("direction") == "TUI>AS" and f.get("method") == "thread/name/set" and f["params"]["threadId"] == thread_id]
+        assert names, "real TUI did not request a thread name"
+        assert all(any(r.get("connection") == n.get("connection") and r.get("id") == n["id"] and r.get("direction") == "AS>TUI" and r.get("result") == {} for r in current) for n in names), "thread/name/set not acknowledged"
+        assert persisted["title"] == names[-1]["params"]["name"].strip(), "thread name not persisted"
+        summary["persisted_title"] = persisted["title"]
         summary["approvals"] = approvals
         proof["approval_roundtrip"] = any(row["status"] == "decided" and json.loads(row["decided_by"] or "{}").get("label", "").startswith("codex-tui:") for row in approvals) and (workspace / "ingress-proof.txt").read_text() == "ingress-approved" and any(f.get("method") == "serverRequest/resolved" for f in frames())
-        stop_tui()
+        wait(lambda: b"INGRESS_SMOKE_COMPLETED" in output, "TUI rendered completed response")
+        stop_tui(graceful=True)
         before = len(frames())
         launch(["resume", thread_id])
         def resumed():
@@ -258,12 +291,24 @@ trust_level = "trusted"
         until = time.monotonic() + 0.7
         while time.monotonic() < until:
             pump()
-        prompt("Wait for my interruption.")
-        wait(interrupted_request.is_set, "second model turn")
+        prompt(hold_marker)
+        wait(lambda: held_stream.is_set() and any(f.get("method") == "turn/started" for f in frames()[before:]), "resumed model stream open and held")
+        resumed_frames = frames()[before:]
+        turn_id = next(f["params"]["turn"]["id"] for f in resumed_frames if f.get("method") == "turn/started")
+        summary["interrupted_turn_id"] = turn_id
+        assert not any(f.get("method") == "turn/completed" and f["params"]["turn"]["id"] == turn_id for f in resumed_frames), "held turn completed before interrupt"
         proof["resume_ok"] = True # resumed TUI loaded history and submitted another real turn
         os.write(master, b"\x1b")
-        wait(lambda: any(f.get("method") == "turn/completed" and f["params"]["turn"]["status"] == "interrupted" for f in frames()[before:]), "interrupt completion")
-        proof["interrupt_ok"] = any(f.get("method") == "turn/interrupt" and f.get("direction") == "TUI>AS" for f in frames()[before:])
+        def interrupted():
+            current = frames()[before:]
+            requests = [f for f in current if f.get("method") == "turn/interrupt" and f.get("direction") == "TUI>AS" and f["params"].get("turnId") == turn_id]
+            ack = any(f.get("connection") == r.get("connection") and f.get("id") == r["id"] and "result" in f and f["direction"] == "AS>TUI" for r in requests for f in current)
+            terminal = any(f.get("method") == "turn/completed" and f["params"]["turn"]["id"] == turn_id and f["params"]["turn"]["status"] == "interrupted" for f in current)
+            return bool(requests) and ack and terminal
+        wait(interrupted, "matching interrupt request, acknowledgement and terminal notification")
+        proof["interrupt_ok"] = True
+        summary["model_stream_held_until_interrupt"] = not release_stream.is_set()
+        release_stream.set()
     except Exception as error:
         summary["error"] = str(error)
         summary["traceback"] = traceback.format_exc()

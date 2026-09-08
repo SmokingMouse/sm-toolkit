@@ -43,6 +43,7 @@ export const MethodSchemas = {
   "thread/items/list": { params: threadId.extend({ cursor: z.string().optional(), limit, turnId: IdSchema.optional(), direction: z.enum(["asc", "desc"]).optional() }), result: z.object({ items: z.array(ItemSchema), nextCursor: z.string().nullable() }) },
   "thread/list": { params: z.object({ status: ThreadStatusTypeSchema.optional(), backend: BackendSchema.optional(), cwd: AbsolutePathSchema.optional(), limit, cursor: z.string().optional() }), result: z.object({ threads: z.array(ThreadSchema), nextCursor: z.string().nullable() }) },
   "thread/read": { params: threadId, result: z.object({ thread: ThreadSchema }) },
+  "thread/name/set": { params: threadId.extend({ name: z.string().trim().min(1) }), result: empty },
   "thread/fork": { params: threadId.extend({ fromItemId: IdSchema.optional(), clientThreadId: IdSchema.optional() }), result: threadResult },
   "thread/close": { params: threadId.extend({ reason: z.string().optional() }), result: empty },
   "thread/interrupt": { params: threadId, result: z.object({ interruptedTurnId: IdSchema.nullable() }) },

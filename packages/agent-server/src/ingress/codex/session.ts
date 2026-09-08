@@ -2,7 +2,7 @@ import { CODEX_SCHEMA_VERSION } from "../../engines/codex-version.js";
 import { ErrorCode, ProtocolError, rpcError, ServerRequestMethodSchema, ServerRequestSchemas, type Frame, type RpcId, type ServerRequestMethod } from "../../protocol/index.js";
 import type { AgentServer, InProcessClient } from "../../server/server.js";
 import type { ControlClient, NativeObject } from "./control-process.js";
-import { CodexRouter } from "./router.js";
+import { CodexRouter, NativeRpcError } from "./router.js";
 
 export function nativeDecision(method: ServerRequestMethod, result: NativeObject): unknown {
   if (!result || typeof result !== "object" || Array.isArray(result)) throw new ProtocolError(ErrorCode.invalid_params, "as-ingress: decision object required");
@@ -85,6 +85,7 @@ export class CodexSession {
       if (this.state !== "ready") throw new ProtocolError(ErrorCode.not_initialized, "as-ingress: initialize and initialized required");
       this.send({ id, result: await this.router.request(f.method, p) });
     } catch (error) {
+      if (error instanceof NativeRpcError) { this.send({ id, error: { code: error.code, message: error.message } }); return; }
       const rpc = rpcError(error);
       this.send({ id, error: { ...rpc, message: `${rpc.message.startsWith("as-ingress: ") ? "" : "as-ingress: "}${rpc.message}${rpc.data?.holder ? ` (holder: ${rpc.data.holder.label})` : ""}` } });
       if (this.state === "initializing") { this.close(); this.options.end?.(); }
@@ -116,6 +117,9 @@ export class CodexSession {
       const thread = this.router.server.threads.get(p.threadId);
       this.send({ method: "serverRequest/resolved", params: { threadId: thread.engineThreadId, requestId: id, ...(p.decidedBy ? { decidedBy: p.decidedBy } : {}), ...(p.reason ? { reason: p.reason } : {}) } });
       this.logical.delete(p.requestId); this.reverse.delete(id);
+    } else if (frame.method === "thread/metadata/updated" && typeof p.title === "string") {
+      const thread = this.router.server.threads.get(p.threadId);
+      this.send({ method: "thread/name/updated", params: { threadId: thread.engineThreadId, threadName: p.title } });
     } else if (frame.method === "error") {
       // CodexEventMapper also projects each native error into AS. Its raw error
       // object identifies that projection; the original frame was sent above.
