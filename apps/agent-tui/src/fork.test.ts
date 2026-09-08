@@ -10,9 +10,26 @@ const item = (id: string, seq: number, text = id): Item => ({ id, seq, type: "ag
 test("fork summaries normalize multiline text, strip terminal controls and truncate Unicode safely", () => {
   expect(itemSummary(item("i", 1, "a\n \x1b[2Jb\t c"))).toBe("Agent: a b c");
   const summary = itemSummary(item("i", 1, "😀".repeat(100)), 12);
-  expect(Array.from(summary)).toHaveLength(12); expect(summary).toBe("Agent: 😀😀😀😀…");
+  expect(Bun.stringWidth(summary)).toBe(12); expect(summary).toBe("Agent: 😀😀…");
   expect(itemSummary({ ...item("cmd", 2), type: "commandExecution", payload: { command: "pwd", cwd: "/tmp" } })).toContain("$ pwd");
   expect(itemSummary({ ...item("files", 3), type: "fileChange", payload: { changes: [{ kind: "update", path: "file.ts" }] } })).toContain("update file.ts");
+});
+test("P2-3 fork summaries truncate by terminal columns without splitting CJK, emoji or combining graphemes", () => {
+  for (const text of ["中文".repeat(100), "中文 mixed 😀 ".repeat(50), "👨‍👩‍👧‍👦".repeat(100), "e\u0301".repeat(100)]) {
+    for (const limit of [0, 1, 8, 10, 12, 40, 80]) {
+      const summary = itemSummary(item("i", 1, text), limit);
+      expect(Bun.stringWidth(summary)).toBeLessThanOrEqual(limit);
+      if (limit) {
+        expect(summary.endsWith("…")).toBe(true);
+        expect(("Agent: " + text).startsWith(summary.slice(0, -1))).toBe(true);
+      } else expect(summary).toBe("");
+    }
+  }
+  expect(itemSummary(item("i", 1, "中"), 9)).toBe("Agent: 中");
+  expect(itemSummary(item("i", 1, "中文"), 10)).toBe("Agent: 中…");
+  expect(itemSummary(item("i", 1, "👨‍👩‍👧‍👦".repeat(20)), 10)).toBe("Agent: 👨‍👩‍👧‍👦…");
+  expect(itemSummary(item("i", 1, "e\u0301".repeat(20)), 9)).toBe("Agent: e\u0301…");
+  expect(Bun.stringWidth(itemSummary(item("i", 1, "中文".repeat(100))))).toBe(80);
 });
 test("fork selector sorts by seq and stable id without mutating source, includes all item kinds and live boundaries", () => {
   const items = [item("z", 9), item("b", 2), { ...item("a", 2), status: "inProgress" as const }];
