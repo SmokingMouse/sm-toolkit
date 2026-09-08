@@ -47,7 +47,7 @@ test("fork selection fetches all pages, navigates, cancels, and sends fromItemId
   expect(calls.at(-1)).toEqual(["thread/detach", { threadId: "source" }]);
 });
 test("fork direct id bypasses picker; missing capability offers only explicit tip action", async () => {
-  const direct = setup(true); await direct.controller.sessions.run("/fork", "first");
+  const direct = setup(true); direct.model.input = "/fork first"; await direct.controller.submit();
   expect(direct.calls[0][1]).toMatchObject({ fromItemId: "first" }); expect(direct.model.thread?.id).toBe("branch");
   for (const argument of ["", "first"]) {
     const { model, calls, controller } = setup(false);

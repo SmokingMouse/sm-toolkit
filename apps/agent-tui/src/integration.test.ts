@@ -206,7 +206,7 @@ test("all delta item kinds and expired cards update without leaking unrelated th
   const r: PendingServerRequest = { method: "item/tool/requestUserInput", params: { requestId: "expire", threadId: thread.id, turnId, itemId: "r", isBlocking: true, questions: [] } };
   a.model.request(r);
   a.model.notification({ jsonrpc: "2.0", method: "serverRequest/expired", params: { threadId: thread.id, requestId: "expire", reason: "timeout" } });
-  expect(a.model.activeCard).toBeUndefined(); expect(a.model.cards.get("expire")?.note).toBe("已过期：timeout");
+  expect(a.model.activeCard).toBeUndefined(); expect(a.model.cards.get("expire")?.note).toBe("请求超时：timeout");
 });
 
 test("real bin in Bun PTY attaches, draws deltas, answers both cards, and restores terminal on exit", async () => {
@@ -558,7 +558,7 @@ test("fix2 P1-1 PTY: rival during acquire, immediate resolve and slow network ke
     const send = peer.send.bind(peer);
     peer.send = text => {
       const frame = JSON.parse(text);
-      if (frame.method === "serverRequest/resolved") {
+      if (frame.method === "serverRequest/resolved" || (frame.method === "thread/pendingRequests" && frame.params.status === "resolved")) {
         if (dropResolved) return;
         if (resolvedDelay) { setTimeout(() => send(text), resolvedDelay); return; }
       }

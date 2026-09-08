@@ -9,7 +9,7 @@ export const commands: Candidate[] = [
   { name: "clear", description: "新建空会话" },
   { name: "threads", description: "选择 daemon 会话" },
   { name: "resume", description: "恢复会话：/resume [id]" },
-  { name: "fork", description: "分叉当前 Claude 会话" },
+  { name: "fork", description: "选择分叉 item：/fork [itemId]" },
   { name: "permissions", description: "选择权限模式" },
   { name: "effort", description: "thinking budget：low/medium/high/max" },
   { name: "model", description: "切换模型：/model <name>" },

@@ -30,16 +30,18 @@ Enter 发 `turn/start`；运行时同样入队，显示从 1 起的排队位置�
 | `/takeover`、`/release` | 手动获取独占输入 lease / 释放；活跃时续期，空闲后到期 |
 | `/context <窗口 token 数>` | 覆盖当前 TUI 的上下文窗口估算 |
 | `/new`、`/clear`（Ctrl+N） | 沿用当前 thread 的 cwd、backend、model 起新 thread 并切换；旧 thread 继续运行 |
-| `/threads`（Ctrl+T） | 列出 daemon 全部会话，按最近活动降序；↑/↓ 选择、Enter attach、Esc 取消 |
+| `/threads`（Ctrl+T） | 列出 daemon 全部会话，按最近活动降序，分叉会话显示 forkedFrom 父 thread 与 item 短 id；↑/↓ 选择、Enter attach、Esc 取消 |
 | `/resume` | 打开同一会话选择器 |
 | `/resume <完整 thread id>` | 恢复指定会话；systemError 时重启引擎，closed 时先询问 y/N；确认后 thread/resume 再 attach |
-| `/fork` | 从当前引擎会话末端 fork 并切换；服务端目前仅支持具有 engine session id 的 Claude thread |
+| `/fork [itemId]` | 无参数按 seq 选择 item（显示类型和摘要），↑↓ 选择、Enter 分叉并切换、Esc 取消；传 itemId 直接分叉。daemon 无 midThreadFork 能力时明确提示，并仅提供末尾分叉 |
 | `/steer <文本>` | 向当前 turn 插话 |
 | `/image <path>`、`/paste-image` | 发送本地图片 / 附加剪贴板图片 |
 
 键位优先级：Ctrl-C 始终可用；会话操作期间按原保护规则丢弃输入（扫描期间允许审批/问题卡）；关闭会话确认、会话选择器、审批卡、权限选择器依次接管按键。Ctrl-N/Ctrl-T 可从普通审批卡切换会话，控制请求提交期间需等确认。补全列表中的普通 Tab/Enter 插入候选，Shift+Tab 保留权限切换；没有补全时 Tab 切 effort，Ctrl-R 切 reasoning，Ctrl-P 切 plan。Shift+Enter/Ctrl-J 始终用于主输入换行，Ctrl-U 清空文字与附件。输入完整无参数命令后，若补全仍开着，先 Enter 插入再 Enter 执行，或加空格后 Enter。
 
 切换会话时按 thread id 保存本端已知启动权限，清空租约显示并停止旧会话续期，未知会话隐藏 bypass 资格；权限面板、补全和本端 effort 标签重置。草稿及待发附件仍保留。
+
+TUI 协商开启 pendingRequests 通知，状态栏显示待处理请求数。他端处理后卡片立即显示处理者并撤掉审批按键；超时、撤回会提示原因。离线计数标为待确认，重连后按 attach 快照重建待处理卡片与计数。
 
 模式以 `thread.permission`、`thread/permission/changed` 为准；他端通知只更新状态栏，不覆盖本端发送/排队等消息。readonly 是 CLI 启动工具限制，不能安全热切来回：当前或本端记录的启动模式为 readonly 时，快捷键和面板都保持该限制，不发 permission/set；更改需新建线程。
 

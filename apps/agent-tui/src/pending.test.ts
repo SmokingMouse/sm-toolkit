@@ -5,14 +5,14 @@ import { pendingRequestState, type PendingServerRequest } from "@smokingmouse/ag
 
 const request: PendingServerRequest = { method: "item/commandExecution/requestApproval", params: { threadId: "thread", turnId: "turn", itemId: "item", requestId: "request", command: "pwd", cwd: "/tmp", startedAtMs: 1 } };
 test("pending notification resolves card and count without legacy notifications, label falls back to clientId", () => {
-  for (const label of ["phone", undefined]) {
+  for (const label of ["phone", ""]) {
     const model = new TuiModel(); model.request(request);
     const state = pendingRequestState(request, 1);
     model.notification({ jsonrpc: "2.0", method: "thread/pendingRequests", params: state });
     expect(model.pendingCount).toBe(1);
-    model.notification({ jsonrpc: "2.0", method: "thread/pendingRequests", params: { ...state, status: "resolved", decidedBy: { clientId: "client-phone", name: "phone", kind: "test", version: "1", label } } });
+    model.notification({ jsonrpc: "2.0", method: "thread/pendingRequests", params: { ...state, status: "resolved", decidedBy: { clientId: "client-phone", label } } });
     expect(model.pendingCount).toBe(0); expect(model.activeCard).toBeUndefined();
-    expect(renderCard(model.cards.get("request")!).join("\n")).toBe(`[request] 已由 ${label ?? "client-phone"} 处理`);
+    expect(renderCard(model.cards.get("request")!).join("\n")).toBe(`[request] 已由 ${label || "client-phone"} 处理`);
   }
 });
 test("pending timeout and withdrawal have notices; reconnect snapshot rebuilds pending count", () => {

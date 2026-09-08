@@ -161,7 +161,7 @@ export class Controller {
     if (this.client.state !== "connected") throw new Error("连接尚未恢复，输入已保留");
     const [command, ...args] = text.trim().split(/\s+/);
     if (["/new", "/clear", "/threads", "/fork", "/resume"].includes(command)) {
-      if ((command !== "/resume" && args.length) || args.length > 1) throw new Error(`用法：${command}${command === "/resume" ? " [id]" : ""}`);
+      if ((!["/resume", "/fork"].includes(command) && args.length) || args.length > 1) throw new Error(`用法：${command}${command === "/resume" ? " [id]" : command === "/fork" ? " [itemId]" : ""}`);
       this.submitting = true;
       this.model.input = "";
       try { await this.sessions.run(command, args[0]); }
@@ -374,6 +374,9 @@ export class Controller {
     const unsubscribe = this.client.onNotification("serverRequest/resolved", p => {
       if (p.requestId === handle.params.requestId) won = p.decidedBy.clientId === this.client.clientId;
     });
+    const unsubscribePending = this.client.onNotification("thread/pendingRequests", p => {
+      if (p.requestId === handle.params.requestId && p.status === "resolved") won = p.decidedBy?.clientId === this.client.clientId;
+    });
     let replied = false;
     try {
       await this.reply(card, () => {
@@ -384,6 +387,7 @@ export class Controller {
       if (exitPlan && won && this.model.thread?.id === handle.params.threadId) await this.control(() => this.setPermission("default"));
     } finally {
       unsubscribe();
+      unsubscribePending();
       // Even a denied approval lease must never disable the emergency stop.
       if (decision === "abort" && (!replied || handle.method === "item/permissions/requestApproval")) await this.client.request("turn/interrupt", { threadId: handle.params.threadId, turnId: handle.params.turnId });
     }
