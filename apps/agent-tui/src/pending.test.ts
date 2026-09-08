@@ -1,9 +1,23 @@
 import { expect, test } from "bun:test";
 import { TuiModel } from "./model.js";
-import { renderCard } from "./render.js";
+import { render, renderCard } from "./render.js";
 import { pendingRequestState, type PendingServerRequest } from "@smokingmouse/agent-server/protocol";
 
 const request: PendingServerRequest = { method: "item/commandExecution/requestApproval", params: { threadId: "thread", turnId: "turn", itemId: "item", requestId: "request", command: "pwd", cwd: "/tmp", startedAtMs: 1 } };
+test("P2-1 requests without local cards neither count nor replace the current status on termination", () => {
+  for (const status of ["resolved", "expired"] as const) {
+    const model = new TuiModel(); model.connection = "connected";
+    model.message = "已排队 #1";
+    const state = pendingRequestState(request, 1);
+    model.notification({ jsonrpc: "2.0", method: "thread/pendingRequests", params: state });
+    expect(model.cards.size).toBe(0); expect(model.pendingCount).toBe(0);
+    expect(render(model, 160, 24)).toContain("待处理 0");
+    model.notification({ jsonrpc: "2.0", method: "thread/pendingRequests", params: { ...state, status, decidedBy: { clientId: "phone", label: "手机" }, reason: "timeout" } });
+    expect(model.message).toBe("已排队 #1"); expect(model.pendingCount).toBe(0);
+    model.request(request);
+    expect(model.pendingCount).toBe(1);
+  }
+});
 test("pending notification resolves card and count without legacy notifications, label falls back to clientId", () => {
   for (const label of ["phone", ""]) {
     const model = new TuiModel(); model.request(request);

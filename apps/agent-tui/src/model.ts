@@ -21,9 +21,8 @@ export class TuiModel {
   cards = new Map<string, RequestCard>();
   pendingStates = new Map<string, PendingRequestState>();
   get pendingCount(): number {
-    const ids = new Set([...this.pendingStates.values()].filter(s => s.status === "pending").map(s => s.requestId));
-    for (const [id, card] of this.cards) if (["pending", "sending", "offline"].includes(card.state)) ids.add(id);
-    return ids.size;
+    // This client can only act on requests delivered as cards (including offline recovery).
+    return [...this.cards.values()].filter(card => ["pending", "sending", "offline"].includes(card.state)).length;
   }
   queue: QueuedTurn[] = [];
   usage?: Usage;
@@ -154,8 +153,7 @@ export class TuiModel {
     const card = this.cards.get(state.requestId);
     if (state.status !== "pending") {
       const note = state.status === "resolved" ? `已由 ${state.decidedBy?.label || state.decidedBy?.clientId || "未知客户端"} 处理` : expiredNote(state.reason ?? "unknown");
-      if (card) { card.state = state.status; card.replying = false; card.note = note; }
-      this.message = note;
+      if (card) { card.state = state.status; card.replying = false; card.note = note; this.message = note; }
     }
   }
   notification(n: ServerNotification): void {
