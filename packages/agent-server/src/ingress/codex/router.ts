@@ -5,6 +5,7 @@ import { ErrorCode, ProtocolError, type Item, type StartThreadParams, type Threa
 import type { AgentServer, InProcessClient } from "../../server/server.js";
 import { CONTROL_METHODS, type ControlClient, type NativeObject } from "./control-process.js";
 import { claudeItems, claudeSettings, claudeThread, claudeTurn } from "./claude-projection.js";
+import { methodPolicy } from "./method-policy.js";
 import { nativePage, pageLimit, turnItemsView } from "./pagination.js";
 import { NativeRpcError, nativeResult } from "./native-error.js";
 export { NativeRpcError } from "./native-error.js";
@@ -199,6 +200,8 @@ export class CodexRouter {
     return nativePage(values.map((value, i) => ({ key: [i, ""], value })), p, `${nativeThreadId(thread)}:${method}:${p.turnId ?? ""}`, method === "thread/items/list" ? "asc" : "desc");
   }
   async request(method: string, p: NativeObject = {}): Promise<NativeObject> {
+    if (methodPolicy(method) === "deny") throw new ProtocolError(ErrorCode.method_not_found, `as-ingress: unsupported method ${method}`);
+    if (p.approvalsReviewer != null && p.approvalsReviewer !== "user") throw new ProtocolError(ErrorCode.unauthorized, "as-ingress: approvalsReviewer must be user");
     if (!this.claudeThreads && typeof p.threadId === "string" && !this.server.log.findEngine(p.threadId, "codex") && findClaudeThread(this.server, `th_${p.threadId}`))
       throw new ProtocolError(ErrorCode.method_not_found, "as-ingress: Claude threads are disabled by codex_ingress.claude_threads");
     if (CONTROL_METHODS.has(method)) {

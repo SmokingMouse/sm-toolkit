@@ -13,6 +13,13 @@
 - 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude`（默认含 cross_backend_model_override_tolerated 与 wire_schema_clean）。
 - 修复：已有线程忽略跨后端模型 override 并发带 threadId 的可见 warning，同后端校验保留；权限卡补 isBlocking=true，所有出站帧过新生成官方 schema，缺映射也失败。本条取代下条「不传 --model」规避方式，该规避未满足原契约。
 
+### codex-ingress slice 4：Unix 路径过长与重连初始化竞态（resolved）
+
+- 症状：macOS 默认 TMPDIR 下隔离 CODEX_HOME 的 Unix socket 超过 sun_path；新增显示端崩溃冒烟在重连后立即 close，迟到的 TUI 初始化 read 又恢复线程。
+- 可证伪假设：失败取决于临时目录长度与 close 前是否等到重连历史显示，而非断连导致引擎中断。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --transport unix --expect display_disconnect_ok,external_client_reply_while_attached_ok`。
+- 修复：临时目录固定在 /tmp 下并检查 socket 字节上限；重连先等待离线完成历史在官方 TUI 渲染，再验 close。Codex unix / Claude ws 均已通过；进行中的 turn 经 TUI SIGKILL 仍完成。
+
 ### codex-ingress slice 3 返工：混合 picker 的模型与准备状态（resolved）
 
 - 症状：Claude 主会话切 Codex 被 changing backend guard 拒绝；合并后的 fresh 关闭/重开与旧 full 租约断言不兼容；对当前线程重复 /resume 不发新 resume RPC。

@@ -18,6 +18,14 @@ export function seed(log: ItemLog, id = "th"): void {
 }
 const create = () => { const log = new ItemLog(); logs.push(log); seed(log); return log; };
 describe("ItemLog", () => {
+  test("engine UUID lookups use SEARCH with and without a backend on reopened databases", () => {
+    const log = create();
+    for (const backend of [null, "codex"]) {
+      const plan = log.db.query("EXPLAIN QUERY PLAN SELECT data_json FROM threads WHERE engine_thread_id = ? AND (? IS NULL OR backend = ?)").all("id", backend, backend) as Array<{ detail: string }>;
+      expect(plan.some(row => row.detail.includes("SEARCH threads USING INDEX threads_engine_id"))).toBe(true);
+      expect(plan.some(row => row.detail.includes("SCAN threads"))).toBe(false);
+    }
+  });
   test("N1: publish rejects malformed params before any subscriber sees them", () => {
     const log = create(), received: ServerNotification[] = [];
     log.subscribe("th", n => received.push(n)); log.subscribe("th", n => received.push(n));

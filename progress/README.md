@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server native ingress 已修复 TUI 跨后端默认模型兼容与 Claude 权限卡 schema，双后端各三轮、全量测试和 typecheck 通过，待主控验收。
+agent-server native ingress 正在集成最新多线程兼容、Unix 传输与治理硬化，待完成合并后全量回归。
 
 ## Goals
 

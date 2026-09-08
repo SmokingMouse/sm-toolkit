@@ -9,6 +9,33 @@ const servers: AgentServer[] = [];
 afterEach(async () => { for (const server of servers.splice(0)) await server.close(); });
 const create = (options = {}) => { const fixture = setup(options); servers.push(fixture.server); return fixture; };
 describe("ThreadManager", () => {
+  test("interrupt acknowledgement without completion retires the generation and permits close/resume", async () => {
+    const { server, engines } = create({ interruptTimeoutMs: 20 });
+    const c = await client(server);
+    const { thread } = await c.request("thread/start", { backend: "claude", model: "sonnet", cwd: process.cwd() });
+    engines[0].interrupt = async () => {};
+    const { turn } = await c.request("turn/start", { threadId: thread.id, input: input("never finishes") });
+    await c.request("turn/interrupt", { threadId: thread.id, turnId: turn.id });
+    await until(() => server.threads.get(thread.id).status.type === "systemError");
+    expect(server.threads.queue(thread.id).runningTurnId).toBeNull();
+    expect(server.log.turn(turn.id).status).toBe("failed");
+    expect(engines[0].closed).toBe(true);
+    await expect(c.request("thread/close", { threadId: thread.id })).resolves.toEqual({});
+    await c.request("thread/resume", { threadId: thread.id });
+    expect(server.threads.get(thread.id).status.type).toBe("idle");
+    expect(engines).toHaveLength(2);
+  });
+  test("as/1 display disconnect never interrupts a running engine", async () => {
+    const { server, engines } = create(); const c = await client(server);
+    const { thread } = await c.request("thread/start", { backend: "claude", model: "sonnet", cwd: process.cwd() });
+    const { turn } = await c.request("turn/start", { threadId: thread.id, input: input("continue offline") });
+    c.close();
+    engines[0].emit({ type: "turnCompleted", turnId: turn.id, status: "completed" });
+    await until(() => server.log.turn(turn.id).status === "completed");
+    expect(engines[0].interrupted).toHaveLength(0); expect(engines[0].closed).toBe(false);
+    const peer = await client(server, "replacement-display");
+    expect((await peer.request("thread/attach", { threadId: thread.id })).thread.status.type).toBe("idle");
+  });
   test("R1c: importing an unknown native thread requires explicit cwd", async () => {
     const { server, engines } = create(); const c = await client(server);
     await expect(c.request("thread/resume", { engineThreadId: "unknown", backend: "claude" })).rejects.toMatchObject({ code: -32602 });

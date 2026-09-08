@@ -60,19 +60,18 @@ if (import.meta.main) {
     const pinned = readFileSync(new URL("../../../docs/agent-server/codex-schema-version.txt", import.meta.url), "utf8").trim();
     checkVersion(CODEX_SCHEMA_VERSION, pinned);
     const args = process.argv.slice(2);
-    if (args.length && (args.length !== 2 || args[0] !== "--schema-dir")) throw new Error("Usage: check-codex-alignment.ts [--schema-dir <dir>]");
+    if (args.length && (args.length !== 2 || !["--schema-dir", "--candidate-schema-dir"].includes(args[0]))) throw new Error("Usage: check-codex-alignment.ts [--schema-dir | --candidate-schema-dir <dir>]");
     let directory = args[1];
     if (!directory) {
       const version = execFileSync("codex", ["--version"], { encoding: "utf8" }).trim().replace(/^codex-cli\s+/, "");
       checkVersion(version, pinned);
-      const cached = "/tmp/codex-app-server-schema";
-      const marker = join(cached, "codex-schema-version.txt");
-      if (existsSync(marker) && readFileSync(marker, "utf8").trim() === pinned) directory = cached;
+      const cached = new URL(`../../../docs/agent-server/codex-schema/${pinned}/`, import.meta.url).pathname;
+      if (existsSync(join(cached, "ClientRequest.json"))) directory = cached;
       else {
         directory = temporary = mkdtempSync(join(tmpdir(), "as-codex-schema-"));
-        execFileSync("codex", ["app-server", "generate-json-schema", "--out", directory], { stdio: "pipe" });
+        execFileSync("codex", ["app-server", "generate-json-schema", "--experimental", "--out", directory], { stdio: "pipe" });
       }
-    } else checkVersion(readFileSync(join(directory, "codex-schema-version.txt"), "utf8").trim(), pinned);
+    } else if (args[0] !== "--candidate-schema-dir") checkVersion(readFileSync(join(directory, "codex-schema-version.txt"), "utf8").trim(), pinned);
     const schemas = Object.fromEntries(Object.keys(groups).map(group => [group, JSON.parse(readFileSync(join(directory!, `${group}.json`), "utf8"))]));
     const count = checkAlignment(readFileSync(new URL("../../../docs/agent-server/protocol.md", import.meta.url), "utf8"), schemas);
     console.log(`Codex ${pinned}: ${count} protocol names and required-field contracts aligned`);

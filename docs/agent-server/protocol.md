@@ -771,7 +771,7 @@ availableDecisions 只保留 AS 支持的四种；扩展策略修改决策返回
 
 未实现的副作用方法默认返回 -32601，message 前缀 `as-ingress: `，不返回伪成功。
 包括恢复时 thread/goal/get（可见的非阻断拒绝）、配置写入、command/exec、fs 写入、插件安装、账户写入、
-review、realtime、goal、memory、动态 TUI 工具；这些不在 slice 1 中实现。
+review、realtime、goal、memory。slice 4 的 codex_tui 动态工具直通例外见下文治理表。
 原生 dynamicTools、historyMode 和 UI personality/web_search 提示不传入 engine；以 daemon 的 native 配置为准。
 仅支持 default collaboration mode，其 model/effort 进入 AS guard，TUI 的模式说明不覆盖引擎说明。
 拒绝原生权限 profiles、任意 config overrides、auto_review、非 default serviceTier/serviceTierForTurn。
@@ -789,6 +789,37 @@ resolved 帧及被批准命令生成的隔离 proof 文件；不把单测 fake a
 直到匹配的 turn/interrupt 请求、成功响应和 interrupted 终态全部出现才释放。请求次数和模型响应速度不参与判定。
 TUI 自动标题生成的临时 system thread 带禁止的 provider/config overrides，仍拒绝；冒烟只豁免这一明确可选请求与 goal/get，
 所有普通 thread/name/set、resume 和 interrupt 错误都会导致失败。
+
+### 13.0 治理硬化与 Unix 传输（slice 4）
+
+完整白名单和 readonly deny 表见 [155 项方法治理表](codex-method-policy.md)。未知方法默认拒绝，拒绝记录持久化到 SQLite ingress_audit。
+源协议固定为 codex-cli 0.153.4，experimental JSON schema 原始生成物位于 `docs/agent-server/codex-schema/0.153.4/`。
+
+```toml
+[codex_ingress]
+enabled = true
+port = 0
+unix_path = "default"
+```
+
+`unix_path` 缺省不监听；`default` 使用 `$CODEX_HOME/agent-server/ingress.sock`（未设 CODEX_HOME 则 `$HOME/.codex/agent-server/ingress.sock`），也可给绝对路径。
+独立命名空间避免占用官方 app-server daemon 默认 socket。endpoint.json 同时公布 `codexIngressUrl` 与 `codexIngressUnixUrl`。
+连接方式为 `codex --remote unix:///绝对路径/ingress.sock`，不传 bearer 参数；该端口是 **WebSocket over Unix socket**，不能使用 as/1 NDJSON。
+socket 权限 0600，父目录必须本用户所有且 0700；拒绝已占用路径、非 socket 文件与不安全父目录。仅用于单用户本机。
+两种 native 传输帧上限均为 128 MiB；as/1 NDJSON 仍为 16 MiB。Unix 路径须符合系统 sun_path 长度限制（macOS 103 字节、Linux 107 字节）。
+
+显示端 socket 断开、SIGKILL 或发送失败只回收客户端连接/租约，不中断引擎 turn。`display_disconnect_ok` 真机判据在 turn 进行中 SIGKILL 官方 TUI，检查 DB 终态为 completed，再新启 TUI 读取离线完成的历史。
+进程死亡清空引擎及队列 activeTurn，终态 failed；thread/close 在死引擎上可用。interrupt ack 后 5 秒未收到 turn/completed 时退役故障引擎，冻结队列并清空 activeTurn，允许 close/resume；迟到终态不能污染下一个 generation。
+
+升级回归：
+
+```sh
+scripts/codex-ingress-upgrade-check.sh --codex /绝对路径/codex --out /tmp/codex-upgrade-report
+```
+
+默认两后端 × 两传输 × 3 次，执行全部公共冒烟与 Claude tool_permission_question、全量 agent-server 测试、typecheck。
+候选二进制统一进入 display/control/engine 的 PATH；允许报告版本变化，但不修改 0.153.4 基线。重新生成 experimental schema 并用 JSON Schema Draft 7 校验所有文件，验证 AS required-field 对齐，输出方法增删、逐文件 schema.diff、逐命令 exit/log 和 report.json/report.md。
+任何 schema 差异或回归失败均 exit 1；不因 schema 差异跳过冒烟。运行需要 bun、uv、python3 及既有 Claude 登录；不会创建新凭证。`--runs 1` 可做快速候选检查，正式验收保留默认 3。
 
 ### 13.1 Claude 线程（slice 2）
 
@@ -853,6 +884,7 @@ Claude 通用工具审批 `{toolName,input}` 投影为 `item/tool/requestUserInp
 再由原 AS permissions broker 决策、审计、通知 resolved。无效答案明确报错并保留待决，不伪造 network/fileSystem 授权，不提供整会话授权。
 native 没有 multiSelect 字段：多选问题移除该字段，options=null，题干列出编号、选项及描述，并提示「可多选，逗号分隔」。
 返回答案按中英文逗号拆分、去空白、将编号还原成选项文字并去重，保留自由文本，回传 AS answers 数组；越界编号报错并保留待决。
+有损边界：自由文本或直接填写的选项 label 自带逗号时也会拆分；使用编号可完整保留含逗号的 label。多选问题必须逐题提供字符串答案数组，缺答整张卡返回 invalid_params 并保持待决；单选缺答沿用原生容忍行为。
 
 **已知有损**：Claude Bash 通过 ToolCallDone 一次性提供 aggregatedOutput，不产生 stdout/stderr outputDelta；
 因此 `command_execution_output` 冒烟判据验证终态 aggregatedOutput 包含命令实际输出。Claude CLI 没提供结构化退出码时 exitCode=null，
@@ -881,7 +913,7 @@ Claude 引擎使用真实 CLI 与真实模型，显式 `--model sonnet`，读取
 脚本按 `--backend claude` 或启用 `list_contains_both_backends` 设置隔离 daemon 的 `claude_threads=true`；不测混合后端的 Codex 冒烟仍为 false。
 只复用已有 Claude 登录文件，隔离 HOME/settings，并要求 Bash/Read 审批；不存在登录文件时明确 blocker，不申请新凭证。
 真实 PTY 执行审批按键、`/quit`、恢复和 Esc 中断；中断前确认真实 agentMessage delta 且该 turn 尚未完成。
-六判据之外支持 `agent_message_delta,command_execution_output,user_input_question,unsupported_method_errors`。
+六判据之外支持 `agent_message_delta,command_execution_output,tool_permission_question,unsupported_method_errors`。旧 `user_input_question` 仅是 `tool_permission_question` 的兼容别名，验证 Read 通用工具权限经 requestUserInput 往返，不代表覆盖原生 AskUserQuestion 或 multiSelect。
 Claude 用真实 Read 工具触发权限问答，官方 TUI Enter 选择 allow，验证 Read 成功、AS permissions 审计与 broker resolved。
 unsupported_method_errors 由同一隔离 daemon 的独立 native WebSocket 探测 review/start、thread/realtime/start，逐条要求 -32601 与 as-ingress 前缀。
 同时核对 broker decided_by、隔离 proof 文件、resolved 帧、fresh/普通/Read 回复的终端渲染。

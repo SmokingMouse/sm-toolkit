@@ -67,6 +67,23 @@ export class CodexEngine implements EngineSession {
   readonly emitsUserMessages = true;
   readonly emitsTokenUsage = true;
   readonly events = new AsyncQueue<EngineEvent>();
+  readonly nativeToolCalls = new Map<NativeId, { frame: NativeFrame; owner?: string }>();
+  claimNativeToolCall(id: NativeId, owner: string): boolean {
+    const call = this.nativeToolCalls.get(id);
+    if (!call || call.owner) return false;
+    call.owner = owner; return true;
+  }
+  respondNativeToolCall(id: NativeId, owner: string, response: NativeFrame): void {
+    const call = this.nativeToolCalls.get(id);
+    if (!call || call.owner !== owner) throw new ProtocolError(ErrorCode.unauthorized, "native tool response owner mismatch");
+    this.write({ id, ...response }); this.nativeToolCalls.delete(id);
+  }
+  releaseNativeToolCalls(owner: string): void {
+    for (const call of this.nativeToolCalls.values()) if (call.owner === owner) {
+      delete call.owner;
+      this.events.push({ type: "engineEvent", backend: "codex", subtype: "item/tool/call", payload: structuredClone(call.frame) });
+    }
+  }
   engineThreadId: string | null = null;
   private process?: ChildProcessWithoutNullStreams;
   private options?: SessionOptions;
@@ -162,7 +179,7 @@ export class CodexEngine implements EngineSession {
   }
   async close(_reason: string): Promise<void> {
     if (this.closed) return;
-    this.closed = true; this.ready = false;
+    this.closed = true; this.ready = false; this.active = undefined; this.nativeToolCalls.clear();
     this.rejectPending(this.unavailable("Codex session closed")); this.approvals.clear();
     const child = this.process;
     if (child && child.exitCode === null && child.signalCode === null) {
@@ -258,7 +275,7 @@ export class CodexEngine implements EngineSession {
   }
   private fail(error: ProtocolError): void {
     if (this.dead || this.closed) return;
-    this.dead = true; this.ready = false; this.approvals.clear(); this.rejectPending(error);
+    this.dead = true; this.ready = false; this.active = undefined; this.nativeToolCalls.clear(); this.approvals.clear(); this.rejectPending(error);
     this.events.push({ type: "exit", error: error.toJSON() }); this.events.end(); this.process?.kill("SIGKILL");
   }
   private bindTurn(turn: ActiveTurn, nativeId: string): void {
@@ -285,6 +302,13 @@ export class CodexEngine implements EngineSession {
     }
     if (typeof frame.method !== "string") throw codexProtocolError("Invalid Codex JSON-RPC frame", raw);
     const method = frame.method, params = codexRecord(frame.params);
+    if (hasId && method === "item/tool/call" && params.namespace === "codex_tui") {
+      if (!this.active?.nativeId || params.threadId !== this.engineThreadId || params.turnId !== this.active.nativeId || this.nativeToolCalls.has(frame.id)) {
+        this.rejectRequest(frame, codexProtocolError("Invalid native TUI tool ownership", raw)); return;
+      }
+      this.nativeToolCalls.set(frame.id, { frame: structuredClone(frame) });
+      this.events.push({ type: "engineEvent", turnId: this.active.id, backend: "codex", subtype: method, payload: structuredClone(frame) }); return;
+    }
     if (hasId && !ServerRequestMethodSchema.safeParse(method).success) { this.rejectRequest(frame, codexProtocolError(`Unknown Codex server request: ${method}`, raw)); return; }
     if (params.threadId && this.engineThreadId && params.threadId !== this.engineThreadId) {
       if (hasId) this.rejectRequest(frame, codexProtocolError("Codex request belongs to another thread", raw));
@@ -321,6 +345,7 @@ export class CodexEngine implements EngineSession {
     }
     const events = this.mapper.map(method, params);
     if (method === "turn/completed") {
+      for (const [id, call] of this.nativeToolCalls) if (call.frame.params.turnId === nativeTurnId) this.nativeToolCalls.delete(id);
       this.active = undefined;
       for (const event of events) if (event.type === "turnCompleted") for (const [id, request] of this.approvals) if (request.turnId === event.turnId) this.approvals.delete(id);
     }

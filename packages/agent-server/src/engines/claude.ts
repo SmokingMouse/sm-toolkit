@@ -308,7 +308,7 @@ export class ClaudeEngine implements EngineSession {
   }
   async close(_reason: string): Promise<void> {
     if (this.closed) return;
-    this.closed = true; this.rejectControls(new Error("Claude session closed"));
+    this.closed = true; this.active = null; this.bash = undefined; this.rejectControls(new Error("Claude session closed"));
     if (this.seeding) { clearTimeout(this.seeding.timer); this.seeding.reject(new Error("Claude session closed while seeding")); this.seeding = undefined; }
     const child = this.process;
     if (child && child.exitCode === null && child.signalCode === null) {
@@ -332,7 +332,7 @@ export class ClaudeEngine implements EngineSession {
   private rejectControls(error: Error): void { for (const p of this.controls.values()) { clearTimeout(p.timer); p.reject(error); } this.controls.clear(); }
   private fail(error: ProtocolError): void {
     if (this.dead || this.closed) return;
-    this.dead = true;
+    this.dead = true; this.active = null; this.bash = undefined;
     if (this.seeding) { clearTimeout(this.seeding.timer); this.seeding.reject(error); this.seeding = undefined; }
     this.rejectControls(error); this.events.push({ type: "exit", error: error.toJSON() }); this.events.end();
     this.process?.kill("SIGKILL");

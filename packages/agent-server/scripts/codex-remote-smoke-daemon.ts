@@ -8,7 +8,9 @@ import { loadToken } from "../src/daemon/paths.js";
 const root = process.env.CODEX_SMOKE_ROOT!;
 const backend = process.env.CODEX_SMOKE_BACKEND === "claude" ? "claude" : "codex";
 if (!root || process.env.HOME !== join(root, "home")) throw new Error("isolated smoke HOME required");
-const daemon = await runDaemon({ graceMs: 0 });
+const daemon = await runDaemon({ graceMs: 0, codexTrace(direction, frame, connection) {
+  appendFileSync(join(root, "wire.ndjson"), JSON.stringify({ connection, direction, ...frame }) + "\n");
+} });
 // Record the actual CLI init events before the native projection filters them.
 const publish = daemon.server.log.publish.bind(daemon.server.log);
 daemon.server.log.publish = frame => {
@@ -82,7 +84,7 @@ if (process.env.CODEX_SMOKE_MIXED === "1") {
 }
 if (daemon.server.log.turns(fresh.thread.id).length !== 0) throw new Error("fresh thread already has turns");
 as1.close();
-writeFileSync(join(root, "smoke-endpoint.json"), JSON.stringify({ url: `ws://127.0.0.1:${proxy.port}`, nativeUrl: daemon.codexIngressUrl, tokenPath: daemon.paths.tokenPath, databasePath: daemon.paths.databasePath, mixedThreadId, freshThreadId: backend === "claude" ? fresh.thread.id.slice(3) : fresh.thread.engineThreadId, freshAsThreadId: fresh.thread.id }));
+writeFileSync(join(root, "smoke-endpoint.json"), JSON.stringify({ url: process.env.CODEX_SMOKE_TRANSPORT === "unix" ? daemon.codexIngressUnixUrl : `ws://127.0.0.1:${proxy.port}`, nativeUrl: daemon.codexIngressUrl, tokenPath: daemon.paths.tokenPath, databasePath: daemon.paths.databasePath, mixedThreadId, freshThreadId: backend === "claude" ? fresh.thread.id.slice(3) : fresh.thread.engineThreadId, freshAsThreadId: fresh.thread.id }));
 let closing = false;
 async function shutdown() {
   if (closing) return; closing = true;

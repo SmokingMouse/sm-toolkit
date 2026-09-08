@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { sessionEnvironment } from "../../engines/session.js";
 import { ProtocolError, ErrorCode } from "../../protocol/index.js";
+import { NATIVE_METHOD_POLICY } from "./method-policy.js";
 
 export type NativeObject = Record<string, any>;
 export interface ControlClient {
@@ -8,11 +9,7 @@ export interface ControlClient {
   request(method: string, params?: NativeObject): Promise<NativeObject>;
   close(): Promise<void>;
 }
-export const CONTROL_METHODS = new Set([
-  "model/list", "configRequirements/read", "account/read", "account/rateLimits/read",
-  "hooks/list", "skills/list", "plugin/list", "experimentalFeature/list", "collaborationMode/list",
-  "environment/info", "config/read", "permissionProfile/list", "mcpServerStatus/list",
-]);
+export const CONTROL_METHODS = new Set(Object.keys(NATIVE_METHOD_POLICY).filter(method => NATIVE_METHOD_POLICY[method] === "control-read"));
 
 /** Ingress-owned process: no thread is ever started here. */
 export class ControlProcess implements ControlClient {
