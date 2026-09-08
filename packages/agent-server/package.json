@@ -1,0 +1,32 @@
+{
+  "name": "@smokingmouse/agent-server",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "AS Protocol v1: persistent agent sessions, transports, client and daemon",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./protocol": { "types": "./dist/protocol/index.d.ts", "default": "./dist/protocol/index.js" },
+    "./client": { "types": "./dist/client/index.d.ts", "default": "./dist/client/index.js" },
+    "./transport": { "types": "./dist/transport/index.d.ts", "default": "./dist/transport/index.js" },
+    "./daemon": { "types": "./dist/daemon/index.d.ts", "default": "./dist/daemon/index.js" },
+    "./paths": { "types": "./dist/daemon/paths.d.ts", "default": "./dist/daemon/paths.js" }
+  },
+  "bin": { "agent-server": "./bin/agent-server" },
+  "files": ["dist", "schema", "bin"],
+  "scripts": {
+    "prepare": "tsc --build",
+    "build": "tsc --build",
+    "typecheck": "tsc --build",
+    "test": "bun test",
+    "schema": "bun run scripts/generate-schema.ts",
+    "check-codex-alignment": "bun run scripts/check-codex-alignment.ts"
+  },
+  "dependencies": {
+    "@smokingmouse/agent": "workspace:*",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": { "bun-types": "^1.3.14", "typescript": "^6.0.3" }
+}

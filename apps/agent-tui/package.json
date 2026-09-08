@@ -1,0 +1,9 @@
+{
+  "name": "@smokingmouse/agent-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "agent-tui": "./bin/agent-tui" },
+  "scripts": { "build": "tsc --build", "typecheck": "tsc --build", "test": "bun test" },
+  "dependencies": { "@smokingmouse/agent-server": "workspace:*" }
+}

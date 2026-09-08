@@ -1,0 +1,113 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`all item types render stable text, folded and expanded reasoning 1`] = `
+"You: 你好
+[file] /tmp/a.ts
+
+Agent …: Hello 世界
+
+Reasoning: [折叠 · Ctrl-R 展开]
+
+$ pwd
+  cwd: /tmp
+1
+2
+3
+4
+5
+6
+  exit: 0
+
+Files:
+  add a.ts
+  delete b.ts
+
+Tool fs/read
+  {"path":"a.ts"}
+  "content"
+
+MCP local/search [failed]
+  {}
+  "offline"
+
+SubAgent agent: working
+  "50%"
+  "checked"
+
+Error (-1): failed
+
+Search: Bun
+["result"]
+
+Images: /tmp/image.png
+
+Plan: Build
+  [pending] test
+
+── Context compacted · compact_boundary ──"
+`;
+
+exports[`approval and question cards show contents and resolutions 1`] = `
+"[request] Action Required
+Command: ls
+cwd: /tmp
+Reason: inspect
+y 允许 · s 本会话允许 · n 拒绝 · a 中止
+Enter 不操作 · Esc 拒绝
+
+[request] Action Required
+update a.ts
+grantRoot: /tmp
+y 允许 · s 本会话允许 · n 拒绝 · a 中止
+Enter 不操作 · Esc 拒绝
+
+[request] Action Required
+Permissions: {"network":{"enabled":true}}
+cwd: /tmp
+y 允许 · s 本会话允许 · n 拒绝 · a 中止
+Enter 不操作 · Esc 拒绝
+
+[request] Action Required
+问题 1/1:  Choose
+1. [ ] One — first
+2. [x] Two
+数字切换多选 · Enter 下一题/提交
+自由回答: 
+Enter to confirm · Esc to cancel"
+`;
+
+exports[`fixed header, footer, queue and active card viewport snapshots 1`] = `
+"th_demo | cwd /tmp | model unknown
+codex running | 待处理 0 | 租约:未持有 | queue 1 | tokens 10 in / 4 out / 3 cached | connected
+mode default | effort — | model — | ctx [??????????] ?% / ~200000 | bypass 上限未知，已隐藏
+You: 你好
+[file] /tmp/a.ts
+
+Agent …: Hello 世界
+
+排队 #1: next
+
+
+
+系统日志 0 条 · 折叠 · Ctrl-L /log
+
+Ctrl-N 新建 · Ctrl-T 会话 · Enter 发送 · Tab effort · Shift-Tab 权限 · Ctrl-R 推理 · Ctrl-C 两次退出
+> new input"
+`;
+
+exports[`fixed header, footer, queue and active card viewport snapshots 2`] = `
+"th_demo | cwd /tmp | model unknown
+codex running | 待处理 1 | 租约:未持有 | queue 1 | tokens 10 in / 4 o
+ut / 3 cached | connected
+mode default | effort — | model — | ctx [??????????] ?% / ~200000 | b
+ypass 上限未知，已隐藏
+[request] Action Required
+Command: ls
+cwd: /tmp
+y 允许 · s 本会话允许 · n 拒绝 · a 中止
+Enter 不操作 · Esc 拒绝
+系统日志 0 条 · 折叠 · Ctrl-L /log
+
+审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片
+> "
+`;

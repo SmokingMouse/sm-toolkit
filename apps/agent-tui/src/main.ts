@@ -1,0 +1,28 @@
+import { AgentClient } from "@smokingmouse/agent-server/client";
+import { help, parseOptions, readToken } from "./options.js";
+import { bindClient, TuiModel } from "./model.js";
+import { runTerminal } from "./terminal.js";
+import { startHerdr } from "./herdr.js";
+import { publishReady, threadStartParams } from "./handoff.js";
+
+export async function main(args = process.argv.slice(2)): Promise<number> {
+  let client: AgentClient | undefined;
+  try {
+    const options = parseOptions(args);
+    if (options.help) { console.log(help); return 0; }
+    client = new AgentClient(options.endpoint, { token: readToken(options.tokenPath), client: { name: "agent-tui", version: "0.1.0", kind: "tui", label: "agent-tui" }, capabilities: { pendingRequests: true, engineEvents: true, bashInput: true, serverRequests: ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput"] } });
+    const model = new TuiModel(); bindClient(client, model);
+    try { await client.connect(); } catch (error) { throw new Error(`Cannot connect to agent-server (${options.endpoint.transport === "unix" ? options.endpoint.path : options.endpoint.url}). Start it with agent-server start. ${String(error)}`); }
+    if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("agent-tui requires an interactive terminal (TTY)");
+    if (!options.attach) model.launchPermission = options.permission;
+    const threadId = options.attach ?? (await client.request("thread/start", threadStartParams(options))).thread.id;
+    await client.request("thread/attach", { threadId });
+    model.awaitFirstTurn = options.awaitFirstTurn;
+    publishReady(options, model.thread);
+    if (model.thread?.status.type === "systemError") model.message = "引擎已中断：检查失败轮次与队列后显式 /resume；不会自动重投。";
+    const stopHerdr = startHerdr(model, text => process.stdout.write(text));
+    try { await runTerminal(client, model); } finally { await stopHerdr(); }
+    return 0;
+  } catch (error) { console.error(`agent-tui: ${error instanceof Error ? error.message : String(error)}`); return 1; }
+  finally { client?.close(); }
+}

@@ -1,0 +1,14 @@
+import { z } from "zod";
+import { RpcErrorSchema } from "./errors.js";
+export const RpcIdSchema = z.union([z.number().int(), z.string()]);
+export const RequestSchema = z.strictObject({ jsonrpc: z.literal("2.0"), id: RpcIdSchema, method: z.string(), params: z.json() });
+export const ResponseSchema = z.strictObject({ jsonrpc: z.literal("2.0"), id: RpcIdSchema, result: z.json() });
+export const ErrorResponseSchema = z.strictObject({ jsonrpc: z.literal("2.0"), id: RpcIdSchema.nullable(), error: RpcErrorSchema });
+export const NotificationSchema = z.strictObject({ jsonrpc: z.literal("2.0"), method: z.string(), params: z.json() });
+export const FrameSchema = z.union([RequestSchema, ResponseSchema, ErrorResponseSchema, NotificationSchema]);
+export type RpcId = z.infer<typeof RpcIdSchema>;
+export type Request = z.infer<typeof RequestSchema>;
+export type Response = z.infer<typeof ResponseSchema>;
+export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
+export type Notification = z.infer<typeof NotificationSchema>;
+export type Frame = z.infer<typeof FrameSchema>;
