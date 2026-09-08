@@ -3,12 +3,13 @@ import type { RequestCard, TuiModel } from "./model.js";
 import { Sessions } from "./sessions.js";
 import { pickerOffset } from "./render.js";
 import { imageInput, messageInput, pasteImage, unquote } from "./attachments.js";
-import { CompletionSource } from "./completion.js";
+import { CompletionSource, completionToken } from "./completion.js";
 import { controlError, controlSuccess, effortBudgets, efforts, estimatedContextWindow, nativePermission, nextEffort, nextPermission, permissionModes, type Effort, type Permission } from "./modes.js";
 import { InputLease } from "./lease.js";
 import { bashInput } from "./bash-input.js";
 import { controlPayload, engineCommand, nativeContext, renderEngineResult, type EngineCommand } from "./engine-commands.js";
 import { help } from "./options.js";
+import { focusStack } from "./focus.js";
 
 export interface Key { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean; paste?: boolean; sequence?: string }
 export class Controller {
@@ -33,14 +34,9 @@ export class Controller {
   async key(text: string | undefined, key: Key = {}): Promise<void> {
     try {
       this.lease.touch(this.model.thread?.id);
-      // Approval shortcuts apply only to physical keys, including during a session scan.
-      if (key.paste && this.model.activeCard && this.model.activeCard.request.method !== "item/tool/requestUserInput") {
-        this.model.input += text ?? "";
-        this.model.completion = undefined;
-        return;
-      }
       if (key.ctrl && key.name === "c") {
         this.model.rewindConfirmation = undefined;
+        this.model.resumeConfirmation = undefined;
         if (this.now() - this.interruptedAt < 1500) { this.exit(); return; }
         this.interruptedAt = this.now(); this.model.message = "已请求中断；1.5 秒内再按 Ctrl-C 退出";
         this.model.changed();
@@ -48,54 +44,59 @@ export class Controller {
         return;
       }
       this.interruptedAt = -Infinity;
-      if (this.model.rewindConfirmation && !this.model.activeCard) {
+      // Global view keys never decide a card or edit another surface's buffer.
+      if (!key.paste && key.ctrl && key.name === "l") { this.toggleLog(); return; }
+      if (!key.paste && key.ctrl && key.name === "r") { this.model.expandedReasoning = !this.model.expandedReasoning; return; }
+      if (!key.paste && key.ctrl && key.name === "p") { this.model.expandedPlan = !this.model.expandedPlan; return; }
+      if (!key.paste && key.name === "f6") {
+        const focus = ["history", ...(this.model.logExpanded ? ["log"] : []), ...(this.model.tasksVisible ? ["tasks"] : [])] as const;
+        this.model.panelFocus = focus[(focus.indexOf(this.model.panelFocus) + 1) % focus.length] as typeof this.model.panelFocus; return;
+      }
+      if (!key.paste && key.ctrl && (key.name === "n" || key.name === "t")) {
+        if (key.name === "n" && this.model.activeCard) this.model.discardNote = "卡片待处理：Ctrl-N 新建会话会离开卡片，已丢弃；请先处理卡片";
+        else if (this.sessions.busy || this.model.sessionOperation) this.sessions.rejectInput();
+        else if (this.submitting || this.controlling) this.model.message = "提交进行中，本次快捷键已丢弃，请稍后重试";
+        else {
+          this.model.rewindConfirmation = undefined; this.model.resumeConfirmation = undefined;
+          await this.sessions.run(key.name === "n" ? "/new" : "/threads");
+        }
+        return;
+      }
+      const focus = focusStack(this.model)[0];
+      if (focus === "card") {
+        if (key.name === "pageup" || key.name === "pagedown") {
+          if (this.model.panelFocus !== "history") {
+            const field = this.model.panelFocus === "log" ? "logScroll" : "taskScroll";
+            this.model[field] = Math.max(0, this.model[field] + (key.name === "pageup" ? 5 : -5)); return;
+          }
+          this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? -10 : 10)); return;
+        }
+        await this.cardKey(this.model.activeCard!, text, key); return;
+      }
+      if (focus === "rewind") {
         const confirmation = this.model.rewindConfirmation;
         if (!key.paste && !key.ctrl && !key.meta && text?.toLowerCase() === "y") {
           this.model.rewindConfirmation = undefined;
-          if (confirmation.threadId !== this.model.thread?.id) throw new Error("会话已切换，请重新 /rewind");
-          await this.control(() => this.runEngineCommand(confirmation.request));
+          if (confirmation!.threadId !== this.model.thread?.id) throw new Error("会话已切换，请重新 /rewind");
+          await this.control(() => this.runEngineCommand(confirmation!.request));
         } else if (!key.paste && (text?.toLowerCase() === "n" || ["return", "enter", "escape"].includes(key.name ?? ""))) {
           this.model.rewindConfirmation = undefined; this.model.message = "已取消回滚";
         }
         return;
       }
-      if (this.sessions.busy) {
-        const card = this.model.activeCard;
-        if (this.sessions.scanning && card) {
-          if (key.name === "pageup" || key.name === "pagedown") {
-            this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? -10 : 10)); return;
-          }
-          if (card.request.method === "item/tool/requestUserInput" || key.name === "escape" || (!key.ctrl && !key.meta && ["y", "s", "n", "a"].includes(text?.toLowerCase() ?? ""))) {
-            await this.cardKey(card, text, key); return;
-          }
-        }
-        this.sessions.rejectInput(); return;
-      }
-      // Match render's card overlay, including lease acquisition and reply confirmation.
-      // In-flight card keys never fall through to a hidden actionable surface.
-      if (this.model.activeCard && !this.model.picker) {
-        if (key.name === "pageup" || key.name === "pagedown") {
-          this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? -10 : 10)); return;
-        }
-        await this.cardKey(this.model.activeCard, text, key); return;
-      }
-      if (this.model.resumeConfirmation) {
+      if (focus === "resume") {
         const threadId = this.model.resumeConfirmation;
-        if (!key.ctrl && !key.meta && text?.toLowerCase() === "y") {
+        if (!key.paste && !key.ctrl && !key.meta && text?.toLowerCase() === "y") {
           this.model.resumeConfirmation = undefined;
           await this.sessions.run("/resume", threadId, true);
-        } else if (text?.toLowerCase() === "n" || ["return", "enter", "escape"].includes(key.name ?? "")) {
+        } else if (!key.paste && (text?.toLowerCase() === "n" || ["return", "enter", "escape"].includes(key.name ?? ""))) {
           this.model.resumeConfirmation = undefined; this.model.message = "已取消恢复关闭的会话";
         }
         return;
       }
-      if (key.ctrl && (key.name === "n" || key.name === "t")) {
-        if (this.submitting || this.controlling) this.model.message = "提交进行中，本次快捷键已丢弃，请稍后重试";
-        else await this.sessions.run(key.name === "n" ? "/new" : "/threads");
-        return;
-      }
-      if (this.model.forkPicker) {
-        const picker = this.model.forkPicker;
+      if (focus === "busy") { this.sessions.rejectInput(); return; }
+      if (focus === "fork") {
+        const picker = this.model.forkPicker!;
         if (key.name === "escape") this.model.forkPicker = undefined;
         else if (key.name === "up") picker.index = Math.max(0, picker.index - 1);
         else if (key.name === "down") picker.index = Math.min(picker.entries.length - 1, picker.index + 1);
@@ -106,8 +107,8 @@ export class Controller {
         }
         return;
       }
-      if (this.model.picker) {
-        const picker = this.model.picker;
+      if (focus === "threads") {
+        const picker = this.model.picker!;
         if (key.name === "escape") this.model.picker = undefined;
         else if (key.name === "up") picker.index = Math.max(0, picker.index - 1);
         else if (key.name === "down") picker.index = Math.min(Math.max(0, picker.entries.length - 1), picker.index + 1);
@@ -118,11 +119,7 @@ export class Controller {
         }
         return;
       }
-      if (key.ctrl && key.name === "l") { this.toggleLog(); return; }
-      if (key.name === "f6") {
-        const focus = ["history", ...(this.model.logExpanded ? ["log"] : []), ...(this.model.tasksVisible ? ["tasks"] : [])] as const;
-        this.model.panelFocus = focus[(focus.indexOf(this.model.panelFocus) + 1) % focus.length] as typeof this.model.panelFocus; return;
-      }
+      if (focus === "permissions") { await this.permissionKey(text, key); return; }
       if (this.model.enginePanel && !this.model.activeCard && this.model.panelFocus === "history" && (key.name === "pageup" || key.name === "pagedown")) {
         this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? -10 : 10)); return;
       }
@@ -132,25 +129,39 @@ export class Controller {
       }
       if (key.name === "pageup" || key.name === "pagedown") { this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? (this.model.activeCard ? -10 : 10) : (this.model.activeCard ? 10 : -10))); return; }
       if (key.name === "escape" && this.model.enginePanel && !this.model.completion) { this.model.enginePanel = undefined; this.model.scroll = 0; return; }
-      if (this.model.permissionPicker !== undefined) { await this.permissionKey(text, key); return; }
-      if (key.paste || (key.ctrl && key.name === "j") || (key.shift && ["return", "enter"].includes(key.name ?? ""))) {
-        this.model.input += key.paste ? (text ?? "") : "\n";
-        this.model.completion = undefined; return;
-      }
       const completion = this.model.completion;
       if (completion) {
+        const draft = completion.draft ?? this.model.input;
         if (key.name === "escape") { this.model.completion = undefined; return; }
         if (key.name === "up" || key.name === "down") {
           completion.selected = (completion.selected + (key.name === "up" ? -1 : 1) + completion.candidates.length) % completion.candidates.length; return;
         }
         if (!key.shift && ["tab", "return", "enter"].includes(key.name ?? "")) {
           const name = completion.candidates[completion.selected].name;
-          this.model.input = this.model.input.slice(0, completion.start) + completion.prefix + (/\s|["']/.test(name) ? JSON.stringify(name) : name) + " ";
+          this.model.input = draft.slice(0, completion.start) + completion.prefix + (/\s|["']/.test(name) ? JSON.stringify(name) : name) + " ";
           this.model.completion = undefined; return;
         }
+        if (key.name === "backspace") completion.draft = Array.from(draft).slice(0, -1).join("");
+        else if (key.ctrl && key.name === "u") completion.draft = "";
+        else if (key.paste) completion.draft = draft + (text ?? "");
+        else if ((key.ctrl && key.name === "j") || (key.shift && ["return", "enter"].includes(key.name ?? ""))) completion.draft = draft + "\n";
+        else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) completion.draft = draft + text;
+        else return;
+        const edited = completion.draft;
+        if (!completionToken(edited)) { this.model.completion = undefined; this.model.input = edited; return; }
+        const next = await this.completions.complete(edited, this.model.thread?.cwd ?? process.cwd());
+        if (this.model.completion !== completion || completion.draft !== edited) return;
+        // Finishing a token is an explicit editor transition, never a send.
+        // While covered by a card, retain the edit in its original selector.
+        if (!next && focusStack(this.model)[0] !== "completion") return;
+        this.model.completion = next;
+        if (!next) this.model.input = edited;
+        return;
       }
-      if (key.ctrl && key.name === "r") { this.model.expandedReasoning = !this.model.expandedReasoning; return; }
-      if (key.ctrl && key.name === "p") { this.model.expandedPlan = !this.model.expandedPlan; return; }
+      if (key.paste || (key.ctrl && key.name === "j") || (key.shift && ["return", "enter"].includes(key.name ?? ""))) {
+        this.model.input += key.paste ? (text ?? "") : "\n";
+        this.model.completion = undefined; return;
+      }
       if (key.name === "tab") {
         await this.control(async () => key.shift || key.sequence === "\x1b[Z"
           ? this.setPermission(nextPermission(this.model.thread?.permission, this.model.bypassAvailable))
@@ -164,7 +175,7 @@ export class Controller {
       const draft = this.model.input;
       this.model.completion = undefined;
       const next = await this.completions.complete(draft, this.model.thread?.cwd ?? process.cwd());
-      if (draft === this.model.input) this.model.completion = next;
+      if (draft === this.model.input && focusStack(this.model)[0] === "input") this.model.completion = next;
     } catch (error) { this.model.recordError(error); }
     finally { this.resize(); this.model.changed(); }
   }
@@ -385,7 +396,7 @@ export class Controller {
           };
           const unsubscribe = this.model.onChange(check);
           const timer = setTimeout(() => {
-            if (card.state === "sending") { card.state = "pending"; card.note = "审批回复超时，可重试；不会自动重发"; }
+            if (card.state === "sending") { card.state = "pending"; card.note = "审批回复超时，可重试；不会自动重发"; this.model.message = card.note; }
             finish(new Error("审批回复超时，可重试；不会自动重发")); this.model.changed();
           }, Math.min(this.client.options.requestTimeoutMs ?? 5000, 5000));
           timer.unref(); card.state = "sending";
@@ -395,21 +406,22 @@ export class Controller {
     } finally { card.replying = false; this.model.changed(); }
   }
   private async cardKey(card: RequestCard, text: string | undefined, key: Key): Promise<void> {
-    if (card.state === "sending" || card.replying) {
+    if (card.state === "sending" || card.replying || key.paste) {
       // Keep draft editing usable while the overlay owns all action keys.
       // In particular Enter must not submit that draft or confirm a hidden picker.
       if (key.name === "return" || key.name === "enter") return;
-      if (key.name === "backspace") this.model.input = Array.from(this.model.input).slice(0, -1).join("");
-      else if (key.ctrl && key.name === "u") { this.model.input = ""; this.model.attachments = []; }
-      else if (key.paste) this.model.input += text ?? "";
-      else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) this.model.input += text;
-      this.model.completion = undefined;
+      if (key.name === "backspace") card.draft = Array.from(card.draft).slice(0, -1).join("");
+      else if (key.ctrl && key.name === "u") card.draft = "";
+      else if (key.paste) card.draft += text ?? "";
+      else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) card.draft += text;
       return;
     }
     if (card.state !== "pending") return;
     const handle = this.client.pendingRequests.get(card.request.params.requestId);
     if (!handle || this.client.state !== "connected") throw new Error("请求连接已失效，等待重连快照");
     if (handle.method === "item/tool/requestUserInput") {
+      if (key.ctrl && key.name === "u") { card.draft = ""; return; }
+      if ((key.ctrl && key.name === "j") || (key.shift && ["return", "enter"].includes(key.name ?? ""))) { card.draft += "\n"; return; }
       // TerminalInput already normalizes pasted CR/CRLF for every input surface.
       // Treat the entire paste as draft text, including digits that select options when typed.
       if (key.paste) { card.draft += text ?? ""; return; }
@@ -427,17 +439,22 @@ export class Controller {
           if (card.draft.trim()) card.answers[question.id] = { answers: [card.draft.trim()] };
           if (!card.answers[question.id]?.answers.length) throw new Error("请选择选项或输入回答");
         }
-        card.draft = "";
-        if (card.question + 1 < handle.params.questions.length) { card.question++; this.model.scroll = 0; return; }
-        await this.reply(card, () => handle.respond({ answers: card.answers })); return;
+        if (card.question + 1 < handle.params.questions.length) { card.draft = ""; card.question++; this.model.scroll = 0; return; }
+        const answers = structuredClone(card.answers);
+        await this.reply(card, () => handle.respond({ answers })); return;
       }
       if (key.name === "backspace") card.draft = Array.from(card.draft).slice(0, -1).join("");
       else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) card.draft += text;
       return;
     }
     const choices = { y: "accept", s: "acceptForSession", n: "reject", a: "abort" } as const;
-    const decision = key.name === "escape" ? "reject" : choices[text?.toLowerCase() as keyof typeof choices];
-    if (!decision) return;
+    const decision = key.name === "escape" ? "reject" : !key.ctrl && !key.meta ? choices[text?.toLowerCase() as keyof typeof choices] : undefined;
+    if (!decision) {
+      if (key.name === "backspace") card.draft = Array.from(card.draft).slice(0, -1).join("");
+      else if (key.ctrl && key.name === "u") card.draft = "";
+      else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) card.draft += text;
+      return;
+    }
     const exitPlan = handle.method === "item/permissions/requestApproval" && handle.params.permissions.toolName === "ExitPlanMode" && (decision === "accept" || decision === "acceptForSession");
     let won = false;
     const unsubscribe = this.client.onNotification("serverRequest/resolved", p => {

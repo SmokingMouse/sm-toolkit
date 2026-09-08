@@ -9,7 +9,7 @@ import type { Completion } from "./completion.js";
 import type { EngineCommand, EnginePanel } from "./engine-commands.js";
 import { controlError, estimatedContextWindow, nativePermission, permissionModes, type Effort, type Permission } from "./modes.js";
 
-export interface RequestCard { request: PendingServerRequest; responseId?: RpcId; replying?: boolean; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
+export interface RequestCard { request: PendingServerRequest; responseId?: RpcId; replying?: boolean; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string; scroll?: number }
 export function expiredNote(reason: string): string {
   return `${reason === "timeout" ? "请求超时" : "请求已撤回/过期"}：${reason}`;
 }
@@ -49,7 +49,13 @@ export class TuiModel {
   leaseExpiresAt = 0;
   contextWindow = 200_000;
   contextWindowEstimated = true;
-  scroll = 0;
+  private historyScroll = 0;
+  get scroll(): number { return this.activeCard?.scroll ?? (this.activeCard ? 0 : this.enginePanel ? this.enginePanel.scroll ?? 0 : this.historyScroll); }
+  set scroll(value: number) {
+    if (this.activeCard) this.activeCard.scroll = value;
+    else if (this.enginePanel) this.enginePanel.scroll = value;
+    else this.historyScroll = value;
+  }
   logs = new LogBuffer();
   logExpanded = false;
   private logAnchorEnd?: number;
@@ -123,7 +129,15 @@ export class TuiModel {
   }
   private listeners = new Set<() => void>();
   onChange(fn: () => void): () => void { this.listeners.add(fn); return () => this.listeners.delete(fn); }
-  changed(): void { for (const fn of this.listeners) fn(); }
+  changed(): void {
+    // A preempted destructive confirmation must never re-arm when a card leaves.
+    if (this.activeCard && (this.rewindConfirmation || this.resumeConfirmation)) {
+      this.rewindConfirmation = undefined; this.resumeConfirmation = undefined;
+      this.discardNote = "卡片优先：已取消回滚/恢复确认，请在卡片处理后重新发起";
+      this.message = "确认已取消，优先处理卡片";
+    }
+    for (const fn of this.listeners) fn();
+  }
   get activeCard(): RequestCard | undefined { return [...this.cards.values()].find(c => c.state === "pending" || c.state === "sending"); }
   get agentState(): "working" | "idle" | "blocked" {
     if (this.activeCard || this.connection !== "connected" || this.thread?.status.type === "systemError") return "blocked";
@@ -147,8 +161,7 @@ export class TuiModel {
   request(request: PendingServerRequest, responseId?: RpcId): void {
     if (this.thread && this.thread.id !== request.params.threadId) return;
     const old = this.cards.get(request.params.requestId);
-    if (!old || old.state === "offline") this.scroll = 0;
-    this.cards.set(request.params.requestId, { request, responseId: responseId ?? old?.responseId, state: "pending", question: old?.question ?? 0, answers: old?.answers ?? {}, draft: old?.draft ?? "" });
+    this.cards.set(request.params.requestId, { request, responseId: responseId ?? old?.responseId, state: "pending", question: old?.question ?? 0, answers: old?.answers ?? {}, draft: old?.draft ?? "", scroll: old?.scroll ?? 0 });
     if (request.state) this.pendingState(request.state);
     this.changed();
   }

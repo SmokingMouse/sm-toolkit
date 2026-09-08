@@ -3,7 +3,7 @@ import { basename, join } from "node:path";
 import { homedir } from "node:os";
 
 export interface Candidate { name: string; description: string }
-export interface Completion { start: number; prefix: "@" | "/"; candidates: Candidate[]; selected: number }
+export interface Completion { start: number; prefix: "@" | "/"; candidates: Candidate[]; selected: number; draft?: string }
 export const commands: Candidate[] = [
   { name: "new", description: "新建会话" },
   { name: "clear", description: "新建空会话" },
@@ -156,6 +156,6 @@ export class CompletionSource {
       entry.value.catch(() => { this.cache.delete(key); });
     }
     const candidates = fuzzyMatch(token.query, await entry.value);
-    return candidates.length ? { start: token.start, prefix: token.prefix, candidates, selected: 0 } : undefined;
+    return candidates.length ? { start: token.start, prefix: token.prefix, candidates, selected: 0, draft: input } : undefined;
   }
 }

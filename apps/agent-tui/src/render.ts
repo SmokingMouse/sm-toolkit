@@ -3,6 +3,7 @@ import { canResume, type RequestCard, type TuiModel } from "./model.js";
 import { shortId } from "./sessions.js";
 import { contextUsage, nativePermission, permissionModes } from "./modes.js";
 import { object } from "./observations.js";
+import { focusFooter, focusStack } from "./focus.js";
 
 /** Strip terminal control sequences from untrusted engine/user text before drawing. */
 export function plain(text: string): string {
@@ -105,10 +106,11 @@ const header = plain(`${thread?.backend ?? "agent"} ${thread?.status.type ?? "un
   const notices = model.discardNote ? [wrap(model.discardNote, width)[0]] : [];
   const headers = [...wrap(status, width), ...wrap(header, width), ...modeStatus.map(line => context.warning ? `\x1b[33m${line}\x1b[0m` : line)].slice(0, Math.max(1, height - 4 - notices.length));
   const baseAvailable = Math.max(0, height - headers.length - 3 - notices.length);
-  const input = model.activeCard?.state === "pending" && !model.activeCard.replying && model.activeCard.request.method === "item/tool/requestUserInput" ? model.activeCard.draft : model.input;
+  const focus = focusStack(model)[0];
+  const input = focus === "card" ? model.activeCard!.draft : focus === "completion" ? model.completion!.draft ?? model.input : model.input;
   const inputLines = input.split("\n").flatMap((line, i) => wrap(`${i ? "  " : "> "}${line}`, width));
   const inputRows = inputLines.slice(-Math.max(1, Math.min(6, height - 4)));
-  const completion = !model.activeCard && model.permissionPicker === undefined && !model.picker && !model.forkPicker && !model.sessionOperation && model.completion;
+  const completion = focus === "completion" && model.completion;
   const menu = completion ? completion.candidates.slice(Math.max(0, completion.selected - 3), Math.max(0, completion.selected - 3) + 6)
     .map(c => wrap(`${c === completion.candidates[completion.selected] ? "❯" : " "} ${completion.prefix}${c.name} — ${c.description}`, width)[0]) : [];
   const attached = !model.activeCard ? model.attachments.map(i => wrap(`[image] ${i.path}`, width)[0]) : [];
@@ -139,16 +141,15 @@ export function render(model: TuiModel, columns = 100, rows = 30, color = false)
   const content = model.enginePanel
     ? [{ text: `${model.enginePanel.title} · Esc 关闭 · PgUp/PgDn 滚动`, tone: "heading" }, ...model.enginePanel.lines].flatMap(line => wrap(line.text, width).map(text => color && line.tone ? `\x1b[${line.tone === "add" ? 32 : line.tone === "remove" ? 31 : 36}m${text}\x1b[0m` : text))
     : body.flatMap(line => wrap(line, width));
-  const picker = model.permissionPicker === undefined ? [] : ["权限模式 · ↑↓/数字选择 · Enter 确认 · Esc 取消", ...model.permissionChoices.map((p, i) => `${i === model.permissionPicker ? ">" : " "} ${i + 1}. ${p}${p === nativePermission(model.thread?.permission) ? " (当前)" : ""}`)];
+  const focus = focusStack(model)[0];
+  const picker = focus !== "permissions" ? [] : ["权限模式 · ↑↓/数字选择 · Enter 确认 · Esc 取消", ...model.permissionChoices.map((p, i) => `${i === model.permissionPicker ? ">" : " "} ${i + 1}. ${p}${p === nativePermission(model.thread?.permission) ? " (当前)" : ""}`)];
   const card = (model.activeCard ? renderCard(model.activeCard) : picker).flatMap(line => wrap(line, width));
-  const scanCard = model.sessionOperation === "/threads" && !!model.activeCard;
-const footer = scanCard ? "/threads 加载中 · 审批/问题卡可操作 · Ctrl-C 中断" : model.sessionOperation ? `${model.sessionOperation} 进行中 · 按键将丢弃 · Esc 不取消在途操作` : model.resumeConfirmation ? "恢复已关闭会话？[y/N] · Enter/n/Esc 取消" : model.picker ? "会话选择 · ↑/↓ 选择 · Enter 切换 · Esc 取消" : model.activeCard && (model.activeCard.replying || model.activeCard.state === "sending") ? "审批确认中 · 可编辑草稿 · Enter 暂不受理 · Ctrl-C 中断" : model.activeCard ? "审批/问题卡优先 · Ctrl-C 中断 · PgUp/PgDn 滚动卡片" : model.permissionPicker !== undefined ? "权限模式 · ↑↓/数字选择 · Enter 确认 · Esc 取消" : model.completion && !model.picker ? "↑↓ 选择 · Tab/Enter 插入 · Esc 关闭补全" : "Ctrl-N 新建 · Ctrl-T 会话 · Enter 发送 · Tab effort · Shift-Tab 权限 · Ctrl-R 推理 · Ctrl-C 两次退出";
   const panels: string[] = [];
-  const budget = model.picker || model.forkPicker || model.permissionPicker !== undefined || model.sessionOperation ? 0 : Math.max(0, frameAvailable - 1);
+  const budget = ["threads", "fork", "permissions", "busy"].includes(focus) ? 0 : Math.max(0, frameAvailable - 1);
   const logHeader = `系统日志 ${model.logs.length} 条${model.logs.dropped ? ` · 已丢弃 ${model.logs.dropped} 条` : ""}${model.logsMayBeMissing ? " · 重连后可能缺失" : model.logsStartAtAttach ? " · 仅显示接入后事件" : ""} · ${model.logExpanded ? "展开" : "折叠"} · Ctrl-L /log${model.panelFocus === "log" ? " [焦点]" : ""}`;
   if (budget > 0) panels.push(wrap(logHeader, width)[0]);
   const tail = (lines: string[], count: number, scroll: number) => { const end = Math.max(Math.min(lines.length, count), lines.length - scroll); return lines.slice(Math.max(0, end - count), end); };
-  if (!model.activeCard && model.logExpanded) {
+  if (model.logExpanded) {
     const count = Math.min(Math.floor(budget / 3), Math.max(0, budget - panels.length - (model.tasksVisible ? 1 : 0)));
     let lines: string[] = [];
     // Scroll by events, lay out only the entries needed to fill this viewport.
@@ -165,7 +166,7 @@ const footer = scanCard ? "/threads 加载中 · 审批/问题卡可操作 · Ct
       panels.push(...lines.slice(Math.max(0, lines.length - count)));
     }
   }
-  if (!model.activeCard && model.tasksVisible && panels.length < budget) {
+  if (model.tasksVisible && panels.length < budget) {
     const tasks = [...model.tasks.values()];
     panels.push(wrap(`Tasks ${tasks.length} · /tasks${model.panelFocus === "tasks" ? " [焦点]" : ""}`, width)[0]);
     const lines = tasks.flatMap(t => wrap(`[${t.status}] #${t.id}${t.inferred ? "?" : ""} ${t.title}`, width));
@@ -173,7 +174,7 @@ const footer = scanCard ? "/threads 加载中 · 审批/问题卡可操作 · Ct
   }
   const available = frameAvailable - panels.length;
   let middle: string[];
-  if ((model.picker || model.forkPicker) && !scanCard && !(model.forkPicker && model.activeCard)) {
+  if (focus === "threads" || focus === "fork") {
     const { entries, offset = 0 } = (model.forkPicker ?? model.picker)!;
     middle = entries.length ? pickerLines(model, width).flat().slice(offset, offset + available) : ["（daemon 中没有会话）"].slice(0, available);
   } else if (card.length) {
@@ -189,6 +190,5 @@ const footer = scanCard ? "/threads 加载中 · 审批/问题卡可操作 · Ct
   }
   while (middle.length < available) middle.push("");
   const status = [model.message, model.leaseWarning].filter(Boolean).join(" · ");
-  const forkFooter = model.rewindConfirmation && !model.activeCard ? "回滚会话？[y/N] · Enter/n/Esc 取消 · 仅实体 y 确认" : model.forkPicker && !model.sessionOperation && !model.activeCard ? "分叉 item 选择 · ↑/↓ 选择 · Enter 分叉 · Esc 取消" : footer;
-  return [...headers, ...middle, ...panels, ...extras, wrap(status, width)[0], ...notices, wrap(forkFooter, width)[0], ...inputRows].slice(-height).join("\n");
+  return [...headers, ...middle, ...panels, ...extras, wrap(status, width)[0], ...notices, wrap(focusFooter(model), width)[0], ...inputRows].slice(-height).join("\n");
 }

@@ -8,7 +8,7 @@ export const engineCommands: Record<string, string> = {
 };
 export interface EngineCommand { command: string; subtype: string; params: JsonObject }
 export interface OutputLine { text: string; tone?: "add" | "remove" | "heading" }
-export interface EnginePanel { title: string; lines: OutputLine[] }
+export interface EnginePanel { title: string; lines: OutputLine[]; scroll?: number }
 
 export function engineCommand(command: string, args: string[]): EngineCommand | undefined {
   // These native commands are outside the daemon allowlist; never send as prompts.

@@ -68,10 +68,12 @@ test("P1-1 card overlay exclusively consumes repeated Enter in lease and sending
     expect(model.thread?.id).toBe("source");
     expect(model.input).toBe("/fork first");
     await controller.key("X");
-    expect(model.input).toBe("/fork firstX");
+    expect(model.input).toBe("/fork first");
+    expect(model.activeCard!.draft).toBe("X");
     await controller.key(undefined, { name: "return" });
     expect(calls).toHaveLength(before);
-    expect(model.input).toBe("/fork firstX");
+    expect(model.input).toBe("/fork first");
+    expect(model.activeCard!.draft).toBe("X");
     controller.dispose();
   }
 });

@@ -13,18 +13,10 @@ export async function runTerminal(client: AgentClient, model: TuiModel): Promise
   const controller = new Controller(client, model, stop);
   const draw = () => { timer = undefined; output.write("\x1b[H" + render(model, output.columns, output.rows, true).replace(/\n/g, "\x1b[K\r\n") + "\x1b[K"); };
   const schedule = () => { controller.resize(output.columns, output.rows); if (!timer) timer = setTimeout(draw, 16); };
-  // Complete each async edit before applying the next key in the same PTY chunk.
-  let edits = Promise.resolve();
+  // Dispatch at receipt. Text edits and action guards are synchronous before
+  // any RPC/completion await; queued keys must never migrate to a revealed modal.
   const keyboard = new TerminalInput((text: string | undefined, key: Key) => {
-    // Route overlay keys at receipt, so Enter cannot wait for a reply and then
-    // execute against the picker/input revealed when that card disappears.
-    if ((model.activeCard && !model.picker) || controller.sessions.busy || (key.ctrl && key.name === "c")) { void controller.key(text, key); return; }
-    edits = edits.then(() => {
-      const pending = controller.key(text, key);
-      // Session RPCs stay in flight so subsequent keys are rejected (or answer a scan-time card).
-      if (!controller.sessions.busy && !controller.inFlight) return pending;
-      void pending;
-    });
+    void controller.key(text, key);
   });
   const data = (chunk: Buffer) => keyboard.write(chunk);
   const dispose = model.onChange(schedule);

@@ -57,7 +57,7 @@ test("P2-f: real approval resolves before a delayed thread scan completes", asyn
     engine.emit({ type: "approval", request: { method: "item/commandExecution/requestApproval", params: { threadId: thread.id, turnId: turn.id, itemId: "tool", requestId: "scan-approval", startedAtMs: Date.now(), command: "pwd", cwd: home } }, respond: result => { decision = result; } });
     await until(() => !!a.model.activeCard);
     for (const text of ["y", "s", "n", "a"]) await a.controller.key(text, { paste: true });
-    expect(decision).toBeUndefined(); expect(a.model.input).toBe("ysna");
+    expect(decision).toBeUndefined(); expect(a.model.input).toBe(""); expect(a.model.activeCard!.draft).toBe("ysna");
     await a.controller.key("y"); await until(() => !!decision);
     expect(decision).toEqual({ decision: "accept" }); expect(a.controller.sessions.scanning).toBe(true);
     expect(a.model.discardNote).toBe("");
