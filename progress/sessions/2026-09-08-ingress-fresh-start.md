@@ -4,4 +4,5 @@
 - config 按项映射到 AS 选项，本地偏好只记录键名审计；模型/路径/权限/服务档守卫保留。personality、webSearch 增加线程选项与引擎映射，schema 同步生成。resume/fork 沿用保存的启动偏好。
 - 冒烟增加 fresh_tui_session_ok（每后端三次真实 TUI 不带 resume 新建并完成一轮）；prod 模式连接已有 endpoint，默认双后端，保留用户 config，不启停 daemon。
 - 实测：agent-server 1214 pass，typecheck 通过；D3/D4 原样命令通过。本机默认用户 config 连接临时源码 daemon，Codex/Claude 各三次通过；升级回归进行中。
+- 完整回归暴露两处旧 oracle 依赖模型持续输出的假设：Claude 可能拒绝诊断命令或 10000 行输出。审批/中断等待现会检查精确目标终局并快速失败，提示明确测试目的，保留真实审批与三重中断证据；新版本 D4 通过，默认升级回归重跑中。
 - Next：完成升级检查、提交并请求主控推送；创建/合并 PR，主仓快进与构建，生产重启及后验由主控执行。

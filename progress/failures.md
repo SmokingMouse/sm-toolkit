@@ -6,12 +6,12 @@
 
 ## 已结案
 
-### Claude 冒烟已结束却继续等待审批卡（resolved）
+### Claude 冒烟已结束却继续等待审批或中断（resolved）
 
-- 症状：升级最后一组 Claude 把诊断命令误判为注入而直接回复，turn 已 completed，脚本仍等审批直到总超时。
+- 症状：Claude 把诊断命令误判为注入而直接回复，或拒绝生成 10000 行；turn 已 completed，脚本仍等审批或 interrupted 直到总超时。
 - 可证伪假设：等待审批的 oracle 没检查无审批的终局，而非审批 broker 丢卡；wire 明确只有 userMessage/agentMessage 与 completed，无工具请求。
 - 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,fresh_tui_session_ok`。
-- 修复：等待审批时遇到无审批终局立即失败并指向 wire 证据；明确临时测试文件的目的，保留真实审批/工具输出校验，不把模型拒绝当成功。D4 复跑通过；模型将来仍可能拒绝，脚本会明确报失败。
+- 修复：等待审批或中断时检查目标 turn 终局，缺审批或非 interrupted 立即失败并指向 wire；明确临时测试文件目的，中断改用 200 句流式测试。保留真实审批/工具输出及同 thread/turn 的中断请求、回执、终局三重校验，不把模型拒绝当成功。D4 复跑通过；模型将来仍可能拒绝，脚本会明确报失败。
 
 ### 官方 TUI 冷启动 config 被整体拒绝（resolved）
 

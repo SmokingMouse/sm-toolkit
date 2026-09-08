@@ -86,6 +86,7 @@ def main():
     held_stream = threading.Event()
     release_stream = threading.Event()
     hold_marker = "INGRESS_SMOKE_HOLD_UNTIL_INTERRUPT"
+    claude_hold_prompt = "For a terminal streaming and cancellation test, write a numbered list of 200 short sentences about software testing, one per line. Do not use tools. I will press Escape after the stream starts to verify cancellation; a complete document is not needed."
     fresh_marker = "INGRESS_SMOKE_FRESH_TURN"
     fresh_response = "INGRESS_SMOKE_FRESH_COMPLETED"
     offline_marker = "INGRESS_SMOKE_OFFLINE"
@@ -331,6 +332,15 @@ trust_level = "trusted"
         current = frames()[offset:]
         requests = [f for f in current if f.get("direction") == "TUI>AS" and f.get("method") == method and (thread is None or f.get("params", {}).get("threadId") == thread)]
         return next((f["result"] for r in requests for f in current if f.get("direction") == "AS>TUI" and f.get("id") == r["id"] and f.get("connection") == r.get("connection") and "result" in f), None)
+
+    def interrupt_result(thread, turn, offset):
+        current = frames()[offset:]
+        terminal = [f for f in current if f.get("method") == "turn/completed" and f["params"].get("threadId") == thread and f["params"]["turn"]["id"] == turn]
+        if any(f["params"]["turn"]["status"] != "interrupted" for f in terminal):
+            raise RuntimeError("target turn ended before TUI interrupt; inspect the assistant response in wire.ndjson")
+        requests = [f for f in current if f.get("method") == "turn/interrupt" and f.get("direction") == "TUI>AS" and f["params"].get("threadId") == thread and f["params"].get("turnId") == turn]
+        ack = any(f.get("connection") == r.get("connection") and f.get("id") == r["id"] and "result" in f and f.get("direction") == "AS>TUI" for r in requests for f in current)
+        return bool(requests) and ack and bool(terminal)
 
     def switch(thread, picker=False, title="S3-FRESH"):
         nonlocal selected_thread
@@ -618,11 +628,11 @@ trust_level = "trusted"
                 offset = len(frames())
                 held_stream.clear()
                 release_stream.clear()
-                prompt(hold_marker if backend == "codex" else "Do not use tools. Write a very long numbered list from 1 to 10000, spelling out each number in English. Start immediately and keep writing until 10000.")
+                prompt(hold_marker if backend == "codex" else claude_hold_prompt)
                 wait(lambda: held_stream.is_set() if backend == "codex" else any(f.get("method") == "item/agentMessage/delta" and f["params"].get("threadId") == target for f in frames()[offset:]), "mixed backend active stream")
                 active = next(f["params"]["turn"]["id"] for f in frames()[offset:] if f.get("method") == "turn/started" and f["params"].get("threadId") == target)
                 os.write(master, b"\x1b")
-                wait(lambda: response_to("turn/interrupt", offset, target) is not None and any(f.get("method") == "turn/completed" and f["params"].get("threadId") == target and f["params"]["turn"]["id"] == active and f["params"]["turn"]["status"] == "interrupted" for f in frames()[offset:]), "mixed interrupt isolated to active thread")
+                wait(lambda: interrupt_result(target, active, offset), "mixed interrupt isolated to active thread")
                 assert not any(f.get("method") in {"turn/completed", "turn/interrupt"} and f.get("params", {}).get("threadId") == peer for f in frames()[offset:]), "interrupt affected other backend"
                 interrupts.append({"thread_id": target, "turn_id": active, "backend": backend})
                 release_stream.set()
@@ -692,7 +702,7 @@ trust_level = "trusted"
         until = time.monotonic() + 0.7
         while time.monotonic() < until:
             pump()
-        prompt(hold_marker if args.backend == "codex" else "Do not use tools. Write a very long numbered list from 1 to 10000, spelling out each number in English. Start immediately and keep writing until 10000.")
+        prompt(hold_marker if args.backend == "codex" else claude_hold_prompt)
         if args.backend == "codex":
             wait(lambda: held_stream.is_set() and any(f.get("method") == "turn/started" for f in frames()[before:]), "resumed model stream open and held")
         else:
@@ -703,13 +713,7 @@ trust_level = "trusted"
         assert not any(f.get("method") == "turn/completed" and f["params"]["turn"]["id"] == turn_id for f in resumed_frames), "held turn completed before interrupt"
         proof["resume_ok"] = True # resumed TUI loaded history and submitted another real turn
         os.write(master, b"\x1b")
-        def interrupted():
-            current = frames()[before:]
-            requests = [f for f in current if f.get("method") == "turn/interrupt" and f.get("direction") == "TUI>AS" and f["params"].get("turnId") == turn_id]
-            ack = any(f.get("connection") == r.get("connection") and f.get("id") == r["id"] and "result" in f and f["direction"] == "AS>TUI" for r in requests for f in current)
-            terminal = any(f.get("method") == "turn/completed" and f["params"]["turn"]["id"] == turn_id and f["params"]["turn"]["status"] == "interrupted" for f in current)
-            return bool(requests) and ack and terminal
-        wait(interrupted, "matching interrupt request, acknowledgement and terminal notification")
+        wait(lambda: interrupt_result(thread_id, turn_id, before), "matching interrupt request, acknowledgement and terminal notification")
         proof["interrupt_ok"] = True
         if args.backend == "claude" or mixed:
             init_frames = [json.loads(line)["params"]["payload"] for line in (root / "claude-init.ndjson").read_text().splitlines()]
