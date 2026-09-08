@@ -6,6 +6,13 @@
 
 ## 已结案
 
+### codex-ingress slice 3 返工：混合 picker 的模型与准备状态（resolved）
+
+- 症状：Claude 主会话切 Codex 被 changing backend guard 拒绝；合并后的 fresh 关闭/重开与旧 full 租约断言不兼容；对当前线程重复 /resume 不发新 resume RPC。
+- 可证伪假设：TUI 启动 --model 是后续 resume 的粘性覆盖；fresh 仍带 full 或显式向 Claude 传 sandbox；脚本把当前选择当成新选择。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude`；wire 中跨后端 resume 必须 model=null，双线程轮流完成且各自审批/中断可核验。
+- 修复：用配置默认模型和显式 sonnet 建线程，保留跨后端模型 override 拒绝；fresh 在关闭前命名、关闭后停旧 PTY，再以 auto-edit 重开（仅 Codex 传 sandbox）；跟踪真实 resume/turn 选择。旧租约测试改为普通 full 输入不占租约，与 129f581 一致。
+
 ### codex-ingress slice 3：分页错误被包装为引擎不可用（resolved）
 
 - 症状：真实 0.153.4 的无效 items cursor 原本返回 -32600，ingress 返回 -32004，并附引擎 stderr；活进程被错误描述为 unavailable。

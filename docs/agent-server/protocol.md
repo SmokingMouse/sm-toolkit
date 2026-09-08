@@ -877,8 +877,8 @@ TUI 改 effort 的错误文案为 `as-ingress: Claude 线程 effort 只在新建
 官方 TUI 0.153.4 CLI/config 已移除 untrusted 选项，虽然 native 协议仍有该枚举；正常 TUI 使用 on-request。
 
 Claude 冒烟：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,external_client_reply_while_attached_ok`。
-使用真实 Claude CLI 与真实模型，显式 `--model sonnet`，读取实际 system/init 帧并断言每个 model 包含 sonnet；不调用本地模型 fixture。
-脚本按 `--backend claude` 自动设置隔离 daemon 的 `claude_threads=true`；Codex 冒烟保持 false。
+Claude 引擎使用真实 CLI 与真实模型，显式 `--model sonnet`，读取实际 system/init 帧并断言每个 model 包含 sonnet；Claude 模型响应不使用 fixture。
+脚本按 `--backend claude` 或启用 `list_contains_both_backends` 设置隔离 daemon 的 `claude_threads=true`；不测混合后端的 Codex 冒烟仍为 false。
 只复用已有 Claude 登录文件，隔离 HOME/settings，并要求 Bash/Read 审批；不存在登录文件时明确 blocker，不申请新凭证。
 真实 PTY 执行审批按键、`/quit`、恢复和 Esc 中断；中断前确认真实 agentMessage delta 且该 turn 尚未完成。
 六判据之外支持 `agent_message_delta,command_execution_output,user_input_question,unsupported_method_errors`。
@@ -892,6 +892,7 @@ unsupported_method_errors 由同一隔离 daemon 的独立 native WebSocket 探�
 
 一个 TUI 主连接可交替 resume/start 多条线程；各线程的订阅独立，所有 turn、审批和历史仍按 §13 的 UUID 规则路由到 owning engine。
 官方 picker 另开短命只读连接查询列表，选择后复用原主连接发 turn。`thread/unsubscribe` 只 detach 指定订阅，既不关闭线程也不终止进程。
+混合后端会话用配置默认模型选首线程，picker 切换继承目标线程的持久模型。官方 TUI 的启动 `--model` 会持续覆盖后续 resume；若该模型属于另一后端，ingress 明确拒绝，不把目标线程改路由到另一引擎。
 
 `thread/list` 默认 created_at 倒序、25 条，limit 按上游夹到 1–100；支持 updated_at/recency_at、asc/desc、cwd（单路径或数组）、
 modelProviders、sourceKinds、searchTerm、parentThreadId/ancestorThreadId（互斥）、archived。archived 空/false 只返未关闭线程；true 只返关闭线程。
@@ -916,16 +917,17 @@ fork 响应、后续 read/resume/list 的 forkedFromId 指向父 native UUID；�
 这是 daemon 生命周期内的重连记录，不是 daemon 重启恢复协议；同 token 代表同一授权 audience，不能区分其下多个已断开的 TUI。
 恢复通过 as/1 attach 让 broker 重发尚未决定的请求，使用新连接 wire id；旧 wire id 先收到 resolved（reason=reconnected），避免重复卡片。
 离线期间已决定/过期的旧请求只重放 resolved，不再次提交决策。broker 的 120 秒/30 分钟超时规则不变。
-重连接管订阅不占租约；下一次 full 输入/升权再按需获取，其他在线持有人仍可拒绝该输入。正常输入继续依赖 assertInput。
+重连接管订阅与普通 full 输入均不占租约；仅 permission/set 升权持短租约并在 finally 释放，其他在线持有人仍可拒绝输入。正常输入继续依赖 assertInput。
 
 扩展冒烟命令（两种 backend 各连续运行三次）：
 
 ```sh
-python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,multi_thread_ok,fork_ok,reconnect_ok
-python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,multi_thread_ok,fork_ok,reconnect_ok
+python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,multi_thread_ok,fork_ok,reconnect_ok,list_contains_both_backends
+python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude --expect thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,multi_thread_ok,fork_ok,reconnect_ok,list_contains_both_backends
 ```
 
 multi_thread_ok 要求真实 picker 包含两条线程、同主连接四轮交替输入及匹配回复；fork_ok 要求真实 `/fork`、切回父线程再 resume 子线程并完成新 turn。
+list_contains_both_backends 是默认必测项，在两种 --backend 下都开启 Claude 投影：daemon 通过 as/1 预建另一后端线程，真实 TUI picker 选择并在同主连接与原线程四轮交替；thread/list 同时包含 Codex 与 Claude（显式 sonnet）并核对模型/provider，loaded/list 同时包含两条 UUID。两种后端均经真实按键审批，分别中断一条后在另一条完成新轮，逐项检查 threadId、turnId、审批 resolved 与 TUI 渲染。Claude 沿用已有登录；Codex 仅模型 Responses 端点使用本地确定性 fixture。默认超时 360 秒，原始 wire、PTY 输出及 summary.json 保留在临时产物目录。
 reconnect_ok 在真实审批未决时终止 TUI，验证线程未 closed、engine UUID 未变、新卡片参数不变且旧卡片 resolved，随后真实按键决定并经 broker 收口。
 Codex fork 冒烟还生成 200+ 原生 items，由 `codex-remote-history.ts` 独立 WebSocket 校验双向分页、摘要、游标、空页、恢复与 fromItemId 中间 fork；证据单独保存为 history-proof.json。
-Claude 单测覆盖 240 项、60 turns 的相同边界；另有断线期间其他客户端决定审批、按需重新获取租约和跨后端 UUID 路由测试。
+Claude 单测覆盖 240 项、60 turns 的相同边界；另有断线期间其他客户端决定审批、重连输入不占租约，以及同连接跨后端双审批同时未决、错误 turnId 拒绝、中断一端后另一端审批仍可完成的测试。

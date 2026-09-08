@@ -29,7 +29,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=["codex", "claude"], default="codex")
     parser.add_argument("--expect", default="thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,multi_thread_ok,fork_ok,reconnect_ok,external_client_reply_while_attached_ok,list_contains_both_backends")
-    parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument("--timeout", type=float, default=360)
     args = parser.parse_args()
     expected = set(args.expect.split(","))
     known = {"thread_started", "turn_completed", "approval_roundtrip", "resume_ok", "interrupt_ok", "resume_fresh_ok",
@@ -43,7 +43,8 @@ def main():
     workspace = root / "workspace"
     for directory in [home, codex_home, state, workspace]:
         directory.mkdir(parents=True, exist_ok=True)
-    if args.backend == "claude":
+    mixed = "list_contains_both_backends" in expected
+    if args.backend == "claude" or mixed:
         # Reuse existing login only; never request or create credentials. Keep
         # global allowlists/hooks out of the isolated approval smoke.
         config = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
@@ -152,7 +153,7 @@ def main():
 
     model = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Model)
     threading.Thread(target=model.serve_forever, daemon=True).start()
-    (codex_home / "config.toml").write_text('''model = "gpt-5.6-sol"
+    (codex_home / "config.toml").write_text('''model = %s
 model_provider = "smoke"
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
@@ -164,15 +165,17 @@ wire_api = "responses"
 requires_openai_auth = false
 [projects.%s]
 trust_level = "trusted"
-''' % (model.server_port, json.dumps(str(workspace))))
-    (state / "config.toml").write_text('allowed_roots = [%s]\ndefault_model = %s\n[codex_ingress]\nenabled = true\nclaude_threads = %s\nport = 0\n' % (json.dumps(str(workspace)), json.dumps("sonnet" if args.backend == "claude" else "gpt-5.6-sol"), "true" if args.backend == "claude" else "false"))
+''' % (json.dumps("sonnet" if args.backend == "claude" else "gpt-5.6-sol"), model.server_port, json.dumps(str(workspace))))
+    (state / "config.toml").write_text('allowed_roots = [%s]\ndefault_model = %s\n[codex_ingress]\nenabled = true\nclaude_threads = %s\nport = 0\n' % (json.dumps(str(workspace)), json.dumps("sonnet" if args.backend == "claude" else "gpt-5.6-sol"), "true" if args.backend == "claude" or mixed else "false"))
     env = {"PATH": os.environ["PATH"], "HOME": str(home), "CODEX_HOME": str(codex_home), "TERM": "xterm-256color", "LANG": "en_US.UTF-8", "TMPDIR": str(root), "NO_PROXY": "*", "no_proxy": "*", "CODEX_SMOKE_ROOT": str(root), "AGENT_SERVER_SOCKET_PATH": str(root / "as.sock")}
     env["CODEX_SMOKE_BACKEND"] = args.backend
+    env["CODEX_SMOKE_MIXED"] = "1" if mixed else "0"
     runner = Path(__file__).with_name("codex-remote-smoke-daemon.ts").resolve()
     log = open(root / "daemon-output.log", "wb")
     daemon = subprocess.Popen(["bun", str(runner)], cwd=workspace, env=env, stdout=log, stderr=log, start_new_session=True)
     tui = None
     master = None
+    selected_thread = None
     output = bytearray()
     proof = {name: False for name in known}
     summary = {"artifact_dir": str(root), "backend": args.backend, "model": "real Claude CLI --model sonnet" if args.backend == "claude" else "local deterministic Responses fixture", "proof": proof}
@@ -242,12 +245,14 @@ trust_level = "trusted"
         raise TimeoutError(label)
 
     def launch(extra=None):
-        nonlocal tui, master
+        nonlocal tui, master, selected_thread
+        selected_thread = None
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 150, 0, 0))
         command = ["codex", "--remote", endpoint["url"], "--remote-auth-token-env", "SMOKE_BEARER", "--no-alt-screen"]
-        if args.backend == "claude":
-            command += ["--model", "sonnet"]
+        # --model is a sticky override on every native resume, including the
+        # other backend. The config default selects the first thread instead;
+        # subsequent picker selections must inherit their saved model.
         command += extra or []
         tui = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, cwd=workspace, env=env, start_new_session=True)
         os.close(slave)
@@ -291,7 +296,10 @@ trust_level = "trusted"
         requests = [f for f in current if f.get("direction") == "TUI>AS" and f.get("method") == method and (thread is None or f.get("params", {}).get("threadId") == thread)]
         return next((f["result"] for r in requests for f in current if f.get("direction") == "AS>TUI" and f.get("id") == r["id"] and f.get("connection") == r.get("connection") and "result" in f), None)
 
-    def switch(thread, picker=False):
+    def switch(thread, picker=False, title="S3-FRESH"):
+        nonlocal selected_thread
+        if selected_thread == thread and not picker:
+            return
         offset = len(frames())
         prompt("/resume" if picker else "/resume " + thread)
         if picker:
@@ -299,15 +307,17 @@ trust_level = "trusted"
             listed = response_to("thread/list", offset)["data"]
             assert {fresh_id, thread_id} <= {t["id"] for t in listed}, "picker missing managed threads"
             settle()
-            os.write(master, b"S3-FRESH")
+            os.write(master, title.encode())
             # The picker filters already-fetched rows locally before requesting
             # further pages, so a search does not necessarily issue another RPC.
             settle()
             os.write(master, b"\r")
         wait(lambda: response_to("thread/resume", offset, thread) is not None, "same connection switched " + thread)
+        selected_thread = thread
         settle()
 
     def small_turn(thread, marker):
+        nonlocal selected_thread
         offset, output_offset = len(frames()), len(output)
         prompt("Do not use tools. Reply with exactly: " + marker)
         wait(lambda: any(f.get("method") == "turn/completed" and f["params"].get("threadId") == thread and f["params"]["turn"]["status"] == "completed" for f in frames()[offset:]), "alternating turn completed on " + thread)
@@ -315,6 +325,7 @@ trust_level = "trusted"
         assert len(requests) == 1 and requests[0]["params"]["threadId"] == thread, "turn routed to wrong thread"
         assert any(f.get("method") == "item/completed" and f["params"].get("threadId") == thread and marker in f["params"].get("item", {}).get("text", "") for f in frames()[offset:]), "wrong response/thread association"
         wait(lambda: marker.encode() in output[output_offset:], "TUI rendered alternating response")
+        selected_thread = thread
         settle(0.3)
 
     try:
@@ -348,6 +359,10 @@ trust_level = "trusted"
         wait(fresh_completed, "first real turn completed on as/1 fresh thread")
         wait(lambda: fresh_response.encode() in output, "TUI rendered fresh response")
         proof["resume_fresh_ok"] = True
+        if "multi_thread_ok" in expected:
+            name_offset = len(frames())
+            prompt("/rename S3-FRESH")
+            wait(lambda: response_to("thread/name/set", name_offset, fresh_id) is not None, "fresh picker name")
         # A second process speaks real as/1 over the daemon's Unix socket while
         # the official full-permission TUI stays attached. Keep every frame.
         full_resumes = [f for f in frames() if f.get("direction") == "TUI>AS" and f.get("method") == "thread/resume" and f["params"].get("threadId") == fresh_id]
@@ -397,14 +412,15 @@ trust_level = "trusted"
                 assert json.loads(db.execute("SELECT data_json FROM turns WHERE id = ?", (reply["turn"]["id"],)).fetchone()[0])["status"] == "completed", "external reply did not complete"
             assert tui.poll() is None
             closed = external_rpc("thread/close", {"threadId": endpoint["freshAsThreadId"]})
-            assert closed == {} and tui.poll() is None
+            assert closed == {}
+            # Claude's closed notification makes the official TUI disconnect
+            # from this task. End that PTY before preparing the later picker.
+            stop_tui()
             assert external_rpc("thread/read", {"threadId": endpoint["freshAsThreadId"]})["thread"]["status"]["type"] == "closed"
-            summary["external_client"] = {"permission": "full", "turn_id": reply["turn"]["id"], "close_ack": closed, "tui_alive_after_close": True}
+            summary["external_client"] = {"permission": "full", "turn_id": reply["turn"]["id"], "close_ack": closed, "tui_alive_after_reply": True}
             proof["external_client_reply_while_attached_ok"] = True
-        if "multi_thread_ok" in expected:
-            name_offset = len(frames())
-            prompt("/rename S3-FRESH")
-            wait(lambda: response_to("thread/name/set", name_offset, fresh_id) is not None, "fresh picker name")
+            # The later picker exercise still needs this managed thread live.
+            external_rpc("thread/resume", {"threadId": endpoint["freshAsThreadId"], "permission": "auto-edit", **({"sandbox": "workspace-write"} if args.backend == "codex" else {})})
         stop_tui(graceful=True)
         initial_offset = len(frames())
         launch()
@@ -493,6 +509,59 @@ trust_level = "trusted"
             connections = {f["connection"] for f in frames()[multi_offset:] if f.get("direction") == "TUI>AS" and f.get("method") == "turn/start"}
             assert len(connections) == 1, "multi-thread test used multiple TUI connections"
             proof["multi_thread_ok"] = True
+        if mixed:
+            mixed_offset = len(frames())
+            other_id = endpoint["mixedThreadId"]
+            other_backend = "claude" if args.backend == "codex" else "codex"
+            switch(other_id, picker=True, title="S3-MIXED-" + other_backend.upper())
+            approval_offset = len(frames())
+            prompt("Use only Bash to run exactly: " + smoke_command + " . Do not read any files or use other tools. After Bash succeeds reply exactly INGRESS_SMOKE_COMPLETED.")
+            wait(lambda: any(f.get("method") == "item/commandExecution/requestApproval" for f in frames()[approval_offset:]), "other backend approval card")
+            card = next(f for f in frames()[approval_offset:] if f.get("method") == "item/commandExecution/requestApproval")
+            assert card["params"]["threadId"] == other_id, "cross-backend approval routed to primary thread"
+            assert any(f.get("method") == "turn/started" and f["params"].get("threadId") == other_id and f["params"]["turn"]["id"] == card["params"]["turnId"] for f in frames()[approval_offset:]), "approval turn does not belong to other backend"
+            settle(2)
+            os.write(master, b"y")
+            wait(lambda: any(f.get("method") == "turn/completed" and f["params"].get("threadId") == other_id and f["params"]["turn"]["status"] == "completed" for f in frames()[approval_offset:]), "other backend approval completed")
+            assert any(f.get("method") == "serverRequest/resolved" and f["params"].get("requestId") == card["id"] and f["params"].get("threadId") == other_id for f in frames()[approval_offset:]), "other backend approval resolution crossed threads"
+            # Both engines remain loaded while the PTY alternates real turns.
+            for target, marker in [(thread_id, "S3_REPLY_MIX_PRIMARY_A"), (other_id, "S3_REPLY_MIX_OTHER_A"), (thread_id, "S3_REPLY_MIX_PRIMARY_B"), (other_id, "S3_REPLY_MIX_OTHER_B")]:
+                switch(target)
+                small_turn(target, marker)
+            interrupts = []
+            for target, backend, peer in [(other_id, other_backend, thread_id), (thread_id, args.backend, other_id)]:
+                switch(target)
+                offset = len(frames())
+                held_stream.clear()
+                release_stream.clear()
+                prompt(hold_marker if backend == "codex" else "Do not use tools. Write a very long numbered list from 1 to 10000, spelling out each number in English. Start immediately and keep writing until 10000.")
+                wait(lambda: held_stream.is_set() if backend == "codex" else any(f.get("method") == "item/agentMessage/delta" and f["params"].get("threadId") == target for f in frames()[offset:]), "mixed backend active stream")
+                active = next(f["params"]["turn"]["id"] for f in frames()[offset:] if f.get("method") == "turn/started" and f["params"].get("threadId") == target)
+                os.write(master, b"\x1b")
+                wait(lambda: response_to("turn/interrupt", offset, target) is not None and any(f.get("method") == "turn/completed" and f["params"].get("threadId") == target and f["params"]["turn"]["id"] == active and f["params"]["turn"]["status"] == "interrupted" for f in frames()[offset:]), "mixed interrupt isolated to active thread")
+                assert not any(f.get("method") in {"turn/completed", "turn/interrupt"} and f.get("params", {}).get("threadId") == peer for f in frames()[offset:]), "interrupt affected other backend"
+                interrupts.append({"thread_id": target, "turn_id": active, "backend": backend})
+                release_stream.set()
+                settle()
+                switch(peer)
+                small_turn(peer, "S3_REPLY_MIX_SURVIVED_" + backend.upper())
+            release_stream.clear()
+            held_stream.clear()
+            current = frames()[mixed_offset:]
+            connections = {f["connection"] for f in current if f.get("direction") == "TUI>AS" and f.get("method") in {"turn/start", "turn/interrupt", "thread/resume"}}
+            assert len(connections) == 1, "mixed backends did not share the TUI main connection"
+            listed = response_to("thread/list", mixed_offset)["data"]
+            metadata = {t["id"]: t for t in listed}
+            backend_ids = {args.backend: thread_id, other_backend: other_id}
+            assert metadata[backend_ids["claude"]]["modelProvider"] == "claude" and metadata[backend_ids["claude"]]["model"] == "sonnet"
+            assert metadata[backend_ids["codex"]]["modelProvider"] == "smoke" and metadata[backend_ids["codex"]]["model"] == "gpt-5.6-sol"
+            loaded = [f["result"]["data"] for r in current if r.get("method") == "thread/loaded/list" and r.get("direction") == "TUI>AS" for f in current if f.get("connection") == r["connection"] and f.get("id") == r["id"] and "result" in f]
+            assert any({thread_id, other_id} <= set(ids) for ids in loaded), "loaded/list missing mixed backends"
+            primary_card = next(f for f in frames() if f.get("method") == "item/commandExecution/requestApproval" and f["params"].get("threadId") == thread_id and f.get("connection") in connections)
+            assert card["connection"] == primary_card["connection"] and card["id"] != primary_card["id"], "mixed approval IDs collided or used different connections"
+            summary["mixed_backends"] = {"connection": next(iter(connections)), "threads": backend_ids, "metadata": {k: metadata[v] for k, v in backend_ids.items()}, "loaded_lists": loaded, "interrupts": interrupts, "approvals": [primary_card, card]}
+            proof["list_contains_both_backends"] = True
+            switch(thread_id)
         if "fork_ok" in expected:
             fork_offset = len(frames())
             prompt("/fork")
@@ -547,7 +616,7 @@ trust_level = "trusted"
             return bool(requests) and ack and terminal
         wait(interrupted, "matching interrupt request, acknowledgement and terminal notification")
         proof["interrupt_ok"] = True
-        if args.backend == "claude":
+        if args.backend == "claude" or mixed:
             init_frames = [json.loads(line)["params"]["payload"] for line in (root / "claude-init.ndjson").read_text().splitlines()]
             summary["claude_init_models"] = [f.get("model") for f in init_frames]
             assert init_frames and all("sonnet" in f.get("model", "").lower() for f in init_frames), "Claude init did not confirm sonnet"

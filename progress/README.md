@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server native ingress 多线程、fork、历史分页和断线恢复已通过双后端各三次冒烟与全量测试，待主控独立验收。
+agent-server native ingress 已补齐同连接 Codex/Claude 混合后端判据，合并租约修复，双后端各三轮与全量测试通过，待主控独立验收。
 
 ## Goals
 
