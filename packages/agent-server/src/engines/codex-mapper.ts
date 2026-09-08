@@ -79,6 +79,13 @@ export function mapCodexItem(raw: unknown, completed = false, parentItemId?: str
       // otherwise the native activity item itself is the available anchor.
       type = "subAgent"; payload = { kind: "agent", parentItemId: parentItemId ?? d.id, phase: d.kind, progress: json(d), ...(d.kind === "completed" ? { report: json(d) } : {}) }; break;
     case "webSearch": type = "webSearch"; payload = { query: d.query, ...(d.results != null ? { results: json(d.results) } : {}) }; break;
+    // These display items have no native status; the notification lifecycle
+    // supplies it. Preserve the pinned schema fields as ordinary tool inputs.
+    case "sleep": type = "toolCall"; payload = { name: "clock.sleep", input: { durationMs: d.durationMs }, ...(completed ? { output: { status: status(d.status, completed) } } : {}) }; break;
+    case "imageView": type = "toolCall"; payload = { name: "image.view", input: { path: d.path } }; break;
+    case "hookPrompt": type = "toolCall"; payload = { name: "hook.prompt", input: { fragments: json(d.fragments) } }; break;
+    case "enteredReviewMode": type = "toolCall"; payload = { name: "review.enter", input: { review: d.review } }; break;
+    case "exitedReviewMode": type = "toolCall"; payload = { name: "review.exit", input: { review: d.review } }; break;
     case "imageGeneration": type = "imageOutput"; payload = { paths: d.savedPath ? [d.savedPath] : [] }; break;
     case "plan": type = "plan"; payload = { text: d.text }; break;
     case "contextCompaction": type = "contextCompaction"; payload = {}; break;

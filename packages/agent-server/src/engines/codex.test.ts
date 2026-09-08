@@ -9,6 +9,7 @@ import { capture, client, input, until } from "../test-helpers.test.js";
 import { CodexEngine, buildCodexThreadParams } from "./codex.js";
 import { CodexEventMapper, codexUserInput, mapCodexDecision, mapCodexItem } from "./codex-mapper.js";
 import type { EngineEvent } from "./session.js";
+import { ItemPayloadSchemas } from "../protocol/index.js";
 
 const fixture = resolve(import.meta.dir, "../../scripts/fixtures/fake-codex-app-server.ts");
 test("N1: all Codex mapper error paths omit turnId before beginTurn", () => {
@@ -66,7 +67,57 @@ const itemCases: Array<[Record<string, unknown>, string, Record<string, unknown>
   [{ type: "plan", text: "1. Test" }, "plan", { text: "1. Test" }],
   [{ type: "contextCompaction" }, "contextCompaction", {}],
 ];
+const displayItemCases = [
+  { type: "sleep", name: "clock.sleep", input: { durationMs: 5000 } },
+  { type: "imageView", name: "image.view", input: { path: "/tmp/image.png" } },
+  { type: "hookPrompt", name: "hook.prompt", input: { fragments: [{ hookRunId: "hook-1", text: "Check the result" }] } },
+  { type: "enteredReviewMode", name: "review.enter", input: { review: "Review the working tree" } },
+  { type: "exitedReviewMode", name: "review.exit", input: { review: "No findings" } },
+];
+
 describe("Codex v2 mapper", () => {
+  test.each(displayItemCases)("$type started/completed remain schema-valid tool calls", ({ type, name, input }) => {
+    const mapper = new CodexEventMapper();
+    mapper.beginTurn("tn");
+    for (const completed of [false, true]) {
+      const events = mapper.map(completed ? "item/completed" : "item/started", { item: { id: "display", type, ...input } });
+      expect(events).toHaveLength(1);
+      const event = events[0];
+      expect(event.type).toBe(completed ? "itemCompleted" : "itemStarted");
+      if (event.type !== "itemStarted" && event.type !== "itemCompleted") throw new Error("Expected item lifecycle event");
+      expect(event.item).toEqual({ id: "display", type: "toolCall", status: completed ? "completed" : "inProgress", payload: {
+        name, input, ...(type === "sleep" && completed ? { output: { status: "completed" } } : {}),
+      } });
+      expect(ItemPayloadSchemas[event.item.type].safeParse(event.item.payload).success).toBe(true);
+    }
+  });
+  test("every pinned schema ThreadItemType has a mapper (additive variants fail here first)", () => {
+    const docs = resolve(import.meta.dir, "../../../../docs/agent-server");
+    const version = readFileSync(join(docs, "codex-schema-version.txt"), "utf8").trim();
+    const schema = JSON.parse(readFileSync(join(docs, "codex-schema", version, "codex_app_server_protocol.schemas.json"), "utf8"));
+    const types = new Set<string>();
+    function visit(value: any): void {
+      if (!value || typeof value !== "object") return;
+      if (typeof value.title === "string" && value.title.endsWith("ThreadItemType")) {
+        expect(Array.isArray(value.enum)).toBe(true);
+        for (const type of value.enum) types.add(type);
+      }
+      for (const child of Object.values(value)) visit(child);
+    }
+    visit(schema);
+    expect(types.size).toBeGreaterThan(0);
+    const samples = new Map<string, Record<string, unknown>>([
+      ...itemCases.map(([native]) => [String(native.type), native] as const),
+      ...displayItemCases.map(({ type, input }) => [type, { type, ...input }] as const),
+    ]);
+    for (const type of types) {
+      // An unknown schema variant still reaches the mapper even without a fixture.
+      for (const completed of [false, true]) {
+        const item = mapCodexItem({ id: "schema-item", ...samples.get(type), type }, completed);
+        expect(ItemPayloadSchemas[item.type].safeParse(item.payload).success).toBe(true);
+      }
+    }
+  });
   test.each(itemCases)("%j maps to %s with schema-valid payload", (native, type, payload) => {
     const item = mapCodexItem({ id: "it", ...native }, true);
     expect(item).toMatchObject({ id: "it", type, payload });
