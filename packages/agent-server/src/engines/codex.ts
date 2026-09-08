@@ -33,10 +33,14 @@ export function buildCodexThreadParams(options: SessionOptions): Record<string, 
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(sandbox ? { sandbox } : {}), ...(approval ? { approvalPolicy: approval } : {}),
     approvalsReviewer: "user", serviceTier: options.serviceTier ?? "default",
+    ...(options.personality !== undefined ? { personality: options.personality } : {}),
     ...(options.systemPrompt !== undefined ? { baseInstructions: options.systemPrompt } : {}),
     ...(options.seedHistory?.length ? { developerInstructions: codexHistoryInstructions(options.seedHistory) } : {}),
     ...(options.forkSession && options.forkPoint ? { lastTurnId: options.forkPoint } : {}),
-    ...(options.effort !== undefined ? { config: { model_reasoning_effort: options.effort } } : {}),
+    ...(options.effort !== undefined || options.webSearch !== undefined ? { config: {
+      ...(options.effort !== undefined ? { model_reasoning_effort: options.effort } : {}),
+      ...(options.webSearch !== undefined ? { web_search: options.webSearch } : {}),
+    } } : {}),
     ...(options.engineThreadId ? { threadId: options.engineThreadId, excludeTurns: true } : {}),
   };
 }

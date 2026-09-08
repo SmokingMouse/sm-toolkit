@@ -11,6 +11,8 @@ export const ThreadOptionsSchema = z.strictObject({
   // ThreadManager enforces the effective model before spawning Claude or Codex.
   fjContext: z.strictObject({ root: AbsolutePathSchema, cid: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/), seat: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/).optional() }).optional(),
   serviceTier: z.literal("default").optional(),
+  personality: z.enum(["none", "friendly", "pragmatic"]).optional(),
+  webSearch: z.enum(["disabled", "cached", "live"]).optional(),
   cwd: AbsolutePathSchema.optional(), model: z.string().optional(), effort: z.string().min(1).optional(), permission: PermissionSchema.optional(),
   sandbox: z.string().optional(), systemPrompt: z.string().optional(), tools: z.union([z.literal("all"), z.array(z.string())]).optional(),
   meta: JsonObjectSchema.optional(),

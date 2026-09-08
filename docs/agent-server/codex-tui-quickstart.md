@@ -48,6 +48,8 @@ WS 只监听 loopback，鉴权通过请求头；不要把 token 值填进 argv�
 
 使用 `/resume` 在 picker 中切换线程、`/fork` 分叉、Esc 中断当前 turn。已有线程上的跨后端启动模型覆盖会被忽略，并提示沿用原模型；新建线程才选择引擎。显示端退出或崩溃后 turn 继续执行，重新连接可读取完成历史。
 
+直接连接不带 `resume` 时，TUI 自建线程。启动 config 中的 model、reasoning effort、sandbox/approvalPolicy、cwd、personality 与 web_search 映射到 AS 线程选项，仍经过模型、路径和权限检查；service tier 仅允许 default。TUI/history/desktop 等本地偏好忽略并发出 `native_config_ignored` engineEvent，审计只记录键名。Claude 的 cached web_search 偏好忽略并审计，工具调用仍受 AS broker 管理。resume/fork 沿用已保存的 effort、personality 和搜索配置；未知项及全局配置写操作明确报出被拒键名。
+
 四类审批通过 AS broker 处理；Claude 通用工具权限显示为 allow/deny 问答。配置/文件/插件等未支持的 native 方法明确拒绝。Claude 多选问答、输出流、effort 及只读名单限制详见[协议](protocol.md)，完整方法清单见[治理表](codex-method-policy.md)。只读名单的自定义条目不自动获得参数安全校验。
 
 ## 验证与升级
@@ -57,6 +59,10 @@ python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex
 python3 packages/agent-server/scripts/codex-remote-smoke.py --backend claude
 python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --transport unix
 scripts/codex-ingress-upgrade-check.sh --out /tmp/codex-upgrade-report
+python3 packages/agent-server/scripts/codex-remote-smoke.py --mode prod --endpoint "$HOME/.sm-toolkit/agent-server.sock.endpoint.json" --backend codex
+python3 packages/agent-server/scripts/codex-remote-smoke.py --mode prod --endpoint "$HOME/.sm-toolkit/agent-server.sock.endpoint.json" --backend claude
 ```
 
 升级脚本默认双后端 × WS/Unix × 三轮，包含模型覆盖兼容、wire schema、显示端断连及 Claude 权限问答，另跑全量测试和 typecheck；`schema.diff` 必须为空且全部检查 exit 0。冒烟隔离 HOME/DB/socket，Codex 模型响应使用本地 fixture，Claude 使用真实模型与已有登录；产物目录含隔离登录副本，只分享脱敏日志及 summary，勿整体公开。
+
+`fresh_tui_session_ok` 要求官方 TUI 不带 resume 自建三个不同线程，各完成一轮并正常 `/quit`。`--mode prod` 只连接 endpoint 指向的常驻 daemon，沿用用户配置和已有凭证，不创建或重启 daemon；每个 backend 默认三次，产出 PTY 与 SQLite 回查证据，保留测试线程与 allowed_roots 下的临时工作目录。

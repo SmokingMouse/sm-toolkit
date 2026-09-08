@@ -90,7 +90,7 @@ def main():
         report["schema"] = {"valid": False, "changed_files": [], "errors": ["generation failed"]}
     run("agent-server-tests", ["bun", "test"], repo / "packages/agent-server")
     run("typecheck", ["bun", "run", "typecheck"])
-    common = "thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,external_client_reply_while_attached_ok,display_disconnect_ok,agent_message_delta,command_execution_output,unsupported_method_errors,multi_thread_ok,fork_ok,reconnect_ok,list_contains_both_backends,cross_backend_model_override_tolerated,wire_schema_clean"
+    common = "thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,fresh_tui_session_ok,external_client_reply_while_attached_ok,display_disconnect_ok,agent_message_delta,command_execution_output,unsupported_method_errors,multi_thread_ok,fork_ok,reconnect_ok,list_contains_both_backends,cross_backend_model_override_tolerated,wire_schema_clean"
     for backend in ["codex", "claude"]:
         for transport in ["ws", "unix"]:
             expected = common + (",tool_permission_question" if backend == "claude" else "")

@@ -6,6 +6,13 @@
 
 ## 已结案
 
+### 官方 TUI 冷启动 config 被整体拒绝（resolved）
+
+- 症状：生产不带 resume 的 codex --remote 在 thread/start bootstrap 报 native config overrides are not supported；as/1 创建再 resume 正常。
+- 可证伪假设：TUI 默认注入 model_reasoning_effort 不在原两项白名单。真实 wire 记录同时携带 web_search=cached、personality=pragmatic、model_reasoning_effort=medium。
+- 判定命令：`python3 packages/agent-server/scripts/codex-remote-smoke.py --backend codex --expect fresh_tui_session_ok`；Claude 替换 backend。
+- 修复：按项分流至 AS 线程选项和既有 guards；本地偏好审计忽略，未知项指名拒绝。初版仅处理 start 导致 resume/fork 拒绝重复 config，已补保留原线程启动偏好的分流，真实 TUI 回归覆盖。
+
 ### codex-ingress slice 3 再审：启动模型覆盖与权限卡 schema（resolved）
 
 - 症状：TUI `--model sonnet` 切到 Codex 线程被拒绝；Claude Read 权限卡缺官方 schema 必填 isBlocking。

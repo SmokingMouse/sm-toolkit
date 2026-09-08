@@ -28,6 +28,7 @@ export function claudePermission(permission: SessionOptions["permission"] = "def
 export function buildClaudeLaunch(options: SessionOptions): { args: string[]; env: NodeJS.ProcessEnv } {
   validateClaudeEffort(options.effort);
   if (options.sandbox !== undefined) throw new ProtocolError(ErrorCode.unsupported_capability, "Claude sandbox override is not supported");
+  if (options.webSearch === "cached") throw new ProtocolError(ErrorCode.unsupported_capability, "Claude does not support cached web_search");
   const resolved = resolveClaudeModel(options.model);
   const permission = claudePermission(options.permission);
   // Keep stdio on every mode for live switches and unexpected native requests.
@@ -39,7 +40,9 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   // model never gets a file-write tool to call in the first place. Cost: plan's native
   // "save plan to a file" step (Write to ~/.claude/plans/…) is skipped; ExitPlanMode still works
   // without a planFilePath.
-  if (options.permission === "readonly" || options.permission === "plan") args.push("--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit");
+  const disallowedTools = options.permission === "readonly" || options.permission === "plan" ? ["Edit", "Write", "MultiEdit", "NotebookEdit"] : [];
+  if (options.webSearch === "disabled") disallowedTools.push("WebSearch");
+  if (disallowedTools.length) args.push("--disallowedTools", disallowedTools.join(","));
   if (resolved.model) args.push("--model", resolved.model);
   if (options.effort !== undefined) args.push("--effort", options.effort);
   if (options.autocompact !== undefined) args.push("--autocompact", String(options.autocompact));
@@ -48,6 +51,7 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   if (options.forkSession && options.engineThreadId) args.push("--fork-session");
   if (options.forkPoint && options.forkSession && options.engineThreadId) args.push("--resume-session-at", options.forkPoint);
   if (options.systemPrompt) args.push("--system-prompt", options.systemPrompt);
+  if (options.personality && options.personality !== "none") args.push("--append-system-prompt", `Use a ${options.personality} communication style.`);
   if (options.tools && options.tools !== "all") args.push("--tools", options.tools.join(","));
   args.push("--permission-mode", permission);
   // 2.1.258 PLe checks isBypassPermissionsModeAvailable on a live switch.

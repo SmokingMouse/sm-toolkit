@@ -23,18 +23,36 @@ import termios
 import threading
 import time
 import traceback
+import uuid
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=["codex", "claude"], default="codex")
+    parser.add_argument("--backend", choices=["codex", "claude", "both"], help="prod defaults to both; isolated defaults to codex")
+    parser.add_argument("--mode", choices=["isolated", "prod"], default="isolated")
+    parser.add_argument("--endpoint", type=Path, help="production daemon endpoint.json; never launches/restarts a daemon")
+    parser.add_argument("--runs", type=int, default=3, help="fresh TUI sessions per backend")
+    parser.add_argument("--out", type=Path)
     parser.add_argument("--transport", choices=["ws", "unix"], default="ws")
     parser.add_argument("--allow-version-mismatch", action="store_true", help="upgrade regression only; record candidate version")
-    parser.add_argument("--expect", default="thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,multi_thread_ok,fork_ok,reconnect_ok,external_client_reply_while_attached_ok,list_contains_both_backends,cross_backend_model_override_tolerated,wire_schema_clean,display_disconnect_ok")
+    parser.add_argument("--expect", help="comma-separated required criteria (prod supports fresh_tui_session_ok)")
     parser.add_argument("--timeout", type=float, default=360)
     args = parser.parse_args()
+    args.backend = args.backend or ("both" if args.mode == "prod" else "codex")
+    args.expect = args.expect or ("fresh_tui_session_ok" if args.mode == "prod" else "thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,fresh_tui_session_ok,multi_thread_ok,fork_ok,reconnect_ok,external_client_reply_while_attached_ok,list_contains_both_backends,cross_backend_model_override_tolerated,wire_schema_clean,display_disconnect_ok")
+    if args.runs < 1:
+        parser.error("runs must be positive")
+    if args.mode == "prod":
+        if not args.endpoint:
+            parser.error("--mode prod requires --endpoint")
+        if args.expect != "fresh_tui_session_ok":
+            parser.error("prod supports only --expect fresh_tui_session_ok")
+        from codex_remote_prod import run_prod
+        return run_prod(args)
+    if args.backend == "both":
+        parser.error("--backend both requires --mode prod")
     expected = set(args.expect.split(","))
-    known = {"thread_started", "turn_completed", "approval_roundtrip", "resume_ok", "interrupt_ok", "resume_fresh_ok",
+    known = {"fresh_tui_session_ok", "thread_started", "turn_completed", "approval_roundtrip", "resume_ok", "interrupt_ok", "resume_fresh_ok",
              "agent_message_delta", "command_execution_output", "user_input_question", "tool_permission_question", "display_disconnect_ok", "unsupported_method_errors", "multi_thread_ok", "fork_ok", "reconnect_ok", "external_client_reply_while_attached_ok", "list_contains_both_backends", "cross_backend_model_override_tolerated", "wire_schema_clean"}
     if not expected <= known:
         parser.error("unknown expectation: " + str(expected - known))
@@ -165,6 +183,7 @@ def main():
     threading.Thread(target=model.serve_forever, daemon=True).start()
     (codex_home / "config.toml").write_text('''model = %s
 model_provider = "smoke"
+model_reasoning_effort = "medium"
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
 check_for_update_on_startup = false
@@ -351,6 +370,25 @@ trust_level = "trusted"
         wait(lambda: (root / "smoke-endpoint.json").exists(), "daemon startup")
         endpoint = json.loads((root / "smoke-endpoint.json").read_text())
         env["SMOKE_BEARER"] = Path(endpoint["tokenPath"]).read_text().strip()
+        if "fresh_tui_session_ok" in expected:
+            summary["fresh_tui_runs"] = []
+            for index in range(args.runs):
+                offset = len(frames())
+                launch()
+                wait(lambda: response_to("thread/start", offset) is not None, "fresh TUI thread/start")
+                response = response_to("thread/start", offset)
+                native_id = response["thread"]["id"]
+                assert not any(f.get("method") == "thread/resume" for f in frames()[offset:])
+                settle(1)
+                marker = "S3_REPLY_FRESH_" + uuid.uuid4().hex.upper()
+                small_turn(native_id, marker)
+                with sqlite3.connect(endpoint["databasePath"]) as db:
+                    row = db.execute("SELECT id,backend FROM threads WHERE id=? OR engine_thread_id=?", ("th_" + native_id, native_id)).fetchone()
+                    assert row and row[1] == args.backend
+                    assert db.execute("SELECT count(*) FROM turns WHERE thread_id=? AND status='completed'", (row[0],)).fetchone()[0] == 1
+                stop_tui(graceful=True)
+                summary["fresh_tui_runs"].append({"thread": native_id, "backend": row[1], "marker": marker, "tui_exit": 0})
+            proof["fresh_tui_session_ok"] = len({r["thread"] for r in summary["fresh_tui_runs"]}) == args.runs
         fresh_id = endpoint["freshThreadId"]
         summary["fresh_thread_id"] = fresh_id
         with sqlite3.connect(endpoint["databasePath"]) as db:
