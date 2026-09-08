@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync, chmodSync, statSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { AgentServer } from "../../server/server.js";
 import { CodexEngine } from "../../engines/codex.js";
@@ -11,10 +11,124 @@ import { readConfig, runDaemon } from "../../daemon/runtime.js";
 import { resolveDaemonPaths } from "../../daemon/paths.js";
 import { CodexSession, nativeDecision } from "./session.js";
 import { nativeOptions, nativeThreadId, resolveThread } from "./router.js";
-import { listenCodex, MAX_NATIVE_FRAME_BYTES } from "./listener.js";
+import { defaultCodexUnixPath, listenCodex, MAX_NATIVE_FRAME_BYTES } from "./listener.js";
+import { NATIVE_METHOD_POLICY, methodPolicy, READONLY_OVERRIDE_DENY } from "./method-policy.js";
 import { CONTROL_METHODS, ControlProcess, type NativeObject, type ControlClient } from "./control-process.js";
 
 const cleanups: Array<() => void | Promise<void>> = [];
+
+test("pinned experimental method table is exhaustive; every denied method rejects and audits for every permission", async () => {
+  const schema = JSON.parse(readFileSync(new URL("../../../../../docs/agent-server/codex-schema/0.153.4/ClientRequest.json", import.meta.url), "utf8"));
+  const methods: string[] = schema.oneOf.map((v: any) => v.properties.method.enum[0]);
+  expect(Object.keys(NATIVE_METHOD_POLICY).sort()).toEqual(methods.sort());
+  const documented = readFileSync(new URL("../../../../../docs/agent-server/codex-method-policy.md", import.meta.url), "utf8").split("readonly 追加 deny 表")[0];
+  expect([...documented.matchAll(/^\| `([^`]+)` \|/gm)].map(m => m[1]).sort()).toEqual(methods.sort());
+  for (const method of methods) {
+    expect(["handshake", "control-read", "as-governed", "owner-read", "deny"]).toContain(methodPolicy(method));
+    expect(CONTROL_METHODS.has(method)).toBe(methodPolicy(method) === "control-read");
+  }
+  const f = setup(), c = connection(f); await c.initialize();
+  for (const permission of ["readonly", "default", "full"]) {
+    const start = await c.session.client.request("thread/start", { backend: "codex", cwd: f.root, model: "gpt-6-astra", permission: permission as any });
+    const threadId = nativeThreadId(start.thread);
+    const calls = f.control.calls.length;
+    const denied = [...methods.filter(m => methodPolicy(m) === "deny"), "workspace/create", "userVerification/verify", "future/execute", "toString", "__proto__"];
+    for (const method of denied) {
+      await c.session.receive({ id: `${permission}:${method}`, method, params: { threadId, path: "/", command: "touch forbidden" } });
+      expect(c.frames.at(-1)?.error?.code).toBe(-32601);
+      const audit = f.server.log.db.query("SELECT * FROM ingress_audit ORDER BY id DESC LIMIT 1").get() as any;
+      expect(audit.method).toBe(method); expect(audit.client_id).toBe(c.session.client.clientId); expect(audit.thread_id).toBe(threadId);
+    }
+    expect(f.control.calls.length).toBe(calls);
+    expect(f.server.log.turns(start.thread.id)).toHaveLength(0);
+  }
+  for (const method of CONTROL_METHODS) expect(methodPolicy(method)).toBe("control-read");
+});
+
+test("readonly explicit deny table blocks sandbox and reviewer overrides at every supported entry", async () => {
+  const f = setup(), c = connection(f); await c.initialize();
+  const { thread } = await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra", approvalPolicy: "never", sandbox: "read-only" });
+  for (const method of Object.keys(READONLY_OVERRIDE_DENY)) {
+    for (const override of [{ sandbox: "workspace-write" }, { sandboxPolicy: { type: "dangerFullAccess" }, approvalPolicy: "never" }, { approvalsReviewer: "auto_review" }]) {
+      await expect(c.request(method, { threadId: thread.id, input: [{ type: "text", text: "forbidden" }], ...override })).rejects.toThrow();
+    }
+  }
+  const as = resolveThread(f.server, thread.id);
+  expect(f.server.log.turns(as.id)).toHaveLength(0);
+  expect(f.server.threads.get(as.id).permission).toBe("readonly");
+  expect(f.server.log.db.query("SELECT count(*) AS n FROM ingress_audit").get()).toEqual({ n: 9 });
+});
+
+test("unix WebSocket uses CODEX_HOME namespace, private modes, and never replaces existing paths", async () => {
+  expect(defaultCodexUnixPath({ CODEX_HOME: "/test/codex", HOME: "/else" })).toBe("/test/codex/agent-server/ingress.sock");
+  expect(defaultCodexUnixPath({ HOME: "/test/home" })).toBe("/test/home/.codex/agent-server/ingress.sock");
+  const f = setup(), path = join(f.root, "native", "ingress.sock");
+  const listener = listenCodex(f.server, { token: "secret", unixPath: path, control: f.control });
+  cleanups.push(() => listener.close());
+  expect(listener.url).toBe("unix://" + path);
+  expect(statSync(path).mode & 0o777).toBe(0o600);
+  expect(statSync(join(f.root, "native")).mode & 0o777).toBe(0o700);
+  const response = await fetch("http://localhost/", { unix: path });
+  expect(response.status).toBe(426); // no bearer required; must still upgrade
+  expect((await fetch("http://localhost/", { unix: path, headers: { Origin: "http://localhost" } })).status).toBe(403);
+  expect(() => listenCodex(f.server, { token: "secret", unixPath: path, control: f.control })).toThrow("already exists");
+  const publicDir = join(f.root, "public"); mkdirSync(publicDir, { mode: 0o755 });
+  expect(() => listenCodex(f.server, { token: "secret", unixPath: join(publicDir, "sock"), control: f.control })).toThrow("0700");
+});
+
+test("native engine death clears activeTurn and close remains usable", async () => {
+  const f = setup("hold"), c = connection(f); await c.initialize();
+  const { thread } = await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });
+  await c.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "hold" }] });
+  const as = resolveThread(f.server, thread.id), turnId = f.server.threads.queue(as.id).runningTurnId!;
+  (f.engines[0] as any).process.kill("SIGKILL");
+  await until(() => f.server.threads.get(as.id).status.type === "systemError");
+  expect(f.server.threads.queue(as.id).runningTurnId).toBeNull();
+  expect((f.engines[0] as any).active).toBeUndefined();
+  expect(f.server.log.turn(turnId).status).toBe("failed");
+  await expect(c.session.client.request("thread/close", { threadId: as.id })).resolves.toEqual({});
+});
+
+test("disconnect during native start acknowledgement leaves the daemon turn running to completion", async () => {
+  const f = setup("hold-delayed"), c = connection(f); await c.initialize();
+  const { thread } = await c.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });
+  const pending = c.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "hold" }] });
+  const as = resolveThread(f.server, thread.id);
+  await until(() => !!f.server.threads.queue(as.id).runningTurnId);
+  const id = f.server.threads.queue(as.id).runningTurnId!;
+  c.session.close(); await pending;
+  await until(() => !!f.engines[0].nativeTurnId(id));
+  expect(f.server.log.turn(id).status).toBe("inProgress");
+  f.engines[0].receive({ method: "turn/completed", params: { threadId: thread.id, turn: { id: f.engines[0].nativeTurnId(id), status: "completed", items: [], error: null } } });
+  await until(() => f.server.log.turn(id).status === "completed");
+  expect(f.server.threads.live.has(as.id)).toBe(true);
+});
+
+test("codex_tui local tool calls go to one owner, remap IDs and survive owner disconnect without approval bypass", async () => {
+  const f = setup("hold"), a = connection(f), b = connection(f); await a.initialize(); await b.initialize();
+  const { thread } = await a.request("thread/start", { cwd: f.root, model: "gpt-6-astra" });
+  const { turn } = await a.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "hold" }] });
+  await b.request("thread/resume", { threadId: thread.id });
+  const frame = { id: "local-1", method: "item/tool/call", params: { namespace: "codex_tui", tool: "local", arguments: { x: 1 }, callId: "call", threadId: thread.id, turnId: turn.id } };
+  f.engines[0].receive(frame);
+  await until(() => a.frames.some(f => f.method === "item/tool/call"));
+  const first = a.frames.find(f => f.method === "item/tool/call")!;
+  expect(first.id).not.toBe(frame.id); expect(first.params).toEqual(frame.params);
+  expect(b.frames.some(f => f.method === "item/tool/call")).toBe(false);
+  a.session.close();
+  await until(() => b.frames.some(f => f.method === "item/tool/call"));
+  const second = b.frames.find(f => f.method === "item/tool/call")!;
+  expect(second.id).not.toBe(first.id);
+  const sent: any[] = []; (f.engines[0] as any).write = (v: any) => sent.push(v);
+  const result = { success: true, contentItems: [{ type: "inputText", text: "done" }] };
+  await b.session.receive({ id: second.id, result });
+  expect(sent).toEqual([{ id: frame.id, result }]);
+  expect(f.engines[0].nativeToolCalls.size).toBe(0);
+  expect(f.server.log.pendingRequests(resolveThread(f.server, thread.id).id)).toHaveLength(0);
+  f.engines[0].receive({ ...frame, id: "blocked", params: { ...frame.params, namespace: "mcp" } });
+  expect(sent.at(-1).error.message).toContain("Unknown Codex server request");
+});
+
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 function temporary() {
   const root = realpathSync(mkdtempSync("/tmp/as-ingress-test-"));

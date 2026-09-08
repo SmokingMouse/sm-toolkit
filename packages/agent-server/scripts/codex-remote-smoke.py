@@ -28,15 +28,18 @@ import traceback
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=["codex", "claude"], default="codex")
+    parser.add_argument("--transport", choices=["ws", "unix"], default="ws")
+    parser.add_argument("--allow-version-mismatch", action="store_true", help="upgrade regression only; record candidate version")
     parser.add_argument("--expect", default="thread_started,turn_completed,approval_roundtrip,resume_ok,interrupt_ok,resume_fresh_ok,external_client_reply_while_attached_ok")
     parser.add_argument("--timeout", type=float, default=180)
     args = parser.parse_args()
     expected = set(args.expect.split(","))
     known = {"thread_started", "turn_completed", "approval_roundtrip", "resume_ok", "interrupt_ok", "resume_fresh_ok",
-             "agent_message_delta", "command_execution_output", "user_input_question", "unsupported_method_errors", "external_client_reply_while_attached_ok"}
+             "agent_message_delta", "command_execution_output", "user_input_question", "tool_permission_question", "unsupported_method_errors", "external_client_reply_while_attached_ok", "display_disconnect_ok"}
     if not expected <= known:
         parser.error("unknown expectation: " + str(expected - known))
-    root = Path(tempfile.mkdtemp(prefix="as-codex-remote-")).resolve()
+    # macOS sun_path is 104 bytes; its default per-user TMPDIR is too long.
+    root = Path(tempfile.mkdtemp(prefix="as-codex-remote-", dir="/tmp")).resolve()
     home = root / "home"
     codex_home = home / ".codex"
     state = home / ".agent-server"
@@ -64,6 +67,8 @@ def main():
     hold_marker = "INGRESS_SMOKE_HOLD_UNTIL_INTERRUPT"
     fresh_marker = "INGRESS_SMOKE_FRESH_TURN"
     fresh_response = "INGRESS_SMOKE_FRESH_COMPLETED"
+    offline_marker = "INGRESS_SMOKE_OFFLINE"
+    offline_release = threading.Event()
     stop_model = threading.Event()
     smoke_command = "printf ingress-approved > ingress-proof.txt; printf INGRESS_COMMAND_OUTPUT"
 
@@ -104,7 +109,10 @@ def main():
             response_id = "smoke-response-" + str(count)
             events = [{"type": "response.created", "response": {"id": response_id}}]
             tool_returned = any(entry.get("type") in {"function_call_output", "custom_tool_call_output"} and entry.get("call_id") == "call_smoke" for entry in body.get("input", []))
-            if user_inputs and fresh_marker in json.dumps(user_inputs[-1]):
+            if user_inputs and offline_marker in json.dumps(user_inputs[-1]):
+                offline_release.wait(args.timeout)
+                item = {"type": "message", "id": "msg_offline_" + str(count), "role": "assistant", "status": "completed", "phase": "final_answer", "content": [{"type": "output_text", "text": offline_marker, "annotations": []}]}
+            elif user_inputs and fresh_marker in json.dumps(user_inputs[-1]):
                 item = {"type": "message", "id": "msg_fresh_" + str(count), "role": "assistant", "status": "completed", "phase": "final_answer", "content": [{"type": "output_text", "text": fresh_response, "annotations": []}]}
             elif not tool_returned:
                 names = [t.get("name") for t in body.get("tools", [])]
@@ -157,7 +165,11 @@ requires_openai_auth = false
 trust_level = "trusted"
 ''' % (model.server_port, json.dumps(str(workspace))))
     (state / "config.toml").write_text('allowed_roots = [%s]\ndefault_model = %s\n[codex_ingress]\nenabled = true\nclaude_threads = %s\nport = 0\n' % (json.dumps(str(workspace)), json.dumps("sonnet" if args.backend == "claude" else "gpt-5.6-sol"), "true" if args.backend == "claude" else "false"))
+    if args.transport == "unix":
+        with (state / "config.toml").open("a") as file:
+            file.write('unix_path = "default"\n')
     env = {"PATH": os.environ["PATH"], "HOME": str(home), "CODEX_HOME": str(codex_home), "TERM": "xterm-256color", "LANG": "en_US.UTF-8", "TMPDIR": str(root), "NO_PROXY": "*", "no_proxy": "*", "CODEX_SMOKE_ROOT": str(root), "AGENT_SERVER_SOCKET_PATH": str(root / "as.sock")}
+    env["CODEX_SMOKE_TRANSPORT"] = args.transport
     env["CODEX_SMOKE_BACKEND"] = args.backend
     runner = Path(__file__).with_name("codex-remote-smoke-daemon.ts").resolve()
     log = open(root / "daemon-output.log", "wb")
@@ -166,7 +178,7 @@ trust_level = "trusted"
     master = None
     output = bytearray()
     proof = {name: False for name in known}
-    summary = {"artifact_dir": str(root), "backend": args.backend, "model": "real Claude CLI --model sonnet" if args.backend == "claude" else "local deterministic Responses fixture", "proof": proof}
+    summary = {"artifact_dir": str(root), "backend": args.backend, "transport": args.transport, "model": "real Claude CLI --model sonnet" if args.backend == "claude" else "local deterministic Responses fixture", "proof": proof}
     started = time.monotonic()
 
     def frames():
@@ -236,7 +248,9 @@ trust_level = "trusted"
         nonlocal tui, master
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 150, 0, 0))
-        command = ["codex", "--remote", endpoint["url"], "--remote-auth-token-env", "SMOKE_BEARER", "--no-alt-screen"]
+        command = ["codex", "--remote", endpoint["url"], "--no-alt-screen"]
+        if args.transport == "ws":
+            command += ["--remote-auth-token-env", "SMOKE_BEARER"]
         if args.backend == "claude":
             command += ["--model", "sonnet"]
         command += extra or []
@@ -275,7 +289,7 @@ trust_level = "trusted"
     try:
         version = subprocess.check_output(["codex", "--version"], env=env, text=True).strip()
         summary["codex_version"] = version
-        if version != "codex-cli 0.153.4":
+        if version != "codex-cli 0.153.4" and not args.allow_version_mismatch:
             raise RuntimeError("pinned codex-cli 0.153.4 required, found " + version)
         wait(lambda: (root / "smoke-endpoint.json").exists(), "daemon startup")
         endpoint = json.loads((root / "smoke-endpoint.json").read_text())
@@ -351,6 +365,34 @@ trust_level = "trusted"
             with sqlite3.connect(endpoint["databasePath"]) as db:
                 assert json.loads(db.execute("SELECT data_json FROM turns WHERE id = ?", (reply["turn"]["id"],)).fetchone()[0])["status"] == "completed", "external reply did not complete"
             assert tui.poll() is None
+            offline_before = len(frames())
+            prompt(offline_marker if args.backend == "codex" else "Use Bash to run exactly: sleep 3; printf INGRESS_SMOKE_OFFLINE . Then reply exactly INGRESS_SMOKE_OFFLINE.")
+            wait(lambda: any(f.get("method") == "turn/started" and f["params"].get("threadId") == fresh_id for f in frames()[offline_before:]), "offline turn started")
+            with sqlite3.connect(endpoint["databasePath"]) as db:
+                offline_turn = db.execute("SELECT id,status FROM turns WHERE thread_id = ? ORDER BY ordinal DESC LIMIT 1", (endpoint["freshAsThreadId"],)).fetchone()
+            assert offline_turn[1] == "inProgress", "offline turn already ended before display crash"
+            tui.kill()  # actual official display crash, not a native unsubscribe
+            tui.wait(timeout=3)
+            stop_tui()
+            offline_release.set()
+            def offline_completed():
+                with sqlite3.connect(endpoint["databasePath"]) as db:
+                    row = db.execute("SELECT data_json FROM turns WHERE id = ?", (offline_turn[0],)).fetchone()
+                turn = json.loads(row[0])
+                if turn["status"] in {"failed", "interrupted"}:
+                    raise RuntimeError("display crash terminated engine turn: " + json.dumps(turn))
+                return turn["status"] == "completed"
+            wait(offline_completed, "daemon turn completes after official TUI SIGKILL")
+            assert not any(f.get("method") == "turn/interrupt" and f.get("direction") == "TUI>AS" for f in frames()[offline_before:])
+            summary["offline_turn"] = {"id": offline_turn[0], "status_at_display_crash": offline_turn[1], "status_after": "completed", "signal": "SIGKILL"}
+            proof["display_disconnect_ok"] = True
+            reconnect_before = len(frames())
+            launch(["-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"', "resume", fresh_id])
+            wait(lambda: any(f.get("result", {}).get("thread", {}).get("id") == fresh_id for f in frames()[reconnect_before:]), "display replacement resumed completed thread")
+            wait(lambda: offline_marker.encode() in output, "display replacement rendered offline completion")
+            until = time.monotonic() + 0.7
+            while time.monotonic() < until:
+                pump()
             closed = external_rpc("thread/close", {"threadId": endpoint["freshAsThreadId"]})
             assert closed == {} and tui.poll() is None
             assert external_rpc("thread/read", {"threadId": endpoint["freshAsThreadId"]})["thread"]["status"]["type"] == "closed"
@@ -411,6 +453,7 @@ trust_level = "trusted"
             summary["read_permission_approvals"] = reads
             proof["user_input_question"] = any(row["status"] == "decided" and json.loads(row["decision_json"])["permissions"].get("toolName") == "Read" and json.loads(row["decided_by"]).get("label", "").startswith("codex-tui:") for row in reads) and any(f.get("method") == "serverRequest/resolved" and f["params"]["requestId"] == card["id"] for f in frames()[question_offset:])
             assert proof["user_input_question"], "Read permission did not close through AS broker"
+            proof["tool_permission_question"] = proof["user_input_question"]
             assert any(f.get("method") == "item/completed" and f.get("params", {}).get("item", {}).get("tool") == "Read" and f["params"]["item"].get("success") is True for f in frames()[question_offset:]), "Read tool did not execute successfully"
             wait(lambda: b"INGRESS_READ_COMPLETED" in output, "TUI rendered Read completion")
         stop_tui(graceful=True)
@@ -454,6 +497,7 @@ trust_level = "trusted"
         summary["error"] = str(error)
         summary["traceback"] = traceback.format_exc()
     finally:
+        offline_release.set()
         stop_tui()
         stop_model.set()
         daemon.terminate()
@@ -471,6 +515,7 @@ trust_level = "trusted"
         # Claude Bash reports a terminal aggregate, not stdout/stderr deltas.
         proof["command_execution_output"] = any(f.get("method") == "item/completed" and f.get("params", {}).get("item", {}).get("type") == "commandExecution" and "INGRESS_COMMAND_OUTPUT" in f["params"]["item"].get("aggregatedOutput", "") for f in current)
         summary["command_output_semantics"] = "completed commandExecution.aggregatedOutput contains INGRESS_COMMAND_OUTPUT"
+        summary["question_semantics"] = "tool_permission_question verifies Read permission via requestUserInput; user_input_question is a deprecated alias, neither asserts AskUserQuestion/multiSelect"
         unsupported = root / "unsupported-methods.json"
         if unsupported.exists():
             summary["unsupported_methods"] = json.loads(unsupported.read_text())

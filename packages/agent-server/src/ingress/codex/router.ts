@@ -5,6 +5,7 @@ import { ErrorCode, ProtocolError, type Item, type StartThreadParams, type Threa
 import type { AgentServer, InProcessClient } from "../../server/server.js";
 import { CONTROL_METHODS, type ControlClient, type NativeObject } from "./control-process.js";
 import { claudeItems, claudeSettings, claudeThread, claudeTurn } from "./claude-projection.js";
+import { methodPolicy } from "./method-policy.js";
 
 export const isClaudeModel = (model: string): boolean => /^(claude-|sonnet(?:$|-)|opus(?:$|-)|haiku(?:$|-)|fable(?:$|-))/i.test(model);
 const claudeModels = ["sonnet", "opus"].map(model => ({ id: model, model, displayName: `Claude · ${model}`, description: `Claude ${model} via Agent Server`, hidden: false,
@@ -173,6 +174,8 @@ export class CodexRouter {
     return { data: page.map(r => r.value), nextCursor: rows.length > limit ? cursor(page.at(-1)!.ordinal, false) : null, backwardsCursor: page.length ? cursor(page[0]!.ordinal, true) : null };
   }
   async request(method: string, p: NativeObject = {}): Promise<NativeObject> {
+    if (methodPolicy(method) === "deny") throw new ProtocolError(ErrorCode.method_not_found, `as-ingress: unsupported method ${method}`);
+    if (p.approvalsReviewer != null && p.approvalsReviewer !== "user") throw new ProtocolError(ErrorCode.unauthorized, "as-ingress: approvalsReviewer must be user");
     if (!this.claudeThreads && typeof p.threadId === "string" && !this.server.log.findEngine(p.threadId, "codex") && findClaudeThread(this.server, `th_${p.threadId}`))
       throw new ProtocolError(ErrorCode.method_not_found, "as-ingress: Claude threads are disabled by codex_ingress.claude_threads");
     if (CONTROL_METHODS.has(method)) {

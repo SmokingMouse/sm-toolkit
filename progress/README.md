@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server native ingress 已修 full 附着误占输入租约，权限设置改用短租约，生命周期 close 放开输入门控，待主控独立验收。
+agent-server native ingress 已补 Unix WebSocket、完整方法治理与中断收尾，正在合并多线程切片并执行升级回归。
 
 ## Goals
 

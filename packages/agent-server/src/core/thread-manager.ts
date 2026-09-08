@@ -5,7 +5,7 @@ import { TurnQueue } from "./turn-queue.js";
 import type { ApprovalBroker } from "./approval-broker.js";
 import { executionModel, type ModelPolicyOptions } from "./model-policy.js";
 
-export interface ThreadManagerOptions extends ModelPolicyOptions { maxQueuedTurns?: number; idleTimeoutMs?: number; now?: () => number }
+export interface ThreadManagerOptions extends ModelPolicyOptions { maxQueuedTurns?: number; idleTimeoutMs?: number; interruptTimeoutMs?: number; now?: () => number }
 const transitions: Record<ThreadStatus["type"], ThreadStatus["type"][]> = {
   spawning: ["idle", "systemError", "closed"], idle: ["running", "closed", "systemError"],
   running: ["idle", "interrupted", "systemError", "closed"], interrupted: ["idle", "systemError", "closed"],
@@ -68,7 +68,7 @@ export class ThreadManager {
   queue(threadId: string): TurnQueue {
     this.get(threadId);
     let queue = this.queues.get(threadId);
-    if (!queue) { queue = new TurnQueue(threadId, this.log, () => this.session(threadId), status => this.setStatus(threadId, status), this.maxQueuedTurns, error => this.engineDied(threadId, error)); this.queues.set(threadId, queue); }
+    if (!queue) { queue = new TurnQueue(threadId, this.log, () => this.session(threadId), status => this.setStatus(threadId, status), this.maxQueuedTurns, error => this.engineDied(threadId, error), this.options.interruptTimeoutMs); this.queues.set(threadId, queue); }
     return queue;
   }
   setStatus(threadId: string, status: ThreadStatus): void {

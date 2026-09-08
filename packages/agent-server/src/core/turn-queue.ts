@@ -6,7 +6,8 @@ export class TurnQueue {
   private active: string | null = null;
   private frozen = false;
   private dispatch = new Map<string, Promise<void>>();
-  constructor(readonly threadId: string, private readonly log: ItemLog, private readonly engine: () => EngineSession, private readonly status: (status: ThreadStatus) => void, readonly maxQueuedTurns = 8, private readonly onEngineFailure?: (error: RpcError) => void) {}
+  private interruptTimer?: ReturnType<typeof setTimeout>;
+  constructor(readonly threadId: string, private readonly log: ItemLog, private readonly engine: () => EngineSession, private readonly status: (status: ThreadStatus) => void, readonly maxQueuedTurns = 8, private readonly onEngineFailure?: (error: RpcError) => void, private readonly interruptTimeoutMs = 5000) {}
   get runningTurnId(): string | null { return this.active; }
   get isFrozen(): boolean { return this.frozen; }
   read() { return this.log.queue(this.threadId); }
@@ -61,6 +62,17 @@ export class TurnQueue {
     const turnId = this.assertActive(expected);
     await this.dispatch.get(turnId); this.assertActive(turnId);
     await this.engine().interrupt(turnId);
+    if (this.active === turnId && !this.interruptTimer) {
+      // An ack does not prove completion. Retire an engine that never closes
+      // the interrupted generation; do not let it leak output into a new turn.
+      this.interruptTimer = setTimeout(() => {
+        this.interruptTimer = undefined;
+        if (this.active !== turnId) return;
+        const error = new ProtocolError(ErrorCode.engine_unavailable, "interrupt acknowledged without turn completion; resume required", { threadId: this.threadId, turnId, retryable: true }).toJSON();
+        if (this.onEngineFailure) this.onEngineFailure(error); else this.freeze(error);
+      }, this.interruptTimeoutMs);
+      this.interruptTimer.unref();
+    }
     return turnId;
   }
   cancel(turnId: string): void {
@@ -71,6 +83,7 @@ export class TurnQueue {
   }
   complete(turnId: string, status: "completed" | "interrupted" | "failed", usage?: Usage, error?: RpcError): void {
     if (this.active !== turnId) return; // late terminal frames must not finish the next turn
+    clearTimeout(this.interruptTimer); this.interruptTimer = undefined;
     const turn = this.log.turn(turnId); turn.status = status; turn.completedAtMs = Date.now();
     turn.durationMs = turn.completedAtMs - (turn.startedAtMs ?? turn.enqueuedAtMs);
     if (usage) turn.usage = usage; if (error) turn.error = error;

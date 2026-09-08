@@ -36,6 +36,11 @@ export class ItemLog {
         request_json TEXT NOT NULL, options_json TEXT NOT NULL, data_json TEXT NOT NULL, next_seq INTEGER NOT NULL DEFAULT 1,
         UNIQUE(backend, engine_thread_id)
       );
+      CREATE INDEX IF NOT EXISTS threads_engine_id ON threads(engine_thread_id);
+      CREATE TABLE IF NOT EXISTS ingress_audit (
+        id INTEGER PRIMARY KEY, created_at INTEGER NOT NULL, client_id TEXT NOT NULL,
+        method TEXT NOT NULL, thread_id TEXT, code INTEGER NOT NULL, reason TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS turns (
         id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id), ordinal INTEGER NOT NULL,
         status TEXT NOT NULL, client_turn_id TEXT UNIQUE, request_json TEXT NOT NULL, data_json TEXT NOT NULL,

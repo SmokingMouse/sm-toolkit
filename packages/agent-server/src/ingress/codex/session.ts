@@ -1,4 +1,5 @@
 import { CODEX_SCHEMA_VERSION } from "../../engines/codex-version.js";
+import { CodexEngine } from "../../engines/codex.js";
 import { ErrorCode, ProtocolError, rpcError, ServerRequestMethodSchema, ServerRequestSchemas, type Frame, type RpcId, type ServerRequestMethod } from "../../protocol/index.js";
 import type { AgentServer, InProcessClient } from "../../server/server.js";
 import type { ControlClient, NativeObject } from "./control-process.js";
@@ -27,6 +28,7 @@ export class CodexSession {
   private abort = new AbortController();
   private reverse = new Map<RpcId, { requestId: string; method: ServerRequestMethod; claudeParams?: NativeObject }>();
   private logical = new Map<string, RpcId>();
+  private localTools = new Map<RpcId, { engine: CodexEngine; nativeId: RpcId }>();
   private optOut = new Set<string>();
   private unsubscribe: () => void;
   private unclose: () => void;
@@ -49,6 +51,12 @@ export class CodexSession {
       if (!f || typeof f !== "object" || Array.isArray(f) || ("id" in f && id === null) || (f.jsonrpc != null && f.jsonrpc !== "2.0")) throw new ProtocolError(ErrorCode.invalid_request, "as-ingress: invalid native frame");
       if (!f.method) {
         if (this.state !== "ready") throw new ProtocolError(ErrorCode.not_initialized, "as-ingress: initialize and initialized required");
+        const tool = id === null ? undefined : this.localTools.get(id);
+        if (tool) {
+          if (("result" in f) === ("error" in f)) throw new ProtocolError(ErrorCode.invalid_request, "as-ingress: native tool result or error required");
+          tool.engine.respondNativeToolCall(tool.nativeId, this.client.clientId, "error" in f ? { error: f.error } : { result: f.result });
+          this.localTools.delete(id!); return;
+        }
         const pending = id === null ? undefined : this.reverse.get(id);
         if (!pending || !("result" in f) || "error" in f) throw new ProtocolError(ErrorCode.invalid_request, "as-ingress: unknown approval or missing decision");
         const result = pending.claudeParams ? claudeAnswer(pending.method, pending.claudeParams, f.result) : f.result;
@@ -85,10 +93,21 @@ export class CodexSession {
         this.state = "initialized"; this.send({ id, result }); return;
       }
       if (this.state !== "ready") throw new ProtocolError(ErrorCode.not_initialized, "as-ingress: initialize and initialized required");
-      this.send({ id, result: await this.router.request(f.method, p) });
+      const result = await this.router.request(f.method, p);
+      this.send({ id, result });
+      if (f.method === "thread/resume" && result.thread?.id) {
+        const thread = this.router.server.log.findEngine(result.thread.id, "codex");
+        const engine = thread && this.router.server.threads.live.get(thread.id);
+        if (engine instanceof CodexEngine) for (const call of engine.nativeToolCalls.values()) this.forwardTool(engine, call.frame);
+      }
     } catch (error) {
-      if (error instanceof NativeRpcError) { this.send({ id, error: { code: error.code, message: error.message } }); return; }
       const rpc = rpcError(error);
+      if (this.state !== "closed" && typeof f?.method === "string") {
+        // Durable audit omits arbitrary params, paths, tokens and tool contents.
+        this.router.server.log.db.query("INSERT INTO ingress_audit(created_at,client_id,method,thread_id,code,reason) VALUES (?,?,?,?,?,?)")
+          .run(Date.now(), this.client.clientId, f.method.slice(0, 256), typeof f.params?.threadId === "string" ? f.params.threadId.slice(0, 128) : null, error instanceof NativeRpcError ? error.code : rpc.code, "native_request_rejected");
+      }
+      if (error instanceof NativeRpcError) { this.send({ id, error: { code: error.code, message: error.message } }); return; }
       this.send({ id, error: { ...rpc, message: `${rpc.message.startsWith("as-ingress: ") ? "" : "as-ingress: "}${rpc.message}${rpc.data?.holder ? ` (holder: ${rpc.data.holder.label})` : ""}` } });
       if (this.state === "initializing") { this.close(); this.options.end?.(); }
     }
@@ -124,6 +143,11 @@ export class CodexSession {
       this.send({ id: frame.id, method: thread.backend === "claude" && claudeToolPermission(method.data, p) ? "item/tool/requestUserInput" : method.data, params }); return;
     }
     if (frame.method === "thread/engineEvent" && p.backend === "codex" && typeof p.payload?.method === "string") {
+      if (p.payload.method === "item/tool/call" && p.payload.id != null) {
+        const engine = this.router.server.threads.live.get(p.threadId);
+        if (engine instanceof CodexEngine) this.forwardTool(engine, p.payload);
+        return;
+      }
       // Broker owns card closure; engine request IDs are process-local and collide.
       if (p.payload.method !== "serverRequest/resolved") this.send(p.payload);
     } else if (frame.method === "serverRequest/resolved" || frame.method === "serverRequest/expired") {
@@ -150,8 +174,16 @@ export class CodexSession {
     }
   }
   parseError(): void { this.send({ id: null, error: { code: ErrorCode.parse, message: "as-ingress: invalid JSON" } }); }
+  private forwardTool(engine: CodexEngine, frame: NativeObject): void {
+    if (this.state !== "ready" || !engine.claimNativeToolCall(frame.id, this.client.clientId)) return;
+    const id = `tui_tool_${crypto.randomUUID()}`;
+    this.localTools.set(id, { engine, nativeId: frame.id });
+    this.send({ ...frame, id });
+  }
   close(): void {
     if (this.state === "closed") return;
     this.state = "closed"; this.abort.abort(); this.unsubscribe?.(); this.unclose?.(); this.client.close(); this.reverse.clear(); this.logical.clear();
+    for (const engine of new Set([...this.localTools.values()].map(call => call.engine))) engine.releaseNativeToolCalls(this.client.clientId);
+    this.localTools.clear();
   }
 }
