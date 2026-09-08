@@ -136,7 +136,9 @@ export function render(model: TuiModel, columns = 100, rows = 30, color = false)
   const body = renderTimeline(model);
   for (const q of model.queue) body.push(`排队 #${q.position + 1}: ${q.preview}`);
   for (const c of model.cards.values()) if (c !== model.activeCard) body.push(...renderCard(c));
-  const content = body.flatMap(line => wrap(line, width));
+  const content = model.enginePanel
+    ? [{ text: `${model.enginePanel.title} · Esc 关闭 · PgUp/PgDn 滚动`, tone: "heading" }, ...model.enginePanel.lines].flatMap(line => wrap(line.text, width).map(text => color && line.tone ? `\x1b[${line.tone === "add" ? 32 : line.tone === "remove" ? 31 : 36}m${text}\x1b[0m` : text))
+    : body.flatMap(line => wrap(line, width));
   const picker = model.permissionPicker === undefined ? [] : ["权限模式 · ↑↓/数字选择 · Enter 确认 · Esc 取消", ...model.permissionChoices.map((p, i) => `${i === model.permissionPicker ? ">" : " "} ${i + 1}. ${p}${p === nativePermission(model.thread?.permission) ? " (当前)" : ""}`)];
   const card = (model.activeCard ? renderCard(model.activeCard) : picker).flatMap(line => wrap(line, width));
   const scanCard = model.sessionOperation === "/threads" && !!model.activeCard;
@@ -178,12 +180,15 @@ export function render(model: TuiModel, columns = 100, rows = 30, color = false)
     const cardRows = Math.min(card.length, available);
     const offset = Math.min(model.scroll, Math.max(0, card.length - cardRows));
     middle = [...content.slice(-Math.max(0, available - cardRows)).slice(0, available - cardRows), ...card.slice(offset, offset + cardRows)];
+  } else if (model.enginePanel) {
+    const start = Math.min(model.scroll, Math.max(0, content.length - available));
+    middle = content.slice(start, start + available);
   } else {
     const end = Math.max(Math.min(content.length, available), content.length - model.scroll);
     middle = content.slice(Math.max(0, end - available), end);
   }
   while (middle.length < available) middle.push("");
   const status = [model.message, model.leaseWarning].filter(Boolean).join(" · ");
-  const forkFooter = model.forkPicker && !model.sessionOperation && !model.activeCard ? "分叉 item 选择 · ↑/↓ 选择 · Enter 分叉 · Esc 取消" : footer;
+  const forkFooter = model.rewindConfirmation && !model.activeCard ? "回滚会话？[y/N] · Enter/n/Esc 取消 · 仅实体 y 确认" : model.forkPicker && !model.sessionOperation && !model.activeCard ? "分叉 item 选择 · ↑/↓ 选择 · Enter 分叉 · Esc 取消" : footer;
   return [...headers, ...middle, ...panels, ...extras, wrap(status, width)[0], ...notices, wrap(forkFooter, width)[0], ...inputRows].slice(-height).join("\n");
 }

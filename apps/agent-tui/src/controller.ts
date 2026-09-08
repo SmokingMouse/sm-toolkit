@@ -7,6 +7,8 @@ import { CompletionSource } from "./completion.js";
 import { controlError, controlSuccess, effortBudgets, efforts, estimatedContextWindow, nativePermission, nextEffort, nextPermission, permissionModes, type Effort, type Permission } from "./modes.js";
 import { InputLease } from "./lease.js";
 import { bashInput } from "./bash-input.js";
+import { controlPayload, engineCommand, nativeContext, renderEngineResult, type EngineCommand } from "./engine-commands.js";
+import { help } from "./options.js";
 
 export interface Key { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean; paste?: boolean; sequence?: string }
 export class Controller {
@@ -38,6 +40,7 @@ export class Controller {
         return;
       }
       if (key.ctrl && key.name === "c") {
+        this.model.rewindConfirmation = undefined;
         if (this.now() - this.interruptedAt < 1500) { this.exit(); return; }
         this.interruptedAt = this.now(); this.model.message = "已请求中断；1.5 秒内再按 Ctrl-C 退出";
         this.model.changed();
@@ -45,6 +48,17 @@ export class Controller {
         return;
       }
       this.interruptedAt = -Infinity;
+      if (this.model.rewindConfirmation && !this.model.activeCard) {
+        const confirmation = this.model.rewindConfirmation;
+        if (!key.paste && !key.ctrl && !key.meta && text?.toLowerCase() === "y") {
+          this.model.rewindConfirmation = undefined;
+          if (confirmation.threadId !== this.model.thread?.id) throw new Error("会话已切换，请重新 /rewind");
+          await this.control(() => this.runEngineCommand(confirmation.request));
+        } else if (!key.paste && (text?.toLowerCase() === "n" || ["return", "enter", "escape"].includes(key.name ?? ""))) {
+          this.model.rewindConfirmation = undefined; this.model.message = "已取消回滚";
+        }
+        return;
+      }
       if (this.sessions.busy) {
         const card = this.model.activeCard;
         if (this.sessions.scanning && card) {
@@ -102,12 +116,16 @@ export class Controller {
         const focus = ["history", ...(this.model.logExpanded ? ["log"] : []), ...(this.model.tasksVisible ? ["tasks"] : [])] as const;
         this.model.panelFocus = focus[(focus.indexOf(this.model.panelFocus) + 1) % focus.length] as typeof this.model.panelFocus; return;
       }
+      if (this.model.enginePanel && !this.model.activeCard && this.model.panelFocus === "history" && (key.name === "pageup" || key.name === "pagedown")) {
+        this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? -10 : 10)); return;
+      }
       if (!this.model.activeCard && (key.name === "pageup" || key.name === "pagedown") && this.model.panelFocus !== "history") {
         const field = this.model.panelFocus === "log" ? "logScroll" : "taskScroll";
         this.model[field] = Math.max(0, this.model[field] + (key.name === "pageup" ? 5 : -5)); return;
       }
       if (key.name === "pageup" || key.name === "pagedown") { this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? (this.model.activeCard ? -10 : 10) : (this.model.activeCard ? 10 : -10))); return; }
       if (this.model.activeCard?.state === "pending" && !this.model.activeCard.replying) { await this.cardKey(this.model.activeCard, text, key); return; }
+      if (key.name === "escape" && this.model.enginePanel && !this.model.completion) { this.model.enginePanel = undefined; this.model.scroll = 0; return; }
       if (this.model.permissionPicker !== undefined) { await this.permissionKey(text, key); return; }
       if (key.paste || (key.ctrl && key.name === "j") || (key.shift && ["return", "enter"].includes(key.name ?? ""))) {
         this.model.input += key.paste ? (text ?? "") : "\n";
@@ -188,6 +206,7 @@ export class Controller {
         ? [...attachments, await imageInput(unquote(text.slice(6).trim()), thread.cwd)]
         : await messageInput(steer ? text.slice(7) : text, thread.cwd, attachments));
       if (!input.length) return;
+      this.model.enginePanel = undefined;
       const fingerprint = JSON.stringify(input);
       const turnId = steer ? this.model.activeTurnId : undefined;
       if (!this.submission || this.submission.text !== fingerprint || this.submission.threadId !== thread.id || this.submission.turnId !== turnId) {
@@ -259,14 +278,27 @@ export class Controller {
   }
   private async command(text: string): Promise<boolean> {
     const [command, ...args] = text.split(/\s+/), value = args.join(" ");
+    if (command === "/help") {
+      if (value) throw new Error("用法：/help");
+      this.model.enginePanel = { title: "/help", lines: help.split("\n").map(text => ({ text })) };
+      this.model.scroll = 0; return true;
+    }
     if (command === "/permissions") {
       if (value) throw new Error("用法：/permissions");
       this.model.permissionPicker = this.permissionChoices.indexOf(nativePermission(this.model.thread?.permission));
       return true;
     }
-    if (command === "/context") {
+    if (command === "/context" && value) {
       if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) <= 0) throw new Error("用法：/context <窗口 token 数>，当前默认窗口为估算值");
       this.model.contextWindow = Number(value); this.model.contextWindowEstimated = false; return true;
+    }
+    const request = engineCommand(command, args);
+    if (request) {
+      if (command === "/rewind") {
+        this.model.rewindConfirmation = { threadId: this.model.thread!.id, request };
+        this.model.message = `回滚到原生消息 ${request.params.target_message_uuid}？[y/N]`;
+      } else await this.control(() => this.runEngineCommand(request));
+      return true;
     }
     if (!["/effort", "/model", "/compact", "/takeover", "/release"].includes(command)) return false;
     if (command === "/effort" && !efforts.includes(value as Effort)) throw new Error("用法：/effort <low|medium|high|max>");
@@ -304,6 +336,22 @@ export class Controller {
     return true;
   }
   private toggleLog(): void { this.model.logExpanded = !this.model.logExpanded; this.model.panelFocus = this.model.logExpanded ? "log" : "history"; }
+  private async runEngineCommand(request: EngineCommand): Promise<void> {
+    const threadId = this.model.thread!.id;
+    const frame = await this.withLease(threadId, () => this.client.request("thread/engineControl", { threadId, subtype: request.subtype, params: request.params }));
+    if (this.model.thread?.id !== threadId) return;
+    const data = controlPayload(frame);
+    this.model.enginePanel = renderEngineResult(request.command, data);
+    this.model.panelFocus = "history"; this.model.scroll = 0;
+    this.model.message = `${request.command} 返回 · Esc 关闭 · PgUp/PgDn 滚动`;
+    if (request.command === "/context") {
+      const { tokens, window } = nativeContext(data);
+      if (window && tokens !== undefined) {
+        this.model.contextWindow = window; this.model.contextWindowEstimated = false;
+        this.model.usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0, cacheCreation: 0, usd: null, estimated: false, ...this.model.usage, contextTokens: tokens };
+      }
+    }
+  }
   private async withLease<T>(threadId: string, action: () => Promise<T> | T): Promise<T> {
     return this.lease.run(threadId, action);
   }

@@ -6,6 +6,7 @@ import type { ThreadEntry } from "./sessions.js";
 import type { ForkEntry } from "./fork.js";
 import type { ImageInput } from "./attachments.js";
 import type { Completion } from "./completion.js";
+import type { EngineCommand, EnginePanel } from "./engine-commands.js";
 import { controlError, estimatedContextWindow, nativePermission, permissionModes, type Effort, type Permission } from "./modes.js";
 
 export interface RequestCard { request: PendingServerRequest; responseId?: RpcId; replying?: boolean; state: "pending" | "sending" | "resolved" | "expired" | "offline"; note?: string; question: number; answers: Record<string, { answers: string[] }>; draft: string }
@@ -34,6 +35,8 @@ export class TuiModel {
   input = "";
   attachments: ImageInput[] = [];
   completion?: Completion;
+  enginePanel?: EnginePanel;
+  rewindConfirmation?: { threadId: string; request: EngineCommand };
   expandedReasoning = false;
   expandedPlan = true;
   permissionPicker?: number;
@@ -113,6 +116,7 @@ export class TuiModel {
       this.collapsedAgents.clear(); this.taskScroll = 0;
     }
     this.permissionPicker = undefined; this.completion = undefined;
+    this.enginePanel = undefined; this.rewindConfirmation = undefined;
     this.thread = snapshot.thread;
     this.items.clear(); this.cards.clear(); this.queue = []; this.usage = undefined;
     this.activeTurnId = undefined; this.scroll = 0; this.picker = undefined; this.forkPicker = undefined;
