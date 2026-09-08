@@ -57,7 +57,7 @@ export class Controller {
         this.sessions.rejectInput(); return;
       }
       // Match render's card overlay, including lease acquisition and reply confirmation.
-      // In-flight card keys must be swallowed, never fall through to a hidden surface.
+      // In-flight card keys never fall through to a hidden actionable surface.
       if (this.model.activeCard && !this.model.picker) {
         if (key.name === "pageup" || key.name === "pagedown") {
           this.model.scroll = Math.max(0, this.model.scroll + (key.name === "pageup" ? -10 : 10)); return;
@@ -343,7 +343,18 @@ export class Controller {
     } finally { card.replying = false; this.model.changed(); }
   }
   private async cardKey(card: RequestCard, text: string | undefined, key: Key): Promise<void> {
-    if (card.state !== "pending" || card.replying) return;
+    if (card.state === "sending" || card.replying) {
+      // Keep draft editing usable while the overlay owns all action keys.
+      // In particular Enter must not submit that draft or confirm a hidden picker.
+      if (key.name === "return" || key.name === "enter") return;
+      if (key.name === "backspace") this.model.input = Array.from(this.model.input).slice(0, -1).join("");
+      else if (key.ctrl && key.name === "u") { this.model.input = ""; this.model.attachments = []; }
+      else if (key.paste) this.model.input += text ?? "";
+      else if (!key.ctrl && !key.meta && text && !/[\x00-\x1f\x7f]/.test(text)) this.model.input += text;
+      this.model.completion = undefined;
+      return;
+    }
+    if (card.state !== "pending") return;
     const handle = this.client.pendingRequests.get(card.request.params.requestId);
     if (!handle || this.client.state !== "connected") throw new Error("请求连接已失效，等待重连快照");
     if (handle.method === "item/tool/requestUserInput") {
