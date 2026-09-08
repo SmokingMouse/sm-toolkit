@@ -149,7 +149,8 @@ export class TuiModel {
     this.changed();
   }
   private pendingState(state: PendingRequestState): void {
-    this.pendingStates.set(state.requestId, structuredClone(state));
+    if (state.status === "pending") this.pendingStates.set(state.requestId, structuredClone(state));
+    else this.pendingStates.delete(state.requestId);
     const card = this.cards.get(state.requestId);
     if (state.status !== "pending") {
       const note = state.status === "resolved" ? `已由 ${state.decidedBy?.label || state.decidedBy?.clientId || "未知客户端"} 处理` : expiredNote(state.reason ?? "unknown");

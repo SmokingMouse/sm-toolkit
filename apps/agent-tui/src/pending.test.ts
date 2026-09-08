@@ -40,6 +40,28 @@ test("pending notification resolves card and count without legacy notifications,
     expect(renderCard(model.cards.get("request")!).join("\n")).toBe(`[request] 已由 ${label || "client-phone"} 处理`);
   }
 });
+test("P2-4 new notifications alone reclaim terminal pending states with and without local cards", () => {
+  const model = new TuiModel();
+  model.request(request);
+  const live = pendingRequestState(request, 1);
+  model.notification({ jsonrpc: "2.0", method: "thread/pendingRequests", params: live });
+  for (let i = 0; i < 200; i++) {
+    const next: PendingServerRequest = { ...request, params: { ...request.params, requestId: `request-${i}` } };
+    if (i % 2 === 0) model.request(next);
+    const state = pendingRequestState(next, 1);
+    model.notification({ jsonrpc: "2.0", method: "thread/pendingRequests", params: state });
+    expect(model.pendingStates.size).toBe(2);
+    const terminal = { ...state, status: i % 3 ? "resolved" as const : "expired" as const, reason: "timeout", decidedBy: { clientId: "phone", label: "手机" } };
+    model.notification({ jsonrpc: "2.0", method: "thread/pendingRequests", params: terminal });
+    // A repeated terminal notification must not reinsert a tombstone either.
+    model.notification({ jsonrpc: "2.0", method: "thread/pendingRequests", params: terminal });
+    expect([...model.pendingStates.keys()]).toEqual(["request"]);
+    expect(model.pendingCount).toBe(1);
+    if (i % 2 === 0) expect(model.cards.get(state.requestId)?.state).toBe(terminal.status);
+  }
+  model.notification({ jsonrpc: "2.0", method: "thread/pendingRequests", params: { ...live, status: "expired", reason: "timeout" } });
+  expect(model.pendingStates.size).toBe(0); expect(model.pendingCount).toBe(0);
+});
 test("pending timeout and withdrawal have notices; reconnect snapshot rebuilds pending count", () => {
   const model = new TuiModel();
   for (const reason of ["timeout", "turn_interrupted"]) {
