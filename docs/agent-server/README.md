@@ -295,6 +295,7 @@ Trellis 今天自己 spawn 引擎（`lib/llm/claude.ts` / `codex.ts` → `Backen
 | **P1 单后端 daemon** | Session Registry + Item Log + Turn Queue + unix socket 传输；只支持 `backend:"codex"`（app-server 协议映射最短） + TUI 客户端 | TUI 能开 thread、连发三轮不重启进程、断开重连补齐、`turn/interrupt` 生效 | 已完成 |
 | **P2 Claude 长会话** | `ClaudeSession`：stdin 常开跨轮、control protocol 复用、`can_use_tool` 接进 Approval Broker | 同一进程跑完五轮；审批在两个客户端同时弹、先答生效另一个撤卡 | 已完成（`engines/claude.ts` 常驻单进程 + 测试覆盖） |
 | **P3 WebSocket + 鉴权 + 多客户端** | WS 传输、token、`serverRequest/resolved`、可选 input lease | 手机 + TUI 同时 attach 同一 thread，双方看到同一份日志 | 已完成（`transport/websocket.ts` + `LeaseManager`/`ApprovalBroker` 已接线，见[包 README](../../packages/agent-server/README.md)） |
+| **Codex 官方 TUI 接入** | codex-ingress 双后端、多线程/fork/分页、WS/Unix 与方法/只读治理 | 双后端及传输各三轮冒烟、全量测试、typecheck、升级 schema 无差异 | 已集成至 feat/codex-ingress，待主控验收；[快速上手](codex-tui-quickstart.md)、[协议 §13](protocol.md#13-codex-ingresscodex-官方-tui) |
 | **P4 Trellis 迁移第一步** | Trellis 的 project 模式改走 agent-server（chat 保持原路） | 见 `trellis-migration.md` 第一步验收 | 进行中（Trellis 分支实测，细节见 `trellis-migration.md`） |
 | **P5 外部提供者** | `ExternalSession` + Herdr 桥审批回写 | pane 里的 codex 会话在手机上可读、可批 | 未开始 |
 | **P6 飞书 / 手机客户端切换** | 飞书 handler 与手机 PWA 改走协议 | Trellis 侧不再有第二个 `startRun` 调用点 | 未开始 |

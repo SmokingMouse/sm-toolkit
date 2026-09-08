@@ -28,15 +28,16 @@ Claude 权限启动映射：
 
 | permission | 原生模式 | settings 与审批 |
 | --- | --- | --- |
-| default | default（manual 兼容名） | 仅此模式注入 `permissions.ask:["*"]`，强制经纪人审批 |
+| default | default（manual 兼容名） | 注入 `permissions.ask:["*"]`，要求经纪人审批 |
 | acceptEdits / auto-edit | acceptEdits | 不注入 settings，编辑由 CLI 自动允许，其余原生询问转审批 |
-| plan / readonly | plan | 不注入 settings，原生只读规划模式；readonly 是启动别名，热切用 plan |
+| readonly | default | 注入 ask 并禁用四类文件写工具，Bash 经 daemon 名单或审批；只支持启动时选择 |
+| plan | plan | 注入 ask 并禁用四类文件写工具；CLI 仍可能直接放行模型发起的 Bash，限制见协议 |
 | bypassPermissions / full | bypassPermissions | 不注入 ask/settings；意外 `can_use_tool` 自动 allow，零新增 pendingRequests |
 | dontAsk | dontAsk | 不注入 settings；原生未授权操作拒绝，意外 `can_use_tool` 自动 deny |
 
 所有模式保留 `--permission-prompt-tool stdio`。bypass 启动另加 `--allow-dangerously-skip-permissions` 支持以后重新进入该模式；无需重复 `--dangerously-skip-permissions`。自动答复通过 `thread/engineEvent` 的 `permission_auto_response` 留痕（需协商 engineEvents），不经过审批队列。readonly/plan 是 CLI 权限模式，不是 OS 沙箱。热切保留启动 settings：从 default 热切后仍可能出现 ask 规则审批，但 bypass/dontAsk 会自动处理；需要原生 acceptEdits/plan 行为请直接以该模式新建线程。完整语义与 lease 要求见 [协议](../../docs/agent-server/protocol.md)。
 
-default/plan/acceptEdits 下，`Bash` 的 `can_use_tool` 若命令判定为只读则 daemon 直接 allow。判定器（`readonly-commands.ts`）是 fail-closed 的白名单解析器：命令先按严格语法解析，解析失败（未知构造）直接判非只读，而不是黑名单式识别已知危险模式再放行其余部分。`` ` ``/`$` 不论是否在引号内一律判非只读（覆盖 `$(...)`、`` `...` ``、`${...}`、`$((...))`）；未加引号的 `<`/`>`/`(`/`)` 一律判非只读（覆盖重定向、heredoc、子 shell、`<(...)`/`>(...)`），引号内同样字符是字面量不受影响；允许的连接符仅 `&&`/`||`/`|`/`;`/换行 `\n`/`\r`，单个 `&`（后台）与 `|&` 一律判非只读。每段简单命令的 `argv[0]` 需不含 `/`（防路径冒用同名二进制）、不在硬编码包装命令黑名单 `env command exec xargs source . eval sudo doas time nice nohup sh bash zsh script expect` 内（独立于 `readonly_commands` 生效，写进去也没用）、在默认名单 `ls cat head tail wc find grep rg pwd echo stat file which git` 内、且经真实 PATH 查找能解析到系统目录白名单（默认 `/bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /opt/homebrew/bin /opt/homebrew/sbin`）内的可执行文件（堵住 PATH 前插目录劫持裸命令名）。命中名单后再按各命令的参数校验：`git` 不允许任何全局 flag（第一个参数必须就是子命令本身），仅 `status/log/diff/show/rev-parse/branch`，`log/diff/show` 额外拒绝 `--output`/`--output=<file>`，`branch` 仅纯列出形式（`-a/-l/-r/--list/--show-current/-v`）；`find`/`rg`/`grep`/`file` 使用独立的选项白名单，只接受代码中逐项列出的只读 flag 和参数形式；未知选项、缩写、短选项合并、短选项粘值、`--` 终止符均退审批。带值选项必须有合法值（文本非空且不以 `-` 开头，计数为非负十进制整数，枚举逐值匹配；find 的时间/大小比较另接受规定的正负数形式），只有 `rg`/`grep`/`file` 的带值长选项接受 `--name=value`。`find` 的路径须在表达式前，`-H/-L/-P` 只在路径前；`-exec`/`-delete`、`--pre`/`--hostname-bin`、`file -C/-m` 及其变体不在白名单内。四命令的未加引号 glob/brace/tilde 展开回退审批，防止 shell 扩展生成额外选项；模式可用引号或转义传入。反斜杠换行按 shell 续行规则移除后再验选项；`ls/cat/head/tail/wc/pwd/echo/stat/which` 无已知写盘/执行开关，不做额外校验。命中时 daemon 以 `thread/engineEvent`（subtype=`readonly_auto_allow`，payload 含 requestId/toolUseId/toolName/command/matchedRules）留痕，同时写入 `approvals` 表一行（`status='auto_allowed'`，`kind='readonly_auto_allow'`），可事后查询是哪条规则放的行；不写入 pendingRequests、不占审批队列；bypass/dontAsk 已有自己的自动应答路径，不受影响，`fileChange`/`item/permissions/requestApproval` 类请求也不受影响。可用 `readonly_auto_allow = false` 整体关闭，或 `readonly_commands = [...]`（整体替换默认名单，非追加；硬编码包装命令黑名单不受此影响）自定义，见下方 `config.toml`。
+default/plan/acceptEdits 下，`Bash` 的 `can_use_tool` 命中只读名单时自动 allow，不进入 pendingRequests；事件 `readonly_auto_allow` 与 approvals 表记录命令及 matchedRules。判定器统一检查严格 shell 语法、所有 argv 的未引号展开字符和真实 PATH，再对 `find/rg/grep/file/git` 校验参数；`-f` 输入文件还受 allowed_roots 约束。未知构造回退审批。配置 `readonly_commands` 整体替换默认名单，自定义命令没有专门参数校验，配置者须确保其无写入开关。完整名单、可用写法、plan/readonly 差异及 shell snapshot、工具配置、git 索引缓存限制，以[协议 §3 的只读规则](../../docs/agent-server/protocol.md#3-方法client--server)为准。
 
 ```sh
 bun run typecheck

@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server native ingress 正在集成最新多线程兼容、Unix 传输与只读治理硬化，待完成合并后全量回归。
+agent-server native ingress 已集成多线程兼容、Unix 传输与只读治理，双后端双传输各三轮和全量回归通过，待主控验收。
 
 ## Goals
 

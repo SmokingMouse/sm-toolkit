@@ -290,6 +290,8 @@ readonly-auto-allow 名单同样发生在这一步，且只对 readonly/default/
 回归材料：`readonly-review-vectors.json` 保留前三轮 377 行；`readonly-review4-vectors.json` 保留四审 166+28 行（原预期、现预期和变更理由）及原 67 条差分命令。`readonly-differential.test.ts` 真执行全部 67 条并核对内容哈希和元数据，包括如今收紧为审批的历史行，不按当前放行集合删行。真机复跑：`bun packages/agent-server/scripts/readonly-expansion-smoke.ts`，显式 sonnet 并断言同线程 init 帧，验证带引号 find 免审、git brace 产生审批且不落盘。
 
 **已知限制**（不阻塞验收，记录在案）：
+- 只读免审不等于进程零写入：`git status` 可能刷新 `.git/index` 缓存及 `.git` 元数据；只读语义不承诺这些内部缓存完全不变。
+- 只有 `find/rg/grep/file/git` 有专门参数校验器；其余名单条目（含自定义 `readonly_commands` 条目）只过统一语法闸和 PATH 闸，不检查参数。配置者须保证命令没有写入开关；例如将 `sed` 或 `tee` 加入名单会使其写入调用免审。硬编码包装命令黑名单仍生效。
 - shell 的名字解析顺序是函数 → 别名 → builtin → PATH，而 `resolveExecutableDir` 只验证 PATH 这一层；真正执行命令的 Bash 工具会 source 一份 shell snapshot，如果用户 rc 里对 `ls`/`cat`/`git` 等名单命令定义了同名函数或别名，分类器解析到系统目录下的真实二进制并放行，但实际跑的是那个函数/别名。利用它需要先能写用户的 rc 文件（链式放大器，不是一击绕过），不属于本次 fail-closed 承诺覆盖的威胁模型，但代码里 `resolveExecutableDir` 的注释不应被读成"端到端保证跑的就是这个二进制"。
 - `find`/`rg`/`grep`/`file` 已改为选项白名单（P2-5）；为避免 GNU/BSD 与未来版本差异导致默认放行，未列明的安全选项也会回退审批，包括混入未知或带值字母的合并串（如 `grep -rnA`）、短选项粘值（如 `rg -C2`）、长选项缩写、`--`、空值及以 `-` 开头的文本值。可改写为独立选项（如 `grep -r -n` / `rg -C 2`）；glob 模式须引号或转义。分类器校验命令文本、PATH 和 `-f` 输入路径，不隔离工具读取的环境/配置（如 ripgrep 的 `RIPGREP_CONFIG_PATH`）；`rg --no-config` 可显式禁用其配置读取。
 对已有 thread，请求 full/bypassPermissions/dontAsk（或原生 ultraplan:true）必须由有效 lease 的持有者发起，覆盖 permission/set、engineControl.set_permission_mode、turn/start.permission 和 resume.permission；无 lease/已过期返回 unauthorized (-32005)，他人持有返回 lease_held (-32012)。持有 lease 不绕过原生 bypass availability/组织策略。普通输入和非提升模式继续使用可选 lease。
@@ -745,7 +747,7 @@ port = 0 # 随机 loopback 端口，endpoint.json 的 codexIngressUrl 给出实�
 官方 `codex-cli 0.153.4` 用 `codex --remote ws://127.0.0.1:PORT --remote-auth-token-env TOKEN_ENV` 连接。
 TOKEN_ENV 指向 daemon token 文件中同一个 bearer。鉴权在 HTTP upgrade 的 Authorization header；
 仅接受 loopback peer，拒绝浏览器 Origin，最大 WebSocket 消息 128 MiB（as/1 网络传输仍为 16 MiB）。
-当前不提供 Unix WebSocket。关闭开关后不创建 control 进程，不增加 endpoint 字段或 as/1 通知。
+也支持显式开启 Unix WebSocket，路径、权限与连接方式见 §13.0。关闭开关后不创建 control 进程，不增加 endpoint 字段或 as/1 通知。
 
 native initialize / initialized 映射为一个独立 connectInProcess 客户端，声明 engineEvents、pendingRequests 和四类审批能力。
 client label 为 `codex-tui:c_<uuid>`，断开只 detach / 释放租约，不关闭线程。
@@ -834,7 +836,7 @@ socket 权限 0600，父目录必须本用户所有且 0700；拒绝已占用路
 scripts/codex-ingress-upgrade-check.sh --codex /绝对路径/codex --out /tmp/codex-upgrade-report
 ```
 
-默认两后端 × 两传输 × 3 次，执行全部公共冒烟与 Claude tool_permission_question、全量 agent-server 测试、typecheck。
+默认两后端 × 两传输 × 3 次，执行全部公共冒烟（含 cross_backend_model_override_tolerated、wire_schema_clean）与 Claude tool_permission_question、全量 agent-server 测试、typecheck。
 候选二进制统一进入 display/control/engine 的 PATH；允许报告版本变化，但不修改 0.153.4 基线。重新生成 experimental schema 并用 JSON Schema Draft 7 校验所有文件，验证 AS required-field 对齐，输出方法增删、逐文件 schema.diff、逐命令 exit/log 和 report.json/report.md。
 任何 schema 差异或回归失败均 exit 1；不因 schema 差异跳过冒烟。运行需要 bun、uv、python3 及既有 Claude 登录；不会创建新凭证。`--runs 1` 可做快速候选检查，正式验收保留默认 3。
 
@@ -847,7 +849,7 @@ start 选择 Claude 模型及直接进入已有 Claude 线程均明确返回 -32
 `model/list` 在 control 最后一页追加显式 `sonnet` / `opus`，显示名为 `Claude · sonnet` / `Claude · opus`。
 列表和执行入口都过 model guard；`fable` / `claude-fable*` 默认禁止。native 没有 backend 字段：
 `thread/start` 的 model 是 Claude tier 或 `claude-*` 时创建 Claude 引擎，否则创建 Codex 引擎。
-已有线程不隐式更换后端；跨后端 `/model` 或 turn override 返回 `-32602`，需要新建线程。
+已有线程不隐式更换后端；跨后端模型 override 沿用原模型并提示 warning，同后端设置规则见 §13.3。切换引擎需要新建线程。
 Claude 线程的 native UUID 是 AS threadId 去掉 `th_`，与 Claude CLI session_id 无关；重连、关闭后恢复、列表都用该持久 UUID。
 fj 仍可通过 as/1 建好 Claude 线程，再在官方 TUI 用 `resume <uuid>` 进入，包括尚无 turn 的线程。
 
