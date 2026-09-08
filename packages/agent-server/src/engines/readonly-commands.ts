@@ -103,7 +103,10 @@ function parseScript(command: string): ParsedScript | null {
     // all start with an unquoted '<', '>', '(' or ')' -- reject the operator outright.
     if (ch === "<" || ch === ">" || ch === "(" || ch === ")") return null;
     if (ch === "\n" || ch === "\r") { pushCommand(); continue; }
-    if (/\s/.test(ch)) { pushWord(); continue; }
+    // Only space/tab split words, matching bash/zsh's default IFS. JS's \s also matches NBSP,
+    // U+2028 and other Unicode space separators that real shells treat as ordinary word
+    // characters; using it here would parse a name real shells never split into two tokens.
+    if (ch === " " || ch === "\t") { pushWord(); continue; }
     if (ch === "&") {
       if (command[i + 1] === "&") { pushCommand(); i++; continue; }
       return null; // bare `&` (background) is not an allowed connector
@@ -156,6 +159,26 @@ function resolveExecutableDir(name: string, dirs: readonly string[]): string | n
   return null;
 }
 
+/**
+ * A name in `allow` only actually skips approval if it also resolves to a real, executable file
+ * inside `systemDirs` on *this* machine -- e.g. `rg` when ripgrep is not installed and the shell
+ * only knows it as an injected function is never resolvable, so it always falls through to deny/
+ * approval instead of auto-allow (fail-closed, but a silent coverage gap). Call this once at
+ * startup to audit the configured allowlist and log which entries are currently dead weight,
+ * rather than discovering it only from an unexplained stream of approval requests.
+ */
+export function unresolvableReadonlyCommands(
+  allow: ReadonlySet<string> = new Set(DEFAULT_READONLY_COMMANDS),
+  options: ReadonlyClassificationOptions = {},
+): string[] {
+  const systemDirs = (options.systemDirs ?? DEFAULT_SYSTEM_BIN_DIRS).map(realpathOrSelf);
+  const searchDirs = pathSearchDirs(options);
+  return [...allow].filter(name => {
+    const dir = resolveExecutableDir(name, searchDirs);
+    return !dir || !systemDirs.includes(dir);
+  });
+}
+
 export interface ReadonlyClassificationOptions {
   /** Directories a resolved executable must live in. Defaults to DEFAULT_SYSTEM_BIN_DIRS. */
   systemDirs?: readonly string[];
@@ -191,6 +214,14 @@ export function classifyReadonlyCommand(
   // result below instead of failing closed on a spurious string mismatch.
   const systemDirs = (options.systemDirs ?? DEFAULT_SYSTEM_BIN_DIRS).map(realpathOrSelf);
   const searchDirs = pathSearchDirs(options);
+  // A long `;`-chain repeats the same head many times; resolving argv[0] does real statSync
+  // calls per PATH entry, so memoize per command name within this one classification call.
+  const resolvedDirCache = new Map<string, string | null>();
+  const resolveCached = (name: string): string | null => {
+    let cached = resolvedDirCache.get(name);
+    if (cached === undefined) { cached = resolveExecutableDir(name, searchDirs); resolvedDirCache.set(name, cached); }
+    return cached;
+  };
 
   const rules: string[] = [];
   for (const tokens of parsed.commands) {
@@ -202,7 +233,7 @@ export function classifyReadonlyCommand(
     const name = head;
     if (HARD_BANNED_HEADS.has(name)) return deny;
     if (!allow.has(name)) return deny;
-    const resolvedDir = resolveExecutableDir(name, searchDirs);
+    const resolvedDir = resolveCached(name);
     if (!resolvedDir || !systemDirs.includes(resolvedDir)) return deny;
 
     if (name === "git") {

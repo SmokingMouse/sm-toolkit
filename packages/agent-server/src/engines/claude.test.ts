@@ -170,13 +170,19 @@ describe("Claude native frame exchange (fake child only)", () => {
       const engine = new ClaudeEngine({ spawnProcess: (_command, argv) => { args = argv; return fake.child; } });
       try {
         await engine.spawn({ backend: "claude", threadId: "th", permission });
+        const brokered = permission === "readonly" || permission === "default" || permission === "plan";
         expect(args.includes("--allow-dangerously-skip-permissions")).toBe(permission === "full" || permission === "bypassPermissions");
-        expect(args[args.indexOf("--permission-mode") + 1]).toBe(permission === "readonly" ? "plan" : permission === "full" ? "bypassPermissions" : permission === "auto-edit" ? "acceptEdits" : permission);
+        // readonly is a daemon-enforced alias for "default", not CLI-native "plan": plan's own
+        // Bash heuristic silently decides some commands without ever asking permission-prompt-tool
+        // (see docs/agent-server, P0-1), so it cannot back a fail-closed guarantee.
+        expect(args[args.indexOf("--permission-mode") + 1]).toBe(permission === "readonly" ? "default" : permission === "full" ? "bypassPermissions" : permission === "auto-edit" ? "acceptEdits" : permission);
         expect(args[args.indexOf("--permission-prompt-tool") + 1]).toBe("stdio");
         expect(args).not.toContain("--dangerously-skip-permissions");
-        expect(args).not.toContain("--disallowedTools");
-        expect(args.includes("--settings")).toBe(permission === "default");
-        if (permission === "default") expect(JSON.parse(args[args.indexOf("--settings") + 1])).toEqual({ permissions: { ask: ["*"] } });
+        // readonly and plan get disallowedTools as defense in depth beyond the broker/ask gate.
+        expect(args.includes("--disallowedTools")).toBe(permission === "readonly" || permission === "plan");
+        if (args.includes("--disallowedTools")) expect(args[args.indexOf("--disallowedTools") + 1]).toBe("Edit,Write,MultiEdit,NotebookEdit");
+        expect(args.includes("--settings")).toBe(brokered);
+        if (brokered) expect(JSON.parse(args[args.indexOf("--settings") + 1])).toEqual({ permissions: { ask: ["*"] } });
       } finally { await engine.close("test"); }
     }
   });
@@ -205,7 +211,7 @@ describe("Claude native frame exchange (fake child only)", () => {
       }
     } finally { unsubscribe(); await server.close(); }
   });
-  test.each(["default", "plan", "acceptEdits"] as const)("readonly auto-allow: %s mode allows a readonly Bash command without an approval", async permission => {
+  test.each(["readonly", "default", "plan", "acceptEdits"] as const)("readonly auto-allow: %s mode allows a readonly Bash command without an approval", async permission => {
     const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-readonly", request: { subtype: "can_use_tool", tool_use_id: "bash", tool_name: "Bash", input: { command: "git status && ls" } } }));
     const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
     const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
@@ -270,6 +276,67 @@ describe("Claude native frame exchange (fake child only)", () => {
       await until(() => published.some(f => f.method === "thread/engineEvent" && f.params.subtype === "readonly_auto_allow"));
       expect(server.log.pendingRequests(thread.id)).toEqual([]);
     } finally { unsubscribe(); await server.close(); }
+  });
+  test("readonly gate: write tools are denied outright with an audit row even if the CLI asks", async () => {
+    const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-readonly-edit", request: { subtype: "can_use_tool", tool_use_id: "edit", tool_name: "Edit", input: { file_path: "/tmp/a", old_string: "x", new_string: "y" } } }));
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
+    const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
+    const published: any[] = [];
+    let unsubscribe = () => {};
+    try {
+      const c = await client(server);
+      const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd(), permission: "readonly" });
+      unsubscribe = server.log.subscribe(thread.id, frame => published.push(frame));
+      await c.request("turn/start", { threadId: thread.id, input: input("go") });
+      await until(() => published.some(f => f.method === "thread/engineEvent" && f.params.subtype === "readonly_denied"));
+      expect(server.log.pendingRequests(thread.id)).toEqual([]);
+      expect(fake.written.find(f => f.type === "control_response")).toMatchObject({ response: { request_id: "native-readonly-edit", subtype: "success", response: { behavior: "deny" } } });
+      expect(published.find(f => f.method === "thread/engineEvent").params).toMatchObject({ backend: "claude", subtype: "readonly_denied", payload: { toolName: "Edit", behavior: "deny", reason: "readonly_write_tool" } });
+      const persisted = server.log.readonlyDenials(thread.id);
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0]).toMatchObject({ id: "native-readonly-edit", thread_id: thread.id, status: "auto_denied" });
+    } finally { unsubscribe(); await server.close(); }
+  });
+  test("readonly auto-allow: a non-readonly Bash command still queues an approval under readonly", async () => {
+    const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-write", request: { subtype: "can_use_tool", tool_use_id: "bash", tool_name: "Bash", input: { command: "touch /tmp/x" } } }));
+    const engine = new ClaudeEngine({ spawnProcess: () => fake.child });
+    const server = new AgentServer({ databasePath: ":memory:", allowedRoots: [process.cwd()], engineFactory: () => engine, idleTimeoutMs: 0 });
+    try {
+      const c = await client(server);
+      const { thread } = await c.request("thread/start", { model: "sonnet", backend: "claude", cwd: process.cwd(), permission: "readonly" });
+      await c.request("turn/start", { threadId: thread.id, input: input("go") });
+      await until(() => server.log.pendingRequests(thread.id).length === 1);
+      expect(server.log.pendingRequests(thread.id)[0]).toMatchObject({ method: "item/commandExecution/requestApproval", params: { command: "touch /tmp/x" } });
+      expect(fake.written.some(f => f.type === "control_response")).toBe(false);
+      expect(server.log.readonlyAutoAllows(thread.id)).toEqual([]);
+    } finally { await server.close(); }
+  });
+  test.each(["readonly", "plan"] as const)("standalone bash turn: %s mode gates outside the CLI's can_use_tool round trip", async permission => {
+    const fake = fakeProcess(() => {}), engine = new ClaudeEngine({ spawnProcess: () => fake.child }), events: EngineEvent[] = [];
+    const consuming = (async () => { for await (const e of engine.events) events.push(e); })();
+    try {
+      await engine.spawn({ backend: "claude", threadId: "th", permission });
+      // Whitelisted: executes without ever asking the CLI, and is still audited.
+      await engine.sendTurn("tn-allow", [{ type: "bash", command: "git status" }], { threadId: "th", input: [{ type: "bash", command: "git status" }] });
+      await until(() => fake.written.some(f => f.type === "bash_command"));
+      expect(fake.written.at(-1)).toMatchObject({ type: "bash_command", command: "git status" });
+      expect(events.some(e => e.type === "engineEvent" && e.subtype === "readonly_auto_allow")).toBe(true);
+      fake.send({ type: "user", isReplay: true, message: { role: "user", content: "<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr><bash-exit-code>0</bash-exit-code>" } });
+      await until(() => events.filter(e => e.type === "turnCompleted").length === 1);
+      // Not whitelisted: must not reach the child process until an approval decides it, and
+      // denial must complete the turn as a failed tool call rather than writing bash_command.
+      let approved: ((result: any) => void) | undefined;
+      const originalPush = engine.events.push.bind(engine.events);
+      engine.events.push = (e: any) => { if (e.type === "approval") approved = e.respond; return originalPush(e); };
+      const send = engine.sendTurn("tn-deny", [{ type: "bash", command: "touch /tmp/roclaw-should-not-run" }], { threadId: "th", input: [{ type: "bash", command: "touch /tmp/roclaw-should-not-run" }] });
+      await until(() => approved !== undefined);
+      expect(fake.written.filter(f => f.type === "bash_command")).toHaveLength(1); // still just the first, whitelisted one
+      approved!({ decision: "reject" });
+      await send;
+      await until(() => events.filter(e => e.type === "turnCompleted").length === 2);
+      expect(fake.written.filter(f => f.type === "bash_command")).toHaveLength(1);
+      expect(events.filter(e => e.type === "itemCompleted" && e.item.type === "commandExecution").at(-1)).toMatchObject({ item: { status: "failed" } });
+    } finally { await engine.close("test"); await consuming; }
   });
   test("readonly auto-allow: does not apply to fileChange requests", async () => {
     const fake = fakeProcess(send => send({ type: "control_request", request_id: "native-write-file", request: { subtype: "can_use_tool", tool_use_id: "edit", tool_name: "Write", input: { file_path: "/tmp/a", content: "hi" } } }));

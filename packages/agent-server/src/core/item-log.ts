@@ -274,5 +274,15 @@ export class ItemLog {
   readonlyAutoAllows(threadId: string): ApprovalRow[] {
     return this.db.query<ApprovalRow, [string]>("SELECT * FROM approvals WHERE thread_id=? AND kind='readonly_auto_allow' ORDER BY created_at,id").all(threadId);
   }
+  /** Same rationale as recordReadonlyAutoAllow, for the readonly-thread write-tool direct-deny path. */
+  recordReadonlyDenied(entry: { id: string; threadId: string; turnId: string; itemId: string; toolName: string; now?: number }): void {
+    const now = entry.now ?? Date.now();
+    const detail = JSON.stringify({ toolName: entry.toolName });
+    this.db.query("INSERT INTO approvals(id,thread_id,turn_id,item_id,kind,params_json,status,decided_by,decision_json,created_at,decided_at) VALUES(?,?,?,?,'readonly_denied',?,'auto_denied',?,?,?,?)")
+      .run(entry.id, entry.threadId, entry.turnId, entry.itemId, detail, JSON.stringify({ system: "readonly_denied" }), detail, now, now);
+  }
+  readonlyDenials(threadId: string): ApprovalRow[] {
+    return this.db.query<ApprovalRow, [string]>("SELECT * FROM approvals WHERE thread_id=? AND kind='readonly_denied' ORDER BY created_at,id").all(threadId);
+  }
   close(): void { this.listeners.clear(); this.serverListeners.clear(); this.partial.clear(); this.db.close(); }
 }

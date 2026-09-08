@@ -5,7 +5,7 @@ import { ClaudeEffortSchema, ErrorCode, PermissionSchema, ProtocolError, type Js
 import { AsyncQueue, sessionEnvironment, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
 import { ClaudeEventMapper, jsonValue, mapPermissionDecision, mapPermissionRequest, record, type ToolPermissionRequest } from "./claude-mapper.js";
 import { historyMessages } from "./fork-history.js";
-import { classifyReadonlyCommand, DEFAULT_READONLY_COMMANDS } from "./readonly-commands.js";
+import { classifyReadonlyCommand, unresolvableReadonlyCommands, DEFAULT_READONLY_COMMANDS } from "./readonly-commands.js";
 
 // Local Claude Code 2.1.258 bin/claude.exe: print.ts d.request.subtype dispatch.
 // Default deny: auth, initialization, settings, remote plumbing and lifecycle controls
@@ -19,7 +19,10 @@ export const CLAUDE_CONTROL_ALLOWLIST = new Set([
   "reload_plugins", "reload_skills", "side_question",
 ]);
 export function claudePermission(permission: SessionOptions["permission"] = "default"): string {
-  return permission === "full" ? "bypassPermissions" : permission === "auto-edit" ? "acceptEdits" : permission === "readonly" ? "plan" : permission;
+  // readonly must be daemon-enforced (default mode + ask:["*"] + our broker), not CLI's native
+  // plan mode: plan's own Bash heuristic silently executes or silently allows commands without
+  // ever asking permission-prompt-tool, so it cannot be relied on for a fail-closed guarantee.
+  return permission === "full" ? "bypassPermissions" : permission === "auto-edit" ? "acceptEdits" : permission === "readonly" ? "default" : permission;
 }
 
 export function buildClaudeLaunch(options: SessionOptions): { args: string[]; env: NodeJS.ProcessEnv } {
@@ -28,9 +31,15 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   const resolved = resolveClaudeModel(options.model);
   const permission = claudePermission(options.permission);
   // Keep stdio on every mode for live switches and unexpected native requests.
-  // Only default forces broker review; ask rules override native mode decisions.
+  // default and plan both force broker review via ask:["*"]; bypassPermissions/acceptEdits/
+  // dontAsk deliberately skip it (native mode already decided the tool-call outcome).
   const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio"];
-  if (permission === "default") args.push("--settings", JSON.stringify({ permissions: { ask: ["*"] } }));
+  if (permission === "default" || permission === "plan") args.push("--settings", JSON.stringify({ permissions: { ask: ["*"] } }));
+  // readonly and plan defense-in-depth: even if the broker or ask:["*"] gate has a gap, the
+  // model never gets a file-write tool to call in the first place. Cost: plan's native
+  // "save plan to a file" step (Write to ~/.claude/plans/…) is skipped; ExitPlanMode still works
+  // without a planFilePath.
+  if (options.permission === "readonly" || options.permission === "plan") args.push("--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit");
   if (resolved.model) args.push("--model", resolved.model);
   if (options.effort !== undefined) args.push("--effort", options.effort);
   if (options.autocompact !== undefined) args.push("--autocompact", String(options.autocompact));
@@ -51,6 +60,19 @@ export function buildClaudeLaunch(options: SessionOptions): { args: string[]; en
   // The shared resolver owns endpoint routing; ambient proxy settings cannot override it.
   for (const key of ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"]) delete env[key];
   return { args, env: sessionEnvironment(options, { ...env, ...resolved.env }) };
+}
+
+// P2-1: a readonly-allowlist entry that never resolves on this host (e.g. `rg` when ripgrep isn't
+// installed and the shell only knows it as an injected function) is fail-closed but silently dead
+// weight -- every matching command falls through to approval instead of auto-allow. Audit this
+// once per process (not per session) so an operator sees it in the log instead of discovering it
+// from an unexplained stream of approval requests.
+let warnedUnresolvableReadonlyCommands = false;
+function warnUnresolvableReadonlyCommandsOnce(allow: ReadonlySet<string>): void {
+  if (warnedUnresolvableReadonlyCommands) return;
+  warnedUnresolvableReadonlyCommands = true;
+  const unresolvable = unresolvableReadonlyCommands(allow);
+  if (unresolvable.length) console.warn(`[agent-server] readonly-auto-allow: ${unresolvable.join(", ")} not resolvable via PATH on this host; matching commands will fall through to approval instead of auto-allow`);
 }
 
 export function validateClaudeEffort(effort?: string): void {
@@ -106,6 +128,7 @@ export class ClaudeEngine implements EngineSession {
   constructor(private readonly config: ClaudeEngineOptions = {}) {
     this.readonlyAutoAllow = config.readonlyAutoAllow ?? true;
     this.readonlyCommandSet = new Set(config.readonlyCommands ?? DEFAULT_READONLY_COMMANDS);
+    warnUnresolvableReadonlyCommandsOnce(this.readonlyCommandSet);
   }
   async spawn(options: SessionOptions): Promise<void> {
     this.options = options; this.mapper = new ClaudeEventMapper(options.cwd);
@@ -183,7 +206,7 @@ export class ClaudeEngine implements EngineSession {
   async setPermission(permission: NonNullable<SessionOptions["permission"]>): Promise<void> {
     if (permission === "readonly") {
       if (this.options?.permission === "readonly") return;
-      throw new ProtocolError(ErrorCode.unsupported_capability, "readonly is a launch-time alias for plan; use plan for hot switching");
+      throw new ProtocolError(ErrorCode.unsupported_capability, "readonly cannot be entered by hot switching; start a new session with permission: readonly");
     }
     const response = await this.engineControl("set_permission_mode", { mode: claudePermission(permission) });
     if (record(response.response).subtype !== "success") throw new ProtocolError(ErrorCode.unsupported_capability, String(record(response.response).error ?? "Claude rejected permission mode"), { raw: response });
@@ -212,8 +235,46 @@ export class ClaudeEngine implements EngineSession {
     if (model) await this.control({ subtype: "set_model", model: resolveClaudeModel(model).model });
     this.active = turnId; this.interrupting = false; this.context = null; this.sawTextDelta = false; this.sawThinkingDelta = false; this.mapper.beginTurn(turnId);
     this.partials.clear(); this.taskParents.clear(); this.bash = undefined;
-    if (bash) { this.bash = { itemId: `bash_${crypto.randomUUID()}` }; this.emit({ type: EventType.ToolCall, data: { id: this.bash.itemId, name: "Bash", input: { command: bash.command } }, backend: "claude", sessionId: this.engineThreadId }); }
+    if (bash) {
+      this.bash = { itemId: `bash_${crypto.randomUUID()}` };
+      this.emit({ type: EventType.ToolCall, data: { id: this.bash.itemId, name: "Bash", input: { command: bash.command } }, backend: "claude", sessionId: this.engineThreadId });
+      // print.ts's bash_command control message runs via runHeadlessBashCommand and never
+      // round-trips can_use_tool, for any permission mode: the CLI's own permission-prompt-tool
+      // gate cannot see or block it. readonly/plan threads must classify and gate this here,
+      // before ever writing to the child process, or a standalone bash turn bypasses the broker
+      // entirely regardless of --permission-mode.
+      const denial = await this.gateStandaloneBash(turnId, bash.command);
+      if (denial) {
+        this.emit({ type: EventType.ToolCallDone, data: { id: this.bash.itemId, output: "", stderr: denial, exitCode: 126, isError: true }, backend: "claude", sessionId: this.engineThreadId });
+        this.bash = undefined; this.active = null;
+        for (const event of this.mapper.finish("completed")) this.events.push(event);
+        return;
+      }
+    }
     this.write(message);
+  }
+  /** Returns a denial message if the standalone bash turn must not reach the engine, else undefined. */
+  private async gateStandaloneBash(turnId: string, command: string): Promise<string | undefined> {
+    const semanticPermission = this.options?.permission;
+    if (!this.readonlyAutoAllow || (semanticPermission !== "readonly" && semanticPermission !== "plan")) return undefined;
+    const permission = claudePermission(semanticPermission);
+    const match = classifyReadonlyCommand(command, this.readonlyCommandSet);
+    const toolUseId = this.bash!.itemId;
+    if (match.readonly) {
+      const requestId = `ar_${crypto.randomUUID()}`;
+      this.events.push({ type: "engineEvent", turnId, backend: this.backend, subtype: "readonly_auto_allow", payload: { requestId, toolUseId, toolName: "Bash", permission, behavior: "allow", reason: "readonly_command", command, matchedRules: match.matchedRules } });
+      return undefined;
+    }
+    const req: ToolPermissionRequest = { requestId: `ar_${crypto.randomUUID()}`, toolUseId, toolName: "Bash", input: { command } };
+    return new Promise<string | undefined>(resolve => {
+      let settled = false;
+      const respond = (decision: Parameters<typeof mapPermissionDecision>[1]) => {
+        if (settled) return; settled = true;
+        const mapped = mapPermissionDecision(req, decision);
+        resolve(mapped.behavior === "allow" ? undefined : (mapped.message ?? "Denied"));
+      };
+      this.events.push({ type: "approval", request: mapPermissionRequest(req, this.options!.threadId, turnId, this.options?.cwd ?? process.cwd()), respond });
+    });
   }
   async steer(turnId: string, input: UserInput[]): Promise<void> {
     this.assertAlive(); if (this.active !== turnId || this.interrupting) throw new ProtocolError(ErrorCode.turn_not_active, "turn changed before steer");
@@ -309,7 +370,13 @@ export class ClaudeEngine implements EngineSession {
       const permission = claudePermission(this.options.permission);
       const readonlyCommand = req.toolName === "Bash" && this.readonlyAutoAllow ? String(record(req.input).command ?? "") : undefined;
       const readonlyMatch = readonlyCommand !== undefined ? classifyReadonlyCommand(readonlyCommand, this.readonlyCommandSet) : undefined;
-      if (permission === "bypassPermissions" || permission === "dontAsk") {
+      if (this.options.permission === "readonly" && ["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(req.toolName)) {
+        // Defense in depth beyond --disallowedTools: deny and audit even if the CLI ever
+        // forwards a can_use_tool for one of these tools under a readonly thread.
+        respond({ decision: "reject" });
+        this.events.push({ type: "engineEvent", turnId: this.active, backend: this.backend, subtype: "readonly_denied", payload: { requestId: req.requestId, toolUseId: req.toolUseId, toolName: req.toolName, permission, behavior: "deny", reason: "readonly_write_tool" } });
+      }
+      else if (permission === "bypassPermissions" || permission === "dontAsk") {
         const decision = permission === "bypassPermissions" ? "accept" : "reject";
         respond({ decision });
         // Never enqueue an approval: consumers can audit this native fallback
