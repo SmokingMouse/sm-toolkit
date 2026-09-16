@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { ErrorCode, ProtocolError, ServerRequestMethodSchema, type StartTurnParams, type UserInput } from "../protocol/index.js";
 import { AsyncQueue, sessionEnvironment, type EngineEvent, type EngineSession, type SessionOptions } from "./session.js";
 import { CodexEventMapper, codexProtocolError, codexRecord, codexString, codexUserInput, mapCodexDecision, mapCodexRequest } from "./codex-mapper.js";
@@ -56,13 +56,60 @@ function turnOverrides(options: StartTurnParams, serviceTier: SessionOptions["se
   };
 }
 
+export interface ProcessEntry { pid: number; ppid: number }
+/** One `ps` snapshot of every visible process. POSIX `-axo pid=,ppid=` is identical on macOS and Linux. */
+export function readProcessTable(): Promise<ProcessEntry[]> {
+  return new Promise(resolve => {
+    execFile("ps", ["-axo", "pid=,ppid="], { maxBuffer: 8 << 20 }, (error, stdout) => {
+      if (error) { resolve([]); return; }
+      const rows: ProcessEntry[] = [];
+      for (const line of stdout.split("\n")) {
+        const [pid, ppid] = line.trim().split(/\s+/, 2).map(Number);
+        if (Number.isSafeInteger(pid) && Number.isSafeInteger(ppid) && pid > 0) rows.push({ pid, ppid });
+      }
+      resolve(rows);
+    });
+  });
+}
+/** Every transitive child of `root` in a snapshot, nearest first; `root` itself is excluded. */
+export function descendantPids(root: number, table: readonly ProcessEntry[]): number[] {
+  const children = new Map<number, number[]>();
+  for (const { pid, ppid } of table) { const siblings = children.get(ppid); if (siblings) siblings.push(pid); else children.set(ppid, [pid]); }
+  const found: number[] = [], seen = new Set([root]);
+  for (const queue = [root]; queue.length; ) for (const pid of children.get(queue.shift()!) ?? []) {
+    if (seen.has(pid)) continue;
+    seen.add(pid); found.push(pid); queue.push(pid);
+  }
+  return found;
+}
+/** `process.kill` with ESRCH folded into "already gone"; a negative pid addresses a process group. */
+export function signalPid(pid: number, signal: NodeJS.Signals): boolean {
+  try { process.kill(pid, signal); return true; }
+  catch { return false; }
+}
+/**
+ * Detached so the app-server leads its own process group. Codex runs commands as
+ * `/bin/zsh -lc '<cmd>'` and, on interrupt, only kills that shell — its own children
+ * are reparented to init and vanish from the process tree. A shared process group
+ * outlives reparenting, so `kill(-pgid)` still reaches them at close/engine death.
+ */
+export function spawnCodexProcess(command: string, args: string[], options: { cwd?: string; env: NodeJS.ProcessEnv }): ChildProcessWithoutNullStreams {
+  return spawn(command, args, { ...options, stdio: "pipe", detached: true }) as ChildProcessWithoutNullStreams;
+}
+
 export interface CodexEngineOptions {
   executable?: string;
   handshakeTimeoutMs?: number;
   requestTimeoutMs?: number;
   spawnProcess?: (command: string, args: string[], options: { cwd?: string; env: NodeJS.ProcessEnv }) => ChildProcessWithoutNullStreams;
+  /** Process-table source for descendant reaping; defaults to a `ps` snapshot. */
+  readProcessTable?: () => Promise<ProcessEntry[]>;
+  /** Signal delivery; a negative pid addresses a process group. Returns false when the target is gone. */
+  signalProcess?: (pid: number, signal: NodeJS.Signals) => boolean;
+  /** SIGTERM-to-SIGKILL grace for reaped turn descendants. */
+  reapGraceMs?: number;
 }
-interface ActiveTurn { id: string; nativeId?: string; interrupting: boolean; buffered: NativeFrame[] }
+interface ActiveTurn { id: string; nativeId?: string; interrupting: boolean; buffered: NativeFrame[]; baseline?: readonly number[]; doomed?: readonly number[] }
 interface PendingCall { method: string; resolve: (value: NativeFrame) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; onResult?: (result: NativeFrame) => void }
 
 /** One app-server process per AS thread; only v2 thread/turn methods use it. */
@@ -113,7 +160,7 @@ export class CodexEngine implements EngineSession {
     this.options = options; this.mapper = new CodexEventMapper(Boolean(options.engineThreadId));
     this.nativeHistoryFresh = !options.engineThreadId;
     try {
-      this.process = (this.config.spawnProcess ?? ((command, args, opts) => spawn(command, args, { ...opts, stdio: "pipe" })))(this.config.executable ?? "codex", ["app-server", "--listen", "stdio://"], { cwd: options.cwd, env: sessionEnvironment(options) });
+      this.process = (this.config.spawnProcess ?? spawnCodexProcess)(this.config.executable ?? "codex", ["app-server", "--listen", "stdio://"], { cwd: options.cwd, env: sessionEnvironment(options) });
       const child = this.process;
       child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => { this.stderr = (this.stderr + chunk).slice(-4000); });
@@ -158,6 +205,9 @@ export class CodexEngine implements EngineSession {
     this.nativeHistoryFresh = false;
     const turn: ActiveTurn = { id: turnId, interrupting: false, buffered: [] };
     this.active = turn; this.mapper.beginTurn(turnId); this.mapper.registerInput(input, options.clientTurnId);
+    // Long-lived helpers (MCP servers, the app-server's own workers) exist before the
+    // turn is dispatched; only what appears afterwards is this turn's work to reap.
+    turn.baseline = await this.descendants();
     try {
       await this.request("turn/start", { threadId: this.engineThreadId, input: codexUserInput(input), ...turnOverrides(options, this.options?.serviceTier) }, result => {
         this.nativeTurns.set(turnId, structuredClone(result));
@@ -177,8 +227,13 @@ export class CodexEngine implements EngineSession {
   }
   async interrupt(turnId: string): Promise<void> {
     const turn = this.assertTurn(turnId); turn.interrupting = true;
+    // Snapshot before the interrupt: codex kills the exec shell, and the kernel then
+    // reparents the surviving grandchildren to init, erasing them from codex's tree.
+    const baseline = new Set(turn.baseline ?? []);
+    turn.doomed = (await this.descendants()).filter(pid => !baseline.has(pid));
     try { await this.request("turn/interrupt", { threadId: this.engineThreadId, turnId: turn.nativeId }); }
     catch (error) { turn.interrupting = false; throw error; }
+    this.reap(turn.doomed);
     // The acknowledgement is not completion. Keep active until turn/completed.
   }
   async close(_reason: string): Promise<void> {
@@ -188,12 +243,43 @@ export class CodexEngine implements EngineSession {
     const child = this.process;
     if (child && child.exitCode === null && child.signalCode === null) {
       await new Promise<void>(resolve => {
-        const timer = setTimeout(() => child.kill("SIGKILL"), 1000);
+        const timer = setTimeout(() => { this.killGroup("SIGKILL"); child.kill("SIGKILL"); }, 1000);
         child.once("close", () => { clearTimeout(timer); resolve(); });
-        child.stdin.end(); child.kill("SIGTERM");
+        child.stdin.end(); this.killGroup("SIGTERM"); child.kill("SIGTERM");
       });
     }
+    // The app-server is gone but its group survives while any command descendant does.
+    this.killGroup("SIGKILL");
     this.events.end();
+  }
+  /** Descendants of the app-server in a fresh process-table snapshot. */
+  private async descendants(): Promise<number[]> {
+    const root = this.process?.pid;
+    if (!root) return [];
+    try { return descendantPids(root, await (this.config.readProcessTable ?? readProcessTable)()); }
+    catch { return []; }
+  }
+  private signal(pid: number, signal: NodeJS.Signals): boolean {
+    // Never signal init, ourselves, or the app-server we terminate through its own lifecycle.
+    if (!Number.isSafeInteger(pid) || Math.abs(pid) <= 1 || Math.abs(pid) === process.pid) return false;
+    try { return (this.config.signalProcess ?? signalPid)(pid, signal); }
+    catch { return false; }
+  }
+  /**
+   * Signals the app-server's process group, which every command descendant inherits.
+   * A group with id `pid` can only exist if the process holding `pid` — our own child —
+   * leads it, so this never reaches the daemon's group or a non-detached spawn (fixtures),
+   * where the call simply fails with ESRCH.
+   */
+  private killGroup(signal: NodeJS.Signals): void {
+    const pid = this.process?.pid;
+    if (pid) this.signal(-pid, signal);
+  }
+  /** SIGTERM the given pids, then SIGKILL whatever is still alive after the grace window. */
+  private reap(pids: readonly number[]): void {
+    const survivors = pids.filter(pid => pid !== this.process?.pid && this.signal(pid, "SIGTERM"));
+    if (!survivors.length) return;
+    setTimeout(() => { for (const pid of survivors) this.signal(pid, "SIGKILL"); }, this.config.reapGraceMs ?? 2000).unref();
   }
   /** Read-only native views for ingress; mutations still enter through as/1. */
   nativeThreadStart(): NativeFrame {
@@ -279,8 +365,12 @@ export class CodexEngine implements EngineSession {
   }
   private fail(error: ProtocolError): void {
     if (this.dead || this.closed) return;
+    const doomed = this.active?.doomed;
     this.dead = true; this.ready = false; this.active = undefined; this.nativeToolCalls.clear(); this.approvals.clear(); this.rejectPending(error);
-    this.events.push({ type: "exit", error: error.toJSON() }); this.events.end(); this.process?.kill("SIGKILL");
+    this.events.push({ type: "exit", error: error.toJSON() }); this.events.end();
+    // Freeze/engine-death fallback: reparented command descendants outlive the group leader.
+    if (doomed) this.reap(doomed);
+    this.killGroup("SIGKILL"); this.process?.kill("SIGKILL");
   }
   private bindTurn(turn: ActiveTurn, nativeId: string): void {
     if (turn.nativeId && turn.nativeId !== nativeId) throw codexProtocolError("Codex changed the active turn id", nativeId);
@@ -350,6 +440,8 @@ export class CodexEngine implements EngineSession {
     const events = this.mapper.map(method, params);
     if (method === "turn/completed") {
       for (const [id, call] of this.nativeToolCalls) if (call.frame.params.turnId === nativeTurnId) this.nativeToolCalls.delete(id);
+      // Second sweep: codex reports the turn done while a reparented command lingers.
+      if (this.active?.doomed) this.reap(this.active.doomed);
       this.active = undefined;
       for (const event of events) if (event.type === "turnCompleted") for (const [id, request] of this.approvals) if (request.turnId === event.turnId) this.approvals.delete(id);
     }

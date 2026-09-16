@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { AgentServer } from "../server/server.js";
 import { ItemSchema, NotificationSchemas, PendingServerRequestSchema, ServerRequestMethodSchema, ServerRequestSchemas, StartThreadParamsSchema, type Frame, type ServerRequestMethod, type ServerRequestResult } from "../protocol/index.js";
 import { capture, client, input, until } from "../test-helpers.test.js";
-import { CodexEngine, buildCodexThreadParams } from "./codex.js";
+import { CodexEngine, buildCodexThreadParams, descendantPids, readProcessTable, spawnCodexProcess, type CodexEngineOptions, type ProcessEntry } from "./codex.js";
 import { CodexEventMapper, codexUserInput, mapCodexDecision, mapCodexItem } from "./codex-mapper.js";
 import type { EngineEvent } from "./session.js";
 import { ItemPayloadSchemas } from "../protocol/index.js";
@@ -28,7 +28,7 @@ test("N1: all Codex mapper error paths omit turnId before beginTurn", () => {
 });
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
-function fake(scenario = "simple", options: { handshakeTimeoutMs?: number; version?: { userAgent?: unknown; cliVersion?: unknown } } = {}) {
+function fake(scenario = "simple", options: Omit<CodexEngineOptions, "spawnProcess"> & { version?: { userAgent?: unknown; cliVersion?: unknown } } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "as-codex-")), tracePath = join(directory, "wire.jsonl");
   cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
   const launches: Array<{ command: string; args: string[]; cwd?: string; env: NodeJS.ProcessEnv }> = [];
@@ -443,5 +443,66 @@ describe("Codex through AS core", () => {
     await c.request("turn/start", { threadId: thread.id, input: input("go") });
     await until(() => server.threads.get(thread.id).status.type === "systemError");
     expect(frames.some(f => "method" in f && f.method === "error" && f.params.error.code === -32004)).toBe(true);
+  });
+});
+
+describe("Codex command-process reaping", () => {
+  const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  async function poll(predicate: () => boolean | Promise<boolean>, description: string, timeoutMs = 8000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (!(await predicate())) {
+      if (Date.now() > deadline) throw new Error(`Timed out: ${description}`);
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  }
+  test("interrupt reaps the descendants snapshotted before the ack and spares pre-turn helpers", async () => {
+    const signals: Array<{ pid: number; signal: string }> = [];
+    let table: ProcessEntry[] = [];
+    const f = fake("interrupt-exec", {
+      reapGraceMs: 10,
+      readProcessTable: async () => table,
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); return true; },
+    });
+    const events = collect(f.engine);
+    await f.engine.spawn({ threadId: "th", backend: "codex", cwd: f.directory });
+    const codex = f.child!.pid!, helper = codex + 1001, shell = codex + 1002, orphan = codex + 1003;
+    table = [{ pid: helper, ppid: codex }]; // a long-lived MCP helper predating the turn
+    await f.engine.sendTurn("tn", input("go"), { threadId: "th", input: input("go") });
+    await until(() => events.some(e => e.type === "itemStarted"));
+    table = [...table, { pid: shell, ppid: codex }, { pid: orphan, ppid: shell }];
+    await f.engine.interrupt("tn");
+    const sent = (signal: string) => signals.filter(s => s.signal === signal).map(s => s.pid).toSorted((a, b) => a - b);
+    expect(sent("SIGTERM")).toEqual([shell, orphan]);
+    await until(() => signals.some(s => s.signal === "SIGKILL"));
+    expect(sent("SIGKILL")).toEqual([shell, orphan]);
+    expect(signals.some(s => s.pid === helper)).toBe(false);
+    // P1-2 regression: the outputDelta written right after the ack must not kill the thread.
+    await until(() => events.some(e => e.type === "turnCompleted"));
+    expect(events.find(e => e.type === "turnCompleted")).toMatchObject({ turnId: "tn", status: "interrupted" });
+    expect(events.filter(e => e.type === "error")).toHaveLength(0);
+    expect(events.some(e => e.type === "exit")).toBe(false);
+  });
+  test("close signals the app-server process group so orphaned commands die with the thread", async () => {
+    const signals: Array<{ pid: number; signal: string }> = [];
+    const f = fake("simple", { signalProcess: (pid, signal) => { signals.push({ pid, signal }); return true; } });
+    collect(f.engine);
+    await f.engine.spawn({ threadId: "th", backend: "codex", cwd: f.directory });
+    const codex = f.child!.pid!;
+    await f.engine.close("test");
+    expect(signals.filter(s => s.pid === -codex).map(s => s.signal)).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+  test("spawnCodexProcess leads a process group that still reaches a reparented grandchild", async () => {
+    // `sh -c "<cmd>; :"` forks instead of exec-replacing, mirroring codex's `/bin/zsh -lc`.
+    const shell = spawnCodexProcess("/bin/sh", ["-c", "sleep 41; :"], { env: process.env });
+    const pid = shell.pid!;
+    let orphan = 0;
+    cleanup.push(() => { for (const target of [-pid, pid, orphan]) if (target) try { process.kill(target, "SIGKILL"); } catch {} });
+    await poll(async () => (orphan = descendantPids(pid, await readProcessTable())[0] ?? 0) > 0, "grandchild started");
+    shell.kill("SIGKILL");
+    // The kernel reparents the survivor to init, so the process tree can no longer find it.
+    await poll(async () => !descendantPids(pid, await readProcessTable()).length, "grandchild reparented");
+    expect(alive(orphan)).toBe(true);
+    expect(process.kill(-pid, "SIGKILL")).toBe(true);
+    await poll(() => !alive(orphan), "group kill reaped the reparented grandchild");
   });
 });
