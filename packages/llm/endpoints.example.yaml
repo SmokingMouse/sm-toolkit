@@ -2,8 +2,10 @@ providers:
   claude:
     api_key_env: ANTHROPIC_API_KEY
     models:
-      - claude-opus-4-6[1m]
+      - claude-fable-5
       - claude-opus-4-8
+      - claude-sonnet-5
+      - claude-opus-4-6
 
   deepseek:
     api_key_env: DEEPSEEK_API_KEY
