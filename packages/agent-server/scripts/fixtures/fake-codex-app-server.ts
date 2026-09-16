@@ -151,6 +151,11 @@ function handle(frame: any) {
       }, 80);
       return;
     }
+    if (scenario === "interrupt-exec") {
+      // Runs until interrupted, standing in for a shell whose own children outlive it.
+      started({ id: `command-${turns}`, type: "commandExecution", command: "long-running", cwd, commandActions: [], processId: null, status: "inProgress", aggregatedOutput: null, exitCode: null, durationMs: null });
+      return;
+    }
     if (scenario === "conversation") { conversation(); return; }
     message("done"); tokens(); finish(); return;
   }
@@ -161,6 +166,8 @@ function handle(frame: any) {
   }
   if (frame.method === "turn/interrupt") {
     assert.equal(p.turnId, turnId, "interrupt requires native turn id"); reply(frame.id, {});
+    // A stream chunk can already be in flight when the ack is written.
+    if (scenario === "interrupt-exec") notify("item/commandExecution/outputDelta", { ...base(), itemId: `command-${turns}`, delta: "late chunk" });
     setTimeout(() => finish("interrupted"), 40); return;
   }
   throw new Error(`Unexpected client method: ${frame.method}`);
