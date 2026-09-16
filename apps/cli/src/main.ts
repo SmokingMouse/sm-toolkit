@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readFileSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { LLMClient, benchEndpoint } from '@smokingmouse/llm'
 import type { Message, BenchMeasurement, EndpointConfig } from '@smokingmouse/llm'
@@ -7,6 +7,24 @@ import { pickEndpoint } from './picker.js'
 import { resolveModelTarget, BUILTIN_ALIASES } from './resolver.js'
 import { recordRecentEndpoint } from './recent.js'
 import { cmdUpdate, getCurrentVersion } from './update.js'
+import {
+  AsClient,
+  isCwdAllowed,
+  readAsToken,
+  translateAsError,
+  type Permission,
+} from './as-client.js'
+import {
+  assertIngressUrl,
+  buildCodexArgv,
+  checkCodexRemoteSupport,
+  isPermission,
+  nativeIdFromThreadId,
+  NATIVE_TOKEN_ENV,
+  PERMISSIONS,
+  readAsEndpoint,
+  resolveCodexBin,
+} from './as-launch.js'
 
 const client = new LLMClient()
 
@@ -51,6 +69,17 @@ function printHelp() {
   --list          列出所有 providers
   -v, --version   显示当前版本
   -h, --help      帮助
+
+交互 session 路线（只影响 llm <model>，不影响 -p / bench）:
+  --as            先在常驻 agent-server 上建一条 backend=claude 的线程，
+                  再用官方 Codex TUI resume 接上去（显示端是 Codex TUI）
+  --local         强制本地 spawn claude（默认）
+  --permission P   readonly | default | auto-edit | full（默认 full，对齐
+                  本地的 --dangerously-skip-permissions）
+  --print-launch  走完全部路线判定后不 exec，向 stdout 打一行 JSON 描述结果
+  环境变量 LLM_ROUTE=as|local 设默认路线，命令行 flag 优先。
+  agent-server 不可用（endpoint 文件缺 / 连不上 / health 不 ok / cwd 不在
+  allowed_roots）会自动回落本地；被 denied_models 拒则直接报错不回落。
 
 子命令:
   llm update [--check] [--registry url]
@@ -106,15 +135,25 @@ interface Args {
   stream: boolean
   list: boolean
   help: boolean
+  route: 'as' | 'local'
+  permission: Permission
+  printLaunch: boolean
 }
 
-function parseArgs(argv: string[]): Args {
+function defaultRoute(env: NodeJS.ProcessEnv = process.env): 'as' | 'local' {
+  return env.LLM_ROUTE?.trim().toLowerCase() === 'as' ? 'as' : 'local'
+}
+
+export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): Args {
   const args: Args = {
     json: false,
     jsonMode: false,
     stream: false,
     list: false,
     help: false,
+    route: defaultRoute(env),
+    permission: 'full',
+    printLaunch: false,
   }
   let i = 0
 
@@ -138,6 +177,19 @@ function parseArgs(argv: string[]): Args {
       args.stream = true
     } else if (a === '--list') {
       args.list = true
+    } else if (a === '--as') {
+      args.route = 'as'
+    } else if (a === '--local') {
+      args.route = 'local'
+    } else if (a === '--print-launch') {
+      args.printLaunch = true
+    } else if (a === '--permission') {
+      const p = argv[++i]
+      if (!p || !isPermission(p)) {
+        console.error(`--permission 只接受 ${PERMISSIONS.join(' | ')}，收到 "${p ?? ''}"`)
+        process.exit(1)
+      }
+      args.permission = p
     } else if (a === '-h' || a === '--help' || a === 'help') {
       args.help = true
     } else if (!a!.startsWith('-') && !args.endpoint) {
@@ -186,12 +238,173 @@ function buildMessages(
 
 // ── interactive session ─────────────────────────────────
 
-async function execClaude(endpointName?: string): Promise<void> {
+interface LaunchPrefs {
+  route: 'as' | 'local'
+  permission: Permission
+  printLaunch: boolean
+}
+
+interface AsAttemptOk {
+  ok: true
+  argv: string[]
+  threadId: string
+  nativeId: string
+  cwd: string
+  client: AsClient
+  token: string
+}
+
+interface AsAttemptFallback {
+  ok: false
+  reason: string
+}
+
+/**
+ * 依次探：endpoint 文件 → codex 能力 → server/health → server/config/read（cwd 自检）
+ * → thread/start。环境类失败一律返回 fallback（调用方静默回落本地）；
+ * 策略类拒绝（model_denied / model_required）直接报错退出，不换路线。
+ */
+async function tryAsRoute(model: string, permission: Permission): Promise<AsAttemptOk | AsAttemptFallback> {
+  let asClient: AsClient | undefined
+  try {
+    const endpoint = readAsEndpoint()
+    const ingressUrl = assertIngressUrl(endpoint.codexIngressUrl)
+    const codexBin = resolveCodexBin()
+    checkCodexRemoteSupport(codexBin)
+    const token = readAsToken()
+
+    asClient = await AsClient.connect({ socketPath: endpoint.socketPath })
+    const health = await asClient.health()
+    if (!health || typeof health.uptimeMs !== 'number') {
+      throw new Error('server/health 返回不可用')
+    }
+
+    const cwd = realpathSync(process.cwd())
+    const config = await asClient.configRead()
+    if (!isCwdAllowed(cwd, config.allowed_roots)) {
+      throw new Error(
+        `cwd ${cwd} 不在 daemon 的 allowed_roots（${(config.allowed_roots ?? []).join(', ') || '空'}）内`,
+      )
+    }
+
+    const thread = await asClient.threadStart({
+      backend: 'claude',
+      cwd,
+      model,
+      permission,
+    })
+    const nativeId = nativeIdFromThreadId(thread.id)
+    const argv = buildCodexArgv({ codexBin, ingressUrl, nativeId, permission })
+    return { ok: true, argv, threadId: thread.id, nativeId, cwd, client: asClient, token }
+  } catch (e) {
+    const failure = translateAsError(e)
+    if (failure.kind === 'policy') {
+      asClient?.close()
+      console.error(`llm: agent-server 拒绝了这次请求：${failure.message}`)
+      process.exit(2)
+    }
+    asClient?.close()
+    return { ok: false, reason: failure.message }
+  }
+}
+
+/** AS 路线下顶层 claude.args / claude.env 传不进去，把被忽略的 key 名打出来（不打值）。 */
+function reportIgnoredLocalPrefs(): void {
+  const settings = client.claudeSettings
+  const argKeys = (settings.args ?? []).map(String).filter((a) => a.startsWith('-'))
+  const envKeys = Object.keys(settings.env ?? {})
+  if (argKeys.length === 0 && envKeys.length === 0) return
+  const parts: string[] = []
+  if (argKeys.length > 0) parts.push(`claude.args: ${argKeys.join(' ')}`)
+  if (envKeys.length > 0) parts.push(`claude.env: ${envKeys.join(' ')}`)
+  console.error(`llm: AS 路线忽略本地 launch 偏好 — ${parts.join('；')}`)
+}
+
+interface LocalLaunch {
+  env: Record<string, string>
+  args: string[]
+}
+
+async function execClaude(
+  endpointName?: string,
+  prefs: LaunchPrefs = { route: 'local', permission: 'full', printLaunch: false },
+): Promise<void> {
   const { name, endpoint: ep } = client.getEndpointConfig(endpointName, 'anthropic')
 
   // 记录最近使用
   recordRecentEndpoint(name)
 
+  let fallbackReason: string | null = null
+
+  if (prefs.route === 'as') {
+    const attempt = await tryAsRoute(name, prefs.permission)
+    if (attempt.ok) {
+      reportIgnoredLocalPrefs()
+      if (prefs.printLaunch) {
+        console.log(
+          JSON.stringify({
+            route: 'as',
+            reason: 'ok',
+            argv: attempt.argv,
+            threadId: attempt.threadId,
+            nativeId: attempt.nativeId,
+            cwd: attempt.cwd,
+          }),
+        )
+        // dry-run 不能在 daemon 上留线程
+        try {
+          await attempt.client.threadClose(attempt.threadId, 'llm --print-launch dry run')
+        } catch (e: any) {
+          console.error(`llm: thread/close 失败（${attempt.threadId}）：${e?.message ?? e}`)
+        }
+        attempt.client.close()
+        process.exit(0)
+      }
+      attempt.client.close()
+      console.error(`→ Codex TUI on agent-server [${name}] thread=${attempt.threadId} permission=${prefs.permission}`)
+      const child = spawn(attempt.argv[0]!, attempt.argv.slice(1), {
+        env: { ...process.env, [NATIVE_TOKEN_ENV]: attempt.token },
+        stdio: 'inherit',
+      })
+      const code = await new Promise<number>((resolve) => {
+        child.on('close', (c) => resolve(c ?? 1))
+      })
+      process.exit(code)
+    }
+    fallbackReason = attempt.reason
+    console.error(`llm: agent-server 不可用，回落本地：${fallbackReason}`)
+  }
+
+  const { env, args } = buildLocalLaunch(name, ep)
+
+  if (prefs.printLaunch) {
+    console.log(
+      JSON.stringify({
+        route: 'local',
+        reason: fallbackReason ?? 'ok',
+        argv: ['claude', ...args],
+        threadId: null,
+        nativeId: null,
+        cwd: process.cwd(),
+      }),
+    )
+    process.exit(0)
+  }
+
+  console.error(`→ Claude Code [${name}] model=${ep.model}`)
+
+  const child = spawn('claude', args, {
+    env,
+    stdio: 'inherit',
+  })
+
+  const code = await new Promise<number>((resolve) => {
+    child.on('close', (c) => resolve(c ?? 1))
+  })
+  process.exit(code)
+}
+
+function buildLocalLaunch(name: string, ep: EndpointConfig): LocalLaunch {
   const env: Record<string, string> = { ...process.env } as Record<
     string,
     string
@@ -243,17 +456,8 @@ async function execClaude(endpointName?: string): Promise<void> {
   const args = ['--model', ep.model]
   args.push(...(settings.args ?? []).map(String))
   args.push(...(ep.claude?.args ?? []).map(String))
-  console.error(`→ Claude Code [${name}] model=${ep.model}`)
 
-  const child = spawn('claude', args, {
-    env,
-    stdio: 'inherit',
-  })
-
-  const code = await new Promise<number>((resolve) => {
-    child.on('close', (c) => resolve(c ?? 1))
-  })
-  process.exit(code)
+  return { env, args }
 }
 
 // ── subcommands: vision / image / bench ───────────────────
@@ -675,7 +879,11 @@ async function main() {
 
   // no prompt → interactive Claude Code session
   if (!hasPrompt) {
-    await execClaude(endpoint)
+    await execClaude(endpoint, {
+      route: args.route,
+      permission: args.permission,
+      printLaunch: args.printLaunch,
+    })
     return
   }
 
