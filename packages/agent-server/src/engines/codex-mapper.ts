@@ -119,7 +119,7 @@ export class CodexEventMapper {
   interruptIncomplete(): EngineEvent[] {
     const out: EngineEvent[] = [];
     for (const item of this.items.values()) if (item.status === "inProgress") {
-      out.push(...this.put({ ...structuredClone(item), status: "failed" }, true));
+      out.push(...this.put({ ...structuredClone(item), status: "completed" }, true));
     }
     return out;
   }

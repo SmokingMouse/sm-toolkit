@@ -445,3 +445,10 @@ describe("Codex through AS core", () => {
     expect(frames.some(f => "method" in f && f.method === "error" && f.params.error.code === -32004)).toBe(true);
   });
 });
+
+test("interruptIncomplete completes in-progress command executions", () => {
+  const m = new CodexEventMapper(); m.beginTurn("t");
+  m.map("item/started", { item: { type: "commandExecution", id: "cmd", command: "sleep 600", cwd: "/tmp", status: "inProgress" } });
+  const events = m.interruptIncomplete();
+  expect(events).toContainEqual(expect.objectContaining({ type: "itemCompleted", item: expect.objectContaining({ id: "cmd", type: "commandExecution", status: "completed" }) }));
+});
