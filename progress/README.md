@@ -4,7 +4,7 @@
 
 ## Current Focus
 
-agent-server 官方 TUI 冷启动修复已提交并开 PR，升级中断问题三次复现后按契约停机，待主控接管。
+codex interrupt 收割已上线（PR #19，daemon 已重启）；llm --as 接 agent-server 已合入并发版 cli 0.6.0；余：网关恢复后补真机脚本、Trellis 迁移后续。
 
 ## Goals
 

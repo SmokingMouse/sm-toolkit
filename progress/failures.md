@@ -2,6 +2,13 @@
 
 ## 待查
 
+### systemError 线程拒绝 thread/close：「Thread is busy; interrupt/cancel or wait before close」
+
+- 症状：2026-09-16 常驻 daemon（pid 33157）上两条 09-08 的线程 `th_097c8337…`（sonnet，cwd feat-tui-display-quickwin）/ `th_8fd37388…`（opus，cwd feat-codex-ingress）`status.type=systemError` 已 8 天，`fj seat retire` 对后者 thread/close 报 busy；对应 pane 早已不在。
+- 可证伪假设：close 的 busy 判定看的是「有未终结的 turn」而不是线程状态，systemError 路径没把 active turn 收掉，于是既非 idle 也无法 interrupt（无引擎进程可打）。反证：对该线程 turn/interrupt 若返回成功且随后 close 成功，则假设不成立、只是缺一步 interrupt。
+- 判定命令：as/1 `thread/read th_8fd37388-e9eb…` 看 `status` 与 `queue`；`turn/interrupt` 后再 `thread/close`；grep `packages/agent-server/src` 里 close 的 busy 分支对 systemError 的处理。
+- 影响：僵尸线程留在 `thread/list`，Trellis 收编侧可能一直显示为错误会话；fj 台账里的坐席 `smtk-ingress-s2rev` 退不了位。
+
 ### 升级冒烟的目标 turn 在 TUI interrupt 前结束（blocked）
 
 - 症状：中断阶段出现 completed 而无匹配 TUI turn/interrupt；长输出拒绝、200 句输出、重按物理 Esc 的三次尝试均未稳定通过，触发 fj-ingress-fresh-start-01bb 停机条款。
