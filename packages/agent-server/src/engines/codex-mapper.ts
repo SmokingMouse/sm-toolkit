@@ -116,6 +116,13 @@ export class CodexEventMapper {
   constructor(resumed = false) { if (!resumed) this.totalUsage = zeroUsage(); }
   beginTurn(turnId: string): void { this.turnId = turnId; this.items.clear(); this.unknownItems.clear(); this.parts.clear(); this.inputs = []; this.turnUsage = undefined; }
   registerInput(input: UserInput[], clientTurnId?: string): void { this.inputs.push({ key: inputKey(codexUserInput(input)), content: structuredClone(input), clientTurnId }); }
+  interruptIncomplete(): EngineEvent[] {
+    const out: EngineEvent[] = [];
+    for (const item of this.items.values()) if (item.status === "inProgress") {
+      out.push(...this.put({ ...structuredClone(item), status: "failed" }, true));
+    }
+    return out;
+  }
   getItem(id: string): EngineItem | undefined { return this.items.get(id); }
   private put(item: EngineItem, completed: boolean): EngineEvent[] {
     const old = this.items.get(item.id), out: EngineEvent[] = [];
