@@ -179,7 +179,6 @@ export class CodexEngine implements EngineSession {
     const turn = this.assertTurn(turnId); turn.interrupting = true;
     try { await this.request("turn/interrupt", { threadId: this.engineThreadId, turnId: turn.nativeId }); }
     catch (error) { turn.interrupting = false; throw error; }
-    for (const event of this.mapper.interruptIncomplete()) this.events.push(event);
     // The acknowledgement is not completion. Keep active until turn/completed.
   }
   async close(_reason: string): Promise<void> {
