@@ -1,5 +1,12 @@
 # Archive（轮转出的旧 session log + 已完成 goals）
 
+### 2026-08-19 — 静默死亡显式化：零终局行退出必吐 Error(0.8.1)
+
+- **触发**:Fisher 生产实录(2026-08-18 晚)——launchd PATH 只有 claude shim 没有真身,shim exit 127 + 零 stdout,ClaudeBackend 零事件"干净"走完,上游把启动失败折算成空回复,买家侧已读不回,全链路无一处报错。
+- **改动**:`stream-lines` 加 exitSink(close 写 code / spawn 失败写 spawnError)、'error' 挂监听(Node 无监听 = uncaught)、死因回填 stderrSink、rl.close() 终止读循环(Bun 实测 spawn 失败 stdout 不自行终结,destroy 叫不醒 for-await);`claude` 跟踪 sawTerminal,流走完没见过 result/error 行 → 显式 Error 带 exit code + stderr 尾巴(此前 stderrSink 只在 is_error result 分支被读,该场景等不到 result 行)。
+- **Verified**:62/62(新增 4:stream-lines 三态 + 假 claude 脚本复现零输出死亡恰好一个 Error)+ tsc 零错;Fisher 侧同日已加 resolveLoopOutcome 二道兜底(BACKEND_SILENT_EXIT)。
+- **Next**:发 0.8.1;Fisher bump 依赖并重启 console 验证。
+
 ### 2026-08-18 — Fisher 磨刀石：Claude 四项标准协议补齐(0.7.0)
 
 - **触发**:Fisher 换底座的接口核对充当磨刀石，暴露 `@smokingmouse/agent` 相对官方 claude-agent-sdk 的四个通用缺口；严格不引入 Fisher 审批状态机/guardStub 等域语义，所有字段可选，Codex 行为未改。

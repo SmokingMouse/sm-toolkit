@@ -1,5 +1,12 @@
 # Sessions（倒序，最近 5 条；更早的移入 archive.md）
 
+### 2026-08-26 — Orchestra RFC：吸收 Alioth 多 Agent 编排架构的治理层设计
+
+- **触发**：交接文档 `/tmp/alioth_handoff_briefing.md`——拆解 Alioth (workflow-os) 的 Hub/Spoke 契约派发体系，要求结合 herdr + sm-toolkit 给出落地方案。
+- **Done**：写成 `progress/orchestra-rfc.md`。核心判断：Alioth 四层里终端驱动（→herdr 原生状态机）、headless 桥（→packages/agent 存量）不吸收；只新建治理层 = 新包 `packages/orchestra`（contract/relay/settle/profile 四模块）+ `apps/cli` 第二个 bin `sm`。关键设计：契约 = frontmatter+markdown 双受众；信箱一约一文件 NDJSON、上行文件总线/下行 herdr 注入的不对称通道；safe_fallback 非阻塞回问协议；settle 落账直接写 progress/（不另造 DECISIONS.md）；Phase 3 用 onCanUseTool 把护栏从事后强杀升级为事前拦截。
+- **Verified**：纯设计产物，无代码变更。
+- **Next**：用户 review RFC → 若认可，从 Phase 0（`sm relay` MVP，半天）起步。
+
 ### 2026-08-25 — 修复官方 Native Claude 端点凭据误判、父进程环境变量污染与 claude 快捷直启
 - **触发**：用户反馈优化之后默认的 `claude` 用不了。
 - **根因/Done**：
@@ -40,11 +47,4 @@
 - **根因/改动**：Codex 0.147.0 的 `--image <FILE>...` 是可变长参数，`buildCodexArgs` 原先把 prompt 紧跟其后，prompt 被吞成图片路径。initial/resume 统一改为 `...imageArgs, "--", prompt`；无图也保留分隔符，保护以 `-` 开头的 prompt。Harbor 退役旧 patch 的集成回归又证实 Codex 漏消费 0.8.1 已有的 `exitSink`，现补 `sawTerminal` 终局检查，把 stderr-only 非零退出转为唯一 Error。版本升 0.8.4。
 - **Verified**：真实 CLI 正反探针复现/证伪；initial 多图、resume 单图、无图 dash prompt 三条精确 argv 回归；假 Codex exit 23 进程级回归；agent 单测 70/70、package build、`git diff --check` 全绿。
 - **Next**：提交并发布 0.8.4；Harbor 升级 0.5.1→0.8.4、删除旧 stderr patch，按 pinned Bun 与真实图片 Run 验收。
-
-### 2026-08-19 — 静默死亡显式化：零终局行退出必吐 Error(0.8.1)
-
-- **触发**:Fisher 生产实录(2026-08-18 晚)——launchd PATH 只有 claude shim 没有真身,shim exit 127 + 零 stdout,ClaudeBackend 零事件"干净"走完,上游把启动失败折算成空回复,买家侧已读不回,全链路无一处报错。
-- **改动**:`stream-lines` 加 exitSink(close 写 code / spawn 失败写 spawnError)、'error' 挂监听(Node 无监听 = uncaught)、死因回填 stderrSink、rl.close() 终止读循环(Bun 实测 spawn 失败 stdout 不自行终结,destroy 叫不醒 for-await);`claude` 跟踪 sawTerminal,流走完没见过 result/error 行 → 显式 Error 带 exit code + stderr 尾巴(此前 stderrSink 只在 is_error result 分支被读,该场景等不到 result 行)。
-- **Verified**:62/62(新增 4:stream-lines 三态 + 假 claude 脚本复现零输出死亡恰好一个 Error)+ tsc 零错;Fisher 侧同日已加 resolveLoopOutcome 二道兜底(BACKEND_SILENT_EXIT)。
-- **Next**:发 0.8.1;Fisher bump 依赖并重启 console 验证。
 
